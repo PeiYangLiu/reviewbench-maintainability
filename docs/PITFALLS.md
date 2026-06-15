@@ -267,3 +267,10 @@
 - **关键发现 2（测试依赖要进镜像）**：plot 题需 `matplotlib`、dataframe 题需 `pandas`——基础镜像没装会 `baseline_no_pass`（测试 import 失败）。已把 `matplotlib pandas pillow` 加进 `PY_SCI_DOCKERFILE` 并给现有镜像打 overlay 层。
 - **关键发现 3（弱题：fix 不在 anchored 文件）**：`_repr_html/params.py`（PASS_TO_PASS=1）golden 也 maint=no——该 PR 的维护性改动落在**别的文件**，anchored-file-only diff 自然不 address concern。**应把有效性筛从「golden 过正确性」收紧到「golden 能 RESOLVE」**，自动剔除这类（顺便也淘汰 PASS_TO_PASS 过小的题）。
 - **关键发现 4（apply 门对 SEARCH/REPLACE 漂移敏感）**：claude-opus-4.8 的低分主要是**偶发 apply=False**——模型的 SEARCH 块跟文件**尾随空白/内容微漂**导致 exact 匹配失败（非确定性）。已给 `evaluate_e2e.apply_search_replace` 加 **rstrip 容差的行级回退**（类似 aider 的模糊匹配）→ 更公平、降噪，惠及所有 leaderboard。
+
+### P38. 公平对待 apply 门：solver 重采样到能 apply（claude 的低分一半是方差）
+- **现象**：claude-opus-4.8 在 SEARCH/REPLACE 协议下**偶发 apply=False**——同一题不同采样有时能精确匹配、有时把 sklearn 的长警告字符串**重排/改写**导致 exact + rstrip 容差都匹配不上（非确定性）。单样本 Resolved@1 + N=4 → 方差极大，把 capability 和 edit-protocol 运气混在一起。
+- **修法**：model solver **重采样最多 3 次直到 edit 能 apply**（`evaluate_docker.make_candidate`）。这只影响"能否产出可用 edit"，不碰 correctness/scope/judge。
+- **效果（apply-retry 后的公平分）**：claude 1/4 → **2/4**——`decision_boundary` 之前是 apply=False，重采样后 apply=True 且 RESOLVED。剩两个没过：`params.py`（弱题，golden 也 maint=no）+ `_discretization`（连试 3 次都 apply=False = claude 对该文件**稳定地**重排长行，是真实的指令精确度短板，不是方差）。
+- **干净 3 题（剔除弱题 params.py）**：golden/gpt-5.5/gemini 3/3、**claude 2/3**、empty 0/3。
+- **结论**：① apply-retry 该成为所有 leaderboard 的标配（已在 docker 评测器落地，evaluate_e2e 可同样加）；② claude 仍稍弱于 gpt-5.5/gemini，但差距远没有 1/4 vs 3/4 那么大；③ 再次印证应把弱题（golden 不 RESOLVE）筛掉。

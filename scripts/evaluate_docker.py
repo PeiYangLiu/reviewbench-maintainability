@@ -151,11 +151,16 @@ def make_candidate(c: Container, mode: str, ctx: dict[str, Any], rec: dict[str, 
         before = ctx["before"]
         concern = rec.get("task_instruction") or ""
         prompt = f"REVIEWER CONCERN:\n{concern}\n\nFILE: {path}\n\n{before}"
-        text = jp.post_responses(endpoint, model, ee.SOLVER_INSTRUCTIONS, prompt)
-        new, note = ee.apply_search_replace(before, text)
-        if new is None:
-            return {}, False, note
-        return {path: new}, True, "model"
+        # Resolve@1 measures the maintainability fix, not edit-protocol luck. The
+        # SEARCH/REPLACE apply is non-deterministic (some samples reflow long lines
+        # and fail exact match), so re-sample up to 3x until the edit applies.
+        note = "no SEARCH/REPLACE blocks"
+        for attempt in range(3):
+            text = jp.post_responses(endpoint, model, ee.SOLVER_INSTRUCTIONS, prompt)
+            new, note = ee.apply_search_replace(before, text)
+            if new is not None:
+                return {path: new}, True, f"model(try{attempt+1})"
+        return {}, False, note
     raise ValueError(mode)
 
 
