@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Annotate ReviewBench CSV rows with a local Copilot OpenAI-compatible API."""
+"""Annotate ReviewBench CSV rows with a local Copilot OpenAI-compatible API.
+
+Each annotation must also include ``case_summary``: a 1-3 sentence Chinese
+summary of what the PR/case is doing (the reviewer's maintainability concern,
+where the before-code has the problem, and how the PR fixed it). This is a
+required deliverable for every annotation task so reviewers can understand a
+case at a glance; it is recorded verbatim and not used for keep/reject gating.
+"""
 
 from __future__ import annotations
 
@@ -30,8 +37,13 @@ LABEL_COLUMNS = (
     "label_keep_for_benchmark",
     "label_quality_score_1_to_5",
     "annotator_id",
+    "case_summary",
     "notes",
 )
+
+# Free-text columns are recorded verbatim and are not validated against an
+# allowed value set or used to decide whether a row is already labeled.
+FREE_TEXT_COLUMNS = {"case_summary", "notes"}
 
 CATEGORIES = {
     "complexity",
@@ -77,11 +89,12 @@ Allowed values:
 - label_correctness_oracle_usable: yes/partial/no/unclear. "yes" means changed tests/build/lint/typecheck files look relevant and usable; "partial" means plausible but broad/indirect; "no" means absent or unrelated.
 - label_keep_for_benchmark: yes/maybe/no. Use yes only when strict keep is satisfied: maintainability yes, clear yes, localized yes, addressed yes, no leakage yes, quality >=4, oracle yes/partial, and valid auto_static when applicable.
 - label_quality_score_1_to_5: 1-5. 4-5 means strong benchmark candidate; 3 means maybe; 1-2 means reject.
+- case_summary: 用 1-3 句中文，平实地概述「这个 case 在干啥」，方便后续人快速理解。要点：reviewer 指出的可维护性问题是什么、改前代码哪里有这个问题（尽量点到函数名/行号/变量）、PR 实际是怎么改的。只依据给定信息，不要编造，不要照抄整段代码。
 
 Return exactly one JSON object with these keys:
-label_is_maintainability_comment, label_category_correct, label_best_category, label_task_is_clear, label_task_localized_to_comment, label_comment_was_addressed, label_no_answer_leakage_after_sanitization, label_auto_static_gate_valid, label_correctness_oracle_usable, label_keep_for_benchmark, label_quality_score_1_to_5, notes.
+label_is_maintainability_comment, label_category_correct, label_best_category, label_task_is_clear, label_task_localized_to_comment, label_comment_was_addressed, label_no_answer_leakage_after_sanitization, label_auto_static_gate_valid, label_correctness_oracle_usable, label_keep_for_benchmark, label_quality_score_1_to_5, case_summary, notes.
 
-The notes must be one concise English sentence explaining the decisive reason. Do not include markdown."""
+case_summary is a 1-3 sentence Chinese summary of what this PR/case is doing (concern -> before -> fix). The notes must be one concise English sentence explaining the decisive reason. Do not include markdown."""
 
 
 def parse_args() -> argparse.Namespace:
@@ -179,7 +192,10 @@ def main() -> int:
 
     all_completed = load_completed(args.checkpoint_jsonl)
     merge_annotations(rows, all_completed)
-    write_csv(args.out_csv, fieldnames, rows)
+    # Ensure every annotation column (e.g. a newly added case_summary) is present
+    # in the output header even if the input template predates it.
+    output_fieldnames = list(fieldnames) + [c for c in LABEL_COLUMNS if c not in fieldnames]
+    write_csv(args.out_csv, output_fieldnames, rows)
     print(f"wrote {args.out_csv} with {len(all_completed)} checkpoint annotations")
     return 0
 
@@ -234,7 +250,7 @@ def load_completed(path: Path) -> dict[str, dict[str, str]]:
 
 
 def already_labeled(row: dict[str, str]) -> bool:
-    return all((row.get(column) or "").strip() for column in LABEL_COLUMNS if column != "notes")
+    return all((row.get(column) or "").strip() for column in LABEL_COLUMNS if column not in FREE_TEXT_COLUMNS)
 
 
 def build_user_prompt(row: dict[str, str], source: dict[str, Any]) -> str:
@@ -346,6 +362,9 @@ def parse_annotation(text: str, row: dict[str, str]) -> dict[str, str]:
         if column == "notes":
             annotation[column] = clean_note(str(data.get(column, "")))
             continue
+        if column == "case_summary":
+            annotation[column] = clean_summary(str(data.get(column, "")))
+            continue
         value = normalize_label_value(column, data.get(column, ""))
         if column == "label_quality_score_1_to_5":
             value = value[:1]
@@ -420,6 +439,13 @@ def clean_note(note: str) -> str:
     return note
 
 
+def clean_summary(summary: str) -> str:
+    summary = " ".join(summary.replace("\n", " ").split())
+    if len(summary) > 600:
+        summary = summary[:597].rstrip() + "..."
+    return summary
+
+
 def enforce_consistency(annotation: dict[str, str], row: dict[str, str]) -> None:
     category = annotation.get("label_best_category") or row.get("category_pred") or "other"
     if category not in CATEGORIES:
@@ -470,6 +496,7 @@ def fallback_annotation(row: dict[str, str], error: str) -> dict[str, str]:
         "label_correctness_oracle_usable": "unclear",
         "label_keep_for_benchmark": "maybe",
         "label_quality_score_1_to_5": "3",
+        "case_summary": "",
         "notes": clean_note(f"Fallback after API/parse failure; requires manual review. Error: {error}"),
     }
 

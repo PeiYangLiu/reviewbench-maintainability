@@ -24,8 +24,13 @@ LABEL_COLUMNS = (
     "label_keep_for_benchmark",
     "label_quality_score_1_to_5",
     "annotator_id",
+    "case_summary",
     "notes",
 )
+
+# Free-text columns are carried through verbatim and excluded from value-count
+# distributions (every value is essentially unique).
+FREE_TEXT_COLUMNS = {"case_summary", "notes"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -273,6 +278,7 @@ def build_report(
         "label_distributions": {
             column: dict(Counter(item.get("human_annotation", {}).get(column, "") for item in labeled).most_common())
             for column in LABEL_COLUMNS
+            if column not in FREE_TEXT_COLUMNS
         },
         "precision_estimates": {
             "maintainability_yes_rate": rate(labeled, "label_is_maintainability_comment", "yes"),
