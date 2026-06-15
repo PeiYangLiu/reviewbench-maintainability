@@ -1,0 +1,261 @@
+# ReviewBench-Maintainability 踩坑记录（PITFALLS）
+
+> 构建这个 benchmark 过程中踩到的坑、根因、解决办法。**每碰到一个新坑就往这里追加一条**，方便以后不重复犯错、也方便写进 paper 的 methodology/limitations。
+>
+> 每条格式：**现象 → 根因 → 解决 → 影响 → 代码位置**。
+
+---
+
+## 数据挖掘 / diff 提取
+
+### P1. GitHub 三点 compare 在被 rebase 的 PR 上产生「幻觉新增」
+- **现象**：某条修法显示成 `+N/-0` 全是新增，但那些代码在 `start_sha` 其实早就存在；难度被虚高。
+- **根因**：`GET /repos/{repo}/compare/{start}...{target}` 用的是**三点 diff**（`merge-base(start,target)..target`）。如果 PR 被 rebase/force-push，`start_sha` 不是 `target_sha` 的祖先，merge-base 会退到很早的提交，把"早已存在的代码"算成新增。
+- **检测**：compare 返回 `status: "diverged"`、`behind_by > 0`。
+- **解决**：**不要用 compare 的 patch**。直接拉 `start_sha` 和 `target_sha` 两个版本的文件 blob，本地 `difflib.unified_diff` 算**真实两点 diff**（rebase 免疫）。
+- **影响**：hard 计数 184 → 164。
+- **代码**：`scripts/enrich_cases.py` `fetch_fix()` / `two_dot_file_diff()`。
+
+### P2. `start_sha` 这个 commit 可能整个不存在（被 force-push 删掉）
+- **现象**：`dead_code 删参数`却显示 `+65/-0` 全新增；`before` 上下文抓取失败。
+- **根因**：`GET /contents/{path}?ref={start_sha}` 返回 404 `No commit found for the ref`。如果把它当成"空文件"，difflib 会把整文件算成新增（又一类幻觉）。
+- **解决**：在 `fetch_file_text` 里**区分两种 404**：
+  - `No commit found for the ref` → commit 没了 → 抛 `MissingRefError` → 该 case **判无效、剔除**（连 start_sha 都 checkout 不了，根本没法做任务）。
+  - `Not Found`（commit 有效但文件不在）→ 返回 None（合法的新增/删除文件）。
+- **影响**：剔除 46 条无效 case；hard 164 → 127。
+- **代码**：`scripts/enrich_cases.py` `MissingRefError` / `fetch_file_text()`。
+
+### P3. 单条评论的「参考修法」会混入 PR 的无关改动（bundled changes）
+- **现象**：文件级 `start→target` diff 里既有评论要的修法，又有 PR 顺手做的别的事（例：日志改 dict 的同时加了 `unavailable` 状态功能；django 改名 PR 顺手加了一堆新测试）。
+- **根因**：一个 PR 通常解决多件事，但 benchmark 任务锚定的是**单条评论**。文件级 diff 把它们混在一起。
+- **影响**：难度被撑高、参考答案不纯、oracle 不干净。
+- **缓解（待加强）**：difficulty/参考修法应**聚焦到评论锚定行附近的 hunk**（`focus_patch` 已做部分），未来需要更强的"按 concern 隔离"。
+
+---
+
+## 难度评分
+
+### P4. 难度打分器高估「以新增为主 / 捆绑改动」的 case
+- **现象**：一个本质是机械改名的 case（django naming）被打成 hard（+71 行、5 个新定义）。
+- **根因**：那 71 行大多是 PR **顺手加的新测试**，不是改名本身；打分按 size/new_defs 给高分。
+- **关联**：本质同 P1/P3——diff 里混进了无关/幻觉内容。修了 P1/P2 后很多虚高被纠正。
+- **代码**：`scripts/score_difficulty.py`。
+
+### P5. 标注 split 之间有子集关系，直接相加会重复计数
+- **现象**：`strict + relaxed = 503`，但去重后其实只有 370。
+- **根因**：`verified_strict ⊂ review_pool_relaxed`（relaxed 池已包含全部 strict）。
+- **解决**：合并任何池子时**一律按 `id` 去重**。
+- **代码**：`apply_annotations.py` 的 split 逻辑；分析时 `dict(byid)`。
+
+---
+
+## 评测 / 正确性 oracle（Track A）
+
+### P6. 「start_sha 的测试必须全过」这个朴素 oracle 是错的
+- **现象**：在 start_sha 跑测试全绿（13/13），但打上**正确的 gold 源码修法**后 2 条挂了。
+- **根因**：那 2 条测试**和实现耦合**（断言旧的 f-string 日志格式 / 旧 status 值），而正确修法本来就会改变这些细节——PR 自己也把这 2 条测试一起改了。
+- **解决**：用 **SWE-bench 式 PASS_TO_PASS**：`= 在 start_sha 绿 ∩ 打完「完整 gold（含测试改动）」后还绿`。被 PR 改过的测试**排除**出 oracle。构造它需要逐 task 跑一遍完整 gold 来确定稳定集。
+- **验证**：本例 PASS_TO_PASS = 13 − 2 = 11 条稳定测试；打完整 gold（源码+测试）后 19/19 绿（PR 还新增 6 条）。
+- **案例**：`ansible/metrics-service#175`。
+
+### P7. 不能用 PR「改后的测试」当评分标准
+- **现象**：想直接用 target_sha 的测试给模型打分。
+- **根因**：改后的测试是**照着作者的具体实现**写的（断言特定的 dict 结构/键名），甚至包含 PR 捆绑的无关功能测试。模型用**另一种合法写法**解决同一个 concern 时会被误判失败。
+- **结论**：maintainability 有"多种合法解"，绑定单一实现的测试会冤枉正确答案。
+  - 改后测试 ❌（绑实现）
+  - 改前全部测试 ❌（见 P6，会冤枉正确修法）
+  - **前后都过的稳定测试 ✅（当回归网）+ AI judge ✅（判是否解决 concern）**
+
+### P8. 正确性门对「被改的那段代码」是弱守卫
+- **现象**：稳定 PASS_TO_PASS 里**不包含**直接测试被改代码的那条（它正是被排除的耦合测试）。
+- **根因**：maintainability 里 reviewer 让你改的地方，往往正是实现耦合测试盯着的地方，重构必然动它 → 它被排除 → 剩下的稳定测试测不到这段改动。
+- **影响**：正确性门只能保证"没改坏无关功能"，**保证不了"这段重构本身行为对不对"**。
+- **结论**：**语义 AI judge 不是可选项，是核心信号**；正确性门只是"别搞坏"的安全网。
+
+### P9. `label_correctness_oracle_usable` 只是人工肉眼猜，不等于真能跑
+- **现象**：标注 `yes/partial` 不代表环境搭得起来、测试真覆盖目标代码。
+- **结论**：真正的 Track A 资格 = **实际 clone + 搭环境 + 跑通 + 验证覆盖**，这是最贵的一公里。名义 oracle=yes 的 hard 有 25 条，但"真验证过可跑"的目前还是 0。
+
+### P14. 把多个无关测试文件一起跑会「跨文件污染」
+- **现象**：单独跑 `test_send_anonymized_to_segment.py` → 13 全过；和另外 3 个测试文件一起跑 → **72 个全 ERROR**（连单独能过的也挂）。
+- **根因**：不相关的测试文件共享 DB / session 级 fixture，一个文件的 DB 初始化失败会污染整个 session。
+- **解决**：`trackA_filter.py` 里**每个测试文件单独跑、再合并结果**；coverage 也只跑稳定测试的 node id（分文件分组），避免顺带跑到耦合测试。
+- **代码**：`scripts/trackA_filter.py` `run_pytest()`（逐文件）。
+
+### P15. 构造 PASS_TO_PASS 必须只打「源码 gold」，不能打完整 gold
+- **现象**：脚本一开始 `git checkout target -- <所有改动文件>`（含测试文件）→ p2p=13、排除 0 条，把耦合测试**掩盖**了。
+- **根因**：完整 gold 把测试文件也换成 target 版（耦合测试被重写后同名通过），按测试名取交集就误判为"前后都过"。
+- **解决**：只 checkout **源码改动文件**的 target 版（`is_test_path` 过滤掉测试文件 + `test_change_paths`），测试文件保持 start 版 → 耦合测试正确地挂掉、被排除。
+- **注意**：SWE-bench 的"始终注入 test patch"**不适用**于 maintainability（见 P7：test patch 绑死作者实现）。
+
+### P16. `coverage json` 在项目设了 `fail-under` 时退出码非 0
+- **现象**：覆盖率 JSON 其实写出来了（"Wrote JSON report"），但命令退出码非 0（`total of 39 is less than fail-under=80`），脚本误判为失败。
+- **解决**：**别看退出码**，直接判断 JSON 文件是否生成、能否解析。
+- **代码**：`scripts/trackA_filter.py` `coverage_of_changed()`。
+
+### P17. 很多 oracle=yes 的 hard 其实是「改测试代码」任务，没有行为 oracle
+- **现象**：候选里不少 task 的目标文件本身就是测试文件（如 `tests/.../test_ball_tree.py`、`test_validation.py`、`test_cli.py`）。
+- **根因**：testability 类评论常是"把这个测试写好点"——改的是测试代码本身，**没有"被测行为"可回归**。
+- **影响**：这类不进 Track A（`stage=test_only_task`）。Track A 真正要的是**源码**可维护性任务。
+
+### P18. `git clone` 默认会因 `start_sha` 不在历史里而无法 checkout（同 P10）
+- **解决**：clone 后 `git fetch origin <start_sha>` 和 `<target_sha>` 各拉一次（按 sha）；`git reset --hard <sha>` 而非 checkout 分支。环境目录（`.venv`）要在 `git clean` 时 `--exclude`，否则每次重建。
+
+---
+
+## 工具 / 基础设施
+
+### P10. `git clone`（默认）里没有 `start_sha`
+- **现象**：`git checkout <start_sha>` 报 `reference is not a tree`。
+- **根因**：start_sha 是 PR 分支 / rebase 前的 commit，默认 clone 不含；`pull/N/head` 也可能不含（若已 rebase）。
+- **解决**：`git fetch origin <start_sha>` 按 SHA 直接拉单个 commit（GitHub 允许，即使它不在任何分支上）。
+
+### P11. TRAPI GPT-5.5 限流严重（429）+ 脚本只在最后写文件会丢进度
+- **现象**：summarize 跑到一半超时被杀，10 条一条没存下来。
+- **根因**：① TRAPI 共享部署经常 429；② 脚本在循环结束后才一次性写出。
+- **解决**：① summarizer **每条 checkpoint**（临时文件 + rename），超时/被杀不丢、可 `resume`；② 加 `--backend responses` 走**本地 Copilot `/v1/responses`**（claude-opus-4.7）做 fallback，限流时秒出。
+- **代码**：`scripts/summarize_cases.py`。
+
+### P12. snap chromium 截图写不进 `/tmp`
+- **现象**：`--screenshot=/tmp/x.png` 提示写了 N 字节，但 `/tmp/x.png` 不存在。
+- **根因**：snap 沙箱限制 `/tmp` 访问。
+- **解决**：截图输出写到 `$HOME` 下。
+
+### P13. 包没 `pip install -e .` 就跑测试 → ModuleNotFoundError
+- **解决**：跑 `pytest` 前先 `python -m pip install -e .`（本仓库测试前提）。
+
+---
+
+## 待办 / 已知未解决
+- P3：参考修法 / 难度的"按单条 concern 隔离"还不够强（仍可能混入同文件无关 hunk）。
+- P8/P9：Track A 正确性 oracle 还没真正规模化验证（环境 + 覆盖）。
+- judge 还需在更大带人工标注的样本上做 judge-人一致率校准。
+
+### P19. Track A 的真正瓶颈是「环境搭建」，通用安装只对纯 Python 项目有效
+- **实测**：10 条 oracle=yes 的 Python hard 跑漏斗 → **只有 1 条 survives**。5 条死在 `env`（构建失败），4 条死在 `baseline_no_pass`（环境装了但 0 测试通过）。
+- **根因**：`uv sync` / `pip install -e .` 只能搞定**纯 Python app/lib**（如 ansible）。科学计算/基础设施仓库需要 bespoke 构建：
+  - scikit-learn / scipy：Cython / C / Fortran 编译，`pip install -e .` metadata-generation-failed
+  - diffusers：要 torch（多 GB，可能要 GPU）
+  - conda：自身构建依赖（pycosat、menuinst）装不上
+  - dask：旧 setuptools 在 py3.12 下 `SafeConfigParser` 报错
+- **结论 / 岔路**：Track A 要规模化，**必须像 SWE-bench 那样逐 repo 做 Docker 镜像**（钉死依赖+构建配方），这是大工程；否则只能**主动挑环境友好的仓库**（纯 Python、pip 可装、无编译扩展），用广度换可行性。
+- **数据**：funnel 见 `data/trackA/funnel.jsonl`，脚本 `scripts/trackA_filter.py`。
+
+### P20. 静态「环境友好度」判定会高估，需 curated 黑名单 + 实跑验证
+- **现象**：只按 GitHub languages（纯 Python 占比）判，会把 conda（25 题）、diffusers 误判为"可跑"——它们代码是纯 Python，但**依赖**要重型构建（pycosat/menuinst 编译）或 torch（多 GB）。
+- **解决**：加 curated 重型仓库/依赖黑名单（conda/torch/tensorflow/ray/airflow/sklearn/scipy/numpy/matplotlib...）+ 检 `meson.build`/`CMakeLists.txt`/`ext_modules`/Cython。改完后 PoC 6/6 ground-truth 全对。
+- **重要**：静态判定只是**上界 + 优先级**，真实"可跑"仍要 `trackA_filter` 逐 repo 实跑确认。
+- **战略结论**：Python 在我们池子里恰是**最不友好**的生态（热门 Python 仓库都是科学计算/编译型）；**Go(109 题/31 hard)是最大最干净的 Track A 池**，其次 TS/Rust。建 Go harness 的性价比 > 死磕 Python。
+- **代码/数据**：`scripts/env_friendliness.py`、`data/trackA/repo_env.json`、`data/trackA/tasks_env.jsonl`。
+
+### P21. 实测:静态 Python-ready 66 → 实跑只 9 条可跑（最大损失可回收）
+- **实测漏斗**（66 个 Python track_a_ready 任务跑 `trackA_filter`）：survives=**9**（hard 4/medium 1/easy 4），来自 4 个仓库（ansible/metrics-service、conan-io/conan、django、pytest-bdd）。
+- **最大损失 = `no_test_file_at_start`（25 条）**：这些 PR 只**新增**测试文件，start_sha 没有对应测试当 baseline。但这是**筛子局限**——只跑了 PR 改过的测试文件，没去跑仓库里**已有的相关测试模块**。
+- **可回收**：改进 `trackA_filter`，对改动的源码文件去找/跑**已有对应测试模块**（如 `test_<name>.py` 或同目录 tests/），而不仅是 PR 触碰的测试 → 预计能救回相当一部分这 25 条。
+- **次要损失**：env 13（友好仓库仍有 pip 装失败，静态筛不完美）、baseline_no_pass 12、complete 但 coverage 没覆盖 5。
+- **结论**：可跑 Track A 极稀缺，且高度集中在少数干净仓库；**把 ansible/conan 这类金矿仓库配好** + 回收 no_test_file，是 Python 侧最划算的扩量方式。Go(109) 仍是更大的池。
+- **数据**：`data/trackA/py_ready_funnel.jsonl`。
+
+### P22. 「只 9 条可跑」是筛子地板，不是真实上限（三个可修硬伤）
+- **现象**：66 Python-ready 实跑只 9 survives，但逐条看死因，多数可回收。
+- **硬伤1：只跑 PR 改过的测试文件** → 25 条死于 `no_test_file_at_start`（PR 只新增测试）。应改成：对改动的源码文件，去跑仓库里**已有的对应测试模块**（`test_<name>.py`/同级 tests/）。
+- **硬伤2：venv 用了过新的 Python（本机 `python3`=3.14.3）** → 一批包 `requires <3.x` / `build_ext` 崩。**走 uv 的 ansible 用 3.12 就成功**。修法：venv 也强制用 3.11/3.12，或全程用 uv。
+- **硬伤3：coverage 偶发 `json not produced` 被当成"没覆盖"** → 4 条有 p2p=26/16/6 稳定测试的本可用 case 被毙。修法：coverage 失败时不要一票否决（可降级为"有 PASS_TO_PASS 即算可跑、coverage 仅作加分"）。
+- **结论**：保守修完三点，Python 可跑数预计 9 → 25~40+。报"可跑池大小"前必须先修这些，否则严重低估。
+
+### P22 续：修复后 9 → 19 可跑（已验证）
+- 三个修复（跑已有测试模块 / uv py3.12 / coverage 改加分项）实测把 Python 可跑数 **9 → 19**（hard 7、medium 1、easy 11），其中 11 条改动行被稳定测试覆盖（更强）。横跨 10 个干净仓库（metrics-service 6、conan 3、pytest 2、pytest-bdd 2…）。
+- **剩余 env-fail（15）是新一类**：① setuptools `package discovery` 失败（不该 `pip install -e .`，应"装依赖 + 从源码跑测试"）；② monorepo 子目录（包不在根，aws-*/kubeflow/langchain-aws）。可回收但边际递减。
+- **里程碑**：已有 19 条真·端到端可跑的 Python Track A 任务（7 hard）。下一步价值最高的是用它们跑通完整评测闭环（模型 patch → PASS_TO_PASS 正确性门 + AI judge）。
+- **数据**：`data/trackA/py_ready_funnel_v2.jsonl`。
+
+### P23. 端到端评测闭环跑通（里程碑）+ solver「重写整文件」会截断
+- **里程碑**：`scripts/evaluate_e2e.py` 在 2 条 runnable hard 上跑通完整闭环（gate0 apply → gate1 PASS_TO_PASS 正确性 → gate2 scope → gate3 judge → Resolved@1）。
+  - **Sanity 全过**：golden→Resolved=True、empty→Resolved=False（两条都对），证明评测器可信。
+  - **正确性门抓到真实回归**：conan 模型 patch 改坏 5 个 PASS_TO_PASS 测试 → Resolved=False；judge 也独立识破。
+  - **judge 给真活打分**：metrics-service 模型正确改成 dict+`extra=` → Resolved=True。claude Resolved@1=1/2。
+- **坑：让模型"输出整个新文件"在大文件上会截断**（conan `environment.py` 被 claude 截断、删了无关函数）。
+  - **修法**：solver 协议应改成**面向区域的 diff/patch** 或函数级编辑，并校验"未删无关代码"；正确性门当前能兜底（截断必挂测试），但会把"输出格式问题"和"真不会做"混在一起。
+- **结论**：ReviewBench-Maintainability 全链路（挖掘→分类→难度→环境验证→PASS_TO_PASS oracle→模型求解→correctness+scope+judge→Resolved@1）已端到端验证可行。
+- **数据**：`data/trackA/e2e_results.json`。
+
+### P24. Leaderboard：golden 锚点的两个坑（必须修，否则排行不公平）
+- **坑1（崩溃）**：写候选文件前没 `mkdir parents` → golden 应用含**新建文件**（如 `.claude/commands/task-review.md`，start_sha 下父目录不存在）时 `write_text` 崩溃 → golden 整条 gate0 失败。模型只改已存在的锚定文件不受影响 → **排行假性地让模型赢过 golden**。修法：写前 `(repo_dir/f).parent.mkdir(parents=True, exist_ok=True)`。
+- **坑2（scope 不公平）**：golden = 整个 PR 的源码 delta（常多文件/大改），会撞 scope 行数上限 → golden 误判 not resolved。但 scope 门是用来**防模型乱改/过度编辑**的。修法：**golden 豁免 scope 门**（只过 correctness+judge），模型才受 scope 约束。
+- **教训**：跑 leaderboard 必须先确认 **golden≈满分、empty≈0**；否则评测器本身有 bug。
+- **数据**：`data/trackA/leaderboard.json`。
+
+### P26. 测试文件类任务必须剔除出 Track A（否则 golden 假性失败、模型假性反超）
+- **现象**：首个 leaderboard 里模型(84%)反超人类 golden(74%)——异常。
+- **根因**：5 条任务的 concern 是关于**测试文件**的（删测试里 unused import、去重 fixture、加 `@needs_pydanticv2`）。我的 golden 用 `source_changed`（**排除测试文件**），于是只应用了 PR 捆绑的非测试改动（CI/docs），**没应用真正在测试文件里的修法** → golden 被 judge 判 not addressed；而模型直接编辑锚定的测试文件反而对了。
+- **更深**：测试文件类任务里，"被改的测试"既是**任务对象**又是**正确性 oracle**，循环依赖，本就不适合 Track A（P17 的延伸）。
+- **修法**：选 Track A 任务时**剔除 `is_test_path(locality.path)` 的任务**。
+- **效果**：剔除后 **golden=14/14(100%)、empty=0/14(0%)**，模型落在 71-86%，排行干净可信。
+- **首个干净 leaderboard（14 源码类任务，judge=claude-opus-4.7）**：golden 100% / claude-opus-4.8 86% / gpt-5.5 79% / gemini-3.1-pro 71% / empty 0%。hard(5)：gpt-5.5 与 gemini 4/5、claude 3/5、golden 5/5。
+- **注意**：N 小(14/5 hard)仅供方向性参考；judge=claude 对 claude solver 可能有偏置，需换 judge 验证。
+- **数据**：`data/trackA/leaderboard.json`。
+
+### P27. 「bench 太简单」诊断：是可跑样本 easy 偏多 + 太小，不是判定放水
+- **数据**：14 条干净任务里 8 easy/1 med/5 hard。严格判定(只算 `yes`)几乎不变（golden 13、gpt-5.5 10、claude-4.8 10、gemini 9），partial 放水每模型仅 1-2 条 → **不是 judge 太松**。
+- **hard 子集(5,严格)有区分度**：golden 5/5、gpt-5.5 4/5、claude-4.8 3/5、gemini 4/5。
+- **根因（流水线系统性偏易）**：① 单评论+单区域 locality 排除了架构级重构；② 要干净 PASS_TO_PASS → 偏好小的行为保持改动；③ env-friendly 选了简单仓库。真正难的 127 hard 恰恰最难做成可跑任务（固有矛盾）。
+- **让它变难**：① headline 改 **hard-only**；② 把可跑 hard 扩到 30-50+（Go harness=31 hard、编译仓库上 Docker、回收 env）；③ 放开 locality 收多文件架构任务；④ 判定收紧（strict yes + rubric：完全解决/不引入新问题/不过度编辑）。
+
+### P28. Go harness 成功：Track A 可跑 hard 从 5 → 18（Go 是最佳生态）
+- **结果**：22 条 Go 源码类 hard → **13 可跑（57%，10 覆盖）**，跨 grpc-go(4)、telegraf(2)、prometheus、cilium、kubernetes、terraform-provider-aws 等。
+- **关键优势**：`go test ./pkg/` 只编译**改动文件所在的那个包**，所以连 **kubernetes/cilium/terraform-provider-aws 这种巨型仓库都跑通**（Python 在科学计算重仓库上全军覆没，Go 没有这个问题）。无 pip 地狱、go mod 自动解析依赖。
+- **组合可跑 hard**：Python 5 + Go 13 = **18**（向 hard-only benchmark 迈进一大步）。
+- **注意**：Go `_test.go` 锚定任务用 `is_go_test()` 单独剔除（P26 的 Go 版；通用 `is_test_path` 只认 Python 的 `_test.py`/`tests/`）。
+- **代码/数据**：`scripts/trackA_go.py`、`data/trackA/go_funnel.jsonl`。
+
+### P29. golden 不是保证的 100% 天花板：人类有时没按 reviewer 字面建议改
+- **现象**：grpc-go 某 hard 任务 golden 被 judge 判 not addressed——reviewer 问"为什么不合并成一个锁?",而真实 PR 重构成了 `oobState` struct 但**仍保留两个锁**(用了不同方案/只部分采纳)。
+- **结论**：golden = 真实 PR 的修法,**未必字面满足评论的建议**(tokio 现象的重现)。所以 golden 在严格 judge 下 < 100% 是**真实的**,不是 bug。
+- **影响**：① golden 不能当作保证满分锚点;② judge rubric 需区分"字面照做 vs 解决了本质 concern"——当前是严格字面;③ 这类"评论建议没被采纳"的任务本身可能是弱题。
+- **已修(让 golden 更公平)**：judge 只看**锚定文件的 diff**(`git diff -- <path>`),避免 golden 的多文件 PR 改动淹没相关变更。但上面这条是真实分歧,改了仍 not addressed。
+- **leaderboard 读法**：empty=0 是关键 sanity;golden 作参考(可能 <100%);模型间相对排名才是主信号。
+
+### P30. Hard leaderboard 暴露两个必须先修的有效性 blocker（flaky 测试 + judge 严格）
+- **现象**：Go hard 上 golden 只 2/7,模型 3-5/7（模型"反超人类"再现）。逐条拆 golden 失败：
+  - **~3 条 correctness=False 但 maint=yes** → **flaky 测试**。这些是 grpc-go 等**并发重仓库**,锁/OOB 负载均衡测试有时序抖动;golden 的源码 = p2p 基线本身,却在复跑时挂了个测试 → 正确性门不可靠。
+  - **~3 条 maint=no/partial** → **judge 严格**:人类 PR 没字面照做 reviewer 的建议（grpc-go 保留两个锁、telegraf 保留指针、prometheus 用闭包而非独立函数）。
+- **结论**：当前 hard leaderboard **数字不可信**,不能当真排行。"模型反超 golden"主要是 flaky + judge 假象。
+- **必修**：① **flaky 检测**——baseline 跑 2-3 次,丢掉不稳定的测试出 PASS_TO_PASS;correctness 也复跑取稳定结果。② **judge rubric**——区分"字面照做 vs 解决本质 concern",并剔除"评论建议根本没被采纳"的弱题。
+- **价值**：宁可现在发现这两个 blocker,也不要发一个被 flaky/judge 污染的噪声榜。
+- **数据**：`data/trackA/leaderboard_go_hard.json`。
+
+### P31. 修 flaky：稳定测试过滤 + 「golden 必须过自己的正确性门」做任务有效性筛
+- **做法**：① PASS_TO_PASS 现在要求测试在 start 和 gold 各跑 **3 次都 PASS**(排除 flaky);② 正确性门对失败测试**复跑最多 3 次**容错;③ 修了 `git_show` 经 `ta.run` 多带 `\n+stderr` 的隐患。
+- **但 grpc-go 病态 flaky**:并发/OOB 测试抖动率高,3 次过滤 + 3 次容错仍然让 golden 正确性挂 → 重试治不了。
+- **principled 修法**:**一个任务只有当 golden 自己能过正确性门才算有效**(golden 就是 target,过不了说明 oracle 坏了/太flaky)→ 自动剔除 grpc-go 这类。leaderboard 只在"golden 正确性通过"的 valid 任务上算。
+- **意义**:这是 SWE-bench 式的"逐任务验证 golden"——比逐测试斗 flaky 更稳、更可辩护。
+
+### P31 续：flaky 修复后的干净 hard-only leaderboard
+- **有效性筛生效**：16 个可跑 hard(5 Py + ~11 Go）中，golden-必须过正确性门 筛掉 8 个 flaky/坏 oracle（绝大多数是 grpc-go 并发抖动）→ 剩 **9 个有效 hard**（5 Py + 4 Go）。
+- **干净 hard-only 排行（judge=claude-opus-4.7）**：golden 8/9(89%) / gpt-5.5 7/9(78%) / gemini-3.1-pro 7/9(78%) / claude-opus-4.8 6/9(67%) / empty 0/9(0%)。
+- **健康信号**：golden≈天花板（唯一失分是"人类没字面照做评论建议"的题）、empty=地板、模型 67-78% 有区分度。
+- **代价/教训**：grpc-go 这类并发重仓库**几乎全军覆没于 flaky**——Go 选题要避开并发/时序敏感包，否则有效率很低。
+- **数据**：`data/trackA/leaderboard_go_hard.json`、`leaderboard_py_hard.json`。
+
+### P33. Docker 化（SWE-bench 式）：能解锁重仓库,但历史 commit 需要 per-instance 环境锁
+- **建成**：`scripts/docker_harness.py`——按生态生成 Dockerfile（python-slim + 科学计算构建依赖 / golang）、clone、装依赖、编译一次。
+- **关键验证**：**scikit-learn 在容器内成功 build + 跑测试**（`test_calibration.py` 在镜像 HEAD 上 103 passed）——这正是直接 harness 完全建不起来的重仓库。**证明 Docker 解锁了 sklearn/scipy 这类（含 13 条 sklearn hard）。**
+- **但**：checkout 到具体 `start_sha`(历史 commit)后重建失败——老 commit 的 `setup.py` 要 `pkg_resources`(setuptools≥81 已删)、且要**该 commit 的 build-system requires**（特定 numpy/cython/meson 版本）。单个 per-repo 镜像只对接近构建点的 commit 有效。
+- **结论/下一步**：这正是 SWE-bench 用 **per-instance 环境 spec**（每个任务按其 commit 的 `pyproject [build-system] requires` 钉死构建依赖）解决的——是已知但工作量大的工程。路径 = per-repo 基础镜像 + per-task 读 commit build-requires 装精确版本。
+- **磁盘注意**：重镜像 1GB+/个,本机 `/` 已 94%；批量构建前要清理。
+
+### P34. Docker per-instance oracle 跑通（近期 commit）：完整 PASS_TO_PASS 在容器内端到端成功
+- **建成**：`scripts/docker_harness.py` 的 `container_oracle_py()`——在 per-repo 镜像里 checkout 精确 `start_sha` → meson editable 重建（`pip install -e . --no-build-isolation`）→ flaky-aware 3× baseline → 应用 source-gold → 重建 → gold 跑 → PASS_TO_PASS = start 稳定且 gold 通过。
+- **验证**：`sklearn/tree/_export.py` 任务全程跑通：start 10 稳定 / gold 收集 10 / **PASS_TO_PASS = 10**。`sklearn/linear_model/_logistic.py` 的 start 侧也正确解析出 267 稳定测试。
+- **关键结论**：P33 担心的"老 commit 装不上"对**近期 commit（meson 时代、py3.12 兼容）不成立**——绝大多数 hard 任务来自 2024-2026 的 PR，用一个 py3.12 per-repo 镜像 + 精确 checkout + 重建即可。只有 pre-meson/老 numpy 的少数老 commit 才需要 era 匹配的 Python。
+- **CLI**：`python scripts/docker_harness.py --repo <r> --oracle-task <task.json>`（test 文件用记录的 `test_change_paths` 自动推导）。
+
+### P35. pytest 输出解析两个隐形坑：ANSI 颜色码 + 长参数名 80 列换行
+- **坑1（致命）**：即使管道（非 TTY），pytest 仍可能输出 `\x1b[32mPASSED\x1b[0m`；正则 `nodeid\s+(PASSED)` 因 nodeid 与 PASSED 之间夹着 ANSI 转义而**全部不匹配 → 解析出 0**。表现：测试明明 288 passed，oracle 却报 stable_pass=0。
+- **坑2**：非 TTY 时 pytest 按 80 列折行，长 parametrize nodeid（如 `[csr_matrix]`）的状态被换到下一行 → 漏解析（267 vs 288 的缺口）。
+- **修法**：① pytest 加 `--color=no -o console_output_style=classic`，解析前再 `re.sub(r'\x1b\[[0-9;]*m','',out)` 兜底；② 容器内 `export COLUMNS=300` 防折行。正则放宽为 `^(\S+::\S+?)\s+(PASSED|FAILED|ERROR)\b`。
+
+### P36. gold 文件用记录的 source_change_paths，绝不用 two-dot `git diff start target`
+- **坑**：当 `start_sha` 与 `target_sha` 在历史上**相距很远**（PR 基于旧 main、合并很晚 / 经过 rebase），`git diff --name-only start target`（two-dot）会包含**数百个中间 commit 的无关文件**。把它们全 checkout 到 target → Frankenstein 状态 → 测试收集 `ImportError`（如 `_logistic.py` 任务报 `cannot import name get_callback_manager`，因 target 版文件引用了中间 commit 才加的新 API）。
+- **修法**：gold 只应用任务记录里的 `correctness_oracle_proxy.source_change_paths`（PR 自身的非测试源码改动，通常 1-2 个文件），不要用 two-dot diff 现算。
+- **更深的有效性问题**：远距 start/target 的任务，即便只 checkout PR 的源文件，target 版仍可能引用中间 commit 的新 API → source-only gold 根本装不干净。**这类任务由"golden 必须过自己正确性门"的有效性筛自动剔除**（P31），是正确行为而非 harness bug。选 sklearn 题要优先 start/target 接近、源文件自包含（纯 Python、单文件）的。
