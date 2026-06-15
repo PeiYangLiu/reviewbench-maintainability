@@ -48,7 +48,7 @@ WORKDIR /repo
 # Warm common build deps as binary wheels (fast), then compile the project once.
 RUN pip install -U pip setuptools wheel \\
  && pip install numpy scipy cython "meson-python>=0.16" ninja pytest pytest-xdist threadpoolctl joblib \\
-    matplotlib pandas pillow setuptools_scm
+    matplotlib pandas pillow setuptools_scm pythran pybind11
 RUN pip install -e . --no-build-isolation || pip install -e . || true
 """
 
