@@ -226,11 +226,15 @@ def make_candidate(mode: str, ctx: dict[str, Any], rec: dict[str, Any], endpoint
         before = git_show(repo_dir, ctx["start"], path) or (repo_dir / path).read_text(encoding="utf-8", errors="replace")
         concern = rec.get("task_instruction") or ""
         prompt = f"REVIEWER CONCERN:\n{concern}\n\nFILE: {path}\n\n{before}"
-        text = jp.post_responses(endpoint, model, SOLVER_INSTRUCTIONS, prompt)
-        new, note = apply_search_replace(before, text)
-        if new is None:
-            return {}, False, note
-        return {path: new}, True, "model"
+        # Resolve@1 measures the maintainability fix, not SEARCH/REPLACE exact-match
+        # luck; re-sample up to 3x until the model emits an edit that applies (P38).
+        note = "no SEARCH/REPLACE blocks"
+        for attempt in range(3):
+            text = jp.post_responses(endpoint, model, SOLVER_INSTRUCTIONS, prompt)
+            new, note = apply_search_replace(before, text)
+            if new is not None:
+                return {path: new}, True, f"model(try{attempt+1})"
+        return {}, False, note
     raise ValueError(mode)
 
 
@@ -343,16 +347,28 @@ def main(argv: list[str] | None = None) -> int:
 def leaderboard(results: list[dict[str, Any]], solvers: list[str]) -> None:
     scored = [t for t in results if t.get("evals")]
 
-    def golden_correct(t: dict[str, Any]) -> bool:
+    def golden_eval(t: dict[str, Any]) -> dict[str, Any] | None:
         g = [e for e in t["evals"] if e.get("mode") == "golden"]
-        return bool(g) and bool(g[0].get("correctness_ok"))
+        return g[0] if g else None
 
-    # A task is VALID only if golden passes its own correctness gate; otherwise the
-    # oracle is broken/flaky (e.g. grpc-go concurrency tests) and the task is dropped.
+    def golden_correct(t: dict[str, Any]) -> bool:
+        g = golden_eval(t)
+        return bool(g) and bool(g.get("correctness_ok"))
+
+    def golden_resolved(t: dict[str, Any]) -> bool:
+        g = golden_eval(t)
+        return bool(g) and bool(g.get("resolved"))
+
+    # A task is VALID only if golden passes its own correctness gate (oracle works).
+    # CLEAN additionally requires golden to RESOLVE: if even the human reference does
+    # not address the concern through the anchored-file diff, the task is mis-anchored
+    # / too weak and only adds noise (P37/P38).
     valid = [t for t in scored if golden_correct(t)]
+    clean = [t for t in valid if golden_resolved(t)]
     print(f"\n=== Leaderboard ===")
-    print(f"scored tasks: {len(scored)} | VALID (golden passes correctness): {len(valid)} | dropped(flaky/broken oracle): {len(scored) - len(valid)}")
-    for label, pool in (("ALL VALID", valid),):
+    print(f"scored: {len(scored)} | VALID (golden correct): {len(valid)} | "
+          f"CLEAN (golden resolves): {len(clean)} | dropped: {len(scored) - len(valid)}")
+    for label, pool in (("CLEAN (golden resolves)", clean), ("ALL VALID", valid)):
         if not pool:
             continue
         print(f"\n-- {label} ({len(pool)} tasks) --")
