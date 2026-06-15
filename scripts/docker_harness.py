@@ -48,7 +48,11 @@ WORKDIR /repo
 # Warm common build deps as binary wheels (fast), then compile the project once.
 RUN pip install -U pip setuptools wheel \\
  && pip install numpy scipy cython "meson-python>=0.16" ninja pytest pytest-xdist threadpoolctl joblib \\
-    matplotlib pandas pillow setuptools_scm pythran pybind11
+    matplotlib pandas pillow setuptools_scm pythran pybind11 hypothesis
+# pybind11 headers (matplotlib/scipy C++ extensions) aren't always found via
+# pkg-config during the meson-editable rebuild; expose them on the include path.
+ENV CPLUS_INCLUDE_PATH=/usr/local/lib/python{py}/site-packages/pybind11/include
+RUN git submodule update --init --recursive || true
 RUN pip install -e . --no-build-isolation || pip install -e . || true
 """
 

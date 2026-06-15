@@ -83,7 +83,11 @@ PYTEST = "python -m pytest {tf} -v -p no:cacheprovider --color=no -o console_out
 
 
 def rebuild(c: Container) -> None:
-    c.sh("pip install -e . --no-build-isolation -q >/dev/null 2>&1 || true", timeout=1800)
+    # Some sci-Python repos vendor build inputs as git submodules (e.g. scipy's
+    # array_api_compat/xsf/unuran); the blob-filtered clone omits them, so init
+    # them before the meson-editable build. No-op for repos without submodules.
+    c.sh("git submodule update --init --recursive >/dev/null 2>&1 || true; "
+         "pip install -e . --no-build-isolation -q >/dev/null 2>&1 || true", timeout=1800)
 
 
 def setup_task(c: Container, rec: dict[str, Any], test_file: str) -> dict[str, Any]:
