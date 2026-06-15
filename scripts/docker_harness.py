@@ -42,7 +42,7 @@ PY_SCI_DOCKERFILE = """FROM python:{py}-slim
 ENV DEBIAN_FRONTEND=noninteractive PIP_NO_CACHE_DIR=1
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     git build-essential gfortran libopenblas-dev liblapack-dev pkg-config \\
-    python3-dev ninja-build && rm -rf /var/lib/apt/lists/*
+    python3-dev ninja-build libfreetype6-dev libpng-dev libqhull-dev && rm -rf /var/lib/apt/lists/*
 RUN git clone --filter=blob:none https://github.com/{repo}.git /repo
 WORKDIR /repo
 # Warm common build deps as binary wheels (fast), then compile the project once.
