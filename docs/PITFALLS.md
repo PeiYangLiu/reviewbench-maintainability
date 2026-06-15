@@ -259,3 +259,11 @@
 - **坑**：当 `start_sha` 与 `target_sha` 在历史上**相距很远**（PR 基于旧 main、合并很晚 / 经过 rebase），`git diff --name-only start target`（two-dot）会包含**数百个中间 commit 的无关文件**。把它们全 checkout 到 target → Frankenstein 状态 → 测试收集 `ImportError`（如 `_logistic.py` 任务报 `cannot import name get_callback_manager`，因 target 版文件引用了中间 commit 才加的新 API）。
 - **修法**：gold 只应用任务记录里的 `correctness_oracle_proxy.source_change_paths`（PR 自身的非测试源码改动，通常 1-2 个文件），不要用 two-dot diff 现算。
 - **更深的有效性问题**：远距 start/target 的任务，即便只 checkout PR 的源文件，target 版仍可能引用中间 commit 的新 API → source-only gold 根本装不干净。**这类任务由"golden 必须过自己正确性门"的有效性筛自动剔除**（P31），是正确行为而非 harness bug。选 sklearn 题要优先 start/target 接近、源文件自包含（纯 Python、单文件）的。
+
+### P37. Docker leaderboard 接入成功：sklearn hard 题进榜（含选题/环境的关键发现）
+- **建成**：`scripts/evaluate_docker.py`——每个任务起**一个常驻容器**（`docker run -d ... sleep infinity`），在 `start_sha` 重建一次后，跨 solver 复用（纯 Python 文件被 meson-editable 实时加载，改一处不用重编译 → 快）。LLM（solver+judge）在宿主机，容器只跑测试。复用 `evaluate_e2e` 的 4 门 + `judge_prototype` 的 judge + 「golden 必须过正确性门」有效性筛。
+- **干净 leaderboard（4 个有效近期 sklearn hard，judge=claude-opus-4.7）**：golden 3/4 / empty 0/4 / gpt-5.5 3/4 / gemini-3.1-pro 3/4 / claude-opus-4.8 1/4。其中 `decision_boundary.py`（PASS_TO_PASS=57）、`_discretization.py`（86）是强 oracle 好题。
+- **关键发现 1（选题=commit 年代）**：sklearn 约 **2024 年中**才切 meson-python；**2024 前的 commit 是 setup.py 时代**，在 py3.12 镜像里 `pip install -e .` 报 `ModuleNotFoundError: pkg_resources`（setuptools≥81 已删）→ 老题 baseline 建不起来。**Docker 解锁的是近期（2024+/meson 时代）的 hard 题**；老题要 era 匹配的 Python/setuptools。
+- **关键发现 2（测试依赖要进镜像）**：plot 题需 `matplotlib`、dataframe 题需 `pandas`——基础镜像没装会 `baseline_no_pass`（测试 import 失败）。已把 `matplotlib pandas pillow` 加进 `PY_SCI_DOCKERFILE` 并给现有镜像打 overlay 层。
+- **关键发现 3（弱题：fix 不在 anchored 文件）**：`_repr_html/params.py`（PASS_TO_PASS=1）golden 也 maint=no——该 PR 的维护性改动落在**别的文件**，anchored-file-only diff 自然不 address concern。**应把有效性筛从「golden 过正确性」收紧到「golden 能 RESOLVE」**，自动剔除这类（顺便也淘汰 PASS_TO_PASS 过小的题）。
+- **关键发现 4（apply 门对 SEARCH/REPLACE 漂移敏感）**：claude-opus-4.8 的低分主要是**偶发 apply=False**——模型的 SEARCH 块跟文件**尾随空白/内容微漂**导致 exact 匹配失败（非确定性）。已给 `evaluate_e2e.apply_search_replace` 加 **rstrip 容差的行级回退**（类似 aider 的模糊匹配）→ 更公平、降噪，惠及所有 leaderboard。

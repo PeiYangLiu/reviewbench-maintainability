@@ -47,7 +47,8 @@ RUN git clone --filter=blob:none https://github.com/{repo}.git /repo
 WORKDIR /repo
 # Warm common build deps as binary wheels (fast), then compile the project once.
 RUN pip install -U pip setuptools wheel \\
- && pip install numpy scipy cython "meson-python>=0.16" ninja pytest pytest-xdist threadpoolctl joblib
+ && pip install numpy scipy cython "meson-python>=0.16" ninja pytest pytest-xdist threadpoolctl joblib \\
+    matplotlib pandas pillow
 RUN pip install -e . --no-build-isolation || pip install -e . || true
 """
 
