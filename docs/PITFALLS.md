@@ -274,3 +274,13 @@
 - **效果（apply-retry 后的公平分）**：claude 1/4 → **2/4**——`decision_boundary` 之前是 apply=False，重采样后 apply=True 且 RESOLVED。剩两个没过：`params.py`（弱题，golden 也 maint=no）+ `_discretization`（连试 3 次都 apply=False = claude 对该文件**稳定地**重排长行，是真实的指令精确度短板，不是方差）。
 - **干净 3 题（剔除弱题 params.py）**：golden/gpt-5.5/gemini 3/3、**claude 2/3**、empty 0/3。
 - **结论**：① apply-retry 该成为所有 leaderboard 的标配（已在 docker 评测器落地，evaluate_e2e 可同样加）；② claude 仍稍弱于 gpt-5.5/gemini，但差距远没有 1/4 vs 3/4 那么大；③ 再次印证应把弱题（golden 不 RESOLVE）筛掉。
+
+### P39. Docker 扩仓库结果：解锁 19 个干净编译型 Python 任务（sklearn+scipy），并踩平 per-repo 构建坑
+- **跨仓库 Docker 榜（CLEAN=golden 能 RESOLVE，19 题：16 sklearn + 3 scipy，judge=claude-opus-4.7）**：golden 19/19(100%) / gemini-3.1-pro 18/19(94.7%) / gpt-5.5 17/19(89.5%) / claude-opus-4.8 14/19(73.7%) / empty 0/19(0%)。golden=天花板、empty=地板、模型 74-95% 有区分度——健康。
+- **per-repo（scored/valid/clean/setup_fail）**：scikit-learn 18/18/16/4、scipy 3/3/3/8、matplotlib 0/0/0/7。
+- **编译型仓库的 per-repo 构建坑（全部已固化进 `PY_SCI_DOCKERFILE` / `evaluate_docker`）**：
+  - **sklearn**：meson-editable，近期 commit 直接装；老 commit（<2024 setup.py 时代）装不上 → 只取近期题。
+  - **scipy**：需 `pythran`+`pybind11`（meson 找不到 → 报 Program pythran not found）、**git 子模块** `array_api_compat`/`xsf`/`unuran`（blob-filtered clone 不带，需 `git submodule update --init --recursive`）、测试需 `hypothesis`。修齐后 build+test 通。
+  - **matplotlib**：需 `setuptools_scm`（`--no-build-isolation` 下要预装）+ `pybind11` 头（meson 经 pkg-config 找不到 → 烤进 `CPLUS_INCLUDE_PATH`）。HEAD 能 import，但**历史 commit 的 per-task 重建仍挂**（baseline_no_pass × 7）→ 暂未产出有效题。
+- **scipy 慢/掉**：`signal`/`stats`/`sparse` 测试文件巨大（test_signaltools 收集上万、flaky 上万）→ 3×baseline+3×gold+5 solver 重跑非常慢，11 题里 8 个 setup 超时/失败。重仓库要选轻量测试模块的题。
+- **总账**：Docker 把直接 harness **完全建不起来**的编译型 Python 捞回 **19 个干净有效 hard/med/easy 题**（之前是 0）。加上原 9 个 Go+轻 Python = 约 28 个有效题。瓶颈从"语言/能否 build"转移到"重仓库测试太重太慢"。
