@@ -251,6 +251,66 @@ def label_badge(label: str, value: Any) -> str:
     )
 
 
+MODEL_LABELS = {
+    "golden": "Golden（人类参考）",
+    "empty": "Empty（不改，地板）",
+    "model:gpt-5.5": "GPT-5.5",
+    "model:claude-opus-4.8": "Claude-Opus-4.8",
+    "model:gemini-3.1-pro-preview": "Gemini-3.1-Pro",
+}
+MODEL_ORDER = ["golden", "model:gpt-5.5", "model:gemini-3.1-pro-preview", "model:claude-opus-4.8", "empty"]
+
+
+def render_model_results(task: dict[str, Any]) -> str:
+    mr = task.get("model_results") or {}
+    if not mr:
+        return ""
+    p2p = task.get("pass_to_pass")
+    rows = []
+    for mode in MODEL_ORDER:
+        r = mr.get(mode)
+        if not r:
+            continue
+        resolved = r.get("resolved")
+        if resolved is True:
+            verdict, vc = "✅ Resolved", "#1a7f37"
+        else:
+            verdict, vc = "❌ Not resolved", "#cf222e"
+
+        def gate(ok, yes, no):
+            if ok is True:
+                return f'<span class="g ok">{yes}</span>'
+            if ok is False:
+                return f'<span class="g no">{no}</span>'
+            return '<span class="g na">–</span>'
+
+        maint = r.get("maintainability")
+        maint_html = {
+            "yes": '<span class="g ok">judge✓</span>',
+            "partial": '<span class="g part">judge~</span>',
+            "no": '<span class="g no">judge✗</span>',
+        }.get(maint, '<span class="g na">judge–</span>')
+        gates = (
+            gate(r.get("correctness_ok"), "测试✓", "测试✗")
+            + gate(r.get("scope_ok"), "范围✓", "范围✗")
+            + maint_html
+        )
+        reason = esc((r.get("judge_reason") or "").strip())
+        reason_html = f'<div class="jr">{reason}</div>' if reason and mode != "golden" else ""
+        rows.append(
+            f'<div class="mr-row"><div class="mr-name">{esc(MODEL_LABELS.get(mode, mode))}</div>'
+            f'<div class="mr-verdict" style="--vc:{vc}">{verdict}</div>'
+            f'<div class="mr-gates">{gates}</div></div>{reason_html}'
+        )
+    p2p_html = f'<span class="muted">PASS_TO_PASS={esc(p2p)} 个测试</span>' if p2p else ""
+    return (
+        '<div class="modelres">'
+        f'<div class="mr-label">🤖 模型评测结果（Resolved@1 = 测试通过 ∧ 范围合规 ∧ judge 认为已解决） {p2p_html}</div>'
+        + "".join(rows)
+        + "</div>"
+    )
+
+
 def render_case(item: dict[str, Any]) -> str:
     task = item.get("task", {})
     pr = item.get("original_pr", {})
@@ -367,6 +427,8 @@ def render_case(item: dict[str, Any]) -> str:
     <div class="task-text">{render_inline(task.get('task_instruction'))}</div>
   </div>
 
+  {render_model_results(task)}
+
   <div class="verify">{verification}</div>
 
   <div class="step">
@@ -466,6 +528,19 @@ nav a.active {{ background:#ddf4ff; font-weight:600; }}
 .task-label {{ font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:#9a6700; font-weight:700; margin-bottom:4px; }}
 .task-text {{ font-size:15px; line-height:1.55; }}
 .verify {{ display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px; }}
+.modelres {{ margin:14px 0; background:#f6f8fa; border:1px solid #d0d7de; border-left:4px solid #6e40c9; border-radius:10px; padding:12px 14px; }}
+.mr-label {{ font-size:12px; font-weight:700; color:#6e40c9; margin-bottom:8px; }}
+.mr-row {{ display:flex; align-items:center; gap:12px; padding:5px 0; border-top:1px solid #eaeef2; }}
+.mr-row:first-of-type {{ border-top:none; }}
+.mr-name {{ flex:0 0 168px; font-weight:600; font-size:14px; }}
+.mr-verdict {{ flex:0 0 130px; font-weight:700; font-size:13px; color:var(--vc); }}
+.mr-gates {{ display:flex; gap:5px; flex-wrap:wrap; }}
+.mr-gates .g {{ font-size:11px; padding:1px 7px; border-radius:999px; border:1px solid; }}
+.g.ok {{ color:#1a7f37; border-color:#aceebb; background:#dafbe1; }}
+.g.no {{ color:#cf222e; border-color:#ffcecb; background:#ffebe9; }}
+.g.part {{ color:#9a6700; border-color:#f0d98c; background:#fff8c5; }}
+.g.na {{ color:#8c959f; border-color:#d0d7de; background:#f6f8fa; }}
+.jr {{ font-size:12.5px; color:#57606a; line-height:1.5; margin:0 0 4px 180px; padding:4px 8px; background:#fff; border-radius:6px; border:1px solid #eaeef2; }}
 .lbl {{ border:1px solid; border-radius:999px; padding:2px 9px; font-size:12px; font-weight:600; }}
 .cols {{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }}
 .col-h {{ font-size:13px; font-weight:700; margin-bottom:6px; }}
