@@ -284,3 +284,12 @@
   - **matplotlib**：需 `setuptools_scm`（`--no-build-isolation` 下要预装）+ `pybind11` 头（meson 经 pkg-config 找不到 → 烤进 `CPLUS_INCLUDE_PATH`）。HEAD 能 import，但**历史 commit 的 per-task 重建仍挂**（baseline_no_pass × 7）→ 暂未产出有效题。
 - **scipy 慢/掉**：`signal`/`stats`/`sparse` 测试文件巨大（test_signaltools 收集上万、flaky 上万）→ 3×baseline+3×gold+5 solver 重跑非常慢，11 题里 8 个 setup 超时/失败。重仓库要选轻量测试模块的题。
 - **总账**：Docker 把直接 harness **完全建不起来**的编译型 Python 捞回 **19 个干净有效 hard/med/easy 题**（之前是 0）。加上原 9 个 Go+轻 Python = 约 28 个有效题。瓶颈从"语言/能否 build"转移到"重仓库测试太重太慢"。
+
+### P40. 端到端扩规模跑通：新挖的 Go hard 进榜（mine→prefilter→score→run 全链路验证）
+- **第一轮挖掘（30 新仓库）→ 788 high-priority → 难度打分 → 235 hard（110 Go + 98 Python）**。原 benchmark 仅 127 hard，一轮就近乎翻三倍。
+- **取 30 个非测试 Go hard 过 host harness（evaluate_e2e，5 solver 一遍过）**：11 个评出、**5 个干净有效**(golden RESOLVE)，19 个 setup 挂。
+- **新 Go hard 干净榜（5 题，judge=claude-opus-4.7）**：golden 5/5 / gpt-5.5 4/5 / gemini-3.1-pro 4/5 / **claude-opus-4.8 1/5** / empty 0/5。有效仓库：thanos / teleport / opa-control-plane / traefik-mesh。
+- **坑（已知再确认）**：重 Go 仓库(etcd/vitess/temporal)**baseline_no_pass 占 19/30(63%)**——大仓库测试建不起来/far-apart sha/flaky。选 Go 题要避开巨型仓库,挑中小且测试轻的(opa/thanos 子模块/teleport 部分包)。
+- **claude 在 Go 上持续偏低**(这批 1/5,之前 sklearn 也偏低)——已带 apply-retry,所以是真实的 correctness/judge 失分倾向,值得后续小样本核实。
+- **工程基建**:Go clone + GOCACHE/GOMODCACHE 全重定向到 `/datadisk/peiyang`(根分区 95% 满,保护 `/`)。
+- **结论**:整条扩规模流水线(挖掘→prefilter→难度打分→跑 harness→榜)端到端打通,新题能稳定增量进榜。
