@@ -309,3 +309,10 @@
 - **试过的回退无效**:`--no-build-isolation`(复用镜像 deps)失败 → 隔离构建(装该 commit 的 build deps)**两种都挂**。meson-editable 的 import 时重建也用不上隔离环境。
 - **真正的解法(未做,工作量大)**:SWE-bench 式**逐 commit 环境重建**——读每个 commit 的 `[build-system] requires` + 匹配的 Python 版本,per-instance 钉死。对 17 个题不划算。
 - **结论/边界**:**Docker 能解锁"任务 commit 区间内工具链稳定"的仓库**(sklearn/scipy 近期 meson commit、plotly 纯 Python);**逐 commit 变化的 Cython 构建仍是硬骨头**,ROI 低。编译型 Python 的增量到此(sklearn 16 + scipy 3 + plotly 2 = 21 个干净有效)。
+
+### P44. 新 Go hard 全量跑完(b1+b2，70 题）：9 个干净有效，claude 的 Go 短板在 N=9 上坐实
+- **70 个非测试新 Go hard 全过 host harness**：18 个评出、**9 个干净有效**(golden RESOLVE)，~74% 在 setup 流失（重 Go 仓库 baseline_no_pass）。
+- **合并干净榜（9 题，judge=claude-opus-4.7）**：golden 9/9 / gpt-5.5 8/9(89%) / gemini-3.1-pro 7/9(78%) / **claude-opus-4.8 4/9(44%)** / empty 0/9。有效仓库：etcd / teleport / thanos / opa-control-plane / traefik / traefik-mesh。
+- **claude 的 Go 短板坐实**：Go 4/9(44%) vs Python 6/7(86%)——同一模型跨语言差 40+ 个百分点。gpt-5.5/gemini 两边都强。**这是 ReviewBench 的一个有意思的发现：维护性修复能力有显著的语言依赖性，且因模型而异。**
+- **Go 选题教训（再确认）**：重仓库(etcd/vitess/temporal/nats-server)setup 慢且常挂；有效产出集中在中等大小、测试包独立的仓库(thanos 子包、opa、teleport 部分包、traefik)。
+- **累计 leaderboard**：原 ~9 + Docker(sklearn16+scipy3+plotly2=21) + 新 Go 9 + 新 Python 7 = **约 46 个干净有效 hard 题**，覆盖 ~15 个仓库、4 大类生态。
