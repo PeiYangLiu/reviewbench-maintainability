@@ -295,8 +295,6 @@ def build_command(
         str(batch_dir / "candidates.jsonl"),
         "--report",
         str(batch_dir / "report.json"),
-        "--snapshot-dir",
-        str(batch_dir / "snapshots"),
         "--gh",
         args.gh,
         "--patch-source",
