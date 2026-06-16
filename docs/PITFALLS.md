@@ -301,3 +301,11 @@
 - **直接 harness 对新 Python 仓库流失率高(82%)**：① 编译型(scikit-image/spaCy/thinc/astropy 用 Cython/C)直接装不上 → 要 Docker;② 重依赖(mlflow/optuna/plotly)uv venv 装依赖/跑测试失败。**这些编译型 Python 仓库是下一步 Docker 化的目标**(和 sklearn/scipy 一样)。
 - **基建**：Python clone + uv/pip 缓存导到 `/datadisk/peiyang`,保护根盘。
 - **累计 leaderboard 新增**:5 Go(P40)+ 7 Python = **12 个干净有效新 hard 题**进榜,来自全新项目。
+
+### P43. 编译型 Python 的 Docker 化：逐 commit Cython 构建是硬骨头(17 题只捞回 2)
+- **6 个编译型 Python 仓库(17 hard)过 Docker**:只有 **plotly.py 出 2 个干净有效题**(纯 Python,可直接 pip 装),其余 **15 题全 setup 挂**。
+- **干净榜(2 题)**:golden / gpt-5.5 / claude-opus-4.8 / gemini 全 2/2,empty 0/2。
+- **挂的原因(逐 commit 构建)**:scikit-image/astropy/thinc/spaCy/bokeh 是真 Cython/C 扩展。镜像在 HEAD 能 build+import,但 **checkout 到任务的历史 start_sha 后重建失败**——典型 `"you will need numpy"`(该 commit 的 `[build-system] requires` 钉死了特定 numpy/cython 版本,跟镜像里装的不匹配)。
+- **试过的回退无效**:`--no-build-isolation`(复用镜像 deps)失败 → 隔离构建(装该 commit 的 build deps)**两种都挂**。meson-editable 的 import 时重建也用不上隔离环境。
+- **真正的解法(未做,工作量大)**:SWE-bench 式**逐 commit 环境重建**——读每个 commit 的 `[build-system] requires` + 匹配的 Python 版本,per-instance 钉死。对 17 个题不划算。
+- **结论/边界**:**Docker 能解锁"任务 commit 区间内工具链稳定"的仓库**(sklearn/scipy 近期 meson commit、plotly 纯 Python);**逐 commit 变化的 Cython 构建仍是硬骨头**,ROI 低。编译型 Python 的增量到此(sklearn 16 + scipy 3 + plotly 2 = 21 个干净有效)。
