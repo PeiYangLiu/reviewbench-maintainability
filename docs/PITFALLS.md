@@ -293,3 +293,11 @@
 - **claude 在 Go 上持续偏低**(这批 1/5,之前 sklearn 也偏低)——已带 apply-retry,所以是真实的 correctness/judge 失分倾向,值得后续小样本核实。
 - **工程基建**:Go clone + GOCACHE/GOMODCACHE 全重定向到 `/datadisk/peiyang`(根分区 95% 满,保护 `/`)。
 - **结论**:整条扩规模流水线(挖掘→prefilter→难度打分→跑 harness→榜)端到端打通,新题能稳定增量进榜。
+
+### P42. 新 Python hard 进榜：7 个干净有效；claude 在 Python 上不弱（Go 才是它的短板）
+- **66 个非测试新 Python hard 过直接 host harness**：12 个评出、**7 个干净有效**(golden RESOLVE)，54 个 setup 挂(82%)。
+- **新 Python hard 干净榜（7 题，judge=claude-opus-4.7）**：golden 7/7 / gpt-5.5 7/7 / gemini-3.1-pro 7/7 / **claude-opus-4.8 6/7** / empty 0/7。有效仓库：pydantic-ai / scrapy / textual / w3lib / optuna-mcp。
+- **重要观察**：claude 在 Python 上 6/7,但在 Go 上只有 1/5(P40)——**claude 的短板是 Go 特定的**(可能 SEARCH/REPLACE 对 Go 代码风格更易漂移,或 Go 维护性判断更难),不是通用能力问题。gpt-5.5/gemini 两边都强。
+- **直接 harness 对新 Python 仓库流失率高(82%)**：① 编译型(scikit-image/spaCy/thinc/astropy 用 Cython/C)直接装不上 → 要 Docker;② 重依赖(mlflow/optuna/plotly)uv venv 装依赖/跑测试失败。**这些编译型 Python 仓库是下一步 Docker 化的目标**(和 sklearn/scipy 一样)。
+- **基建**：Python clone + uv/pip 缓存导到 `/datadisk/peiyang`,保护根盘。
+- **累计 leaderboard 新增**:5 Go(P40)+ 7 Python = **12 个干净有效新 hard 题**进榜,来自全新项目。
