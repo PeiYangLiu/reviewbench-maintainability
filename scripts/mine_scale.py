@@ -275,12 +275,18 @@ def build_command(
     batch: dict[str, Any],
     batch_dir: Path,
 ) -> list[str]:
-    return [
+    cmd = [
         sys.executable,
         "-m",
         "reviewbench_maintainability.build_dataset",
-        "--org",
-        str(batch["org"]),
+    ]
+    # org "*" (or empty) means a query-only search across all of GitHub, which
+    # scales far past per-org curation (the query itself carries language:/created:
+    # qualifiers). Otherwise restrict the search to the org.
+    org = str(batch.get("org") or "").strip()
+    if org and org != "*":
+        cmd += ["--org", org]
+    cmd += [
         "--query",
         str(batch["query"]),
         "--limit",
@@ -298,6 +304,7 @@ def build_command(
         "--addressed-policy",
         "resolved-or-region-touched",
     ]
+    return cmd
 
 
 def wait_for_rate_limit(args: argparse.Namespace) -> None:
