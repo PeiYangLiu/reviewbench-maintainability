@@ -86,8 +86,12 @@ def rebuild(c: Container) -> None:
     # Some sci-Python repos vendor build inputs as git submodules (e.g. scipy's
     # array_api_compat/xsf/unuran); the blob-filtered clone omits them, so init
     # them before the meson-editable build. No-op for repos without submodules.
+    # Try the fast path first (reuse the image's build deps via --no-build-isolation);
+    # fall back to an isolated build, which installs the exact [build-system] deps the
+    # task's commit pins (older commits need a specific numpy/cython, like SWE-bench).
     c.sh("git submodule update --init --recursive >/dev/null 2>&1 || true; "
-         "pip install -e . --no-build-isolation -q >/dev/null 2>&1 || true", timeout=1800)
+         "pip install -e . --no-build-isolation -q >/dev/null 2>&1 "
+         "|| pip install -e . -q >/dev/null 2>&1 || true", timeout=2400)
 
 
 def setup_task(c: Container, rec: dict[str, Any], test_file: str) -> dict[str, Any]:
