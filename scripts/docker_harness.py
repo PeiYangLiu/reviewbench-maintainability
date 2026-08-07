@@ -33,7 +33,9 @@ def is_test_path(p: str) -> bool:
         or base.endswith("_test.py")
         or "/tests/" in p
         or "/test/" in p
+        or "/testing/" in p
         or p.startswith("tests/")
+        or p.startswith("testing/")
     )
 
 

@@ -219,8 +219,14 @@ def evaluate(c: Container, rec: dict[str, Any], ctx: dict[str, Any], mode: str, 
                              before, diff or "(no changes)")
     verdict = jp.parse_verdict(jp.post_responses(endpoint, judge_model, jp.JUDGE_INSTRUCTIONS, prompt))
     res["maintainability"] = verdict["addressed"]
+    res["maintainability_quality_1_to_5"] = verdict["quality_1_5"]
     res["judge_reason"] = verdict["reason"]
-    res["resolved"] = bool(res["correctness_ok"] and scope_gate and verdict["addressed"] in {"yes", "partial"})
+    res["resolved"] = bool(
+        res["correctness_ok"]
+        and scope_gate
+        and verdict["addressed"] == "yes"
+        and verdict["quality_1_5"] >= 4
+    )
     c.sh(f"git checkout -q -f {start} >/dev/null 2>&1 && git clean -qfd >/dev/null 2>&1", timeout=120)
     return res
 
@@ -247,7 +253,12 @@ def main(argv: list[str] | None = None) -> int:
             done[t["id"]] = t
 
     for i, rec in enumerate(recs, 1):
-        if rec["id"] in done and len(done[rec["id"]].get("evals", [])) >= len(args.solvers):
+        if (
+            rec["id"] in done
+            and done[rec["id"]].get("evaluation_schema_version")
+            == ee.EVALUATION_SCHEMA_VERSION
+            and len(done[rec["id"]].get("evals", [])) >= len(args.solvers)
+        ):
             results.append(done[rec["id"]]); continue
         image = dh.slug(rec["repo"])
         test_file = dh.derive_test_file(rec)
@@ -263,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             print(f"    PASS_TO_PASS={len(ctx['p2p'])} flaky_excluded={ctx['flaky_excluded']}", flush=True)
             task_res = {"id": rec["id"], "repo": rec["repo"], "path": ctx["path"],
+                        "evaluation_schema_version": ee.EVALUATION_SCHEMA_VERSION,
                         "tier": rec.get("difficulty", {}).get("tier"), "pass_to_pass": len(ctx["p2p"]), "evals": []}
             for mode in args.solvers:
                 try:

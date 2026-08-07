@@ -22,15 +22,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 from typing import Any
 
 
 TEST_LINE_RE = re.compile(r"^(\S+::[^\s]+)\s+(PASSED|FAILED|ERROR|XFAIL|XPASS)", re.MULTILINE)
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
-TEST_PATH_RE = re.compile(r"(^|/)tests?(/|$)|(^|/)test_[^/]*\.py$|_test\.py$|(^|/)conftest\.py$")
+TEST_PATH_RE = re.compile(r"(^|/)(tests?|testing)(/|$)|(^|/)test_[^/]*\.py$|_test\.py$|(^|/)conftest\.py$")
 
 
 def is_test_path(p: str) -> bool:
@@ -65,14 +68,17 @@ def git(args: list[str], cwd: Path, timeout: int = 300) -> tuple[int, str]:
 
 def build_env(repo_dir: Path) -> tuple[str | None, str]:
     """Return (runner_prefix, note). runner_prefix runs python/pytest in the env."""
+    uv = uv_binary()
+    if not uv:
+        return None, "uv-not-found"
     has_uv_lock = (repo_dir / "uv.lock").exists()
     if has_uv_lock:
-        code, out = run(["uv", "sync", "--extra", "test"], cwd=repo_dir, timeout=600)
+        code, out = run([uv, "sync", "--extra", "test"], cwd=repo_dir, timeout=600)
         if code != 0:
-            code, out = run(["uv", "sync"], cwd=repo_dir, timeout=600)
+            code, out = run([uv, "sync"], cwd=repo_dir, timeout=600)
         if code == 0:
-            run(["uv", "pip", "install", "pytest", "pytest-cov", "coverage"], cwd=repo_dir, timeout=300)
-            return "uv run ", "uv sync"
+            ensure_test_tools(uv, None, repo_dir)
+            return f"{uv} run ", "uv sync"
         return None, f"uv-sync-fail: {out[-300:]}"
 
     # Generic: create a venv pinned to Python 3.12 via uv (the system python3 may be
@@ -80,19 +86,129 @@ def build_env(repo_dir: Path) -> tuple[str | None, str]:
     venv = repo_dir / ".venv_bench"
     py = str(venv / "bin" / "python")
     if not venv.exists():
-        code, out = run(["uv", "venv", "--python", "3.12", str(venv)], timeout=300)
+        code, out = run([uv, "venv", "--python", "3.12", str(venv)], timeout=300)
         if code != 0:
             return None, f"uv-venv-fail: {out[-200:]}"
+    run(
+        [uv, "pip", "install", "--python", py, "-q", "setuptools<81", "wheel"],
+        timeout=300,
+    )
+    build_requirements = python_build_requirements(repo_dir)
+    if build_requirements:
+        run(
+            [
+                uv,
+                "pip",
+                "install",
+                "--python",
+                py,
+                "-q",
+                *build_requirements,
+            ],
+            cwd=repo_dir,
+            timeout=600,
+        )
     installed = False
-    for spec in (".[test]", ".[dev]", ".[tests]", "."):
-        code, out = run(["uv", "pip", "install", "--python", py, "-q", "-e", spec], cwd=repo_dir, timeout=600)
+    for spec in editable_install_specs(repo_dir):
+        base = [uv, "pip", "install", "--python", py, "-q", "-e", spec]
+        code, out = run(base, cwd=repo_dir, timeout=600)
+        if code != 0:
+            code, out = run(
+                [*base, "--no-build-isolation"],
+                cwd=repo_dir,
+                timeout=600,
+            )
         if code == 0:
             installed = True
             break
     if not installed:
         return None, f"pip-install-fail: {out[-300:]}"
-    run(["uv", "pip", "install", "--python", py, "-q", "pytest", "pytest-cov", "coverage"], timeout=300)
+    ensure_test_tools(uv, py, repo_dir)
     return f"{py} -m ", "uv venv py3.12"
+
+
+def uv_binary() -> str | None:
+    found = shutil.which("uv")
+    if found:
+        return found
+    user_binary = Path.home() / ".local" / "bin" / "uv"
+    if user_binary.is_file() and os.access(user_binary, os.X_OK):
+        return str(user_binary)
+    return None
+
+
+def find_python_project_root(repo_dir: Path, source_path: str) -> Path:
+    source = repo_dir / source_path
+    current = source.parent
+    legacy_candidates = []
+    while current == repo_dir or repo_dir in current.parents:
+        if (current / "pyproject.toml").is_file():
+            return current
+        setup_py = current / "setup.py"
+        if setup_py.is_file():
+            try:
+                setup_text = setup_py.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                setup_text = ""
+            if re.search(r"\bsetup\s*\(", setup_text):
+                legacy_candidates.append(current)
+        elif (current / "setup.cfg").is_file():
+            legacy_candidates.append(current)
+        if current == repo_dir:
+            break
+        current = current.parent
+    return legacy_candidates[0] if legacy_candidates else repo_dir
+
+
+def python_build_requirements(project_dir: Path) -> list[str]:
+    pyproject = project_dir / "pyproject.toml"
+    if not pyproject.is_file():
+        return []
+    try:
+        value = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    build_system = value.get("build-system") or {}
+    requirements = build_system.get("requires") or []
+    return [str(item) for item in requirements if str(item).strip()]
+
+
+def editable_install_specs(project_dir: Path) -> list[str]:
+    pyproject = project_dir / "pyproject.toml"
+    if pyproject.is_file():
+        try:
+            value = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            value = {}
+        optional = (value.get("project") or {}).get("optional-dependencies") or {}
+        declared = {str(name) for name in optional}
+        specs = [
+            f".[{name}]"
+            for name in ("test", "dev", "tests")
+            if name in declared
+        ]
+        return [*specs, "."]
+    return [".[test]", ".[dev]", ".[tests]", "."]
+
+
+def ensure_test_tools(uv: str, python: str | None, project_dir: Path) -> None:
+    if python:
+        import_check = run(
+            [python, "-c", "import pytest"],
+            cwd=project_dir,
+            timeout=60,
+        )[0]
+        prefix = [uv, "pip", "install", "--python", python, "-q"]
+    else:
+        import_check = run(
+            [uv, "run", "python", "-c", "import pytest"],
+            cwd=project_dir,
+            timeout=60,
+        )[0]
+        prefix = [uv, "pip", "install", "-q"]
+    if import_check != 0:
+        run([*prefix, "pytest"], cwd=project_dir, timeout=300)
+    run([*prefix, "--no-deps", "coverage"], cwd=project_dir, timeout=300)
 
 
 def parse_tests(output: str) -> dict[str, str]:
@@ -172,7 +288,24 @@ def coverage_of_changed(runner: str, repo_dir: Path, stable_tests: list[str], pa
         by_file[t.split("::")[0]].append(t)
     run(runner.split() + ["coverage", "erase"], cwd=repo_dir, timeout=60)
     for nodeids in by_file.values():
-        run(runner.split() + ["coverage", "run", "-a", "--source", str(Path(path).parent), "-m", "pytest", "-p", "no:cacheprovider", *nodeids], cwd=repo_dir, timeout=300)
+        run(
+            runner.split()
+            + [
+                "coverage",
+                "run",
+                "--parallel-mode",
+                "--source",
+                str(Path(path).parent),
+                "-m",
+                "pytest",
+                "-p",
+                "no:cacheprovider",
+                *nodeids,
+            ],
+            cwd=repo_dir,
+            timeout=300,
+        )
+    run(runner.split() + ["coverage", "combine"], cwd=repo_dir, timeout=60)
     run(runner.split() + ["coverage", "json", "-o", str(cov_json)], cwd=repo_dir, timeout=120)
     if not cov_json.exists():  # exit code is unreliable (projects set fail-under)
         return {"checked": True, "covered": None, "note": "coverage json not produced"}
@@ -196,7 +329,14 @@ def filter_task(rec: dict[str, Any], repos_dir: Path) -> dict[str, Any]:
     start = rec["start_sha"]
     target = rec["target_sha"]
     proxy = rec.get("correctness_oracle_proxy") or {}
-    test_files = [p for p in (proxy.get("test_change_paths") or []) if p.endswith(".py")]
+    test_files = [
+        str(path)
+        for path in [
+            *(proxy.get("test_change_paths") or []),
+            *(rec.get("changed_files") or []),
+        ]
+        if str(path).endswith(".py") and is_test_path(str(path))
+    ]
     result: dict[str, Any] = {"id": rec["id"], "repo": repo, "path": path, "stage": "start", "survives": False}
 
     repo_dir, note = ensure_clone(repo, repos_dir)
@@ -208,6 +348,7 @@ def filter_task(rec: dict[str, Any], repos_dir: Path) -> dict[str, Any]:
         result["stage"] = "fetch_start"; return result
     if git(["fetch", "--quiet", "origin", target], repo_dir, timeout=300)[0] != 0:
         result["stage"] = "fetch_target"; return result
+    git(["fetch", "--quiet", "--tags", "origin"], repo_dir, timeout=600)
     git(["reset", "--hard", "--quiet", start], repo_dir)
     git(["clean", "-qfdx", "--exclude=.venv_bench", "--exclude=.venv"], repo_dir)
 
@@ -222,7 +363,8 @@ def filter_task(rec: dict[str, Any], repos_dir: Path) -> dict[str, Any]:
     if not targets:
         result["stage"] = "no_test_file_at_start"; return result
 
-    runner, env_note = build_env(repo_dir)
+    project_dir = find_python_project_root(repo_dir, path)
+    runner, env_note = build_env(project_dir)
     result["env"] = env_note
     if runner is None:
         result["stage"] = "env"; return result
@@ -236,10 +378,18 @@ def filter_task(rec: dict[str, Any], repos_dir: Path) -> dict[str, Any]:
     # Apply the gold SOURCE change only (keep test files at start_sha): a correct
     # model fixes the source but does NOT get the human's test edits. Coupled tests
     # that assert the old implementation must therefore break (P6/P7).
-    code, names = git(["diff", "--name-only", start, target], repo_dir)
-    changed_files = [n for n in names.splitlines() if n.strip()]
     test_set = set(p for p in (proxy.get("test_change_paths") or []))
-    source_changed = [f for f in changed_files if not is_test_path(f) and f not in test_set]
+    source_changed = [
+        str(path)
+        for path in proxy.get("source_change_paths") or []
+        if path and not is_test_path(str(path)) and str(path) not in test_set
+    ]
+    if not source_changed:
+        _, names = git(["diff", "--name-only", start, target], repo_dir)
+        changed_files = [n for n in names.splitlines() if n.strip()]
+        source_changed = [
+            f for f in changed_files if not is_test_path(f) and f not in test_set
+        ]
     result["source_changed_count"] = len(source_changed)
     if not source_changed:
         result["stage"] = "test_only_task"; return result  # no source to fix -> not a behavior oracle

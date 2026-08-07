@@ -68,10 +68,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-search-remaining", type=int, default=2)
     parser.add_argument("--sleep-safety-seconds", type=int, default=90)
     parser.add_argument("--gh", default="gh")
+    parser.add_argument(
+        "--resume-manifest",
+        action="store_true",
+        help="Reuse target, batch size, orgs, and queries from out-dir/manifest.json.",
+    )
+    parser.add_argument(
+        "--query-filter",
+        help="Regex applied to manifest queries while preserving original batch indexes.",
+    )
     parser.add_argument("--org", action="append", dest="orgs")
     parser.add_argument("--query", action="append", dest="queries")
     parser.add_argument("--dry-run", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    # A manifest resume must not silently override a worker count the caller
+    # asked for on the command line.
+    args.workers_explicit = any(
+        value == "--workers" or value.startswith("--workers=")
+        for value in sys.argv[1:]
+    )
+    args.limit_per_batch_explicit = any(
+        value == "--limit-per-batch" or value.startswith("--limit-per-batch=")
+        for value in sys.argv[1:]
+    )
+    return args
 
 
 def main() -> int:
@@ -81,26 +101,35 @@ def main() -> int:
     (args.out_dir / "batches").mkdir(exist_ok=True)
     (args.out_dir / "snapshots").mkdir(exist_ok=True)
 
-    orgs = tuple(args.orgs or DEFAULT_ORGS)
-    queries = tuple(args.queries or DEFAULT_QUERIES)
-    batches = [
+    if args.resume_manifest:
+        orgs, queries = apply_resume_manifest(args)
+    else:
+        orgs = tuple(args.orgs or DEFAULT_ORGS)
+        queries = tuple(args.queries or DEFAULT_QUERIES)
+    all_batches = [
         {"index": index, "org": org, "query": query}
         for index, (query, org) in enumerate(
             (item for query in queries for item in ((query, org) for org in orgs)),
             start=1,
         )
     ]
+    batches = filter_batches(all_batches, args.query_filter)
     manifest = {
         "target_candidates": args.target_candidates,
         "limit_per_batch": args.limit_per_batch,
         "workers": args.workers,
         "orgs": orgs,
         "queries": queries,
-        "batch_count": len(batches),
+        "batch_count": len(all_batches),
     }
-    write_json(args.out_dir / "manifest.json", manifest)
+    if not args.resume_manifest:
+        write_json(args.out_dir / "manifest.json", manifest)
 
-    print(f"Prepared {len(batches)} batches in {args.out_dir}", flush=True)
+    print(
+        f"Prepared {len(batches)} selected batch(es) "
+        f"from {len(all_batches)} in {args.out_dir}",
+        flush=True,
+    )
     print(f"Using {args.workers} worker(s)", flush=True)
     if args.workers > 1:
         run_parallel(args, repo_root, batches)
@@ -110,20 +139,51 @@ def main() -> int:
     return 0
 
 
+def apply_resume_manifest(args: argparse.Namespace) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    path = args.out_dir / "manifest.json"
+    if not path.is_file():
+        raise ValueError(f"Cannot resume: manifest does not exist at {path}")
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    orgs = tuple(str(item) for item in manifest.get("orgs") or ())
+    queries = tuple(str(item) for item in manifest.get("queries") or ())
+    if not orgs or not queries:
+        raise ValueError(f"Cannot resume: manifest has no orgs/queries at {path}")
+    args.target_candidates = int(manifest["target_candidates"])
+    if not getattr(args, "limit_per_batch_explicit", False):
+        args.limit_per_batch = int(manifest["limit_per_batch"])
+    if not getattr(args, "workers_explicit", False):
+        args.workers = int(manifest.get("workers", args.workers))
+    return orgs, queries
+
+
+def filter_batches(
+    batches: list[dict[str, Any]],
+    query_filter: str | None,
+) -> list[dict[str, Any]]:
+    if not query_filter:
+        return batches
+    pattern = re.compile(query_filter, re.IGNORECASE)
+    return [batch for batch in batches if pattern.search(str(batch["query"]))]
+
+
 def run_serial(args: argparse.Namespace, repo_root: Path, batches: list[dict[str, Any]]) -> None:
     completed_this_run = 0
     for batch in batches:
         if args.max_batches is not None and completed_this_run >= args.max_batches:
             print(f"Reached --max-batches={args.max_batches}", flush=True)
             break
-        current_count = count_unique_candidates(args.out_dir)
-        if current_count >= args.target_candidates:
-            print(f"Reached target unique candidates: {current_count}", flush=True)
-            break
         batch_dir = args.out_dir / "batches" / batch_id(batch)
         done_marker = batch_dir / "done.json"
         if done_marker.exists():
             continue
+        # Counting scans every batch's candidates.jsonl, so it must happen only
+        # for a batch that is actually going to run. Doing it first made a
+        # resume over a large finished manifest spend hours re-counting
+        # candidates it then skipped.
+        current_count = count_unique_candidates(args.out_dir)
+        if current_count >= args.target_candidates:
+            print(f"Reached target unique candidates: {current_count}", flush=True)
+            break
 
         print(
             f"[batch {batch['index']}/{len(batches)}] org={batch['org']} "

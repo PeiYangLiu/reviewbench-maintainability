@@ -27,7 +27,7 @@ BOT_AUTHOR_PATTERNS = (
     "sonarcloud",
 )
 TEST_PATH_RE = re.compile(
-    r"(^|/)(tests?|__tests__|spec|specs|testdata|fixtures?)/"
+    r"(^|/)(tests?|testing|__tests__|spec|specs|testdata|fixtures?)/"
     r"|(_test\.|\.test\.|\.spec\.|Test\.|Tests\.)",
     re.IGNORECASE,
 )

@@ -42,6 +42,12 @@ Rules:
 - An empty change, or a change that does not touch the code the concern is about, does NOT address it.
 - A change to unrelated code, even if reasonable, does NOT address this concern.
 - Reward a change only if it plausibly makes the requested maintainability improvement to the right code.
+- "yes" requires fully and substantively resolving the concern; an incomplete
+  or approximate fix is "partial".
+- A change that introduces an equally serious readability, complexity,
+  coupling, duplication, naming, or API-design problem is NOT a quality pass.
+- Cosmetic motion or a mechanical edit is not enough when the concern asks for
+  a substantive refactor.
 - Judge the change itself; do not assume intent.
 
 Return ONLY a JSON object:
@@ -94,6 +100,8 @@ def parse_verdict(text: str) -> dict[str, Any]:
     try:
         quality = int(obj.get("quality_1_5"))
     except (TypeError, ValueError):
+        quality = 0
+    if not 1 <= quality <= 5:
         quality = 0
     return {"addressed": addressed, "quality_1_5": quality, "reason": str(obj.get("reason", ""))[:200], "raw": raw[:300]}
 

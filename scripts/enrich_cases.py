@@ -18,19 +18,19 @@ from __future__ import annotations
 
 import argparse
 import base64
-import difflib
 import json
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
+from reviewbench_maintainability.evidence import focus_patch, two_dot_file_diff
 
-HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
+
 REFERENCED_LINE_RE = re.compile(r"\blines?\s+(\d+)", re.IGNORECASE)
 CONTEXT_BEFORE = 16
 CONTEXT_AFTER = 8
-HUNK_WINDOW = 30
 
 
 def gh_json(endpoint: str, jq: str | None = None, retries: int = 4) -> Any:
@@ -81,15 +81,6 @@ def fetch_file_text(repo: str, path: str, ref: str) -> str | None:
     if not raw:
         return None
     return base64.b64decode(raw).decode("utf-8", errors="replace")
-
-
-def two_dot_file_diff(before: str | None, after: str | None) -> str:
-    """Unified diff between two file versions (true start..target, rebase-proof)."""
-    before_lines = (before or "").splitlines()
-    after_lines = (after or "").splitlines()
-    diff = difflib.unified_diff(before_lines, after_lines, lineterm="", n=3)
-    # Drop the '--- ' / '+++ ' file header lines so only hunks remain.
-    return "\n".join(line for line in diff if not line.startswith(("--- ", "+++ ")))
 
 
 def fetch_fix(
@@ -167,83 +158,6 @@ def fetch_before_window(repo: str, path: str, ref: str, anchor: int, extra_lines
         "referenced_lines": extra_lines,
         "total_lines": len(lines),
     }
-
-
-def split_hunks(patch: str) -> list[tuple[int, int, str]]:
-    """Return (old_start, new_start, hunk_text) tuples."""
-
-    matches = list(HUNK_RE.finditer(patch))
-    hunks: list[tuple[int, int, str]] = []
-    for i, m in enumerate(matches):
-        start = m.start()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(patch)
-        hunks.append((int(m.group(1)), int(m.group(3)), patch[start:end].rstrip("\n")))
-    return hunks
-
-
-def _hunk_refs(body: list[str], old_start: int, new_start: int) -> list[int | None]:
-    """Map each body line to the file line number it represents (new side preferred)."""
-
-    old, new = old_start, new_start
-    refs: list[int | None] = []
-    for ln in body:
-        if ln.startswith("+"):
-            refs.append(new)
-            new += 1
-        elif ln.startswith("-"):
-            refs.append(old)
-            old += 1
-        elif ln.startswith("\\"):
-            refs.append(None)
-        else:
-            refs.append(new)
-            old += 1
-            new += 1
-    return refs
-
-
-def trim_hunk(text: str, anchor: int, window: int) -> str:
-    """Slice a hunk down to the lines near ``anchor`` so huge hunks stay readable."""
-
-    lines = text.splitlines()
-    if not lines:
-        return text
-    header, body = lines[0], lines[1:]
-    m = HUNK_RE.match(header)
-    if not m:
-        return text
-    refs = _hunk_refs(body, int(m.group(1)), int(m.group(3)))
-    near = [i for i, r in enumerate(refs) if r is not None and abs(r - anchor) <= window]
-    if not near or (max(near) - min(near) + 1) >= len(body):
-        return text
-    lo, hi = max(0, min(near) - 2), min(len(body), max(near) + 3)
-    sliced = body[lo:hi]
-    prefix = "" if lo == 0 else f"… (省略 {lo} 行)\n"
-    suffix = "" if hi == len(body) else f"\n… (省略 {len(body) - hi} 行)"
-    return f"{header}\n{prefix}" + "\n".join(sliced) + suffix
-
-
-def focus_patch(patch: str, anchor: int) -> dict[str, Any]:
-    hunks = split_hunks(patch)
-    if not hunks:
-        return {"text": patch.strip(), "focused": False, "hunk_count": 0}
-    kept = []
-    for old_start, new_start, text in hunks:
-        body = text.splitlines()[1:]
-        old_len = sum(1 for ln in body if not ln.startswith("+"))
-        new_len = sum(1 for ln in body if not ln.startswith("-"))
-        near = (
-            abs(old_start - anchor) <= HUNK_WINDOW
-            or abs(new_start - anchor) <= HUNK_WINDOW
-            or old_start <= anchor <= old_start + old_len
-            or new_start <= anchor <= new_start + new_len
-        )
-        if near:
-            kept.append(trim_hunk(text, anchor, HUNK_WINDOW))
-    focused = bool(kept)
-    if not focused:
-        kept = [trim_hunk(h[2], anchor, HUNK_WINDOW) for h in hunks[:2]]
-    return {"text": "\n".join(kept), "focused": focused, "hunk_count": len(hunks)}
 
 
 def file_patch_from_compare(

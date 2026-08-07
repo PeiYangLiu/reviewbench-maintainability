@@ -35,6 +35,7 @@ import judge_prototype as jp
 
 
 SCOPE_MAX_CHANGED_LINES = 400
+EVALUATION_SCHEMA_VERSION = "reviewbench-e2e/v2-quality-strict"
 SOLVER_INSTRUCTIONS = """You are an expert software engineer addressing a code reviewer's MAINTAINABILITY request.
 You are given the reviewer's concern and the FULL current content of one source file.
 Edit the file to address the concern while PRESERVING ALL EXISTING BEHAVIOR.
@@ -114,7 +115,7 @@ def setup_and_p2p(rec: dict[str, Any], repos_dir: Path) -> dict[str, Any]:
 def correctness(ctx: dict[str, Any], p2p: list[str]) -> dict[str, str]:
     """Run the PASS_TO_PASS tests against the current tree (language-aware)."""
     if ctx["lang"] == "go":
-        res, _ = tg.go_test(ctx["repo_dir"], ctx["pkg"])
+        res, _ = tg.go_test(ctx["go_dir"], ctx["pkg"])
         return res
     return run_nodes(ctx["runner"], ctx["repo_dir"], p2p)
 
@@ -143,23 +144,32 @@ def setup_go(rec: dict[str, Any], repos_dir: Path) -> dict[str, Any]:
     ta.git(["clean", "-qfd"], repo_dir)
     if not (repo_dir / path).exists():
         return {"ok": False, "error": "no_source_at_start"}
-    pkg = tg.pkg_target(path)
+    go_dir, pkg = tg.module_context(repo_dir, path)
     # Flaky-aware baseline: keep only tests passing in ALL of n runs (P30).
-    stable, flaky = stable_pass_go(repo_dir, pkg, n=3)
+    stable, flaky = stable_pass_go(go_dir, pkg, n=3)
     if not stable:
         return {"ok": False, "error": "baseline_no_pass"}
-    _, names = ta.git(["diff", "--name-only", start, target], repo_dir)
-    changed = [n for n in names.splitlines() if n.strip()]
-    source_changed = [f for f in changed if f.endswith(".go") and not tg.is_go_test(f)]
+    proxy = rec.get("correctness_oracle_proxy") or {}
+    source_changed = [
+        str(path)
+        for path in proxy.get("source_change_paths") or []
+        if str(path).endswith(".go") and not tg.is_go_test(str(path))
+    ]
+    if not source_changed:
+        _, names = ta.git(["diff", "--name-only", start, target], repo_dir)
+        changed = [n for n in names.splitlines() if n.strip()]
+        source_changed = [
+            f for f in changed if f.endswith(".go") and not tg.is_go_test(f)
+        ]
     if not source_changed:
         return {"ok": False, "error": "test_only_task"}
     ta.git(["checkout", target, "--", *source_changed], repo_dir)
-    stable_gold, flaky_g = stable_pass_go(repo_dir, pkg, n=3)
+    stable_gold, flaky_g = stable_pass_go(go_dir, pkg, n=3)
     p2p = sorted(stable & stable_gold)
     ta.git(["reset", "--hard", "--quiet", start], repo_dir)
     if not p2p:
         return {"ok": False, "error": "no_pass_to_pass"}
-    return {"ok": True, "lang": "go", "repo_dir": repo_dir, "pkg": pkg, "p2p": p2p, "flaky_excluded": len(flaky | flaky_g),
+    return {"ok": True, "lang": "go", "repo_dir": repo_dir, "go_dir": go_dir, "pkg": pkg, "p2p": p2p, "flaky_excluded": len(flaky | flaky_g),
             "source_changed": source_changed, "start": start, "target": target, "path": path}
 
 
@@ -174,14 +184,26 @@ def setup_py(rec: dict[str, Any], repos_dir: Path) -> dict[str, Any]:
     for sha in (start, target):
         if ta.git(["fetch", "--quiet", "origin", sha], repo_dir)[0] != 0:
             return {"ok": False, "error": f"fetch {sha[:8]}"}
+    # Partial evidence caches fetch commits by SHA and omit tags. Projects using
+    # setuptools_scm otherwise get a fake 0.1.dev version and can reject their
+    # own test configuration (for example pytest's minversion check).
+    ta.git(["fetch", "--quiet", "--tags", "origin"], repo_dir, timeout=600)
     ta.git(["reset", "--hard", "--quiet", start], repo_dir)
     ta.git(["clean", "-qfdx", "--exclude=.venv_bench", "--exclude=.venv"], repo_dir)
 
-    pr_tests = [p for p in (proxy.get("test_change_paths") or []) if p.endswith(".py")]
+    pr_tests = [
+        str(path)
+        for path in [
+            *(proxy.get("test_change_paths") or []),
+            *(rec.get("changed_files") or []),
+        ]
+        if str(path).endswith(".py") and ta.is_test_path(str(path))
+    ]
     targets = sorted(set(p for p in pr_tests if (repo_dir / p).exists()) | set(ta.find_existing_tests(repo_dir, path)))
     if not targets:
         return {"ok": False, "error": "no_tests"}
-    runner, env_note = ta.build_env(repo_dir)
+    project_dir = ta.find_python_project_root(repo_dir, path)
+    runner, env_note = ta.build_env(project_dir)
     if runner is None:
         return {"ok": False, "error": f"env: {env_note}"}
 
@@ -192,10 +214,18 @@ def setup_py(rec: dict[str, Any], repos_dir: Path) -> dict[str, Any]:
     flaky = {t for t in seen if any(r.get(t) == "PASSED" for r in runs) and t not in stable}
     if not stable:
         return {"ok": False, "error": "baseline_no_pass"}
-    _, names = ta.git(["diff", "--name-only", start, target], repo_dir)
-    changed = [n for n in names.splitlines() if n.strip()]
     test_set = set(proxy.get("test_change_paths") or [])
-    source_changed = [f for f in changed if not ta.is_test_path(f) and f not in test_set]
+    source_changed = [
+        str(path)
+        for path in proxy.get("source_change_paths") or []
+        if path and not ta.is_test_path(str(path)) and str(path) not in test_set
+    ]
+    if not source_changed:
+        _, names = ta.git(["diff", "--name-only", start, target], repo_dir)
+        changed = [n for n in names.splitlines() if n.strip()]
+        source_changed = [
+            f for f in changed if not ta.is_test_path(f) and f not in test_set
+        ]
     if not source_changed:
         return {"ok": False, "error": "test_only_task"}
     ta.git(["checkout", target, "--", *source_changed], repo_dir)
@@ -205,7 +235,7 @@ def setup_py(rec: dict[str, Any], repos_dir: Path) -> dict[str, Any]:
     ta.git(["reset", "--hard", "--quiet", start], repo_dir)
     if not p2p:
         return {"ok": False, "error": "no_pass_to_pass"}
-    return {"ok": True, "lang": "python", "repo_dir": repo_dir, "runner": runner, "p2p": p2p, "flaky_excluded": len(flaky),
+    return {"ok": True, "lang": "python", "repo_dir": repo_dir, "project_dir": project_dir, "runner": runner, "p2p": p2p, "flaky_excluded": len(flaky),
             "source_changed": source_changed, "start": start, "target": target, "path": path}
 
 
@@ -286,9 +316,15 @@ def evaluate(rec: dict[str, Any], ctx: dict[str, Any], mode: str, endpoint: str,
     prompt = jp.build_prompt(rec.get("task_instruction") or "", rec.get("difficulty", {}).get("category", "?"), before, diff or "(no changes)")
     verdict = jp.parse_verdict(jp.post_responses(endpoint, judge_model, jp.JUDGE_INSTRUCTIONS, prompt))
     res["maintainability"] = verdict["addressed"]
+    res["maintainability_quality_1_to_5"] = verdict["quality_1_5"]
     res["judge_reason"] = verdict["reason"]
 
-    res["resolved"] = bool(res["correctness_ok"] and scope_gate and verdict["addressed"] in {"yes", "partial"})
+    res["resolved"] = bool(
+        res["correctness_ok"]
+        and scope_gate
+        and verdict["addressed"] == "yes"
+        and verdict["quality_1_5"] >= 4
+    )
     ta.git(["reset", "--hard", "--quiet", ctx["start"]], repo_dir)
     return res
 
@@ -316,7 +352,12 @@ def main(argv: list[str] | None = None) -> int:
             done[t["id"]] = t
 
     for i, rec in enumerate(recs, 1):
-        if rec["id"] in done and len(done[rec["id"]].get("evals", [])) >= len(args.solvers):
+        if (
+            rec["id"] in done
+            and done[rec["id"]].get("evaluation_schema_version")
+            == EVALUATION_SCHEMA_VERSION
+            and len(done[rec["id"]].get("evals", [])) >= len(args.solvers)
+        ):
             results.append(done[rec["id"]]); continue
         print(f"[{i}/{len(recs)}] {rec['repo']} :: setup ...", flush=True)
         ctx = setup_and_p2p(rec, args.repos_dir)
@@ -327,6 +368,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
         print(f"    PASS_TO_PASS={len(ctx['p2p'])}", flush=True)
         task_res = {"id": rec["id"], "repo": rec["repo"], "path": ctx["path"],
+                    "evaluation_schema_version": EVALUATION_SCHEMA_VERSION,
                     "tier": rec.get("difficulty", {}).get("tier"), "pass_to_pass": len(ctx["p2p"]), "evals": []}
         for mode in args.solvers:
             print(f"    eval {mode} ...", flush=True)

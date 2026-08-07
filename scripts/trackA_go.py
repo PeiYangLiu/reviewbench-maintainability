@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shutil
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -26,29 +28,78 @@ import trackA_filter as ta
 
 
 GO_TEST_RE = re.compile(r"^\s*--- (PASS|FAIL|SKIP): (\S+)", re.MULTILINE)
+DEFAULT_GO_IMAGE = "golang:1.25-bookworm"
 
 
 def is_go_test(path: str) -> bool:
     return path.endswith("_test.go")
 
 
-def pkg_target(path: str) -> str:
+def pkg_target(path: str | Path) -> str:
     d = str(Path(path).parent)
     return "./" if d in ("", ".") else "./" + d.strip("/") + "/"
 
 
+def module_context(repo_dir: Path, source_path: str) -> tuple[Path, str]:
+    source = repo_dir / source_path
+    current = source.parent
+    while current == repo_dir or repo_dir in current.parents:
+        if (current / "go.mod").is_file():
+            relative_source = source.relative_to(current)
+            return current, pkg_target(relative_source)
+        if current == repo_dir:
+            break
+        current = current.parent
+    return repo_dir, pkg_target(source_path)
+
+
 def go_test(repo_dir: Path, target: str, run_names: list[str] | None = None,
             cover_out: str | None = None, timeout: int = 900) -> tuple[dict[str, str], str]:
-    cmd = ["go", "test", "-v", "-count=1"]
+    args = ["test", "-v", "-count=1"]
     if run_names:
         tops = sorted({n.split("/")[0] for n in run_names})
-        cmd += ["-run", "^(" + "|".join(tops) + ")$"]
+        args += ["-run", "^(" + "|".join(tops) + ")$"]
     if cover_out:
-        cmd += ["-coverprofile", cover_out]
-    cmd += [target]
+        cover_path = Path(cover_out)
+        if shutil.which("go") is None and cover_path.is_absolute():
+            cover_path = Path("/repo") / cover_path.relative_to(repo_dir.resolve())
+        args += ["-coverprofile", str(cover_path)]
+    args += [target]
+    cmd = build_go_command(repo_dir, args)
     _, out = ta.run(cmd, cwd=repo_dir, timeout=timeout)
     res = {m.group(2): m.group(1) for m in GO_TEST_RE.finditer(out)}
     return res, out
+
+
+def build_go_command(
+    repo_dir: Path,
+    args: list[str],
+    use_docker: bool | None = None,
+) -> list[str]:
+    if use_docker is None:
+        use_docker = shutil.which("go") is None
+    if not use_docker:
+        return ["go", *args]
+    image = os.environ.get("REVIEWBENCH_GO_IMAGE", DEFAULT_GO_IMAGE)
+    return [
+        "docker",
+        "run",
+        "--rm",
+        "--pull=never",
+        "-e",
+        "GOTOOLCHAIN=auto",
+        "-v",
+        f"{repo_dir.resolve()}:/repo",
+        "-v",
+        "reviewbench-go-mod:/go/pkg/mod",
+        "-v",
+        "reviewbench-go-build:/root/.cache/go-build",
+        "-w",
+        "/repo",
+        image,
+        "go",
+        *args,
+    ]
 
 
 def go_covered_lines(repo_dir: Path, cover_out: Path, path: str) -> set[int]:
@@ -88,10 +139,11 @@ def filter_task(rec: dict[str, Any], repos_dir: Path) -> dict[str, Any]:
 
     if not (repo_dir / path).exists():
         result["stage"] = "no_source_at_start"; return result
-    target_pkg = pkg_target(path)
+    go_dir, target_pkg = module_context(repo_dir, path)
     result["pkg"] = target_pkg
+    result["module_dir"] = str(go_dir.relative_to(repo_dir))
 
-    baseline, out = go_test(repo_dir, target_pkg)
+    baseline, out = go_test(go_dir, target_pkg)
     result["baseline_collected"] = len(baseline)
     result["baseline_passed"] = sum(1 for v in baseline.values() if v == "PASS")
     if result["baseline_passed"] == 0:
@@ -100,14 +152,23 @@ def filter_task(rec: dict[str, Any], repos_dir: Path) -> dict[str, Any]:
         return result
 
     # source-only gold (keep _test.go at start)
-    _, names = ta.git(["diff", "--name-only", start, target], repo_dir)
-    changed = [n for n in names.splitlines() if n.strip()]
-    source_changed = [f for f in changed if f.endswith(".go") and not is_go_test(f)]
+    proxy = rec.get("correctness_oracle_proxy") or {}
+    source_changed = [
+        str(path)
+        for path in proxy.get("source_change_paths") or []
+        if str(path).endswith(".go") and not is_go_test(str(path))
+    ]
+    if not source_changed:
+        _, names = ta.git(["diff", "--name-only", start, target], repo_dir)
+        changed = [n for n in names.splitlines() if n.strip()]
+        source_changed = [
+            f for f in changed if f.endswith(".go") and not is_go_test(f)
+        ]
     result["source_changed_count"] = len(source_changed)
     if not source_changed:
         result["stage"] = "test_only_task"; return result
     ta.git(["checkout", target, "--", *source_changed], repo_dir)
-    gold, _ = go_test(repo_dir, target_pkg)
+    gold, _ = go_test(go_dir, target_pkg)
     p2p = sorted(t for t, v in baseline.items() if v == "PASS" and gold.get(t) == "PASS")
     result["pass_to_pass"] = len(p2p)
     result["excluded_coupled"] = sorted(t for t, v in baseline.items() if v == "PASS" and gold.get(t) != "PASS")[:8]
@@ -117,10 +178,10 @@ def filter_task(rec: dict[str, Any], repos_dir: Path) -> dict[str, Any]:
     # coverage: do the stable tests execute the changed lines?
     ta.git(["reset", "--hard", "--quiet", start], repo_dir)
     changed_lines = ta.changed_old_lines(repo_dir, start, target, path)
-    cover_out = repo_dir / ".bench_go_cover.out"
+    cover_out = go_dir / ".bench_go_cover.out"
     cover_out.unlink(missing_ok=True)
-    go_test(repo_dir, target_pkg, run_names=p2p, cover_out=str(cover_out))
-    executed = go_covered_lines(repo_dir, cover_out, path)
+    go_test(go_dir, target_pkg, run_names=p2p, cover_out=str(cover_out))
+    executed = go_covered_lines(go_dir, cover_out, path)
     hit = sorted(changed_lines & executed)
     result["coverage"] = {"changed_old_lines": len(changed_lines), "executed_hit": len(hit), "covered": bool(hit)}
     result["changed_lines_covered"] = bool(hit)

@@ -257,8 +257,92 @@ MODEL_LABELS = {
     "model:gpt-5.5": "GPT-5.5",
     "model:claude-opus-4.8": "Claude-Opus-4.8",
     "model:gemini-3.1-pro-preview": "Gemini-3.1-Pro",
+    "model:gemini-3.5-flash": "Gemini-3.5-Flash",
 }
-MODEL_ORDER = ["golden", "model:gpt-5.5", "model:gemini-3.1-pro-preview", "model:claude-opus-4.8", "empty"]
+MODEL_ORDER = [
+    "golden",
+    "model:gemini-3.5-flash",
+    "model:claude-opus-4.8",
+    "model:gpt-5.5",
+    "model:gemini-3.1-pro-preview",
+    "empty",
+]
+
+
+def render_scoreboard(items: list[dict[str, Any]]) -> str:
+    """Render an at-a-glance leaderboard from per-task model results."""
+
+    modes = []
+    for mode in MODEL_ORDER:
+        if mode in {"golden", "empty"}:
+            continue
+        if any(mode in (item.get("task", {}).get("model_results") or {}) for item in items):
+            modes.append(mode)
+    if not modes:
+        return ""
+
+    total = len(items)
+    hard_total = sum(
+        (item.get("difficulty") or {}).get("tier") == "hard"
+        for item in items
+    )
+    rows = []
+    for mode in modes:
+        values = [
+            (item.get("task", {}).get("model_results") or {}).get(mode) or {}
+            for item in items
+        ]
+        hard_values = [
+            value
+            for item, value in zip(items, values)
+            if (item.get("difficulty") or {}).get("tier") == "hard"
+        ]
+        rows.append(
+            {
+                "mode": mode,
+                "label": MODEL_LABELS.get(mode, mode),
+                "resolved": sum(value.get("resolved") is True for value in values),
+                "generated": sum(value.get("generation_apply") is True for value in values),
+                "correctness": sum(value.get("correctness_ok") is True for value in values),
+                "maintainability": sum(value.get("maintainability") == "yes" for value in values),
+                "hard": sum(value.get("resolved") is True for value in hard_values),
+            }
+        )
+    rows.sort(key=lambda row: (-row["resolved"], row["label"]))
+    best_resolved = max(row["resolved"] for row in rows)
+    best_hard = max(row["hard"] for row in rows)
+
+    cards = []
+    for rank, row in enumerate(rows, start=1):
+        overall_badge = '<span class="score-badge overall">总榜第一</span>' if row["resolved"] == best_resolved else ""
+        hard_badge = '<span class="score-badge hard">Hard 第一</span>' if row["hard"] == best_hard else ""
+        rate = round(100 * row["resolved"] / total) if total else 0
+        cards.append(
+            f"""
+<article class="score-card{' winner' if row['resolved'] == best_resolved else ''}">
+  <div class="score-head">
+    <span class="score-rank">#{rank}</span>
+    <span class="score-model">{esc(row['label'])}</span>
+    <span class="score-badges">{overall_badge}{hard_badge}</span>
+  </div>
+  <div class="score-main"><strong>{row['resolved']}</strong><span>/{total} Resolved@1</span></div>
+  <div class="score-track"><span style="width:{rate}%"></span></div>
+  <div class="score-gates">
+    <div><b>{row['generated']}</b><span>成功生成补丁</span></div>
+    <div><b>{row['correctness']}</b><span>Correctness</span></div>
+    <div><b>{row['maintainability']}</b><span>维护性</span></div>
+    <div><b>{row['hard']}/{hard_total}</b><span>Hard</span></div>
+  </div>
+</article>"""
+        )
+    return f"""
+<section class="scoreboard">
+  <div class="scoreboard-title">
+    <div><span class="score-kicker">最终评测结果</span><h2>{total} 题三模型总榜</h2></div>
+    <div class="score-formula">Resolved@1 = 成功生成补丁且范围合规 ∧ P2P 测试通过 ∧ 严格维护性通过</div>
+  </div>
+  <div class="score-grid">{''.join(cards)}</div>
+</section>"""
 
 
 def render_model_results(task: dict[str, Any]) -> str:
@@ -285,11 +369,13 @@ def render_model_results(task: dict[str, Any]) -> str:
             return '<span class="g na">–</span>'
 
         maint = r.get("maintainability")
+        maint_quality = r.get("maintainability_quality_1_to_5")
+        quality_suffix = f" q{maint_quality}" if maint_quality is not None else ""
         maint_html = {
-            "yes": '<span class="g ok">judge✓</span>',
-            "partial": '<span class="g part">judge~</span>',
-            "no": '<span class="g no">judge✗</span>',
-        }.get(maint, '<span class="g na">judge–</span>')
+            "yes": f'<span class="g ok">维护✓{quality_suffix}</span>',
+            "partial": f'<span class="g part">维护~{quality_suffix}</span>',
+            "no": f'<span class="g no">维护✗{quality_suffix}</span>',
+        }.get(maint, '<span class="g na">维护–</span>')
         gates = (
             gate(r.get("correctness_ok"), "测试✓", "测试✗")
             + gate(r.get("scope_ok"), "范围✓", "范围✗")
@@ -474,6 +560,7 @@ def build_html(items: list[dict[str, Any]], title: str, subtitle: str) -> str:
         for it in items
     )
     cases = "".join(render_case(it) for it in items)
+    scoreboard = render_scoreboard(items)
     legend = "".join(
         f'<span class="leg"><span class="dot" style="background:{color}"></span>{esc(name)}</span>'
         for name, color in CATEGORY_COLORS.items()
@@ -498,6 +585,30 @@ header .sub {{ color:var(--muted); font-size:13px; }}
 .dot {{ width:10px; height:10px; border-radius:50%; display:inline-block; }}
 .progress {{ margin-left:auto; font-weight:600; font-size:13px; }}
 .progress b {{ color:var(--accent); }}
+.scoreboard {{ max-width:1480px; margin:20px auto 0; padding:20px; background:linear-gradient(135deg,#f0f7ff,#fff); border:1px solid #b6e3ff; border-radius:16px; box-shadow:0 4px 16px rgba(9,105,218,.08); }}
+.scoreboard-title {{ display:flex; justify-content:space-between; align-items:end; gap:20px; margin-bottom:14px; }}
+.scoreboard-title h2 {{ margin:2px 0 0; font-size:24px; }}
+.score-kicker {{ color:#0969da; font-size:12px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }}
+.score-formula {{ max-width:620px; color:#57606a; font-size:13px; line-height:1.5; text-align:right; }}
+.score-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }}
+.score-card {{ background:#fff; border:1px solid #d0d7de; border-radius:12px; padding:15px; }}
+.score-card.winner {{ border-color:#54aeff; box-shadow:0 0 0 2px #ddf4ff; }}
+.score-head {{ display:flex; align-items:center; gap:8px; min-height:28px; }}
+.score-rank {{ color:#8c959f; font-weight:800; }}
+.score-model {{ font-weight:750; font-size:15px; }}
+.score-badges {{ margin-left:auto; display:flex; gap:5px; flex-wrap:wrap; justify-content:flex-end; }}
+.score-badge {{ border-radius:999px; padding:2px 7px; font-size:10px; font-weight:750; }}
+.score-badge.overall {{ color:#0550ae; background:#ddf4ff; border:1px solid #54aeff; }}
+.score-badge.hard {{ color:#a40e26; background:#ffebe9; border:1px solid #ff8182; }}
+.score-main {{ margin:10px 0 7px; display:flex; align-items:baseline; gap:5px; }}
+.score-main strong {{ font-size:32px; line-height:1; }}
+.score-main span {{ color:#57606a; font-size:13px; }}
+.score-track {{ height:7px; border-radius:999px; background:#eaeef2; overflow:hidden; }}
+.score-track span {{ display:block; height:100%; background:linear-gradient(90deg,#0969da,#54aeff); border-radius:999px; }}
+.score-gates {{ display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-top:12px; }}
+.score-gates div {{ min-width:0; }}
+.score-gates b {{ display:block; font-size:15px; }}
+.score-gates span {{ display:block; color:#6e7781; font-size:10px; white-space:nowrap; }}
 .layout {{ display:grid; grid-template-columns:240px minmax(0,1fr); gap:20px; max-width:1480px; margin:0 auto; padding:20px; }}
 nav {{ position:sticky; top:120px; align-self:start; background:var(--card); border:1px solid var(--border); border-radius:12px; padding:8px; max-height:calc(100vh - 140px); overflow:auto; }}
 nav a {{ display:flex; align-items:center; gap:8px; color:var(--text); text-decoration:none; padding:7px 9px; border-radius:8px; font-size:13px; }}
@@ -587,7 +698,7 @@ summary {{ cursor:pointer; font-weight:600; font-size:14px; }}
 .pr-body {{ white-space:pre-wrap; overflow-wrap:anywhere; background:#f6f8fa; border:1px solid var(--border); border-radius:8px; padding:10px; max-height:240px; overflow:auto; font-size:13px; }}
 .muted {{ color:var(--muted); }}
 code {{ background:#eef1f4; border-radius:5px; padding:1px 4px; }}
-@media (max-width:980px) {{ .layout {{ grid-template-columns:1fr; }} nav {{ position:static; max-height:none; }} .cols {{ grid-template-columns:1fr; }} }}
+@media (max-width:980px) {{ .scoreboard-title {{ align-items:flex-start; flex-direction:column; }} .score-formula {{ text-align:left; }} .score-grid {{ grid-template-columns:1fr; }} .layout {{ grid-template-columns:1fr; }} nav {{ position:static; max-height:none; }} .cols {{ grid-template-columns:1fr; }} }}
 </style>
 </head>
 <body>
@@ -599,6 +710,7 @@ code {{ background:#eef1f4; border-radius:5px; padding:1px 4px; }}
     <div class="progress">已检查 <b id="done">0</b> / {len(items)} <span class="muted">(快捷键 j/k 跳转，点右上角按钮标记)</span></div>
   </div>
 </header>
+{scoreboard}
 <div class="layout">
   <nav>{nav}</nav>
   <main>{cases}</main>
