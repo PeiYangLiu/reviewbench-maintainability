@@ -1,0 +1,85 @@
+diff --git a/internal/app/database/orders.go b/internal/app/database/orders.go
+index 6c16868..9c7e3bd 100644
+--- a/internal/app/database/orders.go
++++ b/internal/app/database/orders.go
+@@ -84,7 +84,8 @@ func (db *DataBase) AddOrder(cookie string, order int) error {
+ 		return db.Err.Duplicate
+ 	}
+ 
+-	db.getOrderInfo(strconv.Itoa(order))
++	as := &AccrualService{asa: db.ASA, db: db}
++	as.getOrderInfo(strconv.Itoa(order))
+ 
+ 	return nil
+ }
+@@ -100,7 +101,12 @@ type orderStr struct {
+ 	status string
+ }
+ 
+-func (db *DataBase) getOrderInfo(number string) {
++type AccrualService struct {
++	asa string
++	db  *DataBase
++}
++
++func (as *AccrualService) getOrderInfo(number string) {
+ 	go func(number string) {
+ 		inputCh <- orderStr{number: number, status: "NEW"}
+ 	}(number)
+@@ -108,17 +114,17 @@ func (db *DataBase) getOrderInfo(number string) {
+ 	if workers < workersCount {
+ 		for i := workers; i < workersCount; i++ {
+ 			workers++
+-			db.newWorker(inputCh)
++			as.newWorker(inputCh)
+ 		}
+ 	}
+ }
+ 
+-func (db *DataBase) newWorker(input chan orderStr) {
++func (as *AccrualService) newWorker(input chan orderStr) {
+ 	go func() {
+ 		log.Print("starting goroutine")
+ 
+ 		defer func() {
+-			db.newWorker(input)
++			as.newWorker(input)
+ 			if x := recover(); x != nil {
+ 				log.Print("run time panic: ", x)
+ 			}
+@@ -126,7 +132,7 @@ func (db *DataBase) newWorker(input chan orderStr) {
+ 
+ 		for {
+ 			for o := range input {
+-				resp, err := http.Get(db.ASA + "/api/orders/" + o.number)
++				resp, err := http.Get(as.asa + "/api/orders/" + o.number)
+ 				if err != nil {
+ 					go func(o orderStr) {
+ 						inputCh <- o
+@@ -178,7 +184,7 @@ func (db *DataBase) newWorker(input chan orderStr) {
+ 						log.Printf("go number: %s, status: %s", o.number, order.Status)
+ 						go func(o orderStr, order Order) {
+ 							if o.status != order.Status {
+-								err := db.updateOrder(order)
++								err := as.db.updateOrder(order)
+ 								if err != nil {
+ 									log.Printf("go number: %s, err: %s", o.number, err.Error())
+ 									return
+@@ -191,7 +197,7 @@ func (db *DataBase) newWorker(input chan orderStr) {
+ 						log.Printf("go number: %s, status: %s, accrual: %g", o.number, order.Status, order.Accrual)
+ 						go func(o orderStr, order Order) {
+ 							if o.status != order.Status {
+-								err := db.updateOrder(order)
++								err := as.db.updateOrder(order)
+ 								if err != nil {
+ 									o.status = order.Status
+ 									inputCh <- o
+@@ -227,7 +233,7 @@ func (db *DataBase) newWorker(input chan orderStr) {
+ 					log.Printf("go number: %s, status: %s", o.number, resp.Status)
+ 					go func(o orderStr) {
+ 						if o.status != "PROCESSING" {
+-							err := db.updateOrder(Order{Status: "PROCESSING", Number: o.number})
++							err := as.db.updateOrder(Order{Status: "PROCESSING", Number: o.number})
+ 							if err != nil {
+ 								log.Printf("go number: %s, err: %s", o.number, err.Error())
+ 								return

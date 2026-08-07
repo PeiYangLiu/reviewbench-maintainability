@@ -1,0 +1,176 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 138,
+      "path": "internal/controllers/configuration/object_references.go",
+      "start_line": 1
+    },
+    "response_chars": 112,
+    "round": 1,
+    "tool_result": {
+      "content": "1: package configuration\n2: \n3: import (\n4: \t\"context\"\n5: \n6: \tcorev1 \"k8s.io/api/core/v1\"\n7: \textv1beta1 \"k8s.io/api/extensions/v1beta1\"\n8: \tnetv1 \"k8s.io/api/networking/v1\"\n9: \tnetv1beta1 \"k8s.io/api/networking/v1beta1\"\n10: \t\"k8s.io/apimachinery/pkg/types\"\n11: \t\"sigs.k8s.io/controller-runtime/pkg/client\"\n12: \n13: \t\"github.com/kong/kubernetes-ingress-controller/v2/internal/annotations\"\n14: \tctrlref \"github.com/kong/kubernetes-ingress-controller/v2/internal/controllers/reference\"\n15: \t\"github.com/kong/kubernetes-ingress-controller/v2/internal/dataplane\"\n16: \tkongv1 \"github.com/kong/kubernetes-ingress-controller/v2/pkg/apis/configuration/v1\"\n17: \tkongv1beta1 \"github.com/kong/kubernetes-ingress-controller/v2/pkg/apis/configuration/v1beta1\"\n18: )\n19: \n20: // updateReferredObjects updates reference records where the referrer is the object in parameter obj.\n21: // currently it only updates reference records to secrets, since we wanted to limit cache size of secrets:\n22: // https://github.com/Kong/kubernetes-ingress-controller/issues/2868\n23: func updateReferredObjects(\n24: \tctx context.Context, client client.Client, refIndexers ctrlref.CacheIndexers, dataplaneClient *dataplane.KongClient, obj client.Object) error {\n25: \n26: \tvar referredSecretNames = make(map[types.NamespacedName]struct{})\n27: \tswitch obj := obj.(type) {\n28: \t// functions update***ReferredSecrets first list the secrets referred by object,\n29: \t// then call UpdateReferencesToSecret to store referrence records between the object and referred secrets,\n30: \t// and also to remove the outdated reference records in cache where the secret is not referred by the obj specification anymore.\n31: \tcase *corev1.Service:\n32: \t\tlistCoreV1ServiceReferredSecrets(obj, referredSecretNames)\n33: \tcase *netv1.Ingress:\n34: \t\tlistNetV1IngressReferredSecrets(obj, referredSecretNames)\n35: \tcase *netv1beta1.Ingress:\n36: \t\tlistNetV1beta1IngressReferredSecrets(obj, referredSecretNames)\n37: \tcase *extv1beta1.Ingress:\n38: \t\tlistExtensionV1beta1IngressReferredSecrets(obj, referredSecretNames)\n39: \tcase *kongv1.KongPlugin:\n40: \t\tlistKongPluginReferredSecrets(obj, referredSecretNames)\n41: \tcase *kongv1.KongClusterPlugin:\n42: \t\tlistKongClusterPluginReferredSecrets(obj, referredSecretNames)\n43: \tcase *kongv1.KongConsumer:\n44: \t\tlistKongConsumerReferredSecrets(obj, referredSecretNames)\n45: \tcase *kongv1beta1.TCPIngress:\n46: \t\tlistTCPIngressReferredSecrets(obj, referredSecretNames)\n47: \t}\n48: \n49: \treturn ctrlref.UpdateReferencesToSecret(ctx, client, refIndexers, dataplaneClient, obj, referredSecretNames)\n50: }\n51: \n52: func listCoreV1ServiceReferredSecrets(service *corev1.Service, referredSecretNames map[types.NamespacedName]struct{}) {\n53: \n54: \tif service.Annotations == nil {\n55: \t\treturn\n56: \t}\n57: \n58: \tsecretName := annotations.ExtractClientCertificate(service.Annotations)\n59: \tif secretName != \"\" {\n60: \t\tnsName := types.NamespacedName{\n61: \t\t\tNamespace: service.Namespace,\n62: \t\t\tName:      secretName,\n63: \t\t}\n64: \n65: \t\treferredSecretNames[nsName] = struct{}{}\n66: \t}\n67: }\n68: \n69: func listNetV1IngressReferredSecrets(ingress *netv1.Ingress, referredSecretNames map[types.NamespacedName]struct{}) {\n70: \tfor _, tls := range ingress.Spec.TLS {\n71: \t\tnsName := types.NamespacedName{\n72: \t\t\tNamespace: ingress.Namespace,\n73: \t\t\tName:      tls.SecretName,\n74: \t\t}\n75: \t\treferredSecretNames[nsName] = struct{}{}\n76: \t}\n77: }\n78: \n79: func listNetV1beta1IngressReferredSecrets(ingress *netv1beta1.Ingress, referredSecretNames map[types.NamespacedName]struct{}) {\n80: \tfor _, tls := range ingress.Spec.TLS {\n81: \t\tnsName := types.NamespacedName{\n82: \t\t\tNamespace: ingress.Namespace,\n83: \t\t\tName:      tls.SecretName,\n84: \t\t}\n85: \t\treferredSecretNames[nsName] = struct{}{}\n86: \t}\n87: }\n88: \n89: func listExtensionV1beta1IngressReferredSecrets(ingress *extv1beta1.Ingress, referredSecretNames map[types.NamespacedName]struct{}) {\n90: \tfor _, tls := range ingress.Spec.TLS {\n91: \t\tnsName := types.NamespacedName{\n92: \t\t\tNamespace: ingress.Namespace,\n93: \t\t\tName:      tls.SecretName,\n94: \t\t}\n95: \t\treferredSecretNames[nsName] = struct{}{}\n96: \t}\n97: }\n98: \n99: func listKongPluginReferredSecrets(plugin *kongv1.KongPlugin, referredSecretNames map[types.NamespacedName]struct{}) {\n100: \tif plugin.ConfigFrom != nil {\n101: \t\tnsName := types.NamespacedName{\n102: \t\t\tNamespace: plugin.Namespace,\n103: \t\t\tName:      plugin.ConfigFrom.SecretValue.Secret,\n104: \t\t}\n105: \t\treferredSecretNames[nsName] = struct{}{}\n106: \t}\n107: \n108: }\n109: \n110: func listKongClusterPluginReferredSecrets(plugin *kongv1.KongClusterPlugin, referredSecretNames map[types.NamespacedName]struct{}) {\n111: \tif plugin.ConfigFrom != nil {\n112: \t\tnsName := types.NamespacedName{\n113: \t\t\tNamespace: plugin.ConfigFrom.SecretValue.Namespace,\n114: \t\t\tName:      plugin.ConfigFrom.SecretValue.Secret,\n115: \t\t}\n116: \t\treferredSecretNames[nsName] = struct{}{}\n117: \t}\n118: }\n119: \n120: func listKongConsumerReferredSecrets(consumer *kongv1.KongConsumer, referredSecretNames map[types.NamespacedName]struct{}) {\n121: \tfor _, secretName := range consumer.Credentials {\n122: \t\tnsName := types.NamespacedName{\n123: \t\t\tNamespace: consumer.Namespace,\n124: \t\t\tName:      secretName,\n125: \t\t}\n126: \t\treferredSecretNames[nsName] = struct{}{}\n127: \t}\n128: }\n129: \n130: func listTCPIngressReferredSecrets(tcpIngress *kongv1beta1.TCPIngress, referredSecretNames map[types.NamespacedName]struct{}) {\n131: \tfor _, tls := range tcpIngress.Spec.TLS {\n132: \t\tnsName := types.NamespacedName{\n133: \t\t\tNamespace: tcpIngress.Namespace,\n134: \t\t\tName:      tls.SecretName,\n135: \t\t}\n136: \t\treferredSecretNames[nsName] = struct{}{}\n137: \t}\n138: }",
+      "end_line": 138,
+      "path_lines": 138,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 2086,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 116,
+      "output_tokens_details": {
+        "reasoning_tokens": 84
+      },
+      "total_tokens": 2202
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "internal/controllers/reference",
+      "query": "func UpdateReferencesToSecret"
+    },
+    "response_chars": 288,
+    "round": 2,
+    "tool_result": {
+      "matches": [],
+      "query": "func UpdateReferencesToSecret",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 4092,
+      "input_tokens_details": {
+        "cached_tokens": 1792
+      },
+      "output_tokens": 320,
+      "output_tokens_details": {
+        "reasoning_tokens": 244
+      },
+      "total_tokens": 4412
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "internal/controllers/reference/cache.go",
+      "query": "UpdateReferencesToSecret"
+    },
+    "error": "file unavailable at start_sha: internal/controllers/reference/cache.go",
+    "raw_response": "{\"action\":\"find\",\"path\":\"internal/controllers/reference/cache.go\",\"query\":\"UpdateReferencesToSecret\"}\n{\"action\":\"find\",\"path\":\"internal/controllers/reference/references.go\",\"query\":\"UpdateReferencesToSecret\"}\n{\"action\":\"find\",\"path\":\"internal/controllers/reference/references.go\",\"query\":\"UpdateReferencesToSecret\"}",
+    "response_chars": 315,
+    "round": 3,
+    "usage": {
+      "input_tokens": 4144,
+      "input_tokens_details": {
+        "cached_tokens": 3840
+      },
+      "output_tokens": 259,
+      "output_tokens_details": {
+        "reasoning_tokens": 177
+      },
+      "total_tokens": 4403
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\treferredSecretNames := make(map[types.NamespacedName]struct{})\n\tfor _, referredSecretName := range listReferredObjects(obj) {\n\t\treferredSecretNames[referredSecretName] = struct{}{}\n\t}",
+          "end_line": 47,
+          "start_line": 26
+        },
+        {
+          "content": "func listReferredObjects(obj client.Object) []types.NamespacedName {\n\tswitch obj := obj.(type) {\n\t// functions list***ReferredSecrets list the secrets referred by object.\n\tcase *corev1.Service:\n\t\treturn listCoreV1ServiceReferredSecrets(obj)\n\tcase *netv1.Ingress:\n\t\treturn listNetV1IngressReferredSecrets(obj)\n\tcase *netv1beta1.Ingress:\n\t\treturn listNetV1beta1IngressReferredSecrets(obj)\n\tcase *extv1beta1.Ingress:\n\t\treturn listExtensionV1beta1IngressReferredSecrets(obj)\n\tcase *kongv1.KongPlugin:\n\t\treturn listKongPluginReferredSecrets(obj)\n\tcase *kongv1.KongClusterPlugin:\n\t\treturn listKongClusterPluginReferredSecrets(obj)\n\tcase *kongv1.KongConsumer:\n\t\treturn listKongConsumerReferredSecrets(obj)\n\tcase *kongv1beta1.TCPIngress:\n\t\treturn listTCPIngressReferredSecrets(obj)\n\tdefault:\n\t\treturn nil\n\t}\n}\n\nfunc listCoreV1ServiceReferredSecrets(service *corev1.Service) []types.NamespacedName {\n\tif service.Annotations == nil {\n\t\treturn nil\n\t}\n\n\tsecretName := annotations.ExtractClientCertificate(service.Annotations)\n\tif secretName == \"\" {\n\t\treturn nil\n\t}\n\n\treturn []types.NamespacedName{{\n\t\tNamespace: service.Namespace,\n\t\tName:      secretName,\n\t}}\n}\n\nfunc listNetV1IngressReferredSecrets(ingress *netv1.Ingress) []types.NamespacedName {\n\treferredSecretNames := make([]types.NamespacedName, 0, len(ingress.Spec.TLS))\n\tfor _, tls := range ingress.Spec.TLS {\n\t\treferredSecretNames = append(referredSecretNames, types.NamespacedName{\n\t\t\tNamespace: ingress.Namespace,\n\t\t\tName:      tls.SecretName,\n\t\t})\n\t}\n\treturn referredSecretNames\n}\n\nfunc listNetV1beta1IngressReferredSecrets(ingress *netv1beta1.Ingress) []types.NamespacedName {\n\treferredSecretNames := make([]types.NamespacedName, 0, len(ingress.Spec.TLS))\n\tfor _, tls := range ingress.Spec.TLS {\n\t\treferredSecretNames = append(referredSecretNames, types.NamespacedName{\n\t\t\tNamespace: ingress.Namespace,\n\t\t\tName:      tls.SecretName,\n\t\t})\n\t}\n\treturn referredSecretNames\n}\n\nfunc listExtensionV1beta1IngressReferredSecrets(ingress *extv1beta1.Ingress) []types.NamespacedName {\n\treferredSecretNames := make([]types.NamespacedName, 0, len(ingress.Spec.TLS))\n\tfor _, tls := range ingress.Spec.TLS {\n\t\treferredSecretNames = append(referredSecretNames, types.NamespacedName{\n\t\t\tNamespace: ingress.Namespace,\n\t\t\tName:      tls.SecretName,\n\t\t})\n\t}\n\treturn referredSecretNames\n}\n\nfunc listKongPluginReferredSecrets(plugin *kongv1.KongPlugin) []types.NamespacedName {\n\tif plugin.ConfigFrom == nil {\n\t\treturn nil\n\t}\n\n\treturn []types.NamespacedName{{\n\t\tNamespace: plugin.Namespace,\n\t\tName:      plugin.ConfigFrom.SecretValue.Secret,\n\t}}\n}\n\nfunc listKongClusterPluginReferredSecrets(plugin *kongv1.KongClusterPlugin) []types.NamespacedName {\n\tif plugin.ConfigFrom == nil {\n\t\treturn nil\n\t}\n\n\treturn []types.NamespacedName{{\n\t\tNamespace: plugin.ConfigFrom.SecretValue.Namespace,\n\t\tName:      plugin.ConfigFrom.SecretValue.Secret,\n\t}}\n}\n\nfunc listKongConsumerReferredSecrets(consumer *kongv1.KongConsumer) []types.NamespacedName {\n\treferredSecretNames := make([]types.NamespacedName, 0, len(consumer.Credentials))\n\tfor _, secretName := range consumer.Credentials {\n\t\treferredSecretNames = append(referredSecretNames, types.NamespacedName{\n\t\t\tNamespace: consumer.Namespace,\n\t\t\tName:      secretName,\n\t\t})\n\t}\n\treturn referredSecretNames\n}\n\nfunc listTCPIngressReferredSecrets(tcpIngress *kongv1beta1.TCPIngress) []types.NamespacedName {\n\treferredSecretNames := make([]types.NamespacedName, 0, len(tcpIngress.Spec.TLS))\n\tfor _, tls := range tcpIngress.Spec.TLS {\n\t\treferredSecretNames = append(referredSecretNames, types.NamespacedName{\n\t\t\tNamespace: tcpIngress.Namespace,\n\t\t\tName:      tls.SecretName,\n\t\t})\n\t}\n\treturn referredSecretNames\n}",
+          "end_line": 138,
+          "start_line": 52
+        }
+      ]
+    },
+    "response_chars": 4365,
+    "round": 4,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 47,
+          "replacement_lines": 4,
+          "start_line": 26
+        },
+        {
+          "end_line": 138,
+          "replacement_lines": 116,
+          "start_line": 52
+        }
+      ],
+      "current_file_lines": 149,
+      "updated_excerpt": {
+        "content": "16: \tkongv1 \"github.com/kong/kubernetes-ingress-controller/v2/pkg/apis/configuration/v1\"\n17: \tkongv1beta1 \"github.com/kong/kubernetes-ingress-controller/v2/pkg/apis/configuration/v1beta1\"\n18: )\n19: \n20: // updateReferredObjects updates reference records where the referrer is the object in parameter obj.\n21: // currently it only updates reference records to secrets, since we wanted to limit cache size of secrets:\n22: // https://github.com/Kong/kubernetes-ingress-controller/issues/2868\n23: func updateReferredObjects(\n24: \tctx context.Context, client client.Client, refIndexers ctrlref.CacheIndexers, dataplaneClient *dataplane.KongClient, obj client.Object) error {\n25: \n26: \treferredSecretNames := make(map[types.NamespacedName]struct{})\n27: \tfor _, referredSecretName := range listReferredObjects(obj) {\n28: \t\treferredSecretNames[referredSecretName] = struct{}{}\n29: \t}\n30: \n31: \treturn ctrlref.UpdateReferencesToSecret(ctx, client, refIndexers, dataplaneClient, obj, referredSecretNames)\n32: }\n33: \n34: func listReferredObjects(obj client.Object) []types.NamespacedName {\n35: \tswitch obj := obj.(type) {\n36: \t// functions list***ReferredSecrets list the secrets referred by object.\n37: \tcase *corev1.Service:\n38: \t\treturn listCoreV1ServiceReferredSecrets(obj)\n39: \tcase *netv1.Ingress:\n40: \t\treturn listNetV1IngressReferredSecrets(obj)\n41: \tcase *netv1beta1.Ingress:\n42: \t\treturn listNetV1beta1IngressReferredSecrets(obj)\n43: \tcase *extv1beta1.Ingress:\n44: \t\treturn listExtensionV1beta1IngressReferredSecrets(obj)\n45: \tcase *kongv1.KongPlugin:\n46: \t\treturn listKongPluginReferredSecrets(obj)\n47: \tcase *kongv1.KongClusterPlugin:\n48: \t\treturn listKongClusterPluginReferredSecrets(obj)\n49: \tcase *kongv1.KongConsumer:\n50: \t\treturn listKongConsumerReferredSecrets(obj)\n51: \tcase *kongv1beta1.TCPIngress:\n52: \t\treturn listTCPIngressReferredSecrets(obj)\n53: \tdefault:\n54: \t\treturn nil\n55: \t}\n56: }",
+        "end_line": 56,
+        "path_lines": 149,
+        "start_line": 16
+      }
+    },
+    "usage": {
+      "input_tokens": 4161,
+      "input_tokens_details": {
+        "cached_tokens": 3840
+      },
+      "output_tokens": 1842,
+      "output_tokens_details": {
+        "reasoning_tokens": 537
+      },
+      "total_tokens": 6003
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 170,
+      "path": "internal/controllers/configuration/object_references.go",
+      "start_line": 1
+    },
+    "response_chars": 132,
+    "round": 5,
+    "tool_result": {
+      "content": "1: package configuration\n2: \n3: import (\n4: \t\"context\"\n5: \n6: \tcorev1 \"k8s.io/api/core/v1\"\n7: \textv1beta1 \"k8s.io/api/extensions/v1beta1\"\n8: \tnetv1 \"k8s.io/api/networking/v1\"\n9: \tnetv1beta1 \"k8s.io/api/networking/v1beta1\"\n10: \t\"k8s.io/apimachinery/pkg/types\"\n11: \t\"sigs.k8s.io/controller-runtime/pkg/client\"\n12: \n13: \t\"github.com/kong/kubernetes-ingress-controller/v2/internal/annotations\"\n14: \tctrlref \"github.com/kong/kubernetes-ingress-controller/v2/internal/controllers/reference\"\n15: \t\"github.com/kong/kubernetes-ingress-controller/v2/internal/dataplane\"\n16: \tkongv1 \"github.com/kong/kubernetes-ingress-controller/v2/pkg/apis/configuration/v1\"\n17: \tkongv1beta1 \"github.com/kong/kubernetes-ingress-controller/v2/pkg/apis/configuration/v1beta1\"\n18: )\n19: \n20: // updateReferredObjects updates reference records where the referrer is the object in parameter obj.\n21: // currently it only updates reference records to secrets, since we wanted to limit cache size of secrets:\n22: // https://github.com/Kong/kubernetes-ingress-controller/issues/2868\n23: func updateReferredObjects(\n24: \tctx context.Context, client client.Client, refIndexers ctrlref.CacheIndexers, dataplaneClient *dataplane.KongClient, obj client.Object) error {\n25: \n26: \treferredSecretNames := make(map[types.NamespacedName]struct{})\n27: \tfor _, referredSecretName := range listReferredObjects(obj) {\n28: \t\treferredSecretNames[referredSecretName] = struct{}{}\n29: \t}\n30: \n31: \treturn ctrlref.UpdateReferencesToSecret(ctx, client, refIndexers, dataplaneClient, obj, referredSecretNames)\n32: }\n33: \n34: func listReferredObjects(obj client.Object) []types.NamespacedName {\n35: \tswitch obj := obj.(type) {\n36: \t// functions list***ReferredSecrets list the secrets referred by object.\n37: \tcase *corev1.Service:\n38: \t\treturn listCoreV1ServiceReferredSecrets(obj)\n39: \tcase *netv1.Ingress:\n40: \t\treturn listNetV1IngressReferredSecrets(obj)\n41: \tcase *netv1beta1.Ingress:\n42: \t\treturn listNetV1beta1IngressReferredSecrets(obj)\n43: \tcase *extv1beta1.Ingress:\n44: \t\treturn listExtensionV1beta1IngressReferredSecrets(obj)\n45: \tcase *kongv1.KongPlugin:\n46: \t\treturn listKongPluginReferredSecrets(obj)\n47: \tcase *kongv1.KongClusterPlugin:\n48: \t\treturn listKongClusterPluginReferredSecrets(obj)\n49: \tcase *kongv1.KongConsumer:\n50: \t\treturn listKongConsumerReferredSecrets(obj)\n51: \tcase *kongv1beta1.TCPIngress:\n52: \t\treturn listTCPIngressReferredSecrets(obj)\n53: \tdefault:\n54: \t\treturn nil\n55: \t}\n56: }\n57: \n58: func listCoreV1ServiceReferredSecrets(service *corev1.Service) []types.NamespacedName {\n59: \tif service.Annotations == nil {\n60: \t\treturn nil\n61: \t}\n62: \n63: \tsecretName := annotations.ExtractClientCertificate(service.Annotations)\n64: \tif secretName == \"\" {\n65: \t\treturn nil\n66: \t}\n67: \n68: \treturn []types.NamespacedName{{\n69: \t\tNamespace: service.Namespace,\n70: \t\tName:      secretName,\n71: \t}}\n72: }\n73: \n74: func listNetV1IngressReferredSecrets(ingress *netv1.Ingress) []types.NamespacedName {\n75: \treferredSecretNames := make([]types.NamespacedName, 0, len(ingress.Spec.TLS))\n76: \tfor _, tls := range ingress.Spec.TLS {\n77: \t\treferredSecretNames = append(referredSecretNames, types.NamespacedName{\n78: \t\t\tNamespace: ingress.Namespace,\n79: \t\t\tName:      tls.SecretName,\n80: \t\t})\n81: \t}\n82: \treturn referredSecretNames\n83: }\n84: \n85: func listNetV1beta1IngressReferredSecrets(ingress *netv1beta1.Ingress) []types.NamespacedName {\n86: \treferredSecretNames := make([]types.NamespacedName, 0, len(ingress.Spec.TLS))\n87: \tfor _, tls := range ingress.Spec.TLS {\n88: \t\treferredSecretNames = append(referredSecretNames, types.NamespacedName{\n89: \t\t\tNamespace: ingress.Namespace,\n90: \t\t\tName:      tls.SecretName,\n91: \t\t})\n92: \t}\n93: \treturn referredSecretNames\n94: }\n95: \n96: func listExtensionV1beta1IngressReferredSecrets(ingress *extv1beta1.Ingress) []types.NamespacedName {\n97: \treferredSecretNames := make([]types.NamespacedName, 0, len(ingress.Spec.TLS))\n98: \tfor _, tls := range ingress.Spec.TLS {\n99: \t\treferredSecretNames = append(referredSecretNames, types.NamespacedName{\n100: \t\t\tNamespace: ingress.Namespace,\n101: \t\t\tName:      tls.SecretName,\n102: \t\t})\n103: \t}\n104: \treturn referredSecretNames\n105: }\n106: \n107: func listKongPluginReferredSecrets(plugin *kongv1.KongPlugin) []types.NamespacedName {\n108: \tif plugin.ConfigFrom == nil {\n109: \t\treturn nil\n110: \t}\n111: \n112: \treturn []types.NamespacedName{{\n113: \t\tNamespace: plugin.Namespace,\n114: \t\tName:      plugin.ConfigFrom.SecretValue.Secret,\n115: \t}}\n116: }\n117: \n118: func listKongClusterPluginReferredSecrets(plugin *kongv1.KongClusterPlugin) []types.NamespacedName {\n119: \tif plugin.ConfigFrom == nil {\n120: \t\treturn nil\n121: \t}\n122: \n123: \treturn []types.NamespacedName{{\n124: \t\tNamespace: plugin.ConfigFrom.SecretValue.Namespace,\n125: \t\tName:      plugin.ConfigFrom.SecretValue.Secret,\n126: \t}}\n127: }\n128: \n129: func listKongConsumerReferredSecrets(consumer *kongv1.KongConsumer) []types.NamespacedName {\n130: \treferredSecretNames := make([]types.NamespacedName, 0, len(consumer.Credentials))\n131: \tfor _, secretName := range consumer.Credentials {\n132: \t\treferredSecretNames = append(referredSecretNames, types.NamespacedName{\n133: \t\t\tNamespace: consumer.Namespace,\n134: \t\t\tName:      secretName,\n135: \t\t})\n136: \t}\n137: \treturn referredSecretNames\n138: }\n139: \n140: func listTCPIngressReferredSecrets(tcpIngress *kongv1beta1.TCPIngress) []types.NamespacedName {\n141: \treferredSecretNames := make([]types.NamespacedName, 0, len(tcpIngress.Spec.TLS))\n142: \tfor _, tls := range tcpIngress.Spec.TLS {\n143: \t\treferredSecretNames = append(referredSecretNames, types.NamespacedName{\n144: \t\t\tNamespace: tcpIngress.Namespace,\n145: \t\t\tName:      tls.SecretName,\n146: \t\t})\n147: \t}\n148: \treturn referredSecretNames\n149: }",
+      "end_line": 149,
+      "path_lines": 149,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 6127,
+      "input_tokens_details": {
+        "cached_tokens": 3840
+      },
+      "output_tokens": 579,
+      "output_tokens_details": {
+        "reasoning_tokens": 535
+      },
+      "total_tokens": 6706
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 6,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__Kong__kubernetes-ingress-controller__pull_3047__comment_1003236605__modularity.patch"
+    },
+    "usage": {
+      "input_tokens": 8174,
+      "input_tokens_details": {
+        "cached_tokens": 5888
+      },
+      "output_tokens": 193,
+      "output_tokens_details": {
+        "reasoning_tokens": 182
+      },
+      "total_tokens": 8367
+    }
+  }
+]

@@ -1,0 +1,46 @@
+--- a/internal/vendors/asrockrack/asrockrack.go
++++ b/internal/vendors/asrockrack/asrockrack.go
+@@ -8,7 +8,6 @@
+ 	"github.com/metal-toolbox/firmware-syncer/internal/inventory"
+ 	"github.com/metal-toolbox/firmware-syncer/internal/vendors"
+ 
+-	"github.com/pkg/errors"
+ 	rcloneFs "github.com/rclone/rclone/fs"
+ 	rcloneOperations "github.com/rclone/rclone/fs/operations"
+ 	"github.com/sirupsen/logrus"
+@@ -90,6 +89,16 @@
+ 
+ 		err := a.copyFile(ctx, fw)
+ 		if err != nil {
++			if errors.Is(err, vendors.ErrDstFileExists) {
++				a.logger.WithFields(
++					logrus.Fields{
++						"filename": fw.Filename,
++					},
++				).Debug("firmware already exists at dst")
++
++				continue
++			}
++
+ 			return err
+ 		}
+ 
+@@ -131,15 +140,10 @@
+ 		return err
+ 	}
+ 
+-	// In case the file already exists in dst, don't verify/copy it
++	// In case the file already exists in dst, signal the caller so it can decide
++	// whether to verify/copy it.
+ 	if exists, _ := rcloneFs.FileExists(ctx, dstFs, vendors.DstPath(fw)); exists {
+-		a.logger.WithFields(
+-			logrus.Fields{
+-				"filename": fw.Filename,
+-			},
+-		).Debug("firmware already exists at dst")
+-
+-		return nil
++		return vendors.ErrDstFileExists
+ 	}
+ 
+ 	err = vendors.VerifyFile(ctx, tmpFs, srcFs, fw)

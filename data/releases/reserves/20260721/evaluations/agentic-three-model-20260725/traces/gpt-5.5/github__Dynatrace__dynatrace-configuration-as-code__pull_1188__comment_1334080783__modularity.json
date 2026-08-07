@@ -1,0 +1,296 @@
+[
+  {
+    "action": {
+      "action": "find",
+      "path": "pkg/download/bucket/bucket.go",
+      "query": "Debug"
+    },
+    "response_chars": 72,
+    "round": 1,
+    "tool_result": {
+      "matches": [],
+      "query": "Debug",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 2033,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 72,
+      "output_tokens_details": {
+        "reasoning_tokens": 47
+      },
+      "total_tokens": 2105
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "internal/log",
+      "query": "Debug"
+    },
+    "response_chars": 209,
+    "round": 2,
+    "tool_result": {
+      "matches": [],
+      "query": "Debug",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 2086,
+      "input_tokens_details": {
+        "cached_tokens": 1792
+      },
+      "output_tokens": 266,
+      "output_tokens_details": {
+        "reasoning_tokens": 188
+      },
+      "total_tokens": 2352
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": ".",
+      "query": ".Debug("
+    },
+    "error": "invalid repository path: '.'",
+    "raw_response": "{\"action\":\"find\",\"path\":\".\",\"query\":\".Debug(\"}\n{\"action\":\"find\",\"path\":\".\",\"query\":\".Debug(\"}",
+    "response_chars": 93,
+    "round": 3,
+    "usage": {
+      "input_tokens": 2129,
+      "input_tokens_details": {
+        "cached_tokens": 1792
+      },
+      "output_tokens": 131,
+      "output_tokens_details": {
+        "reasoning_tokens": 88
+      },
+      "total_tokens": 2260
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 200,
+      "path": "internal/log/log.go",
+      "start_line": 1
+    },
+    "response_chars": 153,
+    "round": 4,
+    "tool_result": {
+      "content": "1: /*\n2:  * @license\n3:  * Copyright 2023 Dynatrace LLC\n4:  * Licensed under the Apache License, Version 2.0 (the \"License\");\n5:  * you may not use this file except in compliance with the License.\n6:  * You may obtain a copy of the License at\n7:  *\n8:  * http://www.apache.org/licenses/LICENSE-2.0\n9:  *\n10:  * Unless required by applicable law or agreed to in writing, software\n11:  * distributed under the License is distributed on an \"AS IS\" BASIS,\n12:  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n13:  * See the License for the specific language governing permissions and\n14:  * limitations under the License.\n15:  */\n16: \n17: package log\n18: \n19: import (\n20: \t\"fmt\"\n21: \t\"github.com/dynatrace/dynatrace-configuration-as-code/v2/internal/log/field\"\n22: \t\"github.com/dynatrace/dynatrace-configuration-as-code/v2/internal/loggers\"\n23: \t\"github.com/dynatrace/dynatrace-configuration-as-code/v2/internal/loggers/console\"\n24: \t\"github.com/dynatrace/dynatrace-configuration-as-code/v2/internal/loggers/zap\"\n25: \t\"github.com/dynatrace/dynatrace-configuration-as-code/v2/internal/timeutils\"\n26: \t\"github.com/dynatrace/dynatrace-configuration-as-code/v2/pkg/config/coordinate\"\n27: \t\"github.com/spf13/afero\"\n28: \t\"golang.org/x/net/context\"\n29: \t\"io\"\n30: \t\"os\"\n31: \t\"path/filepath\"\n32: )\n33: \n34: const (\n35: \tLogDirectory                 = \".logs\"\n36: \tLogFileTimestampPrefixFormat = \"20060102-150405\"\n37: )\n38: \n39: // CtxKeyCoord context key used for contextual coordinate information\n40: type CtxKeyCoord struct{}\n41: \n42: // CtxKeyEnv context key used for contextual environment information\n43: type CtxKeyEnv struct{}\n44: \n45: // CtxValEnv context value used for contextual environment information\n46: type CtxValEnv struct {\n47: \tName  string\n48: \tGroup string\n49: }\n50: \n51: // CtxGraphComponentId context key used for correlating logs that belong to deployment of a sub graph\n52: type CtxGraphComponentId struct{}\n53: \n54: // CtxValGraphComponentId context value used for correlating logs that belong to deployment of a sub graph\n55: type CtxValGraphComponentId int\n56: \n57: var (\n58: \t_ loggers.Logger = (*zap.Logger)(nil)\n59: \t_ loggers.Logger = (*console.Logger)(nil)\n60: )\n61: \n62: func Fatal(msg string, a ...interface{}) {\n63: \tstd.Fatal(msg, a...)\n64: }\n65: \n66: func Error(msg string, a ...interface{}) {\n67: \tstd.Error(msg, a...)\n68: }\n69: \n70: func Warn(msg string, a ...interface{}) {\n71: \tstd.Warn(msg, a...)\n72: }\n73: \n74: func Info(msg string, a ...interface{}) {\n75: \tstd.Info(msg, a...)\n76: }\n77: \n78: func Debug(msg string, a ...interface{}) {\n79: \tstd.Debug(msg, a...)\n80: }\n81: \n82: func Level() loggers.LogLevel {\n83: \treturn std.Level()\n84: }\n85: \n86: // WithFields adds additional [field.Field] for structured logs\n87: // It accepts vararg fields and should not be called more than once per log call\n88: func WithFields(fields ...field.Field) loggers.Logger {\n89: \treturn std.WithFields(fields...)\n90: }\n91: \n92: // WithCtxFields creates a logger instance with preset structured logging [field.Field] based on the Context\n93: // Coordinate (via [CtxKeyCoord]) and environment (via [CtxKeyEnv] [CtxValEnv]) information is added to logs from the Context\n94: func WithCtxFields(ctx context.Context) loggers.Logger {\n95: \tloggr := std\n96: \tf := make([]field.Field, 0, 2)\n97: \tif c, ok := ctx.Value(CtxKeyCoord{}).(coordinate.Coordinate); ok {\n98: \t\tf = append(f, field.Coordinate(c))\n99: \t}\n100: \tif e, ok := ctx.Value(CtxKeyEnv{}).(CtxValEnv); ok {\n101: \t\tf = append(f, field.Environment(e.Name, e.Group))\n102: \t}\n103: \n104: \tif c, ok := ctx.Value(CtxGraphComponentId{}).(CtxValGraphComponentId); ok {\n105: \t\tf = append(f, field.F(\"gid\", c))\n106: \t}\n107: \treturn loggr.WithFields(f...)\n108: }\n109: \n110: var (\n111: \tstd loggers.Logger = console.Instance\n112: )\n113: \n114: func PrepareLogging(fs afero.Fs, verbose bool, loggerSpy io.Writer) {\n115: \tloglevel := loggers.LevelInfo\n116: \tif verbose {\n117: \t\tloglevel = loggers.LevelDebug\n118: \t}\n119: \n120: \tlogFile, errFile, err := prepareLogFiles(fs)\n121: \tlogFormat := loggers.ParseLogFormat(os.Getenv(loggers.EnvVarLogFormat))\n122: \tlogTime := loggers.ParseLogTimeMode(os.Getenv(loggers.EnvVarLogTime))\n123: \n124: \tsetDefaultLogger(loggers.LogOptions{\n125: \t\tFile:        logFile,\n126: \t\tErrorFile:   errFile,\n127: \t\tJSONLogging: logFormat == loggers.LogFormatJSON,\n128: \t\tLogLevel:    loglevel,\n129: \t\tLogSpy:      loggerSpy,\n130: \t\tLogTimeMode: logTime,\n131: \t})\n132: \n133: \tif err != nil {\n134: \t\tWarn(err.Error())\n135: \t}\n136: }\n137: \n138: // LogFilePath returns the path of a logfile for the current execution time - depending on when this function is called such a file may not yet exist\n139: func LogFilePath() string {\n140: \ttimestamp := timeutils.TimeAnchor().Format(LogFileTimestampPrefixFormat)\n141: \treturn filepath.Join(LogDirectory, timestamp+\".log\")\n142: }\n143: \n144: // ErrorFilePath returns the path of an error logfile for the current execution time - depending on when this function is called such a file may not yet exist\n145: func ErrorFilePath() string {\n146: \ttimestamp := timeutils.TimeAnchor().Format(LogFileTimestampPrefixFormat)\n147: \treturn filepath.Join(LogDirectory, timestamp+\"-errors.log\")\n148: }\n149: \n150: // prepareLogFiles tries to create a LogDirectory (if none exists) and a file each to write all logs and filtered error\n151: // logs to. As errors in preparing log files are viewed as optional for the logger setup using this method, partial data\n152: // may be returned in case of errors.\n153: // If log directory or logFile creation fails, no log files are returned.\n154: // If errLog creation fails, a valid logFile is still being returned with an error.\n155: func prepareLogFiles(fs afero.Fs) (logFile afero.File, errFile afero.File, err error) {\n156: \tif err := fs.MkdirAll(LogDirectory, 0777); err != nil {\n157: \t\treturn nil, nil, fmt.Errorf(\"unable to prepare log directory %s: %w\", LogDirectory, err)\n158: \n159: \t}\n160: \n161: \tlogFilePath := LogFilePath()\n162: \tlogFile, err = fs.OpenFile(logFilePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)\n163: \tif err != nil {\n164: \t\treturn nil, nil, fmt.Errorf(\"unable to prepare log file in %s directory: %w\", LogDirectory, err)\n165: \t}\n166: \n167: \terrFilePath := ErrorFilePath()\n168: \terrFile, err = fs.OpenFile(errFilePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)\n169: \tif err != nil {\n170: \t\treturn logFile, nil, fmt.Errorf(\"unable to prepare error file in %s directory: %w\", LogDirectory, err)\n171: \t}\n172: \n173: \treturn logFile, errFile, nil\n174: \n175: }\n176: \n177: func setDefaultLogger(opts loggers.LogOptions) {\n178: \tlogger, err := zap.New(opts)\n179: \tif err != nil {\n180: \t\tpanic(err)\n181: \t}\n182: \tstd = logger\n183: }",
+      "end_line": 183,
+      "path_lines": 183,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 2140,
+      "input_tokens_details": {
+        "cached_tokens": 1792
+      },
+      "output_tokens": 297,
+      "output_tokens_details": {
+        "reasoning_tokens": 240
+      },
+      "total_tokens": 2437
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 143,
+      "path": "pkg/download/bucket/bucket.go",
+      "start_line": 68
+    },
+    "response_chars": 925,
+    "round": 5,
+    "tool_result": {
+      "content": "68: func (d *Downloader) convertAllObjects(projectName string, objects [][]byte) []config.Config {\n69: \tresult := make([]config.Config, 0, len(objects))\n70: \tfor _, o := range objects {\n71: \n72: \t\tc, err := convertObject(o, projectName)\n73: \t\tif err != nil {\n74: \t\t\tlog.WithFields(field.Coordinate(coordinate.Coordinate{Project: c.Coordinate.Project, Type: \"bucket\", ConfigId: c.Coordinate.ConfigId}), field.Error(err)).\n75: \t\t\t\tWarn(\"Failed to get configuration for %v (%s): %v\", c.Coordinate.ConfigId, \"bucket\", err)\n76: \t\t\tcontinue\n77: \t\t}\n78: \n79: \t\tif c == nil {\n80: \t\t\tcontinue\n81: \t\t}\n82: \t\tresult = append(result, *c)\n83: \t}\n84: \n85: \tlog.Info(\"Downloaded %d Grail buckets\", len(result))\n86: \n87: \treturn result\n88: }\n89: \n90: const (\n91: \tbucketName  = \"bucketName\"\n92: \tdisplayName = \"displayName\"\n93: )\n94: \n95: func convertObject(o []byte, projectName string) (*config.Config, error) {\n96: \tc := config.Config{\n97: \t\tCoordinate: coordinate.Coordinate{\n98: \t\t\tProject: projectName,\n99: \t\t\tType:    \"bucket\",\n100: \t\t},\n101: \t\tType: config.BucketType{},\n102: \t}\n103: \n104: \tr, err := raw.New(o)\n105: \tif err != nil {\n106: \t\treturn &c, err\n107: \t}\n108: \n109: \tid, ok := r.Get(bucketName).(string)\n110: \tif !ok {\n111: \t\treturn &c, fmt.Errorf(\"variable %q unreadable\", bucketName)\n112: \t}\n113: \n114: \t// exclude builtin bucket names\n115: \tif tools.IsDefault(id) {\n116: \t\treturn nil, nil\n117: \t}\n118: \n119: \t// construct config object with generated config ID\n120: \tconfigID := idutils.GenerateUUIDFromString(id)\n121: \tc.Coordinate = coordinate.Coordinate{\n122: \t\tProject:  projectName,\n123: \t\tType:     \"bucket\",\n124: \t\tConfigId: configID,\n125: \t}\n126: \n127: \tc.OriginObjectId = r.Get(bucketName).(string)\n128: \n129: \tr.Delete(bucketName)\n130: \n131: \tc.Parameters = map[string]parameter.Parameter{}\n132: \tp := r.Parameterize(displayName)\n133: \tif p != nil {\n134: \t\tc.Parameters[displayName] = p\n135: \t}\n136: \n137: \tt, err := r.ToJSON()\n138: \tif err != nil {\n139: \t\treturn &c, err\n140: \t}\n141: \tc.Template = template.NewDownloadTemplate(configID, configID, string(jsonutils.MarshalIndent(t)))\n142: \n143: \treturn &c, nil",
+      "end_line": 143,
+      "path_lines": 157,
+      "start_line": 68
+    },
+    "usage": {
+      "input_tokens": 4431,
+      "input_tokens_details": {
+        "cached_tokens": 1792
+      },
+      "output_tokens": 1918,
+      "output_tokens_details": {
+        "reasoning_tokens": 1603
+      },
+      "total_tokens": 6349
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\t\tif tools.IsDefault(c.OriginObjectId) {\n\t\t\tlog.Debug(\"Skipping default Grail bucket %q\", c.OriginObjectId)\n\t\t\tcontinue\n\t\t}",
+          "end_line": 81,
+          "start_line": 79
+        },
+        {
+          "content": "",
+          "end_line": 117,
+          "start_line": 114
+        }
+      ]
+    },
+    "response_chars": 603,
+    "round": 6,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 81,
+          "replacement_lines": 4,
+          "start_line": 79
+        },
+        {
+          "end_line": 117,
+          "replacement_lines": 0,
+          "start_line": 114
+        }
+      ],
+      "current_file_lines": 154,
+      "updated_excerpt": {
+        "content": "69: \tresult := make([]config.Config, 0, len(objects))\n70: \tfor _, o := range objects {\n71: \n72: \t\tc, err := convertObject(o, projectName)\n73: \t\tif err != nil {\n74: \t\t\tlog.WithFields(field.Coordinate(coordinate.Coordinate{Project: c.Coordinate.Project, Type: \"bucket\", ConfigId: c.Coordinate.ConfigId}), field.Error(err)).\n75: \t\t\t\tWarn(\"Failed to get configuration for %v (%s): %v\", c.Coordinate.ConfigId, \"bucket\", err)\n76: \t\t\tcontinue\n77: \t\t}\n78: \n79: \t\tif tools.IsDefault(c.OriginObjectId) {\n80: \t\t\tlog.Debug(\"Skipping default Grail bucket %q\", c.OriginObjectId)\n81: \t\t\tcontinue\n82: \t\t}\n83: \t\tresult = append(result, *c)\n84: \t}\n85: \n86: \tlog.Info(\"Downloaded %d Grail buckets\", len(result))\n87: \n88: \treturn result\n89: }\n90: \n91: const (\n92: \tbucketName  = \"bucketName\"\n93: \tdisplayName = \"displayName\"\n94: )\n95: \n96: func convertObject(o []byte, projectName string) (*config.Config, error) {\n97: \tc := config.Config{\n98: \t\tCoordinate: coordinate.Coordinate{\n99: \t\t\tProject: projectName,\n100: \t\t\tType:    \"bucket\",\n101: \t\t},\n102: \t\tType: config.BucketType{},\n103: \t}\n104: \n105: \tr, err := raw.New(o)\n106: \tif err != nil {\n107: \t\treturn &c, err\n108: \t}\n109: ",
+        "end_line": 109,
+        "path_lines": 154,
+        "start_line": 69
+      }
+    },
+    "usage": {
+      "input_tokens": 5308,
+      "input_tokens_details": {
+        "cached_tokens": 3840
+      },
+      "output_tokens": 855,
+      "output_tokens_details": {
+        "reasoning_tokens": 648
+      },
+      "total_tokens": 6163
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 150,
+      "path": "pkg/download/bucket/bucket.go",
+      "start_line": 68
+    },
+    "response_chars": 107,
+    "round": 7,
+    "tool_result": {
+      "content": "68: func (d *Downloader) convertAllObjects(projectName string, objects [][]byte) []config.Config {\n69: \tresult := make([]config.Config, 0, len(objects))\n70: \tfor _, o := range objects {\n71: \n72: \t\tc, err := convertObject(o, projectName)\n73: \t\tif err != nil {\n74: \t\t\tlog.WithFields(field.Coordinate(coordinate.Coordinate{Project: c.Coordinate.Project, Type: \"bucket\", ConfigId: c.Coordinate.ConfigId}), field.Error(err)).\n75: \t\t\t\tWarn(\"Failed to get configuration for %v (%s): %v\", c.Coordinate.ConfigId, \"bucket\", err)\n76: \t\t\tcontinue\n77: \t\t}\n78: \n79: \t\tif tools.IsDefault(c.OriginObjectId) {\n80: \t\t\tlog.Debug(\"Skipping default Grail bucket %q\", c.OriginObjectId)\n81: \t\t\tcontinue\n82: \t\t}\n83: \t\tresult = append(result, *c)\n84: \t}\n85: \n86: \tlog.Info(\"Downloaded %d Grail buckets\", len(result))\n87: \n88: \treturn result\n89: }\n90: \n91: const (\n92: \tbucketName  = \"bucketName\"\n93: \tdisplayName = \"displayName\"\n94: )\n95: \n96: func convertObject(o []byte, projectName string) (*config.Config, error) {\n97: \tc := config.Config{\n98: \t\tCoordinate: coordinate.Coordinate{\n99: \t\t\tProject: projectName,\n100: \t\t\tType:    \"bucket\",\n101: \t\t},\n102: \t\tType: config.BucketType{},\n103: \t}\n104: \n105: \tr, err := raw.New(o)\n106: \tif err != nil {\n107: \t\treturn &c, err\n108: \t}\n109: \n110: \tid, ok := r.Get(bucketName).(string)\n111: \tif !ok {\n112: \t\treturn &c, fmt.Errorf(\"variable %q unreadable\", bucketName)\n113: \t}\n114: \n115: \n116: \t// construct config object with generated config ID\n117: \tconfigID := idutils.GenerateUUIDFromString(id)\n118: \tc.Coordinate = coordinate.Coordinate{\n119: \t\tProject:  projectName,\n120: \t\tType:     \"bucket\",\n121: \t\tConfigId: configID,\n122: \t}\n123: \n124: \tc.OriginObjectId = r.Get(bucketName).(string)\n125: \n126: \tr.Delete(bucketName)\n127: \n128: \tc.Parameters = map[string]parameter.Parameter{}\n129: \tp := r.Parameterize(displayName)\n130: \tif p != nil {\n131: \t\tc.Parameters[displayName] = p\n132: \t}\n133: \n134: \tt, err := r.ToJSON()\n135: \tif err != nil {\n136: \t\treturn &c, err\n137: \t}\n138: \tc.Template = template.NewDownloadTemplate(configID, configID, string(jsonutils.MarshalIndent(t)))\n139: \n140: \treturn &c, nil\n141: }\n142: \n143: func getValueForAttribute(raw []byte, name string) (string, error) {\n144: \tvar m map[string]any\n145: \terr := json.Unmarshal(raw, &m)\n146: \tif err != nil {\n147: \t\treturn \"\", err\n148: \t}\n149: \tif m[name] != nil {\n150: \t\treturn fmt.Sprintf(\"%v\", m[name]), nil",
+      "end_line": 150,
+      "path_lines": 154,
+      "start_line": 68
+    },
+    "usage": {
+      "input_tokens": 5949,
+      "input_tokens_details": {
+        "cached_tokens": 4864
+      },
+      "output_tokens": 663,
+      "output_tokens_details": {
+        "reasoning_tokens": 620
+      },
+      "total_tokens": 6612
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "",
+          "end_line": 115,
+          "start_line": 115
+        }
+      ]
+    },
+    "response_chars": 237,
+    "round": 8,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 115,
+          "replacement_lines": 0,
+          "start_line": 115
+        }
+      ],
+      "current_file_lines": 153,
+      "updated_excerpt": {
+        "content": "105: \tr, err := raw.New(o)\n106: \tif err != nil {\n107: \t\treturn &c, err\n108: \t}\n109: \n110: \tid, ok := r.Get(bucketName).(string)\n111: \tif !ok {\n112: \t\treturn &c, fmt.Errorf(\"variable %q unreadable\", bucketName)\n113: \t}\n114: \n115: \t// construct config object with generated config ID\n116: \tconfigID := idutils.GenerateUUIDFromString(id)\n117: \tc.Coordinate = coordinate.Coordinate{\n118: \t\tProject:  projectName,\n119: \t\tType:     \"bucket\",\n120: \t\tConfigId: configID,\n121: \t}\n122: \n123: \tc.OriginObjectId = r.Get(bucketName).(string)\n124: \n125: \tr.Delete(bucketName)\n126: \n127: \tc.Parameters = map[string]parameter.Parameter{}\n128: \tp := r.Parameterize(displayName)\n129: \tif p != nil {\n130: \t\tc.Parameters[displayName] = p\n131: \t}\n132: \n133: \tt, err := r.ToJSON()\n134: \tif err != nil {\n135: \t\treturn &c, err\n136: \t}\n137: \tc.Template = template.NewDownloadTemplate(configID, configID, string(jsonutils.MarshalIndent(t)))\n138: \n139: \treturn &c, nil\n140: }\n141: \n142: func getValueForAttribute(raw []byte, name string) (string, error) {\n143: \tvar m map[string]any\n144: \terr := json.Unmarshal(raw, &m)\n145: \tif err != nil {",
+        "end_line": 145,
+        "path_lines": 153,
+        "start_line": 105
+      }
+    },
+    "usage": {
+      "input_tokens": 6926,
+      "input_tokens_details": {
+        "cached_tokens": 5376
+      },
+      "output_tokens": 806,
+      "output_tokens_details": {
+        "reasoning_tokens": 713
+      },
+      "total_tokens": 7732
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 153,
+      "path": "pkg/download/bucket/bucket.go",
+      "start_line": 1
+    },
+    "response_chars": 106,
+    "round": 9,
+    "tool_result": {
+      "content": "1: /*\n2:  * @license\n3:  * Copyright 2023 Dynatrace LLC\n4:  * Licensed under the Apache License, Version 2.0 (the \"License\");\n5:  * you may not use this file except in compliance with the License.\n6:  * You may obtain a copy of the License at\n7:  *\n8:  * http://www.apache.org/licenses/LICENSE-2.0\n9:  *\n10:  * Unless required by applicable law or agreed to in writing, software\n11:  * distributed under the License is distributed on an \"AS IS\" BASIS,\n12:  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n13:  * See the License for the specific language governing permissions and\n14:  * limitations under the License.\n15:  */\n16: \n17: package bucket\n18: \n19: import (\n20: \t\"context\"\n21: \t\"encoding/json\"\n22: \t\"fmt\"\n23: \t\"github.com/dynatrace/dynatrace-configuration-as-code-core/api/clients/buckets\"\n24: \ttools \"github.com/dynatrace/dynatrace-configuration-as-code/v2/internal/buckettools\"\n25: \t\"github.com/dynatrace/dynatrace-configuration-as-code/v2/internal/idutils\"\n26: \tjsonutils \"github.com/dynatrace/dynatrace-configuration-as-code/v2/internal/json\"\n27: \t\"github.com/dynatrace/dynatrace-configuration-as-code/v2/internal/log\"\n28: \t\"github.com/dynatrace/dynatrace-configuration-as-code/v2/internal/log/field\"\n29: \t\"github.com/dynatrace/dynatrace-configuration-as-code/v2/internal/raw\"\n30: \t\"github.com/dynatrace/dynatrace-configuration-as-code/v2/pkg/config\"\n31: \t\"github.com/dynatrace/dynatrace-configuration-as-code/v2/pkg/config/coordinate\"\n32: \t\"github.com/dynatrace/dynatrace-configuration-as-code/v2/pkg/config/parameter\"\n33: \t\"github.com/dynatrace/dynatrace-configuration-as-code/v2/pkg/config/template\"\n34: \tv2 \"github.com/dynatrace/dynatrace-configuration-as-code/v2/pkg/project/v2\"\n35: )\n36: \n37: type BucketClient interface {\n38: \tList(ctx context.Context) (buckets.ListResponse, error)\n39: }\n40: \n41: type Downloader struct {\n42: \tclient BucketClient\n43: }\n44: \n45: func NewDownloader(client BucketClient) *Downloader {\n46: \treturn &Downloader{\n47: \t\tclient: client,\n48: \t}\n49: }\n50: func (d *Downloader) Download(projectName string, _ ...config.BucketType) (v2.ConfigsPerType, error) { // error in return is just to complain to interface\n51: \tresult := make(v2.ConfigsPerType)\n52: \tresponse, err := d.client.List(context.TODO())\n53: \tif err != nil {\n54: \t\tlog.WithFields(field.Type(\"bucket\"), field.Error(err)).Error(\"Failed to fetch all bucket definitions: %v\", err)\n55: \t\treturn nil, nil\n56: \t}\n57: \n58: \tif apiErr, isErr := response.AsAPIError(); isErr {\n59: \t\tlog.WithFields(field.Type(\"bucket\"), field.Error(apiErr)).Error(\"Failed to fetch all bucket definitions: %v\", apiErr)\n60: \t\treturn nil, nil\n61: \t}\n62: \n63: \tconfigs := d.convertAllObjects(projectName, response.Objects)\n64: \tresult[\"bucket\"] = configs\n65: \treturn result, nil\n66: }\n67: \n68: func (d *Downloader) convertAllObjects(projectName string, objects [][]byte) []config.Config {\n69: \tresult := make([]config.Config, 0, len(objects))\n70: \tfor _, o := range objects {\n71: \n72: \t\tc, err := convertObject(o, projectName)\n73: \t\tif err != nil {\n74: \t\t\tlog.WithFields(field.Coordinate(coordinate.Coordinate{Project: c.Coordinate.Project, Type: \"bucket\", ConfigId: c.Coordinate.ConfigId}), field.Error(err)).\n75: \t\t\t\tWarn(\"Failed to get configuration for %v (%s): %v\", c.Coordinate.ConfigId, \"bucket\", err)\n76: \t\t\tcontinue\n77: \t\t}\n78: \n79: \t\tif tools.IsDefault(c.OriginObjectId) {\n80: \t\t\tlog.Debug(\"Skipping default Grail bucket %q\", c.OriginObjectId)\n81: \t\t\tcontinue\n82: \t\t}\n83: \t\tresult = append(result, *c)\n84: \t}\n85: \n86: \tlog.Info(\"Downloaded %d Grail buckets\", len(result))\n87: \n88: \treturn result\n89: }\n90: \n91: const (\n92: \tbucketName  = \"bucketName\"\n93: \tdisplayName = \"displayName\"\n94: )\n95: \n96: func convertObject(o []byte, projectName string) (*config.Config, error) {\n97: \tc := config.Config{\n98: \t\tCoordinate: coordinate.Coordinate{\n99: \t\t\tProject: projectName,\n100: \t\t\tType:    \"bucket\",\n101: \t\t},\n102: \t\tType: config.BucketType{},\n103: \t}\n104: \n105: \tr, err := raw.New(o)\n106: \tif err != nil {\n107: \t\treturn &c, err\n108: \t}\n109: \n110: \tid, ok := r.Get(bucketName).(string)\n111: \tif !ok {\n112: \t\treturn &c, fmt.Errorf(\"variable %q unreadable\", bucketName)\n113: \t}\n114: \n115: \t// construct config object with generated config ID\n116: \tconfigID := idutils.GenerateUUIDFromString(id)\n117: \tc.Coordinate = coordinate.Coordinate{\n118: \t\tProject:  projectName,\n119: \t\tType:     \"bucket\",\n120: \t\tConfigId: configID,\n121: \t}\n122: \n123: \tc.OriginObjectId = r.Get(bucketName).(string)\n124: \n125: \tr.Delete(bucketName)\n126: \n127: \tc.Parameters = map[string]parameter.Parameter{}\n128: \tp := r.Parameterize(displayName)\n129: \tif p != nil {\n130: \t\tc.Parameters[displayName] = p\n131: \t}\n132: \n133: \tt, err := r.ToJSON()\n134: \tif err != nil {\n135: \t\treturn &c, err\n136: \t}\n137: \tc.Template = template.NewDownloadTemplate(configID, configID, string(jsonutils.MarshalIndent(t)))\n138: \n139: \treturn &c, nil\n140: }\n141: \n142: func getValueForAttribute(raw []byte, name string) (string, error) {\n143: \tvar m map[string]any\n144: \terr := json.Unmarshal(raw, &m)\n145: \tif err != nil {\n146: \t\treturn \"\", err\n147: \t}\n148: \tif m[name] != nil {\n149: \t\treturn fmt.Sprintf(\"%v\", m[name]), nil\n150: \n151: \t}\n152: \treturn \"\", nil\n153: }",
+      "end_line": 153,
+      "path_lines": 153,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 7448,
+      "input_tokens_details": {
+        "cached_tokens": 6400
+      },
+      "output_tokens": 800,
+      "output_tokens_details": {
+        "reasoning_tokens": 757
+      },
+      "total_tokens": 8248
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 10,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__Dynatrace__dynatrace-configuration-as-code__pull_1188__comment_1334080783__modularity.patch"
+    },
+    "usage": {
+      "input_tokens": 9364,
+      "input_tokens_details": {
+        "cached_tokens": 6912
+      },
+      "output_tokens": 527,
+      "output_tokens_details": {
+        "reasoning_tokens": 516
+      },
+      "total_tokens": 9891
+    }
+  }
+]

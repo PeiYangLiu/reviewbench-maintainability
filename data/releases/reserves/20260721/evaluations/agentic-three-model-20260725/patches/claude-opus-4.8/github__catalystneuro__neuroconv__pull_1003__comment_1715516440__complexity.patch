@@ -1,0 +1,50 @@
+diff --git a/src/neuroconv/tools/nwb_helpers/_configuration_models/_hdf5_dataset_io.py b/src/neuroconv/tools/nwb_helpers/_configuration_models/_hdf5_dataset_io.py
+index 03c2938..b1fbb12 100644
+--- a/src/neuroconv/tools/nwb_helpers/_configuration_models/_hdf5_dataset_io.py
++++ b/src/neuroconv/tools/nwb_helpers/_configuration_models/_hdf5_dataset_io.py
+@@ -7,7 +7,7 @@ from hdmf import Container
+ from pydantic import Field, InstanceOf
+ from typing_extensions import Self
+ 
+-from ._base_dataset_io import DatasetIOConfiguration, _find_location_in_memory_nwbfile
++from ._base_dataset_io import DatasetIOConfiguration
+ from ...importing import is_package_installed
+ 
+ _base_hdf5_filters = set(h5py.filters.decode)
+@@ -82,26 +82,14 @@ class HDF5DatasetIOConfiguration(DatasetIOConfiguration):
+         return dict(chunks=self.chunk_shape, **compression_bundle)
+ 
+     @classmethod
+-    def from_existing_neurodata_object(
+-        cls, neurodata_object: Container, dataset_name: Literal["data", "timestamps"]
+-    ) -> Self:
+-        location_in_file = _find_location_in_memory_nwbfile(neurodata_object=neurodata_object, field_name=dataset_name)
+-        full_shape = getattr(neurodata_object, dataset_name).shape
+-        dtype = getattr(neurodata_object, dataset_name).dtype
+-        chunk_shape = getattr(neurodata_object, dataset_name).chunks
+-        buffer_shape = getattr(neurodata_object, dataset_name).maxshape
+-        compression_method = getattr(neurodata_object, dataset_name).compression
+-        compression_opts = getattr(neurodata_object, dataset_name).compression_opts
+-        compression_options = dict(compression_opts=compression_opts)
+-        return cls(
+-            object_id=neurodata_object.object_id,
+-            object_name=neurodata_object.name,
+-            location_in_file=location_in_file,
+-            dataset_name=dataset_name,
+-            full_shape=full_shape,
+-            dtype=dtype,
+-            chunk_shape=chunk_shape,
+-            buffer_shape=buffer_shape,
+-            compression_method=compression_method,
+-            compression_options=compression_options,
++    def from_neurodata_object(cls, neurodata_object: Container, dataset_name: Literal["data", "timestamps"]) -> Self:
++        dataset_io_configuration = super().from_neurodata_object(
++            neurodata_object=neurodata_object, dataset_name=dataset_name
+         )
++
++        candidate_dataset = getattr(neurodata_object, dataset_name)
++        if isinstance(candidate_dataset, h5py.Dataset):  # For HDF5, update the compression info from the on-disk dataset
++            dataset_io_configuration.compression_method = candidate_dataset.compression
++            dataset_io_configuration.compression_options = dict(compression_opts=candidate_dataset.compression_opts)
++
++        return dataset_io_configuration

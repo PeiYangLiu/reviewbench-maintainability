@@ -1,0 +1,277 @@
+--- a/internal/repository/memory.go
++++ b/internal/repository/memory.go
+@@ -13,6 +13,15 @@
+ 	"github.com/mailru/easyjson"
+ 	models "github.com/postman17/metrics/internal/model"
+ )
++
++type MetricsRepository interface {
++	AddGauge(name string, value float64)
++	CheckGaugeType(name string) bool
++	AddCounter(name string, value int64)
++	CheckCounterType(name string) bool
++	GetTypeValue(name string) any
++	AddBatch(data models.MetricsList) error
++}
+ 
+ type MemStorage struct {
+ 	Data      map[string]any
+@@ -424,3 +433,258 @@
+ 	}
+ 	return &mem
+ }
++
++type FileStorage struct {
++	*MemStorage
++}
++
++func NewFileStorage(ctx context.Context, storeSync bool, filePath string, restore bool) *FileStorage {
++	return &FileStorage{
++		MemStorage: NewMemStorage(ctx, storeSync, filePath, restore, nil, false),
++	}
++}
++
++type DBStorage struct {
++	db  *sql.DB
++	ctx context.Context
++}
++
++func NewDBStorage(ctx context.Context, db *sql.DB) *DBStorage {
++	return &DBStorage{
++		db:  db,
++		ctx: ctx,
++	}
++}
++
++func (db *DBStorage) AddGauge(name string, value float64) {
++	err := db.AddGaugeToDB(name, value)
++	if err != nil {
++		slog.Error("cant save to db", "err", err)
++	}
++}
++
++func (db *DBStorage) CheckGaugeType(name string) bool {
++	var mType string
++	ctx, cancel := context.WithTimeout(db.ctx, 5*time.Second)
++	defer cancel()
++	row := db.db.QueryRowContext(ctx, "SELECT m_type FROM metrics WHERE name = $1", name)
++	err := row.Scan(&mType)
++	if err != nil {
++		return false
++	}
++	return mType == "gauge"
++}
++
++func (db *DBStorage) AddCounter(name string, value int64) {
++	err := db.AddCounterToDB(name, value)
++	if err != nil {
++		slog.Error("cant save to db", "err", err)
++	}
++}
++
++func (db *DBStorage) CheckCounterType(name string) bool {
++	var mType string
++	ctx, cancel := context.WithTimeout(db.ctx, 5*time.Second)
++	defer cancel()
++	row := db.db.QueryRowContext(ctx, "SELECT m_type FROM metrics WHERE name = $1", name)
++	err := row.Scan(&mType)
++	if err != nil {
++		return false
++	}
++	return mType == "counter"
++}
++
++func (db *DBStorage) GetTypeValue(name string) any {
++	var (
++		mType string
++		value sql.NullFloat64
++		delta sql.NullInt64
++	)
++	ctx, cancel := context.WithTimeout(db.ctx, 5*time.Second)
++	defer cancel()
++	row := db.db.QueryRowContext(ctx, "SELECT m_type, value, delta FROM metrics WHERE name = $1", name)
++	err := row.Scan(&mType, &value, &delta)
++	if err != nil {
++		return nil
++	}
++	if mType == "gauge" && value.Valid {
++		return value.Float64
++	}
++	if mType == "counter" && delta.Valid {
++		return delta.Int64
++	}
++	return nil
++}
++
++func (db *DBStorage) AddBatch(data models.MetricsList) error {
++	for _, metric := range data {
++		if metric.ID == "" {
++			return fmt.Errorf("metric id is empty")
++		}
++		if metric.MType != models.Gauge && metric.MType != models.Counter {
++			return fmt.Errorf("invalid metric type: %s", metric.MType)
++		}
++		switch metric.MType {
++		case models.Gauge:
++			if metric.Value == nil {
++				return fmt.Errorf("gauge value is nil for metric %s", metric.ID)
++			}
++		case models.Counter:
++			if metric.Delta == nil {
++				return fmt.Errorf("counter delta is nil for metric %s", metric.ID)
++			}
++		}
++	}
++	return db.AddBatchToDB(data)
++}
++
++func (db *DBStorage) AddGaugeToDB(name string, value float64) error {
++	var (
++		id    int64
++		mType string
++	)
++	getCtx, getCancel := context.WithTimeout(db.ctx, 5*time.Second)
++	defer getCancel()
++	row := db.db.QueryRowContext(
++		getCtx, "SELECT id, m_type FROM metrics WHERE name = $1", name,
++	)
++	err := row.Scan(&id, &mType)
++	if err != nil && err != sql.ErrNoRows {
++		return err
++	}
++	if err == nil && mType == "gauge" {
++		updateCtx, updateCancel := context.WithTimeout(db.ctx, 5*time.Second)
++		defer updateCancel()
++		_, err := db.db.ExecContext(
++			updateCtx, "UPDATE metrics SET value = $1 WHERE id = $2",
++			value, id,
++		)
++		if err != nil {
++			return err
++		}
++		return nil
++	} else if err == nil && mType == "counter" {
++		updateCtx, updateCancel := context.WithTimeout(db.ctx, 5*time.Second)
++		defer updateCancel()
++		_, err := db.db.ExecContext(
++			updateCtx, "UPDATE metrics SET value = $1, m_type = $2, delta = $3 WHERE id = $4",
++			value, "gauge", 0, id,
++		)
++		if err != nil {
++			return err
++		}
++		return nil
++	}
++	insertCtx, insertCancel := context.WithTimeout(db.ctx, 5*time.Second)
++	defer insertCancel()
++	_, err = db.db.ExecContext(
++		insertCtx, "INSERT INTO metrics (name, m_type, value) VALUES ($1, $2, $3)",
++		name, "gauge", value,
++	)
++	if err != nil {
++		return err
++	}
++	return nil
++}
++
++func (db *DBStorage) AddCounterToDB(name string, value int64) error {
++	var (
++		id    int64
++		mType string
++		delta int64
++	)
++	getCtx, getCancel := context.WithTimeout(db.ctx, 5*time.Second)
++	defer getCancel()
++	row := db.db.QueryRowContext(
++		getCtx, "SELECT id, m_type, delta FROM metrics WHERE name = $1", name,
++	)
++	err := row.Scan(&id, &mType, &delta)
++	if err != nil && err != sql.ErrNoRows {
++		return err
++	}
++	if err == nil && mType == "counter" {
++		value = delta + value
++		updateCtx, updateCancel := context.WithTimeout(db.ctx, 5*time.Second)
++		defer updateCancel()
++		_, err := db.db.ExecContext(
++			updateCtx, "UPDATE metrics SET delta = $1 WHERE id = $2",
++			value, id,
++		)
++		if err != nil {
++			return err
++		}
++		return nil
++	} else if err == nil && mType == "gauge" {
++		updateCtx, updateCancel := context.WithTimeout(db.ctx, 5*time.Second)
++		defer updateCancel()
++		_, err := db.db.ExecContext(
++			updateCtx, "UPDATE metrics SET delta = $1, m_type = $2, value = $3 WHERE id = $4",
++			value, "counter", 0, id,
++		)
++		if err != nil {
++			return err
++		}
++		return nil
++	}
++	insertCtx, insertCancel := context.WithTimeout(db.ctx, 5*time.Second)
++	defer insertCancel()
++	_, err = db.db.ExecContext(
++		insertCtx, "INSERT INTO metrics (name, m_type, delta) VALUES ($1, $2, $3)",
++		name, "counter", value,
++	)
++	if err != nil {
++		return err
++	}
++	return nil
++}
++
++func (db *DBStorage) AddBatchToDB(data models.MetricsList) error {
++	txCtx, cancel := context.WithTimeout(db.ctx, 30*time.Second)
++	defer cancel()
++
++	tx, err := db.db.BeginTx(txCtx, nil)
++	if err != nil {
++		return err
++	}
++	defer func() {
++		_ = tx.Rollback()
++	}()
++
++	stmtGauge, err := tx.PrepareContext(txCtx, `
++		INSERT INTO metrics (name, m_type, value, delta) VALUES ($1, 'gauge', $2, 0)
++		ON CONFLICT (name) DO UPDATE SET
++			m_type = 'gauge',
++			value = EXCLUDED.value,
++			delta = 0
++	`)
++	if err != nil {
++		return err
++	}
++	defer stmtGauge.Close()
++
++	stmtCounter, err := tx.PrepareContext(txCtx, `
++		INSERT INTO metrics (name, m_type, delta, value) VALUES ($1, 'counter', $2, 0)
++		ON CONFLICT (name) DO UPDATE SET
++			m_type = 'counter',
++			delta = CASE WHEN metrics.m_type = 'counter' THEN metrics.delta + EXCLUDED.delta ELSE EXCLUDED.delta END,
++			value = 0
++	`)
++	if err != nil {
++		return err
++	}
++	defer stmtCounter.Close()
++
++	for _, metric := range data {
++		switch metric.MType {
++		case models.Gauge:
++			_, err = stmtGauge.ExecContext(txCtx, metric.ID, *metric.Value)
++		case models.Counter:
++			_, err = stmtCounter.ExecContext(txCtx, metric.ID, *metric.Delta)
++		}
++		if err != nil {
++			return err
++		}
++	}
++
++	return tx.Commit()
++}

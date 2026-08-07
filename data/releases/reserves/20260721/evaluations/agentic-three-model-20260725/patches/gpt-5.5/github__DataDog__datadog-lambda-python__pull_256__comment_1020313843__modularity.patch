@@ -1,0 +1,89 @@
+diff --git a/datadog_lambda/tracing.py b/datadog_lambda/tracing.py
+index 47fc969..97df393 100644
+--- a/datadog_lambda/tracing.py
++++ b/datadog_lambda/tracing.py
+@@ -690,6 +690,43 @@ def insert_upstream_authorizer_span(
+     return upstream_authorizer_span
+ 
+ 
++def try_insert_upstream_authorizer_span_from_api_gateway_event(
++    event, request_context, request_time_epoch_ms, args, tags
++):
++    upstream_authorizer_span = None
++    finish_time_ns = None
++    injected_authorizer_data = get_injected_authorizer_data(
++        event, _EventSource(EventTypes.API_GATEWAY, EventSubtypes.API_GATEWAY)
++    )
++    if injected_authorizer_data:
++        try:
++            start_time_ns = int(
++                injected_authorizer_data.get(Headers.Parent_Span_Finish_Time)
++            )
++            finish_time_ns = (
++                request_time_epoch_ms
++                + (
++                    int(
++                        request_context.get("authorizer", {}).get(
++                            "integrationLatency", 0
++                        )
++                    )
++                )
++            ) * 1e6
++            upstream_authorizer_span = insert_upstream_authorizer_span(
++                args, tags, start_time_ns, finish_time_ns
++            )
++        except Exception as e:
++            traceback.print_exc()
++            logger.debug(
++                "Unable to insert authorizer span. Continue to generate the main span. \
++                Event %s, Reason: %s",
++                event,
++                e,
++            )
++    return upstream_authorizer_span, finish_time_ns
++
++
+ def create_inferred_span_from_api_gateway_websocket_event(
+     event, decode_authorizer_context: bool = True
+ ):
+@@ -798,35 +835,12 @@ def create_inferred_span_from_api_gateway_event(
+     upstream_authorizer_span = None
+     finish_time_ns = None
+     if decode_authorizer_context:
+-        injected_authorizer_data = get_injected_authorizer_data(
+-            event, _EventSource(EventTypes.API_GATEWAY, EventSubtypes.API_GATEWAY)
++        (
++            upstream_authorizer_span,
++            finish_time_ns,
++        ) = try_insert_upstream_authorizer_span_from_api_gateway_event(
++            event, request_context, request_time_epoch_ms, args, tags
+         )
+-        if injected_authorizer_data:
+-            try:
+-                start_time_ns = int(
+-                    injected_authorizer_data.get(Headers.Parent_Span_Finish_Time)
+-                )
+-                finish_time_ns = (
+-                    request_time_epoch_ms
+-                    + (
+-                        int(
+-                            request_context.get("authorizer", {}).get(
+-                                "integrationLatency", 0
+-                            )
+-                        )
+-                    )
+-                ) * 1e6
+-                upstream_authorizer_span = insert_upstream_authorizer_span(
+-                    args, tags, start_time_ns, finish_time_ns
+-                )
+-            except Exception as e:
+-                traceback.print_exc()
+-                logger.debug(
+-                    "Unable to insert authorizer span. Continue to generate the main span. \
+-                    Event %s, Reason: %s",
+-                    event,
+-                    e,
+-                )
+     span = tracer.trace("aws.apigateway", **args)
+     if span:
+         span.set_tags(tags)

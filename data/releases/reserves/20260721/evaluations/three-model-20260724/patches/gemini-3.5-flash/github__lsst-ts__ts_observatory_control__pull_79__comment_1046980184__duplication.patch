@@ -1,0 +1,107 @@
+--- a/python/lsst/ts/observatory/control/auxtel/atcs.py
++++ b/python/lsst/ts/observatory/control/auxtel/atcs.py
+@@ -1053,18 +1053,7 @@
+             # Check that telescope is in a good elevation to open cover.
+             # If not, point to current azimuth and elevation 75 degrees
+             # before opening the mirror cover.
+-            tel_pos = await self.next_telescope_position(timeout=self.fast_timeout)
+-
+-            if tel_pos.elevationCalculatedAngle[-1] < self.tel_el_operate_pneumatics:
+-
+-                nasmyth_angle = await self.get_selected_nasmyth_angle()
+-
+-                await self.point_azel(
+-                    az=tel_pos.azimuthCalculatedAngle[-1],
+-                    el=self.tel_el_operate_pneumatics,
+-                    rot_tel=nasmyth_angle,
+-                    wait_dome=False,
+-                )
++            await self._ensure_elevation_for_pneumatics()
+ 
+             await self.rem.atpneumatics.cmd_openM1Cover.start(timeout=self.long_timeout)
+ 
+@@ -1120,17 +1109,7 @@
+             # Check that telescope is in a good elevation to close cover.
+             # If not, point to current azimuth and elevation 75 degrees
+             # before opening the mirror cover.
+-            tel_pos = await self.next_telescope_position(timeout=self.fast_timeout)
+-
+-            nasmyth_angle = await self.get_selected_nasmyth_angle()
+-
+-            if tel_pos.elevationCalculatedAngle[-1] < self.tel_el_operate_pneumatics:
+-                await self.point_azel(
+-                    az=tel_pos.azimuthCalculatedAngle[-1],
+-                    el=self.tel_el_operate_pneumatics,
+-                    rot_tel=nasmyth_angle,
+-                    wait_dome=False,
+-                )
++            await self._ensure_elevation_for_pneumatics()
+ 
+             self.rem.atpneumatics.evt_m1CoverState.flush()
+ 
+@@ -1468,12 +1447,7 @@
+ 
+         # Determines bore_sight_angle angle
+         azel = self.telescope_position
+-        try:
+-            nasmyth = await self.rem.atmcs.tel_mount_Nasmyth_Encoders.aget(
+-                timeout=self.fast_timeout
+-            )
+-        except asyncio.TimeoutError:
+-            raise RuntimeError("Cannot determine nasmyth position.")
++        nasmyth = await self._get_nasmyth_encoders()
+ 
+         nasmyth_angle = (
+             np.mean(nasmyth.nasmyth1CalculatedAngle)
+@@ -1522,18 +1496,45 @@
+         else:
+             self.log.debug(f"Using nasmyth port {focus_name!r}")
+ 
+-        try:
+-            nasmyth = await self.rem.atmcs.tel_mount_Nasmyth_Encoders.aget(
+-                timeout=self.fast_timeout
+-            )
+-        except asyncio.TimeoutError:
+-            raise RuntimeError("Cannot determine nasmyth position.")
++        nasmyth = await self._get_nasmyth_encoders()
+ 
+         return (
+             np.mean(nasmyth.nasmyth2CalculatedAngle)
+             if focus_name == ATPtg.Foci.NASMYTH2
+             else np.mean(nasmyth.nasmyth1CalculatedAngle)
+         )
++
++    async def _get_nasmyth_encoders(self) -> salobj.type_hints.BaseDdsDataType:
++        """Get the current nasmyth encoder readings.
++
++        Returns
++        -------
++        nasmyth : `ATMCS_tel_mount_Nasmyth_Encoders`
++
++        Raises
++        ------
++        RuntimeError
++            If cannot determine nasmyth position.
++        """
++        try:
++            return await self.rem.atmcs.tel_mount_Nasmyth_Encoders.aget(
++                timeout=self.fast_timeout
++            )
++        except asyncio.TimeoutError:
++            raise RuntimeError("Cannot determine nasmyth position.")
++
++    async def _ensure_elevation_for_pneumatics(self) -> None:
++        """Point telescope to safe elevation for pneumatics if currently below."""
++        tel_pos = await self.next_telescope_position(timeout=self.fast_timeout)
++
++        if tel_pos.elevationCalculatedAngle[-1] < self.tel_el_operate_pneumatics:
++            nasmyth_angle = await self.get_selected_nasmyth_angle()
++            await self.point_azel(
++                az=tel_pos.azimuthCalculatedAngle[-1],
++                el=self.tel_el_operate_pneumatics,
++                rot_tel=nasmyth_angle,
++                wait_dome=False,
++            )
+ 
+     def flush_offset_events(self) -> None:
+         """Implement abstract method to flush events before an offset is

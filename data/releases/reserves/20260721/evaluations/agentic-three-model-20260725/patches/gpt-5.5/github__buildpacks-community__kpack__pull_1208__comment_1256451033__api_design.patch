@@ -1,0 +1,56 @@
+diff --git a/pkg/reconciler/builder/builder.go b/pkg/reconciler/builder/builder.go
+index 56ca096..b016957 100644
+--- a/pkg/reconciler/builder/builder.go
++++ b/pkg/reconciler/builder/builder.go
+@@ -40,6 +40,18 @@ type BuilderCreator interface {
+ 	CreateBuilder(ctx context.Context, builderKeychain authn.Keychain, keychain authn.Keychain, fetcher cnb.RemoteBuildpackFetcher, clusterStack *buildapi.ClusterStack, spec buildapi.BuilderSpec, signingSecrets []corev1.Secret) (buildapi.BuilderRecord, error)
+ }
+ 
++type SigningSecretFetcher interface {
++	FetchBuilderSigningSecrets(ctx context.Context, namespace, serviceAccountName string) ([]corev1.Secret, error)
++}
++
++type cosignSigningSecretFetcher struct {
++	k8sClient k8sclient.Interface
++}
++
++func (f cosignSigningSecretFetcher) FetchBuilderSigningSecrets(ctx context.Context, namespace, serviceAccountName string) ([]corev1.Secret, error) {
++	return cosign.FetchBuilderSigningSecrets(ctx, f.k8sClient, namespace, serviceAccountName)
++}
++
+ func NewController(
+ 	ctx context.Context,
+ 	opt reconciler.Options,
+@@ -61,7 +73,7 @@ func NewController(
+ 		BuildpackLister:        buildpackInformer.Lister(),
+ 		ClusterBuildpackLister: clusterBuildpackInformer.Lister(),
+ 		ClusterStackLister:     clusterStackInformer.Lister(),
+-		K8sClient:              k8sClient,
++		SigningSecretFetcher:   cosignSigningSecretFetcher{k8sClient: k8sClient},
+ 	}
+ 
+ 	logger := opt.Logger.With(
+@@ -114,6 +126,7 @@ type Reconciler struct {
+ 	BuildpackLister        buildlisters.BuildpackLister
+ 	ClusterBuildpackLister buildlisters.ClusterBuildpackLister
+ 	ClusterStackLister     buildlisters.ClusterStackLister
++	SigningSecretFetcher   SigningSecretFetcher
+ 	K8sClient              k8sclient.Interface
+ }
+ 
+@@ -231,9 +244,13 @@ func (c *Reconciler) reconcileBuilder(ctx context.Context, builder *buildapi.Bui
+ 
+ 	fetcher := cnb.NewRemoteBuildpackFetcher(c.KeychainFactory, clusterStore, buildpacks, clusterBuildpacks)
+ 
+-	signerSecrets, err := cosign.FetchBuilderSigningSecrets(
++	signingSecretFetcher := c.SigningSecretFetcher
++	if signingSecretFetcher == nil {
++		signingSecretFetcher = cosignSigningSecretFetcher{k8sClient: c.K8sClient}
++	}
++
++	signerSecrets, err := signingSecretFetcher.FetchBuilderSigningSecrets(
+ 		ctx,
+-		c.K8sClient,
+ 		builder.Namespace,
+ 		builder.Spec.ServiceAccount())
+ 	if err != nil {

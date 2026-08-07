@@ -1,0 +1,368 @@
+[
+  {
+    "action": {
+      "action": "find",
+      "path": "cmd/frontend/internal/auth/userpasswd/lockout_test.go",
+      "query": "MockSendEmail"
+    },
+    "response_chars": 320,
+    "round": 1,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 226,
+          "text": "\t\tMockSendEmail = func(context.Context, string, txemail.Message) (err error) {"
+        },
+        {
+          "line": 232,
+          "text": "\t\t\tMockSendEmail = nil"
+        }
+      ],
+      "query": "MockSendEmail",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 3603,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 540,
+      "output_tokens_details": {
+        "reasoning_tokens": 441
+      },
+      "total_tokens": 4143
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 180,
+      "path": "cmd/frontend/internal/auth/userpasswd/lockout.go",
+      "start_line": 1
+    },
+    "response_chars": 105,
+    "round": 2,
+    "tool_result": {
+      "content": "1: package userpasswd\n2: \n3: import (\n4: \t\"context\"\n5: \t\"encoding/base64\"\n6: \t\"fmt\"\n7: \t\"net/url\"\n8: \t\"strconv\"\n9: \t\"time\"\n10: \n11: \t\"github.com/golang-jwt/jwt/v4\"\n12: \n13: \t\"github.com/sourcegraph/sourcegraph/cmd/frontend/globals\"\n14: \t\"github.com/sourcegraph/sourcegraph/internal/conf\"\n15: \t\"github.com/sourcegraph/sourcegraph/internal/rcache\"\n16: \t\"github.com/sourcegraph/sourcegraph/internal/txemail\"\n17: \t\"github.com/sourcegraph/sourcegraph/internal/txemail/txtypes\"\n18: \t\"github.com/sourcegraph/sourcegraph/lib/errors\"\n19: )\n20: \n21: var MockSendEmail func(context.Context, string, txemail.Message) (err error)\n22: \n23: // LockoutStore provides semantics for account lockout management.\n24: type LockoutStore interface {\n25: \t// IsLockedOut returns true if the given user has been locked along with the\n26: \t// reason.\n27: \tIsLockedOut(userID int32) (reason string, locked bool)\n28: \t// IncreaseFailedAttempt increases the failed login attempt count by 1.\n29: \tIncreaseFailedAttempt(userID int32)\n30: \t// Reset clears the failed login attempt count and releases the lockout.\n31: \tReset(userID int32)\n32: \t// GenerateUnlockAccountURL creates the URL to unlock account with a signet\n33: \t// unlock token.\n34: \tGenerateUnlockAccountURL(userID int32) (string, string, error)\n35: \t// VerifyUnlockAccountTokenAndReset verifies the provided unlock token is valid.\n36: \tVerifyUnlockAccountTokenAndReset(urlToken string) (bool, error)\n37: \t// SendUnlockAccountEmail sends an email to the locked account email providing a\n38: \t// temporary unlock link.\n39: \tSendUnlockAccountEmail(ctx context.Context, userID int32, userEmail string) error\n40: \t// Returns true if the unlock account email has already been sent\n41: \tUnlockEmailSent(userID int32) bool\n42: }\n43: \n44: type lockoutStore struct {\n45: \tfailedThreshold int\n46: \tlockouts        *rcache.Cache\n47: \tfailedAttempts  *rcache.Cache\n48: \tunlockToken     *rcache.Cache\n49: \tunlockEmailSent *rcache.Cache\n50: }\n51: \n52: // NewLockoutStore returns a new LockoutStore with given durations using the\n53: // Redis cache.\n54: func NewLockoutStore(failedThreshold int, lockoutPeriod, consecutivePeriod time.Duration) LockoutStore {\n55: \treturn &lockoutStore{\n56: \t\tfailedThreshold: failedThreshold,\n57: \t\tlockouts:        rcache.NewWithTTL(\"account_lockout\", int(lockoutPeriod.Seconds())),\n58: \t\tfailedAttempts:  rcache.NewWithTTL(\"account_failed_attempts\", int(consecutivePeriod.Seconds())),\n59: \t\tunlockToken:     rcache.NewWithTTL(\"account_unlock_token\", int(lockoutPeriod.Seconds())),\n60: \t\tunlockEmailSent: rcache.NewWithTTL(\"account_lockout_email_sent\", int(lockoutPeriod.Seconds())),\n61: \t}\n62: }\n63: \n64: func key(userID int32) string {\n65: \treturn strconv.Itoa(int(userID))\n66: }\n67: \n68: func (s *lockoutStore) IsLockedOut(userID int32) (reason string, locked bool) {\n69: \tv, locked := s.lockouts.Get(key(userID))\n70: \treturn string(v), locked\n71: }\n72: \n73: func (s *lockoutStore) IncreaseFailedAttempt(userID int32) {\n74: \tmetricsAccountFailedSignInAttempts.Inc()\n75: \n76: \tkey := key(userID)\n77: \ts.failedAttempts.Increase(key)\n78: \n79: \t// Get right after Increase should make the key always exist\n80: \tv, _ := s.failedAttempts.Get(key)\n81: \tcount, _ := strconv.Atoi(string(v))\n82: \tif count >= s.failedThreshold {\n83: \t\tmetricsAccountLockouts.Inc()\n84: \t\ts.lockouts.Set(key, []byte(\"too many failed attempts\"))\n85: \t}\n86: }\n87: \n88: type unlockAccountClaims struct {\n89: \tUserID int32 `json:\"user_id\"`\n90: \tjwt.RegisteredClaims\n91: }\n92: \n93: func (s *lockoutStore) GenerateUnlockAccountURL(userID int32) (string, string, error) {\n94: \tkey := key(userID)\n95: \tttl, exists := s.lockouts.KeyTTL(key)\n96: \n97: \tif !exists {\n98: \t\treturn \"\", \"\", errors.Newf(\"user with id %d is not locked out, cannot generate unlock url\")\n99: \t}\n100: \n101: \tsigningKey := conf.SiteConfig().AuthUnlockAccountLinkSigningKey\n102: \tif signingKey == \"\" {\n103: \t\treturn \"\", \"\", errors.Newf(`signing key not provided, cannot validate JWT on unlock account URL. Please add \"auth.unlockAccountLinkSigningKey\" to site configuration.`)\n104: \t}\n105: \n106: \texpiryTime := time.Now().Add(time.Second * time.Duration(ttl))\n107: \n108: \ttoken := jwt.NewWithClaims(jwt.SigningMethodHS512, &unlockAccountClaims{\n109: \t\tRegisteredClaims: jwt.RegisteredClaims{\n110: \t\t\tIssuer:    globals.ExternalURL().String(),\n111: \t\t\tExpiresAt: jwt.NewNumericDate(expiryTime),\n112: \t\t\tSubject:   strconv.FormatInt(int64(userID), 10),\n113: \t\t},\n114: \t\tUserID: userID,\n115: \t})\n116: \n117: \t// Sign and get the complete encoded token as a string using the secret\n118: \tdecodedSigningKey, err := base64.StdEncoding.DecodeString(signingKey)\n119: \tif err != nil {\n120: \t\treturn \"\", \"\", err\n121: \t}\n122: \ttokenString, err := token.SignedString(decodedSigningKey)\n123: \tif err != nil {\n124: \t\treturn \"\", \"\", err\n125: \t}\n126: \n127: \ts.unlockToken.SetWithTTL(key, []byte(tokenString), ttl)\n128: \n129: \tpath := fmt.Sprintf(\"/unlock-account/%s\", tokenString)\n130: \n131: \treturn globals.ExternalURL().ResolveReference(&url.URL{Path: path}).String(), tokenString, nil\n132: }\n133: \n134: func formatExpiryTime(ttl int) string {\n135: \tminutes := ttl / 60\n136: \tseconds := ttl\n137: \n138: \tif minutes < 1 {\n139: \t\treturn fmt.Sprintf(\"%d seconds\", seconds)\n140: \t}\n141: \treturn fmt.Sprintf(\"%d minutes\", minutes)\n142: }\n143: \n144: func (s *lockoutStore) SendUnlockAccountEmail(ctx context.Context, userID int32, recipientEmail string) error {\n145: \tkey := key(userID)\n146: \tttl, exists := s.lockouts.KeyTTL(key)\n147: \n148: \tif !exists || s.UnlockEmailSent(userID) {\n149: \t\treturn nil\n150: \t}\n151: \n152: \tunlockUrl, _, err := s.GenerateUnlockAccountURL(userID)\n153: \tif err != nil {\n154: \t\treturn err\n155: \t}\n156: \n157: \temailF := txemail.Send\n158: \tif MockSendEmail != nil {\n159: \t\temailF = MockSendEmail\n160: \t}\n161: \terr = emailF(ctx, \"account_unlock\", txemail.Message{\n162: \t\tTo:       []string{recipientEmail},\n163: \t\tTemplate: emailTemplates,\n164: \t\tData: struct {\n165: \t\t\tUnlockAccountUrl string\n166: \t\t\tExpiryTime       string\n167: \t\t}{\n168: \t\t\tUnlockAccountUrl: unlockUrl,\n169: \t\t\tExpiryTime:       formatExpiryTime(ttl),\n170: \t\t},\n171: \t})\n172: \tif err == nil {\n173: \t\ts.unlockEmailSent.SetWithTTL(key, []byte(\"sent\"), ttl)\n174: \t}\n175: \n176: \treturn err\n177: }\n178: \n179: func (s *lockoutStore) UnlockEmailSent(userID int32) bool {\n180: \t_, locked := s.unlockEmailSent.Get(key(userID))",
+      "end_line": 180,
+      "path_lines": 277,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 3715,
+      "input_tokens_details": {
+        "cached_tokens": 3328
+      },
+      "output_tokens": 71,
+      "output_tokens_details": {
+        "reasoning_tokens": 37
+      },
+      "total_tokens": 3786
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 250,
+      "path": "cmd/frontend/internal/auth/userpasswd/lockout_test.go",
+      "start_line": 180
+    },
+    "response_chars": 758,
+    "round": 3,
+    "tool_result": {
+      "content": "180: \n181: \t\tmockSiteConfigSigningKey()\n182: \t\tdefer mockDefaultSiteConfig()\n183: \n184: \t\ts.IncreaseFailedAttempt(1)\n185: \t\t_, token, err := s.GenerateUnlockAccountURL(1)\n186: \n187: \t\tassert.Empty(t, err)\n188: \n189: \t\tvalid, error := s.VerifyUnlockAccountTokenAndReset(token)\n190: \n191: \t\tassert.Empty(t, error)\n192: \n193: \t\tif !valid {\n194: \t\t\tt.Fatalf(\"provided token is invalid\")\n195: \t\t}\n196: \n197: \t})\n198: \n199: \tt.Run(\"fails verification on unlock account token\", func(t *testing.T) {\n200: \t\trcache.SetupForTest(t)\n201: \n202: \t\ts := NewLockoutStore(1, time.Minute, time.Second)\n203: \n204: \t\tmockSiteConfigSigningKey()\n205: \t\tdefer mockDefaultSiteConfig()\n206: \n207: \t\ts.IncreaseFailedAttempt(1)\n208: \t\t_, token, err := s.GenerateUnlockAccountURL(1)\n209: \n210: \t\tassert.Empty(t, err)\n211: \n212: \t\ts.Reset(1)\n213: \n214: \t\tvalid, error := s.VerifyUnlockAccountTokenAndReset(token)\n215: \n216: \t\tassert.EqualError(t, error, \"No previously generated token exists for the specified user\")\n217: \t\tassert.False(t, valid)\n218: \t})\n219: \n220: \tt.Run(\"only allows 1 email to be sent for locked account\", func(t *testing.T) {\n221: \t\trcache.SetupForTest(t)\n222: \n223: \t\ts := NewLockoutStore(1, time.Minute, time.Second)\n224: \n225: \t\tcalls := 0\n226: \t\tMockSendEmail = func(context.Context, string, txemail.Message) (err error) {\n227: \t\t\tcalls++\n228: \t\t\treturn nil\n229: \t\t}\n230: \t\tmockSiteConfigSigningKey()\n231: \t\tdefer func() {\n232: \t\t\tMockSendEmail = nil\n233: \t\t\tmockDefaultSiteConfig()\n234: \t\t}()\n235: \n236: \t\terr := s.SendUnlockAccountEmail(context.Background(), 1, \"foo@bar.baz\")\n237: \t\tassert.Empty(t, err)\n238: \t\tassert.Equal(t, 0, calls, \"email should not have been sent yet, as account is not locked\")\n239: \n240: \t\ts.IncreaseFailedAttempt(1)\n241: \t\terr = s.SendUnlockAccountEmail(context.Background(), 1, \"foo@bar.baz\")\n242: \t\tassert.Empty(t, err)\n243: \t\tassert.Equal(t, 1, calls, \"should have sent 1 email\")\n244: \n245: \t\terr = s.SendUnlockAccountEmail(context.Background(), 1, \"foo@bar.baz\")\n246: \t\tassert.Empty(t, err)\n247: \t\tassert.Equal(t, 1, calls, \"should have sent only 1 email\")\n248: \t})\n249: }",
+      "end_line": 249,
+      "path_lines": 249,
+      "start_line": 180
+    },
+    "usage": {
+      "input_tokens": 5963,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 1808,
+      "output_tokens_details": {
+        "reasoning_tokens": 1568
+      },
+      "total_tokens": 7771
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "cmd/frontend/internal/auth/userpasswd/lockout.go",
+      "query": "lockoutStore{"
+    },
+    "response_chars": 299,
+    "round": 4,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 55,
+          "text": "\treturn &lockoutStore{"
+        }
+      ],
+      "query": "lockoutStore{",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 6854,
+      "input_tokens_details": {
+        "cached_tokens": 5376
+      },
+      "output_tokens": 987,
+      "output_tokens_details": {
+        "reasoning_tokens": 892
+      },
+      "total_tokens": 7841
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "cmd/frontend/internal/auth/userpasswd",
+      "query": "NewLockoutStore("
+    },
+    "response_chars": 1341,
+    "round": 5,
+    "tool_result": {
+      "matches": [],
+      "query": "NewLockoutStore(",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 6928,
+      "input_tokens_details": {
+        "cached_tokens": 6400
+      },
+      "output_tokens": 1288,
+      "output_tokens_details": {
+        "reasoning_tokens": 900
+      },
+      "total_tokens": 8216
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "",
+          "end_line": 21,
+          "start_line": 21
+        },
+        {
+          "content": "\tsendEmail       func(context.Context, string, txemail.Message) (err error)\n",
+          "end_line": 49,
+          "start_line": 50
+        },
+        {
+          "content": "\t\tsendEmail:       txemail.Send,\n",
+          "end_line": 60,
+          "start_line": 61
+        },
+        {
+          "content": "\terr = s.sendEmail(ctx, \"account_unlock\", txemail.Message{",
+          "end_line": 161,
+          "start_line": 157
+        }
+      ]
+    },
+    "response_chars": 875,
+    "round": 6,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 21,
+          "replacement_lines": 0,
+          "start_line": 21
+        },
+        {
+          "end_line": 49,
+          "replacement_lines": 1,
+          "start_line": 50
+        },
+        {
+          "end_line": 60,
+          "replacement_lines": 1,
+          "start_line": 61
+        },
+        {
+          "end_line": 161,
+          "replacement_lines": 1,
+          "start_line": 157
+        }
+      ],
+      "current_file_lines": 274,
+      "updated_excerpt": {
+        "content": "11: \t\"github.com/golang-jwt/jwt/v4\"\n12: \n13: \t\"github.com/sourcegraph/sourcegraph/cmd/frontend/globals\"\n14: \t\"github.com/sourcegraph/sourcegraph/internal/conf\"\n15: \t\"github.com/sourcegraph/sourcegraph/internal/rcache\"\n16: \t\"github.com/sourcegraph/sourcegraph/internal/txemail\"\n17: \t\"github.com/sourcegraph/sourcegraph/internal/txemail/txtypes\"\n18: \t\"github.com/sourcegraph/sourcegraph/lib/errors\"\n19: )\n20: \n21: \n22: // LockoutStore provides semantics for account lockout management.\n23: type LockoutStore interface {\n24: \t// IsLockedOut returns true if the given user has been locked along with the\n25: \t// reason.\n26: \tIsLockedOut(userID int32) (reason string, locked bool)\n27: \t// IncreaseFailedAttempt increases the failed login attempt count by 1.\n28: \tIncreaseFailedAttempt(userID int32)\n29: \t// Reset clears the failed login attempt count and releases the lockout.\n30: \tReset(userID int32)\n31: \t// GenerateUnlockAccountURL creates the URL to unlock account with a signet\n32: \t// unlock token.\n33: \tGenerateUnlockAccountURL(userID int32) (string, string, error)\n34: \t// VerifyUnlockAccountTokenAndReset verifies the provided unlock token is valid.\n35: \tVerifyUnlockAccountTokenAndReset(urlToken string) (bool, error)\n36: \t// SendUnlockAccountEmail sends an email to the locked account email providing a\n37: \t// temporary unlock link.\n38: \tSendUnlockAccountEmail(ctx context.Context, userID int32, userEmail string) error\n39: \t// Returns true if the unlock account email has already been sent\n40: \tUnlockEmailSent(userID int32) bool\n41: }\n42: \n43: type lockoutStore struct {\n44: \tfailedThreshold int\n45: \tlockouts        *rcache.Cache\n46: \tfailedAttempts  *rcache.Cache\n47: \tunlockToken     *rcache.Cache\n48: \tunlockEmailSent *rcache.Cache\n49: \tsendEmail       func(context.Context, string, txemail.Message) (err error)\n50: }\n51: ",
+        "end_line": 51,
+        "path_lines": 274,
+        "start_line": 11
+      }
+    },
+    "usage": {
+      "input_tokens": 6982,
+      "input_tokens_details": {
+        "cached_tokens": 6400
+      },
+      "output_tokens": 1462,
+      "output_tokens_details": {
+        "reasoning_tokens": 1190
+      },
+      "total_tokens": 8444
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 170,
+      "path": "cmd/frontend/internal/auth/userpasswd/lockout.go",
+      "start_line": 43
+    },
+    "response_chars": 320,
+    "round": 7,
+    "tool_result": {
+      "content": "43: type lockoutStore struct {\n44: \tfailedThreshold int\n45: \tlockouts        *rcache.Cache\n46: \tfailedAttempts  *rcache.Cache\n47: \tunlockToken     *rcache.Cache\n48: \tunlockEmailSent *rcache.Cache\n49: \tsendEmail       func(context.Context, string, txemail.Message) (err error)\n50: }\n51: \n52: // NewLockoutStore returns a new LockoutStore with given durations using the\n53: // Redis cache.\n54: func NewLockoutStore(failedThreshold int, lockoutPeriod, consecutivePeriod time.Duration) LockoutStore {\n55: \treturn &lockoutStore{\n56: \t\tfailedThreshold: failedThreshold,\n57: \t\tlockouts:        rcache.NewWithTTL(\"account_lockout\", int(lockoutPeriod.Seconds())),\n58: \t\tfailedAttempts:  rcache.NewWithTTL(\"account_failed_attempts\", int(consecutivePeriod.Seconds())),\n59: \t\tunlockToken:     rcache.NewWithTTL(\"account_unlock_token\", int(lockoutPeriod.Seconds())),\n60: \t\tunlockEmailSent: rcache.NewWithTTL(\"account_lockout_email_sent\", int(lockoutPeriod.Seconds())),\n61: \t\tsendEmail:       txemail.Send,\n62: \t}\n63: }\n64: \n65: func key(userID int32) string {\n66: \treturn strconv.Itoa(int(userID))\n67: }\n68: \n69: func (s *lockoutStore) IsLockedOut(userID int32) (reason string, locked bool) {\n70: \tv, locked := s.lockouts.Get(key(userID))\n71: \treturn string(v), locked\n72: }\n73: \n74: func (s *lockoutStore) IncreaseFailedAttempt(userID int32) {\n75: \tmetricsAccountFailedSignInAttempts.Inc()\n76: \n77: \tkey := key(userID)\n78: \ts.failedAttempts.Increase(key)\n79: \n80: \t// Get right after Increase should make the key always exist\n81: \tv, _ := s.failedAttempts.Get(key)\n82: \tcount, _ := strconv.Atoi(string(v))\n83: \tif count >= s.failedThreshold {\n84: \t\tmetricsAccountLockouts.Inc()\n85: \t\ts.lockouts.Set(key, []byte(\"too many failed attempts\"))\n86: \t}\n87: }\n88: \n89: type unlockAccountClaims struct {\n90: \tUserID int32 `json:\"user_id\"`\n91: \tjwt.RegisteredClaims\n92: }\n93: \n94: func (s *lockoutStore) GenerateUnlockAccountURL(userID int32) (string, string, error) {\n95: \tkey := key(userID)\n96: \tttl, exists := s.lockouts.KeyTTL(key)\n97: \n98: \tif !exists {\n99: \t\treturn \"\", \"\", errors.Newf(\"user with id %d is not locked out, cannot generate unlock url\")\n100: \t}\n101: \n102: \tsigningKey := conf.SiteConfig().AuthUnlockAccountLinkSigningKey\n103: \tif signingKey == \"\" {\n104: \t\treturn \"\", \"\", errors.Newf(`signing key not provided, cannot validate JWT on unlock account URL. Please add \"auth.unlockAccountLinkSigningKey\" to site configuration.`)\n105: \t}\n106: \n107: \texpiryTime := time.Now().Add(time.Second * time.Duration(ttl))\n108: \n109: \ttoken := jwt.NewWithClaims(jwt.SigningMethodHS512, &unlockAccountClaims{\n110: \t\tRegisteredClaims: jwt.RegisteredClaims{\n111: \t\t\tIssuer:    globals.ExternalURL().String(),\n112: \t\t\tExpiresAt: jwt.NewNumericDate(expiryTime),\n113: \t\t\tSubject:   strconv.FormatInt(int64(userID), 10),\n114: \t\t},\n115: \t\tUserID: userID,\n116: \t})\n117: \n118: \t// Sign and get the complete encoded token as a string using the secret\n119: \tdecodedSigningKey, err := base64.StdEncoding.DecodeString(signingKey)\n120: \tif err != nil {\n121: \t\treturn \"\", \"\", err\n122: \t}\n123: \ttokenString, err := token.SignedString(decodedSigningKey)\n124: \tif err != nil {\n125: \t\treturn \"\", \"\", err\n126: \t}\n127: \n128: \ts.unlockToken.SetWithTTL(key, []byte(tokenString), ttl)\n129: \n130: \tpath := fmt.Sprintf(\"/unlock-account/%s\", tokenString)\n131: \n132: \treturn globals.ExternalURL().ResolveReference(&url.URL{Path: path}).String(), tokenString, nil\n133: }\n134: \n135: func formatExpiryTime(ttl int) string {\n136: \tminutes := ttl / 60\n137: \tseconds := ttl\n138: \n139: \tif minutes < 1 {\n140: \t\treturn fmt.Sprintf(\"%d seconds\", seconds)\n141: \t}\n142: \treturn fmt.Sprintf(\"%d minutes\", minutes)\n143: }\n144: \n145: func (s *lockoutStore) SendUnlockAccountEmail(ctx context.Context, userID int32, recipientEmail string) error {\n146: \tkey := key(userID)\n147: \tttl, exists := s.lockouts.KeyTTL(key)\n148: \n149: \tif !exists || s.UnlockEmailSent(userID) {\n150: \t\treturn nil\n151: \t}\n152: \n153: \tunlockUrl, _, err := s.GenerateUnlockAccountURL(userID)\n154: \tif err != nil {\n155: \t\treturn err\n156: \t}\n157: \n158: \terr = s.sendEmail(ctx, \"account_unlock\", txemail.Message{\n159: \t\tTo:       []string{recipientEmail},\n160: \t\tTemplate: emailTemplates,\n161: \t\tData: struct {\n162: \t\t\tUnlockAccountUrl string\n163: \t\t\tExpiryTime       string\n164: \t\t}{\n165: \t\t\tUnlockAccountUrl: unlockUrl,\n166: \t\t\tExpiryTime:       formatExpiryTime(ttl),\n167: \t\t},\n168: \t})\n169: \tif err == nil {\n170: \t\ts.unlockEmailSent.SetWithTTL(key, []byte(\"sent\"), ttl)",
+      "end_line": 170,
+      "path_lines": 274,
+      "start_line": 43
+    },
+    "usage": {
+      "input_tokens": 7795,
+      "input_tokens_details": {
+        "cached_tokens": 6400
+      },
+      "output_tokens": 484,
+      "output_tokens_details": {
+        "reasoning_tokens": 380
+      },
+      "total_tokens": 8279
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "cmd/frontend/internal/auth/userpasswd/lockout.go",
+      "query": "MockSendEmail"
+    },
+    "response_chars": 199,
+    "round": 8,
+    "tool_result": {
+      "matches": [],
+      "query": "MockSendEmail",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 9431,
+      "input_tokens_details": {
+        "cached_tokens": 7424
+      },
+      "output_tokens": 662,
+      "output_tokens_details": {
+        "reasoning_tokens": 601
+      },
+      "total_tokens": 10093
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "",
+          "end_line": 21,
+          "start_line": 21
+        },
+        {
+          "content": "\temailF := s.sendEmail\n\tif emailF == nil {\n\t\temailF = txemail.Send\n\t}\n\terr = emailF(ctx, \"account_unlock\", txemail.Message{",
+          "end_line": 158,
+          "start_line": 158
+        }
+      ]
+    },
+    "response_chars": 617,
+    "round": 9,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 21,
+          "replacement_lines": 0,
+          "start_line": 21
+        },
+        {
+          "end_line": 158,
+          "replacement_lines": 5,
+          "start_line": 158
+        }
+      ],
+      "current_file_lines": 277,
+      "updated_excerpt": {
+        "content": "11: \t\"github.com/golang-jwt/jwt/v4\"\n12: \n13: \t\"github.com/sourcegraph/sourcegraph/cmd/frontend/globals\"\n14: \t\"github.com/sourcegraph/sourcegraph/internal/conf\"\n15: \t\"github.com/sourcegraph/sourcegraph/internal/rcache\"\n16: \t\"github.com/sourcegraph/sourcegraph/internal/txemail\"\n17: \t\"github.com/sourcegraph/sourcegraph/internal/txemail/txtypes\"\n18: \t\"github.com/sourcegraph/sourcegraph/lib/errors\"\n19: )\n20: \n21: // LockoutStore provides semantics for account lockout management.\n22: type LockoutStore interface {\n23: \t// IsLockedOut returns true if the given user has been locked along with the\n24: \t// reason.\n25: \tIsLockedOut(userID int32) (reason string, locked bool)\n26: \t// IncreaseFailedAttempt increases the failed login attempt count by 1.\n27: \tIncreaseFailedAttempt(userID int32)\n28: \t// Reset clears the failed login attempt count and releases the lockout.\n29: \tReset(userID int32)\n30: \t// GenerateUnlockAccountURL creates the URL to unlock account with a signet\n31: \t// unlock token.\n32: \tGenerateUnlockAccountURL(userID int32) (string, string, error)\n33: \t// VerifyUnlockAccountTokenAndReset verifies the provided unlock token is valid.\n34: \tVerifyUnlockAccountTokenAndReset(urlToken string) (bool, error)\n35: \t// SendUnlockAccountEmail sends an email to the locked account email providing a\n36: \t// temporary unlock link.\n37: \tSendUnlockAccountEmail(ctx context.Context, userID int32, userEmail string) error\n38: \t// Returns true if the unlock account email has already been sent\n39: \tUnlockEmailSent(userID int32) bool\n40: }\n41: \n42: type lockoutStore struct {\n43: \tfailedThreshold int\n44: \tlockouts        *rcache.Cache\n45: \tfailedAttempts  *rcache.Cache\n46: \tunlockToken     *rcache.Cache\n47: \tunlockEmailSent *rcache.Cache\n48: \tsendEmail       func(context.Context, string, txemail.Message) (err error)\n49: }\n50: \n51: // NewLockoutStore returns a new LockoutStore with given durations using the",
+        "end_line": 51,
+        "path_lines": 277,
+        "start_line": 11
+      }
+    },
+    "usage": {
+      "input_tokens": 9486,
+      "input_tokens_details": {
+        "cached_tokens": 8960
+      },
+      "output_tokens": 1064,
+      "output_tokens_details": {
+        "reasoning_tokens": 851
+      },
+      "total_tokens": 10550
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 168,
+      "path": "cmd/frontend/internal/auth/userpasswd/lockout.go",
+      "start_line": 145
+    },
+    "response_chars": 343,
+    "round": 10,
+    "tool_result": {
+      "content": "145: \tkey := key(userID)\n146: \tttl, exists := s.lockouts.KeyTTL(key)\n147: \n148: \tif !exists || s.UnlockEmailSent(userID) {\n149: \t\treturn nil\n150: \t}\n151: \n152: \tunlockUrl, _, err := s.GenerateUnlockAccountURL(userID)\n153: \tif err != nil {\n154: \t\treturn err\n155: \t}\n156: \n157: \temailF := s.sendEmail\n158: \tif emailF == nil {\n159: \t\temailF = txemail.Send\n160: \t}\n161: \terr = emailF(ctx, \"account_unlock\", txemail.Message{\n162: \t\tTo:       []string{recipientEmail},\n163: \t\tTemplate: emailTemplates,\n164: \t\tData: struct {\n165: \t\t\tUnlockAccountUrl string\n166: \t\t\tExpiryTime       string\n167: \t\t}{\n168: \t\t\tUnlockAccountUrl: unlockUrl,",
+      "end_line": 168,
+      "path_lines": 277,
+      "start_line": 145
+    },
+    "usage": {
+      "input_tokens": 10233,
+      "input_tokens_details": {
+        "cached_tokens": 8960
+      },
+      "output_tokens": 1291,
+      "output_tokens_details": {
+        "reasoning_tokens": 1175
+      },
+      "total_tokens": 11524
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 11,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__sourcegraph__sourcegraph-public-snapshot__pull_45479__comment_1044503779__testability.patch"
+    },
+    "usage": {
+      "input_tokens": 10553,
+      "input_tokens_details": {
+        "cached_tokens": 9984
+      },
+      "output_tokens": 534,
+      "output_tokens_details": {
+        "reasoning_tokens": 516
+      },
+      "total_tokens": 11087
+    }
+  }
+]

@@ -1,0 +1,185 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 133,
+      "path": "cmd/frontend/graphqlbackend/site_config_change_connection.go",
+      "start_line": 1
+    },
+    "response_chars": 117,
+    "response_object_count": 1,
+    "round": 1,
+    "tool_result": {
+      "content": "1: package graphqlbackend\n2: \n3: import (\n4: \t\"context\"\n5: \n6: \t\"github.com/graph-gophers/graphql-go\"\n7: \t\"github.com/graph-gophers/graphql-go/relay\"\n8: \t\"github.com/sourcegraph/sourcegraph/internal/database\"\n9: \t\"github.com/sourcegraph/sourcegraph/lib/errors\"\n10: )\n11: \n12: type SiteConfigurationChangeConnectionStore struct {\n13: \tdb database.DB\n14: }\n15: \n16: func (s *SiteConfigurationChangeConnectionStore) ComputeTotal(ctx context.Context) (*int32, error) {\n17: \tcount, err := s.db.Conf().GetSiteConfigCount(ctx)\n18: \tc := int32(count)\n19: \treturn &c, err\n20: }\n21: \n22: func copyIntPtr(n *int) *int {\n23: \tif n == nil {\n24: \t\treturn nil\n25: \t}\n26: \n27: \tc := *n\n28: \treturn &c\n29: }\n30: \n31: // modifyArgs will fetch one more than the originally requested number of items because we need one\n32: // older item to get the diff of the oldes item in the list.\n33: //\n34: // A separate function so that this can be tested in isolation.\n35: func modifyArgs(args *database.PaginationArgs) bool {\n36: \tvar modified bool\n37: \tif args.First != nil {\n38: \t\t*args.First += 1\n39: \t\tmodified = true\n40: \t} else if args.Last != nil && args.Before != nil {\n41: \t\tif *args.Before > 0 {\n42: \t\t\tmodified = true\n43: \t\t\t*args.Last += 1\n44: \t\t\t*args.Before -= 1\n45: \t\t}\n46: \t}\n47: \n48: \treturn modified\n49: }\n50: \n51: func (s *SiteConfigurationChangeConnectionStore) ComputeNodes(ctx context.Context, args *database.PaginationArgs) ([]*SiteConfigurationChangeResolver, error) {\n52: \tif args == nil {\n53: \t\treturn []*SiteConfigurationChangeResolver{}, errors.New(\"pagintation args cannot be nil\")\n54: \t}\n55: \n56: \t// NOTE: Do not modify \"args\" in-place because it is used by the caller of ComputeNodes to\n57: \t// determine next / previous page. Instead, dereference the values from args first (if\n58: \t// they're non-nil) and then assign them address of the new variables.\n59: \tpaginationArgs := &database.PaginationArgs{\n60: \t\tFirst:  copyIntPtr(args.First),\n61: \t\tLast:   copyIntPtr(args.Last),\n62: \t\tAfter:  copyIntPtr(args.After),\n63: \t\tBefore: copyIntPtr(args.Before),\n64: \t}\n65: \n66: \tisModifiedPaginationArgs := modifyArgs(paginationArgs)\n67: \n68: \thistory, err := s.db.Conf().ListSiteConfigs(ctx, paginationArgs)\n69: \tif err != nil {\n70: \t\treturn []*SiteConfigurationChangeResolver{}, err\n71: \t}\n72: \n73: \ttotalFetched := len(history)\n74: \tif totalFetched == 0 {\n75: \t\treturn []*SiteConfigurationChangeResolver{}, nil\n76: \t}\n77: \n78: \tresolvers := []*SiteConfigurationChangeResolver{}\n79: \tfor i := 0; i < totalFetched; i++ {\n80: \t\tvar previousSiteConfig *database.SiteConfig\n81: \t\t// If First is used then \"history\" is in descending order: 5, 4, 3, 2, 1. So look ahead for\n82: \t\t// the \"previousSiteConfig\", but also only if we're not at the end of the slice yet.\n83: \t\t//\n84: \t\t// \"previousSiteConfig\" for the last item in \"history\" will be nil and that is okay, because\n85: \t\t// we will truncate it from the end result being returned. The user did not request this.\n86: \t\t// _We_ fetched an extra item to determine the \"previousSiteConfig\" of all the items.\n87: \t\t//\n88: \t\t// Similarly, if Last is used then history is in ascending order: 1, 2, 3, 4, 5. So look\n89: \t\t// behind for the \"previousSiteConfig\", but also only if we're not at the start of the\n90: \t\t// slice.\n91: \t\t//\n92: \t\t// \"previousSiteConfig\" will be nil for the first item in history in this case and that is\n93: \t\t// okay, because we will truncate it from the end result being returned. The user did not\n94: \t\t// request this. _We_ fetched an extra item to determine the \"previousSiteConfig\" of all the\n95: \t\t// items.\n96: \t\tif paginationArgs.First != nil && i != totalFetched-1 {\n97: \t\t\tpreviousSiteConfig = history[i+1]\n98: \t\t} else if paginationArgs.Last != nil && i > 0 {\n99: \t\t\tpreviousSiteConfig = history[i-1]\n100: \t\t}\n101: \n102: \t\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{\n103: \t\t\tdb:                 s.db,\n104: \t\t\tsiteConfig:         history[i],\n105: \t\t\tpreviousSiteConfig: previousSiteConfig,\n106: \t\t})\n107: \t}\n108: \n109: \tif isModifiedPaginationArgs {\n110: \t\tif paginationArgs.Last != nil {\n111: \t\t\tresolvers = resolvers[1:]\n112: \t\t} else if paginationArgs.First != nil && totalFetched == *paginationArgs.First {\n113: \t\t\tresolvers = resolvers[:len(resolvers)-1]\n114: \t\t}\n115: \t}\n116: \n117: \treturn resolvers, nil\n118: }\n119: \n120: func (s *SiteConfigurationChangeConnectionStore) MarshalCursor(node *SiteConfigurationChangeResolver) (*string, error) {\n121: \tcursor := string(node.ID())\n122: \treturn &cursor, nil\n123: }\n124: \n125: func (s *SiteConfigurationChangeConnectionStore) UnmarshalCursor(cursor string) (*int, error) {\n126: \tvar id int\n127: \terr := relay.UnmarshalSpec(graphql.ID(cursor), &id)\n128: \tif err != nil {\n129: \t\treturn nil, err\n130: \t}\n131: \n132: \treturn &id, err\n133: }",
+      "end_line": 133,
+      "path_lines": 133,
+      "start_line": 1
+    },
+    "usage": {
+      "completion_tokens": 38,
+      "prompt_tokens": 2209,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "reasoning_tokens": 4515,
+      "total_tokens": 6762
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\tvar resolvers []*SiteConfigurationChangeResolver\n\tif paginationArgs.First != nil {\n\t\tresolvers = s.computeNodesFirst(history)\n\t} else if paginationArgs.Last != nil {\n\t\tresolvers = s.computeNodesLast(history)\n\t} else {\n\t\tresolvers = s.computeNodesFirst(history)\n\t}\n\n\tif isModifiedPaginationArgs {\n\t\tif paginationArgs.Last != nil {\n\t\t\tresolvers = resolvers[1:]\n\t\t} else if paginationArgs.First != nil && totalFetched == *paginationArgs.First {\n\t\t\tresolvers = resolvers[:len(resolvers)-1]\n\t\t}\n\t}\n\n\treturn resolvers, nil\n}\n\nfunc (s *SiteConfigurationChangeConnectionStore) computeNodesFirst(history []*database.SiteConfig) []*SiteConfigurationChangeResolver {\n\tresolvers := make([]*SiteConfigurationChangeResolver, 0, len(history))\n\tfor i := 0; i < len(history)-1; i++ {\n\t\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{\n\t\t\tdb:                 s.db,\n\t\t\tsiteConfig:         history[i],\n\t\t\tpreviousSiteConfig: history[i+1],\n\t\t})\n\t}\n\tif len(history) > 0 {\n\t\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{\n\t\t\tdb:         s.db,\n\t\t\tsiteConfig: history[len(history)-1],\n\t\t})\n\t}\n\treturn resolvers\n}\n\nfunc (s *SiteConfigurationChangeConnectionStore) computeNodesLast(history []*database.SiteConfig) []*SiteConfigurationChangeResolver {\n\tresolvers := make([]*SiteConfigurationChangeResolver, 0, len(history))\n\tif len(history) > 0 {\n\t\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{\n\t\t\tdb:         s.db,\n\t\t\tsiteConfig: history[0],\n\t\t})\n\t}\n\tfor i := 1; i < len(history); i++ {\n\t\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{\n\t\t\tdb:                 s.db,\n\t\t\tsiteConfig:         history[i],\n\t\t\tpreviousSiteConfig: history[i-1],\n\t\t})\n\t}\n\treturn resolvers",
+          "end_line": 118,
+          "path": "cmd/frontend/graphqlbackend/site_config_change_connection.go",
+          "start_line": 78
+        }
+      ]
+    },
+    "raw_response_tail": "{\"action\":\"edit\",\"edits\":[{\"content\":\"\\tvar resolvers []*SiteConfigurationChangeResolver\\n\\tif paginationArgs.First != nil {\\n\\t\\tresolvers = s.computeNodesFirst(history)\\n\\t} else if paginationArgs.Last != nil {\\n\\t\\tresolvers = s.computeNodesLast(history)\\n\\t} else {\\n\\t\\tresolvers = s.computeNodesFirst(history)\\n\\t}\\n\\n\\tif isModifiedPaginationArgs {\\n\\t\\tif paginationArgs.Last != nil {\\n\\t\\t\\tresolvers = resolvers[1:]\\n\\t\\t} else if paginationArgs.First != nil && totalFetched == *paginationArgs.First {\\n\\t\\t\\tresolvers = resolvers[:len(resolvers)-1]\\n\\t\\t}\\n\\t}\\n\\n\\treturn resolvers, nil\\n}\\n\\nfunc (s *SiteConfigurationChangeConnectionStore) computeNodesFirst(history []*database.SiteConfig) []*SiteConfigurationChangeResolver {\\n\\tresolvers := make([]*SiteConfigurationChangeResolver, 0, len(history))\\n\\tfor i := 0; i < len(history)-1; i++ {\\n\\t\\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{\\n\\t\\t\\tdb:                 s.db,\\n\\t\\t\\tsiteConfig:         history[i],\\n\\t\\t\\tpreviousSiteConfig: history[i+1],\\n\\t\\t})\\n\\t}\\n\\tif len(history) > 0 {\\n\\t\\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{\\n\\t\\t\\tdb:         s.db,\\n\\t\\t\\tsiteConfig: history[len(history)-1],\\n\\t\\t})\\n\\t}\\n\\treturn resolvers\\n}\\n\\nfunc (s *SiteConfigurationChangeConnectionStore) computeNodesLast(history []*database.SiteConfig) []*SiteConfigurationChangeResolver {\\n\\tresolvers := make([]*SiteConfigurationChangeResolver, 0, len(history))\\n\\tif len(history) > 0 {\\n\\t\\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{\\n\\t\\t\\tdb:         s.db,\\n\\t\\t\\tsiteConfig: history[0],\\n\\t\\t})\\n\\t}\\n\\tfor i := 1; i < len(history); i++ {\\n\\t\\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{\\n\\t\\t\\tdb:                 s.db,\\n\\t\\t\\tsiteConfig:         history[i],\\n\\t\\t\\tpreviousSiteConfig: history[i-1],\\n\\t\\t})\\n\\t}\\n\\treturn resolvers\",\"end_line\":118,\"path\":\"cmd/frontend/graphqlbackend/site_config_change_connection.go\",\"start_line\":78}]}",
+    "response_chars": 1983,
+    "response_object_count": 2,
+    "round": 2,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 118,
+          "replacement_lines": 54,
+          "start_line": 78
+        }
+      ],
+      "current_file_lines": 146,
+      "updated_excerpt": {
+        "content": "68: \thistory, err := s.db.Conf().ListSiteConfigs(ctx, paginationArgs)\n69: \tif err != nil {\n70: \t\treturn []*SiteConfigurationChangeResolver{}, err\n71: \t}\n72: \n73: \ttotalFetched := len(history)\n74: \tif totalFetched == 0 {\n75: \t\treturn []*SiteConfigurationChangeResolver{}, nil\n76: \t}\n77: \n78: \tvar resolvers []*SiteConfigurationChangeResolver\n79: \tif paginationArgs.First != nil {\n80: \t\tresolvers = s.computeNodesFirst(history)\n81: \t} else if paginationArgs.Last != nil {\n82: \t\tresolvers = s.computeNodesLast(history)\n83: \t} else {\n84: \t\tresolvers = s.computeNodesFirst(history)\n85: \t}\n86: \n87: \tif isModifiedPaginationArgs {\n88: \t\tif paginationArgs.Last != nil {\n89: \t\t\tresolvers = resolvers[1:]\n90: \t\t} else if paginationArgs.First != nil && totalFetched == *paginationArgs.First {\n91: \t\t\tresolvers = resolvers[:len(resolvers)-1]\n92: \t\t}\n93: \t}\n94: \n95: \treturn resolvers, nil\n96: }\n97: \n98: func (s *SiteConfigurationChangeConnectionStore) computeNodesFirst(history []*database.SiteConfig) []*SiteConfigurationChangeResolver {\n99: \tresolvers := make([]*SiteConfigurationChangeResolver, 0, len(history))\n100: \tfor i := 0; i < len(history)-1; i++ {\n101: \t\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{\n102: \t\t\tdb:                 s.db,\n103: \t\t\tsiteConfig:         history[i],\n104: \t\t\tpreviousSiteConfig: history[i+1],\n105: \t\t})\n106: \t}\n107: \tif len(history) > 0 {\n108: \t\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{",
+        "end_line": 108,
+        "path_lines": 146,
+        "start_line": 68
+      }
+    },
+    "usage": {
+      "completion_tokens": 667,
+      "prompt_tokens": 4251,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "reasoning_tokens": 6006,
+      "total_tokens": 10924
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 146,
+      "path": "cmd/frontend/graphqlbackend/site_config_change_connection.go",
+      "start_line": 70
+    },
+    "response_chars": 118,
+    "response_object_count": 1,
+    "round": 3,
+    "tool_result": {
+      "content": "70: \t\treturn []*SiteConfigurationChangeResolver{}, err\n71: \t}\n72: \n73: \ttotalFetched := len(history)\n74: \tif totalFetched == 0 {\n75: \t\treturn []*SiteConfigurationChangeResolver{}, nil\n76: \t}\n77: \n78: \tvar resolvers []*SiteConfigurationChangeResolver\n79: \tif paginationArgs.First != nil {\n80: \t\tresolvers = s.computeNodesFirst(history)\n81: \t} else if paginationArgs.Last != nil {\n82: \t\tresolvers = s.computeNodesLast(history)\n83: \t} else {\n84: \t\tresolvers = s.computeNodesFirst(history)\n85: \t}\n86: \n87: \tif isModifiedPaginationArgs {\n88: \t\tif paginationArgs.Last != nil {\n89: \t\t\tresolvers = resolvers[1:]\n90: \t\t} else if paginationArgs.First != nil && totalFetched == *paginationArgs.First {\n91: \t\t\tresolvers = resolvers[:len(resolvers)-1]\n92: \t\t}\n93: \t}\n94: \n95: \treturn resolvers, nil\n96: }\n97: \n98: func (s *SiteConfigurationChangeConnectionStore) computeNodesFirst(history []*database.SiteConfig) []*SiteConfigurationChangeResolver {\n99: \tresolvers := make([]*SiteConfigurationChangeResolver, 0, len(history))\n100: \tfor i := 0; i < len(history)-1; i++ {\n101: \t\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{\n102: \t\t\tdb:                 s.db,\n103: \t\t\tsiteConfig:         history[i],\n104: \t\t\tpreviousSiteConfig: history[i+1],\n105: \t\t})\n106: \t}\n107: \tif len(history) > 0 {\n108: \t\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{\n109: \t\t\tdb:         s.db,\n110: \t\t\tsiteConfig: history[len(history)-1],\n111: \t\t})\n112: \t}\n113: \treturn resolvers\n114: }\n115: \n116: func (s *SiteConfigurationChangeConnectionStore) computeNodesLast(history []*database.SiteConfig) []*SiteConfigurationChangeResolver {\n117: \tresolvers := make([]*SiteConfigurationChangeResolver, 0, len(history))\n118: \tif len(history) > 0 {\n119: \t\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{\n120: \t\t\tdb:         s.db,\n121: \t\t\tsiteConfig: history[0],\n122: \t\t})\n123: \t}\n124: \tfor i := 1; i < len(history); i++ {\n125: \t\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{\n126: \t\t\tdb:                 s.db,\n127: \t\t\tsiteConfig:         history[i],\n128: \t\t\tpreviousSiteConfig: history[i-1],\n129: \t\t})\n130: \t}\n131: \treturn resolvers\n132: \n133: func (s *SiteConfigurationChangeConnectionStore) MarshalCursor(node *SiteConfigurationChangeResolver) (*string, error) {\n134: \tcursor := string(node.ID())\n135: \treturn &cursor, nil\n136: }\n137: \n138: func (s *SiteConfigurationChangeConnectionStore) UnmarshalCursor(cursor string) (*int, error) {\n139: \tvar id int\n140: \terr := relay.UnmarshalSpec(graphql.ID(cursor), &id)\n141: \tif err != nil {\n142: \t\treturn nil, err\n143: \t}\n144: \n145: \treturn &id, err\n146: }",
+      "end_line": 146,
+      "path_lines": 146,
+      "start_line": 70
+    },
+    "usage": {
+      "completion_tokens": 39,
+      "prompt_tokens": 5596,
+      "prompt_tokens_details": {
+        "cached_tokens": 4068
+      },
+      "reasoning_tokens": 88,
+      "total_tokens": 5723
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\treturn resolvers\n}",
+          "end_line": 132,
+          "start_line": 131
+        }
+      ],
+      "path": "cmd/frontend/graphqlbackend/site_config_change_connection.go"
+    },
+    "raw_response_tail": "{\"action\":\"edit\",\"edits\":[{\"start_line\":131,\"end_line\":132,\"content\":\"\\treturn resolvers\\n}\"}],\"path\":\"cmd/frontend/graphqlbackend/site_config_change_connection.go\"}",
+    "response_chars": 165,
+    "response_object_count": 2,
+    "round": 4,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 132,
+          "replacement_lines": 2,
+          "start_line": 131
+        }
+      ],
+      "current_file_lines": 146,
+      "updated_excerpt": {
+        "content": "121: \t\t\tsiteConfig: history[0],\n122: \t\t})\n123: \t}\n124: \tfor i := 1; i < len(history); i++ {\n125: \t\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{\n126: \t\t\tdb:                 s.db,\n127: \t\t\tsiteConfig:         history[i],\n128: \t\t\tpreviousSiteConfig: history[i-1],\n129: \t\t})\n130: \t}\n131: \treturn resolvers\n132: }\n133: func (s *SiteConfigurationChangeConnectionStore) MarshalCursor(node *SiteConfigurationChangeResolver) (*string, error) {\n134: \tcursor := string(node.ID())\n135: \treturn &cursor, nil\n136: }\n137: \n138: func (s *SiteConfigurationChangeConnectionStore) UnmarshalCursor(cursor string) (*int, error) {\n139: \tvar id int\n140: \terr := relay.UnmarshalSpec(graphql.ID(cursor), &id)\n141: \tif err != nil {\n142: \t\treturn nil, err\n143: \t}\n144: \n145: \treturn &id, err\n146: }",
+        "end_line": 146,
+        "path_lines": 146,
+        "start_line": 121
+      }
+    },
+    "usage": {
+      "completion_tokens": 54,
+      "prompt_tokens": 6782,
+      "prompt_tokens_details": {
+        "cached_tokens": 4073
+      },
+      "reasoning_tokens": 114,
+      "total_tokens": 6950
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 146,
+      "path": "cmd/frontend/graphqlbackend/site_config_change_connection.go",
+      "start_line": 70
+    },
+    "response_chars": 118,
+    "response_object_count": 1,
+    "round": 5,
+    "tool_result": {
+      "content": "70: \t\treturn []*SiteConfigurationChangeResolver{}, err\n71: \t}\n72: \n73: \ttotalFetched := len(history)\n74: \tif totalFetched == 0 {\n75: \t\treturn []*SiteConfigurationChangeResolver{}, nil\n76: \t}\n77: \n78: \tvar resolvers []*SiteConfigurationChangeResolver\n79: \tif paginationArgs.First != nil {\n80: \t\tresolvers = s.computeNodesFirst(history)\n81: \t} else if paginationArgs.Last != nil {\n82: \t\tresolvers = s.computeNodesLast(history)\n83: \t} else {\n84: \t\tresolvers = s.computeNodesFirst(history)\n85: \t}\n86: \n87: \tif isModifiedPaginationArgs {\n88: \t\tif paginationArgs.Last != nil {\n89: \t\t\tresolvers = resolvers[1:]\n90: \t\t} else if paginationArgs.First != nil && totalFetched == *paginationArgs.First {\n91: \t\t\tresolvers = resolvers[:len(resolvers)-1]\n92: \t\t}\n93: \t}\n94: \n95: \treturn resolvers, nil\n96: }\n97: \n98: func (s *SiteConfigurationChangeConnectionStore) computeNodesFirst(history []*database.SiteConfig) []*SiteConfigurationChangeResolver {\n99: \tresolvers := make([]*SiteConfigurationChangeResolver, 0, len(history))\n100: \tfor i := 0; i < len(history)-1; i++ {\n101: \t\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{\n102: \t\t\tdb:                 s.db,\n103: \t\t\tsiteConfig:         history[i],\n104: \t\t\tpreviousSiteConfig: history[i+1],\n105: \t\t})\n106: \t}\n107: \tif len(history) > 0 {\n108: \t\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{\n109: \t\t\tdb:         s.db,\n110: \t\t\tsiteConfig: history[len(history)-1],\n111: \t\t})\n112: \t}\n113: \treturn resolvers\n114: }\n115: \n116: func (s *SiteConfigurationChangeConnectionStore) computeNodesLast(history []*database.SiteConfig) []*SiteConfigurationChangeResolver {\n117: \tresolvers := make([]*SiteConfigurationChangeResolver, 0, len(history))\n118: \tif len(history) > 0 {\n119: \t\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{\n120: \t\t\tdb:         s.db,\n121: \t\t\tsiteConfig: history[0],\n122: \t\t})\n123: \t}\n124: \tfor i := 1; i < len(history); i++ {\n125: \t\tresolvers = append(resolvers, &SiteConfigurationChangeResolver{\n126: \t\t\tdb:                 s.db,\n127: \t\t\tsiteConfig:         history[i],\n128: \t\t\tpreviousSiteConfig: history[i-1],\n129: \t\t})\n130: \t}\n131: \treturn resolvers\n132: }\n133: func (s *SiteConfigurationChangeConnectionStore) MarshalCursor(node *SiteConfigurationChangeResolver) (*string, error) {\n134: \tcursor := string(node.ID())\n135: \treturn &cursor, nil\n136: }\n137: \n138: func (s *SiteConfigurationChangeConnectionStore) UnmarshalCursor(cursor string) (*int, error) {\n139: \tvar id int\n140: \terr := relay.UnmarshalSpec(graphql.ID(cursor), &id)\n141: \tif err != nil {\n142: \t\treturn nil, err\n143: \t}\n144: \n145: \treturn &id, err\n146: }",
+      "end_line": 146,
+      "path_lines": 146,
+      "start_line": 70
+    },
+    "usage": {
+      "completion_tokens": 39,
+      "prompt_tokens": 7298,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "reasoning_tokens": 61,
+      "total_tokens": 7398
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "response_object_count": 1,
+    "round": 6,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gemini-3.5-flash/patches/github__sourcegraph__sourcegraph-public-snapshot__pull_46475__comment_1081440956__complexity.patch"
+    },
+    "usage": {
+      "completion_tokens": 5,
+      "prompt_tokens": 8484,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "reasoning_tokens": 545,
+      "total_tokens": 9034
+    }
+  }
+]

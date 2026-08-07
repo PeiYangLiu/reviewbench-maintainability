@@ -1,0 +1,72 @@
+diff --git a/airflow/docker.go b/airflow/docker.go
+index 376bdec..6ca45d0 100644
+--- a/airflow/docker.go
++++ b/airflow/docker.go
+@@ -557,37 +557,46 @@ func (d *DockerCompose) Settings(settingsFile, envFile string, connections, vari
+ 	if !fileState {
+ 		return errors.New("file specified does not exist")
+ 	}
+-	var containerID string
+-	for i := range psInfo {
+-		if strings.Contains(psInfo[i].Name, d.projectName) &&
+-			strings.Contains(psInfo[i].Name, WebserverDockerContainerName) {
+-			containerID = psInfo[i].ID
+-		}
++	containerID, err := d.getWebServerContainerID()
++	if err != nil {
++		return err
+ 	}
+-	if export && !envExport {
+-		err = exportSettings(containerID, settingsFile, airflowDockerVersion, connections, variables, pools, logs)
+-		if err != nil {
+-			return err
+-		}
+-		fmt.Println("\nAirflow objects exported to settings file")
++
++	if export {
++		return d.exportAirflowSettings(containerID, settingsFile, envFile, airflowDockerVersion, connections, variables, pools, envExport, logs)
+ 	}
+-	if envExport && export {
+-		err = envExportSettings(containerID, envFile, airflowDockerVersion, connections, variables, logs)
+-		if err != nil {
++	if envExport {
++		return nil
++	}
++	return d.importAirflowSettings(containerID, settingsFile, airflowDockerVersion, connections, variables, pools, logs)
++}
++
++// exportAirflowSettings exports the running Airflow objects to either a settings file or an env file
++func (d *DockerCompose) exportAirflowSettings(containerID, settingsFile, envFile string, airflowDockerVersion uint64, connections, variables, pools, envExport, logs bool) error {
++	if envExport {
++		if err := envExportSettings(containerID, envFile, airflowDockerVersion, connections, variables, logs); err != nil {
+ 			return err
+ 		}
+ 		fmt.Println("\nAirflow objects exported to env file")
++		return nil
+ 	}
+-	if !envExport && !export {
+-		err = initSettings(containerID, settingsFile, airflowDockerVersion, connections, variables, pools, logs)
+-		if err != nil {
+-			return err
+-		}
+-		fmt.Println("\nAirflow objects created from settings file")
++	if err := exportSettings(containerID, settingsFile, airflowDockerVersion, connections, variables, pools, logs); err != nil {
++		return err
+ 	}
++	fmt.Println("\nAirflow objects exported to settings file")
+ 	return nil
+ }
+ 
++// importAirflowSettings creates Airflow objects in the running project from a settings file
++func (d *DockerCompose) importAirflowSettings(containerID, settingsFile string, airflowDockerVersion uint64, connections, variables, pools, logs bool) error {
++	if err := initSettings(containerID, settingsFile, airflowDockerVersion, connections, variables, pools, logs); err != nil {
++		return err
++	}
++	fmt.Println("\nAirflow objects created from settings file")
++	return nil
++}
++}
++
+ func (d *DockerCompose) getWebServerContainerID() (string, error) {
+ 	psInfo, err := d.composeService.Ps(context.Background(), d.projectName, api.PsOptions{
+ 		All: true,

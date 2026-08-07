@@ -1,0 +1,91 @@
+--- a/internal/vendors/asrockrack/asrockrack.go
++++ b/internal/vendors/asrockrack/asrockrack.go
+@@ -24,6 +24,8 @@
+ 	srcCfg    *config.S3Bucket
+ 	dstCfg    *config.S3Bucket
+ }
++
++var errFirmwareExists = errors.New("firmware already exists at dst")
+ 
+ func New(ctx context.Context, firmwares []*serverservice.ComponentFirmwareVersion, cfgSyncer *config.Syncer, logger *logrus.Logger) (vendors.Vendor, error) {
+ 	// RepositoryURL required
+@@ -88,9 +90,27 @@
+ 			},
+ 		).Info("sync ASRockRack")
+ 
+-		err := a.copyFile(ctx, fw)
++		dstFs, tmpFs, srcFs, err := a.initRcloneFs(ctx, fw, a.logger)
+ 		if err != nil {
+ 			return err
++		}
++
++		if exists, _ := rcloneFs.FileExists(ctx, dstFs, dstPath); exists {
++			a.logFirmwareExists(fw)
++		} else {
++			err = vendors.VerifyFile(ctx, tmpFs, srcFs, fw)
++			if err != nil {
++				return err
++			}
++
++			err = a.copyFile(ctx, dstFs, srcFs, fw)
++			if err != nil {
++				if errors.Is(err, errFirmwareExists) {
++					a.logFirmwareExists(fw)
++				} else {
++					return err
++				}
++			}
+ 		}
+ 
+ 		err = a.inventory.Publish(fw, dstURL)
+@@ -100,6 +120,14 @@
+ 	}
+ 
+ 	return nil
++}
++
++func (a *ASRockRack) logFirmwareExists(fw *serverservice.ComponentFirmwareVersion) {
++	a.logger.WithFields(
++		logrus.Fields{
++			"filename": fw.Filename,
++		},
++	).Debug("firmware already exists at dst")
+ }
+ 
+ func (a *ASRockRack) initRcloneFs(ctx context.Context, fw *serverservice.ComponentFirmwareVersion, logger *logrus.Logger) (dstFs, tmpFs, srcFs rcloneFs.Fs, err error) {
+@@ -123,31 +151,12 @@
+ 	return dstFs, tmpFs, srcFs, nil
+ }
+ 
+-func (a *ASRockRack) copyFile(ctx context.Context, fw *serverservice.ComponentFirmwareVersion) error {
+-	var err error
+-
+-	dstFs, tmpFs, srcFs, err := a.initRcloneFs(ctx, fw, a.logger)
+-	if err != nil {
+-		return err
++func (a *ASRockRack) copyFile(ctx context.Context, dstFs, srcFs rcloneFs.Fs, fw *serverservice.ComponentFirmwareVersion) error {
++	if exists, _ := rcloneFs.FileExists(ctx, dstFs, vendors.DstPath(fw)); exists {
++		return errFirmwareExists
+ 	}
+ 
+-	// In case the file already exists in dst, don't verify/copy it
+-	if exists, _ := rcloneFs.FileExists(ctx, dstFs, vendors.DstPath(fw)); exists {
+-		a.logger.WithFields(
+-			logrus.Fields{
+-				"filename": fw.Filename,
+-			},
+-		).Debug("firmware already exists at dst")
+-
+-		return nil
+-	}
+-
+-	err = vendors.VerifyFile(ctx, tmpFs, srcFs, fw)
+-	if err != nil {
+-		return err
+-	}
+-
+-	err = rcloneOperations.CopyFile(ctx, dstFs, srcFs, vendors.DstPath(fw), vendors.SrcPath(fw))
++	err := rcloneOperations.CopyFile(ctx, dstFs, srcFs, vendors.DstPath(fw), vendors.SrcPath(fw))
+ 	if err != nil {
+ 		if errors.Is(err, rcloneFs.ErrorObjectNotFound) {
+ 			return errors.Wrap(vendors.ErrCopy, err.Error()+" :"+fw.Filename)

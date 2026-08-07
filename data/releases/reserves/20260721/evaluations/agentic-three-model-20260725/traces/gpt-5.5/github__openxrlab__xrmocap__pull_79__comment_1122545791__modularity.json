@@ -1,0 +1,214 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 240,
+      "path": "xrmocap/core/evaluation/base_evaluation.py",
+      "start_line": 1
+    },
+    "response_chars": 99,
+    "round": 1,
+    "tool_result": {
+      "content": "1: # yapf: disable\n2: import logging\n3: import os\n4: from typing import List, Union\n5: from xrprimer.utils.log_utils import get_logger\n6: from xrprimer.utils.path_utils import prepare_output_path\n7: \n8: from xrmocap.data.data_visualization.builder import (\n9:     BaseDataVisualization, build_data_visualization,\n10: )\n11: from xrmocap.data.dataset.builder import MviewMpersonDataset, build_dataset\n12: from .metric_manager import MetricManager\n13: from .metrics.base_metric import BaseMetric\n14: \n15: # yapf: enable\n16: \n17: \n18: class BaseEvaluation:\n19: \n20:     def __init__(\n21:         self,\n22:         dataset: Union[dict, MviewMpersonDataset],\n23:         output_dir: str,\n24:         metric_list: List[Union[dict, BaseMetric]],\n25:         pick_dict: Union[dict, None] = None,\n26:         dataset_visualization: Union[None, dict, BaseDataVisualization] = None,\n27:         eval_kps3d_convention: str = 'human_data',\n28:         logger: Union[None, str, logging.Logger] = None,\n29:     ) -> None:\n30:         self.logger = get_logger(logger)\n31:         self.output_dir = output_dir\n32:         self.eval_kps3d_convention = eval_kps3d_convention\n33:         self.metric_manager = MetricManager(\n34:             metric_list=metric_list, pick_dict=pick_dict, logger=self.logger)\n35: \n36:         if isinstance(dataset, dict):\n37:             dataset['logger'] = self.logger\n38:             self.dataset = build_dataset(dataset)\n39:         else:\n40:             self.dataset = dataset\n41: \n42:         if isinstance(dataset_visualization, dict):\n43:             dataset_visualization['logger'] = self.logger\n44:             self.dataset_visualization = build_data_visualization(\n45:                 dataset_visualization)\n46:         else:\n47:             self.dataset_visualization = dataset_visualization\n48: \n49:     def run(self, overwrite: bool = False):\n50:         if not os.path.exists(self.output_dir):\n51:             prepare_output_path(\n52:                 output_path=self.output_dir,\n53:                 allowed_suffix='',\n54:                 path_type='dir',\n55:                 overwrite=overwrite,\n56:                 logger=self.logger)",
+      "end_line": 56,
+      "path_lines": 56,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 4193,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 74,
+      "output_tokens_details": {
+        "reasoning_tokens": 39
+      },
+      "total_tokens": 4267
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 260,
+      "path": "xrmocap/core/evaluation/metric_manager.py",
+      "start_line": 1
+    },
+    "response_chars": 197,
+    "round": 2,
+    "tool_result": {
+      "content": "1: # yapf: disable\n2: import logging\n3: from typing import List, Union\n4: from xrprimer.utils.log_utils import get_logger\n5: \n6: from .metrics.base_metric import BaseMetric\n7: from .metrics.builder import build_metric\n8: \n9: # yapf: enable\n10: \n11: \n12: class MetricManager:\n13:     \"\"\"MetricManager is a class for multiple metrics evaluation.\n14: \n15:     It sorts metrics by ranks(ascend), and call the calculation functions in\n16:     turn.\n17:     \"\"\"\n18: \n19:     def __init__(\n20:         self,\n21:         metric_list: List[Union[dict, BaseMetric]],\n22:         pick_dict: Union[dict, None] = None,\n23:         logger: Union[None, str, logging.Logger] = None,\n24:     ) -> None:\n25:         \"\"\"Construction of MetricManager.\n26: \n27:         Args:\n28:             metric_list (List[Union[dict, BaseMetric]]):\n29:                 A list of metric instances or configs.\n30:             pick_dict (Union[dict, None], optional):\n31:                 Defines which keys to pick for every metric.\n32:                 Defaults to None, pick all.\n33:             logger (Union[None, str, logging.Logger], optional):\n34:                 Logger for logging. If None, root logger will be selected.\n35:                 Defaults to None.\n36:         \"\"\"\n37:         self.logger = get_logger(logger)\n38:         # build metrics\n39:         unsorted_list = []\n40:         for metric in metric_list:\n41:             if isinstance(metric, dict):\n42:                 metric = build_metric(metric)\n43:             unsorted_list.append(metric)\n44:         # sort metrics by RANK\n45:         self.metric_list = _sort_metrics_by_rank(unsorted_list)\n46:         # set pick dict\n47:         self.set_pick_dict(pick_dict)\n48: \n49:     def set_pick_dict(self, raw_pick_dict: Union[dict, None]):\n50:         \"\"\"Set which keys to pick for every metric.\n51: \n52:         Args:\n53:             raw_pick_dict (Union[dict, None]):\n54:                 Defines which keys to pick for every metric.\n55:                 If None, pick all.\n56:         \"\"\"\n57:         if raw_pick_dict is None:\n58:             pick_dict = dict()\n59:             for metric in self.metric_list:\n60:                 name = metric.name\n61:                 pick_value = 'all'\n62:                 pick_dict[name] = pick_value\n63:         else:\n64:             pick_dict = raw_pick_dict\n65:             for key in list(pick_dict.keys()):\n66:                 value = pick_dict[key]\n67:                 if value != 'all' and \\\n68:                         not isinstance(value, list):\n69:                     pick_dict[key] = [\n70:                         value,\n71:                     ]\n72:         self.pick_dict = pick_dict\n73: \n74:     def __call__(self, *args, **kwargs) -> dict:\n75:         \"\"\"Calculate metrics one by one, and return the picked contents.\n76: \n77:         Returns:\n78:             dict: picked results.\n79:         \"\"\"\n80:         accumulate_kwargs = dict()\n81:         accumulate_kwargs.update(kwargs)\n82:         manager_ret_dict = dict()\n83:         for metric in self.metric_list:\n84:             name = metric.name\n85:             # calculate metric\n86:             metric_ret_dict = metric(*args, **accumulate_kwargs)\n87:             # update accumulate_kwargs for the next metric\n88:             accumulate_kwargs.update(metric_ret_dict)\n89:             # record return keys and values\n90:             if name in self.pick_dict:\n91:                 selections = self.pick_dict[name]\n92:                 if selections == 'all':\n93:                     manager_ret_dict[name] = metric_ret_dict\n94:                 else:\n95:                     manager_ret_dict[name] = dict()\n96:                     for key in selections:\n97:                         manager_ret_dict[name][key] = metric_ret_dict[key]\n98:         return manager_ret_dict, accumulate_kwargs\n99: \n100: \n101: def _sort_metrics_by_rank(unsorted_list: List[BaseMetric]) -> List[BaseMetric]:\n102:     sorted_list = []\n103:     cur_rank = 0\n104:     unsorted_idxs = list(range(len(unsorted_list)))\n105:     while len(unsorted_idxs) > 0:\n106:         new_unsorted_idxs = []\n107:         for idx in unsorted_idxs:\n108:             metric = unsorted_list[idx]\n109:             rank = metric.__class__.RANK\n110:             # rank matches, add to sorted list\n111:             if rank == cur_rank:\n112:                 sorted_list.append(metric)\n113:             # not matched yet, preprare for next iter\n114:             else:\n115:                 new_unsorted_idxs.append(idx)\n116:         unsorted_idxs = new_unsorted_idxs\n117:         cur_rank += 1\n118:     return sorted_list",
+      "end_line": 118,
+      "path_lines": 118,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 4845,
+      "input_tokens_details": {
+        "cached_tokens": 3840
+      },
+      "output_tokens": 198,
+      "output_tokens_details": {
+        "reasoning_tokens": 127
+      },
+      "total_tokens": 5043
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "            pred_keypoints3d, gt_keypoints3d = \\\n                self.align_keypoints3d_convention_for_metric_manager(\n                    pred_keypoints3d_raw=pred_keypoints3d_raw,\n                    gt_keypoints3d_raw=gt_keypoints3d_raw)\n",
+          "end_line": 244,
+          "start_line": 208
+        }
+      ]
+    },
+    "response_chars": 2583,
+    "round": 3,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 244,
+          "replacement_lines": 4,
+          "start_line": 208
+        }
+      ],
+      "current_file_lines": 309,
+      "updated_excerpt": {
+        "content": "198:                             gt_kps3d[frame_idx, person_idx, :, :3].dot(\n199:                                 self.trans_matrix)\n200: \n201:             gt_keypoints3d_raw = Keypoints(\n202:                 dtype='numpy',\n203:                 kps=gt_kps3d,\n204:                 mask=gt_mask,\n205:                 convention=self.gt_kps3d_convention,\n206:                 logger=self.logger)\n207: \n208:             pred_keypoints3d, gt_keypoints3d = \\\n209:                 self.align_keypoints3d_convention_for_metric_manager(\n210:                     pred_keypoints3d_raw=pred_keypoints3d_raw,\n211:                     gt_keypoints3d_raw=gt_keypoints3d_raw)\n212:             # evaluate and print results\n213:             eval_results, full_results = self.metric_manager(\n214:                 pred_keypoints3d=pred_keypoints3d,\n215:                 gt_keypoints3d=gt_keypoints3d)\n216: \n217:             table = prettytable.PrettyTable()\n218:             table.field_names = ['Metric name', 'Value']\n219:             for metric_name, metric_dict in eval_results.items():\n220:                 for key, value in metric_dict.items():\n221:                     table.add_row([f'{metric_name}: {key}', f'{value:.2f}'])\n222:             table_str = '\\n' + table.get_string()\n223:             self.logger.info(table_str)\n224: \n225:             if self.checkpoint_select in full_results:\n226:                 accuracy = full_results[self.checkpoint_select]\n227:             else:\n228:                 self.logger.warning(\n229:                     'Metric for checkpoint selection '\n230:                     f'{self.checkpoint_select} is not available, '\n231:                     'This may cause troubles in training,'\n232:                     'please check the config.')\n233:                 if is_train:\n234:                     raise KeyError\n235: \n236:             # save and visualize when it is not train\n237:             if not is_train:\n238:                 pred_file_path = os.path.join(self.output_dir,",
+        "end_line": 238,
+        "path_lines": 309,
+        "start_line": 198
+      }
+    },
+    "usage": {
+      "input_tokens": 6136,
+      "input_tokens_details": {
+        "cached_tokens": 4352
+      },
+      "output_tokens": 1693,
+      "output_tokens_details": {
+        "reasoning_tokens": 1061
+      },
+      "total_tokens": 7829
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 330,
+      "path": "xrmocap/core/evaluation/end2end_evaluation.py",
+      "start_line": 1
+    },
+    "response_chars": 308,
+    "round": 4,
+    "tool_result": {
+      "content": "1: # yapf: disable\n2: import logging\n3: import numpy as np\n4: import os\n5: import prettytable\n6: import time\n7: import torch\n8: from torch.utils.data import DataLoader\n9: from typing import List, Union\n10: \n11: from xrmocap.data.data_visualization.builder import BaseDataVisualization\n12: from xrmocap.data_structure.keypoints import Keypoints\n13: from xrmocap.model.architecture.base_architecture import BaseArchitecture\n14: from xrmocap.transform.convention.keypoints_convention import (\n15:     convert_keypoints, get_intersection_mask,\n16: )\n17: from xrmocap.utils.distribute_utils import collect_results, is_main_process\n18: from xrmocap.utils.mvp_utils import (\n19:     AverageMeter, convert_result_to_kps, norm2absolute,\n20: )\n21: from .base_evaluation import BaseEvaluation\n22: from .metrics.base_metric import BaseMetric\n23: \n24: # yapf: enable\n25: \n26: \n27: class End2EndEvaluation(BaseEvaluation):\n28: \n29:     def __init__(\n30:         self,\n31:         test_loader: DataLoader,\n32:         output_dir: str,\n33:         metric_list: List[Union[dict, BaseMetric]],\n34:         trans_matrix: Union[List[List[float]], None] = None,\n35:         checkpoint_select: str = 'pcp_total_mean',\n36:         n_max_person: int = 10,\n37:         dataset_name: Union[None, str] = None,\n38:         pred_kps3d_convention: str = 'coco',\n39:         gt_kps3d_convention: str = 'coco',\n40:         eval_kps3d_convention: str = 'human_data',\n41:         pick_dict: Union[dict, None] = None,\n42:         print_freq: int = 100,\n43:         dataset_visualization: Union[None, dict, BaseDataVisualization] = None,\n44:         logger: Union[None, str, logging.Logger] = None,\n45:     ) -> None:\n46:         \"\"\"Evaluation for end-to-end methods. For model validation during\n47:         training and model evaluation.\n48: \n49:         Args:\n50:             test_loader (DataLoader):\n51:                 Test dataloader.\n52:             output_dir (str):\n53:                 Output directory.\n54:             metric_list (List[Union[dict, BaseMetric]]):\n55:                 A list of metrics to be evaluated.\n56:             trans_matrix (Union[List[List[float]], None], optional):\n57:                 A rotation matrix to transform the ground truth world\n58:                 coordinate to align with prediction world coordinate.\n59:             checkpoint_select (str, optional):\n60:                 Name of metric in the metric list to be used for\n61:                 checkpoint selection. Defaults to 'pcp_total_mean'.\n62:             n_max_person (int, optional):\n63:                 Number of maximum person the model can predict.\n64:                 Defaults to 10.\n65:             dataset_name (Union[None, str], optional):\n66:                 Name of the dataset. Defaults to None.\n67:             pred_kps3d_convention (str, optional):\n68:                 Keypoint convention of predicted keypoints3d.\n69:                 Defaults to 'coco'.\n70:             gt_kps3d_convention (str, optional):\n71:                 Keypoint convention of ground-truth keypoints3d.\n72:                 Defaults to 'coco'.\n73:             eval_kps3d_convention (str, optional):\n74:                 A keypoint convention used for evaluation.\n75:                 It is recommended to use human_data if pred_kps3d_convention\n76:                 and gt_kps3d_convention are different.\n77:                 Defaults to 'human_data'.\n78:             pick_dict (Union[dict, None], optional):\n79:                 Selected metrics to be printed in the final table.\n80:                 Defaults to None.\n81:             print_freq (int, optional):\n82:                 Printing frequencty during model validation. Defaults to 100.\n83:             dataset_visualization (Union[None, dict,\n84:                 BaseDataVisualization], optional):\n85:                 Dataset visualization. Defaults to None.\n86:             logger (Union[None, str, logging.Logger], optional):\n87:                 Logger for logging. If None, root logger will be\n88:                 selected. Defaults to None.\n89:         \"\"\"\n90: \n91:         BaseEvaluation.__init__(\n92:             self,\n93:             dataset=test_loader.dataset,\n94:             output_dir=output_dir,\n95:             metric_list=metric_list,\n96:             pick_dict=pick_dict,\n97:             dataset_visualization=dataset_visualization,\n98:             eval_kps3d_convention=eval_kps3d_convention,\n99:             logger=logger)\n100: \n101:         self.test_loader = test_loader\n102:         self.dataset_name = dataset_name\n103:         self.print_freq = print_freq\n104:         self.n_frame = test_loader.dataset.len\n105:         self.pred_kps3d_convention = pred_kps3d_convention\n106:         self.n_max_person = n_max_person\n107:         self.gt_kps3d_convention = gt_kps3d_convention\n108:         self.checkpoint_select = checkpoint_select\n109:         self.trans_matrix = np.array(trans_matrix)\n110: \n111:     def run(self,\n112:             model: BaseArchitecture,\n113:             threshold: float = 0.1,\n114:             is_train: bool = False,\n115:             overwrite: bool = False) -> float:\n116:         \"\"\"Run the evaluation.\n117: \n118:         Args:\n119:             model (BaseArchitecture):\n120:                 Model to be evaluated.\n121:             threshold (float, optional):\n122:                 Threshold for the predicted confidence.\n123:                 Defaults to 0.1.\n124:             is_train (bool, optional):\n125:                 If is model validation in training, no keypoints or\n126:                 inference results will be saved. Defaults to False.\n127:             overwrite (bool, optional):\n128:                 Overwrite the output folder. Defaults to False.\n129: \n130:         Returns:\n131:             accuracy: selected metric evaluation result.\n132:         \"\"\"\n133: \n134:         # prepare output folder\n135:         BaseEvaluation.run(self, overwrite=overwrite)\n136: \n137:         # get predicted Keypoints3d from model\n138:         preds_single = self.model_validate(model, threshold=threshold)\n139:         pred_kps3d_list = collect_results(preds_single, len(self.dataset))\n140: \n141:         accuracy = None\n142:         if is_main_process():\n143:             # prepare predicted Keypoints3d\n144:             # Add approximated points and update masks here if needed\n145:             # e.g. nose, jaw, headtop\n146:             n_frame = len(pred_kps3d_list)\n147:             pred_n_kps = pred_kps3d_list[0].shape[1]\n148:             pred_kps3d = np.full((n_frame, self.n_max_person, pred_n_kps, 4),\n149:                                  np.nan)\n150: \n151:             for frame_idx, per_frame_kps3d in enumerate(pred_kps3d_list):\n152:                 if len(per_frame_kps3d) > 0:\n153:                     n_valid_person, keypoints3d_pred_valid = \\\n154:                         convert_result_to_kps([per_frame_kps3d])\n155:                     pred_kps3d[\n156:                         frame_idx, :n_valid_person] = keypoints3d_pred_valid\n157: \n158:             pred_keypoints3d_raw = Keypoints(\n159:                 dtype='numpy',\n160:                 kps=pred_kps3d,\n161:                 mask=pred_kps3d[..., -1] > 0,\n162:                 convention=self.pred_kps3d_convention,\n163:                 logger=self.logger)\n164: \n165:             # prepare gt Keypoints3d\n166:             gt_n_person = np.max(\n167:                 np.array([\n168:                     scene_keypoints.get_person_number()\n169:                     for scene_keypoints in self.dataset.gt3d\n170:                 ]))\n171:             gt_n_kps = self.dataset.gt3d[0].get_keypoints_number()\n172:             gt_kps3d = np.full((self.n_frame, gt_n_person, gt_n_kps, 4),\n173:                                np.nan)\n174:             gt_mask = np.full((self.n_frame, gt_n_person, gt_n_kps), np.nan)\n175: \n176:             start_frame = 0\n177:             for gt_keypoints3d_scene in self.dataset.gt3d:\n178: \n179:                 gt_kps3d_scene = gt_keypoints3d_scene.get_keypoints().numpy(\n180:                 )  # [n_frame, n_person, n_kps, 4]\n181:                 gt_mask_scene = gt_keypoints3d_scene.get_mask().numpy(\n182:                 )  # [n_frame, n_person, n_kps]\n183: \n184:                 n_frame, n_person, _, _ = gt_kps3d_scene.shape\n185:                 end_frame = min(start_frame + n_frame, self.n_frame)\n186: \n187:                 gt_kps3d[start_frame:end_frame, :n_person, ...] = \\\n188:                     gt_kps3d_scene[:end_frame-start_frame, ...]\n189:                 gt_mask[start_frame:end_frame, :n_person, ...] = \\\n190:                     gt_mask_scene[:end_frame-start_frame, ...]\n191:                 start_frame = end_frame\n192: \n193:             if self.dataset_name == 'panoptic' and \\\n194:                     self.trans_matrix is not None:\n195:                 for frame_idx in range(self.n_frame):\n196:                     for person_idx in range(gt_n_person):\n197:                         gt_kps3d[frame_idx, person_idx, :, :3] = \\\n198:                             gt_kps3d[frame_idx, person_idx, :, :3].dot(\n199:                                 self.trans_matrix)\n200: \n201:             gt_keypoints3d_raw = Keypoints(\n202:                 dtype='numpy',\n203:                 kps=gt_kps3d,\n204:                 mask=gt_mask,\n205:                 convention=self.gt_kps3d_convention,\n206:                 logger=self.logger)\n207: \n208:             pred_keypoints3d, gt_keypoints3d = \\\n209:                 self.align_keypoints3d_convention_for_metric_manager(\n210:                     pred_keypoints3d_raw=pred_keypoints3d_raw,\n211:                     gt_keypoints3d_raw=gt_keypoints3d_raw)\n212:             # evaluate and print results\n213:             eval_results, full_results = self.metric_manager(\n214:                 pred_keypoints3d=pred_keypoints3d,\n215:                 gt_keypoints3d=gt_keypoints3d)\n216: \n217:             table = prettytable.PrettyTable()\n218:             table.field_names = ['Metric name', 'Value']\n219:             for metric_name, metric_dict in eval_results.items():\n220:                 for key, value in metric_dict.items():\n221:                     table.add_row([f'{metric_name}: {key}', f'{value:.2f}'])\n222:             table_str = '\\n' + table.get_string()\n223:             self.logger.info(table_str)\n224: \n225:             if self.checkpoint_select in full_results:\n226:                 accuracy = full_results[self.checkpoint_select]\n227:             else:\n228:                 self.logger.warning(\n229:                     'Metric for checkpoint selection '\n230:                     f'{self.checkpoint_select} is not available, '\n231:                     'This may cause troubles in training,'\n232:                     'please check the config.')\n233:                 if is_train:\n234:                     raise KeyError\n235: \n236:             # save and visualize when it is not train\n237:             if not is_train:\n238:                 pred_file_path = os.path.join(self.output_dir,\n239:                                               'pred_keypoints3d.npz')\n240:                 gt_file_path = os.path.join(self.output_dir,\n241:                                             'gt_keypoints3d.npz')\n242: \n243:                 self.logger.info(f'Saving 3D keypoints to: {pred_file_path}')\n244:                 pred_keypoints3d.dump(pred_file_path)\n245:                 self.logger.info(f'Saving 3D keypoints to: {gt_file_path}')\n246:                 gt_keypoints3d.dump(gt_file_path)\n247: \n248:                 if self.dataset_visualization is not None:\n249:                     self.dataset_visualization.pred_kps3d_paths = \\\n250:                         pred_file_path\n251:                     self.dataset_visualization.run(overwrite=overwrite)\n252: \n253:         return accuracy\n254: \n255:     def model_validate(self, model: BaseArchitecture, threshold: float):\n256:         \"\"\"Validate model during training or testing.\n257: \n258:         Args:\n259:             model (BaseArchitecture):\n260:                 Model to be evaluated.\n261:             threshold (float):\n262:                 Confidence threshold to filter non-human keypoints.\n263:         \"\"\"\n264:         batch_time = AverageMeter()\n265:         data_time = AverageMeter()\n266: \n267:         model.eval()\n268: \n269:         preds = []\n270:         with torch.no_grad():\n271:             end = time.time()\n272:             for i, (inputs, meta) in enumerate(self.test_loader):\n273:                 data_time.update(time.time() - end)\n274:                 assert len(inputs) == self.dataset.n_views\n275:                 output = model(views=inputs, meta=meta)\n276: \n277:                 gt_kps3d = meta[0]['kps3d'].float()\n278:                 n_kps = gt_kps3d.shape[2]\n279:                 bs, n_queries = output['pred_logits'].shape[:2]\n280: \n281:                 src_poses = output['pred_poses']['outputs_coord']. \\\n282:                     view(bs, n_queries, n_kps, 3)\n283:                 src_poses = norm2absolute(src_poses, model.module.grid_size,\n284:                                           model.module.grid_center)\n285:                 score = output['pred_logits'][:, :, 1:2].sigmoid()\n286:                 score = score.unsqueeze(2).expand(-1, -1, n_kps, -1)\n287:                 temp = (score > threshold).float() - 1\n288: \n289:                 pred = torch.cat([src_poses, temp, score], dim=-1)\n290:                 pred = pred.detach().cpu().numpy()\n291:                 for b in range(pred.shape[0]):\n292:                     preds.append(pred[b])\n293: \n294:                 batch_time.update(time.time() - end)\n295:                 end = time.time()\n296:                 if (i % self.print_freq == 0 or i\n297:                         == len(self.test_loader) - 1) and is_main_process():\n298:                     gpu_memory_usage = torch.cuda.memory_allocated(0)\n299:                     speed = len(inputs) * inputs[0].size(0) / batch_time.val\n300:                     msg = f'Test: [{i}/{len(self.test_loader)}]\\t' \\\n301:                         f'Time: {batch_time.val:.3f}s ' \\\n302:                         f'({batch_time.avg:.3f}s)\\t' \\\n303:                         f'Speed: {speed:.1f} samples/s\\t' \\\n304:                         f'Data: {data_time.val:.3f}s ' \\\n305:                         f'({data_time.avg:.3f}s)\\t' \\\n306:                         f'Memory {gpu_memory_usage:.1f}'\n307:                     self.logger.info(msg)\n308: \n309:         return preds",
+      "end_line": 309,
+      "path_lines": 309,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 6790,
+      "input_tokens_details": {
+        "cached_tokens": 5888
+      },
+      "output_tokens": 496,
+      "output_tokens_details": {
+        "reasoning_tokens": 383
+      },
+      "total_tokens": 7286
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "    def align_keypoints3d_convention_for_metric_manager(\n            self, pred_keypoints3d_raw: Keypoints,\n            gt_keypoints3d_raw: Keypoints):\n        \"\"\"Align pred and gt keypoints convention before metric_manager.\"\"\"\n        # convert pred and gt to the same convention before passing\n        # to metric manager, human_data recommended\n        if self.pred_kps3d_convention != self.eval_kps3d_convention:\n            pred_keypoints3d = convert_keypoints(\n                pred_keypoints3d_raw,\n                dst=self.eval_kps3d_convention,\n                approximate=True)\n        else:\n            pred_keypoints3d = pred_keypoints3d_raw\n\n        if self.gt_kps3d_convention != self.eval_kps3d_convention:\n            gt_keypoints3d = convert_keypoints(\n                gt_keypoints3d_raw,\n                dst=self.eval_kps3d_convention,\n                approximate=True)\n        else:\n            gt_keypoints3d = gt_keypoints3d_raw\n\n        # set mask to intersection mask if pred and gt convention\n        # are different\n        if self.pred_kps3d_convention != self.gt_kps3d_convention:\n            if self.eval_kps3d_convention != 'human_data':\n                self.logger.warning(\n                    'Predicion and ground truth is having'\n                    'different convention. It is recommended to set '\n                    'eval_kps3d_convention to human_data to avoid error.')\n\n            intersection_mask = get_intersection_mask(\n                self.pred_kps3d_convention, self.gt_kps3d_convention,\n                self.eval_kps3d_convention)\n            gt_intersection_mask = np.multiply(gt_keypoints3d.get_mask(),\n                                               intersection_mask)\n            pred_intersection_mask = np.multiply(pred_keypoints3d.get_mask(),\n                                                 intersection_mask)\n            gt_keypoints3d.set_mask(gt_intersection_mask)\n            pred_keypoints3d.set_mask(pred_intersection_mask)\n\n        return pred_keypoints3d, gt_keypoints3d\n\n",
+          "end_line": 254,
+          "start_line": 255
+        }
+      ]
+    },
+    "response_chars": 4523,
+    "round": 5,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 254,
+          "replacement_lines": 43,
+          "start_line": 255
+        }
+      ],
+      "current_file_lines": 352,
+      "updated_excerpt": {
+        "content": "245:                 self.logger.info(f'Saving 3D keypoints to: {gt_file_path}')\n246:                 gt_keypoints3d.dump(gt_file_path)\n247: \n248:                 if self.dataset_visualization is not None:\n249:                     self.dataset_visualization.pred_kps3d_paths = \\\n250:                         pred_file_path\n251:                     self.dataset_visualization.run(overwrite=overwrite)\n252: \n253:         return accuracy\n254: \n255:     def align_keypoints3d_convention_for_metric_manager(\n256:             self, pred_keypoints3d_raw: Keypoints,\n257:             gt_keypoints3d_raw: Keypoints):\n258:         \"\"\"Align pred and gt keypoints convention before metric_manager.\"\"\"\n259:         # convert pred and gt to the same convention before passing\n260:         # to metric manager, human_data recommended\n261:         if self.pred_kps3d_convention != self.eval_kps3d_convention:\n262:             pred_keypoints3d = convert_keypoints(\n263:                 pred_keypoints3d_raw,\n264:                 dst=self.eval_kps3d_convention,\n265:                 approximate=True)\n266:         else:\n267:             pred_keypoints3d = pred_keypoints3d_raw\n268: \n269:         if self.gt_kps3d_convention != self.eval_kps3d_convention:\n270:             gt_keypoints3d = convert_keypoints(\n271:                 gt_keypoints3d_raw,\n272:                 dst=self.eval_kps3d_convention,\n273:                 approximate=True)\n274:         else:\n275:             gt_keypoints3d = gt_keypoints3d_raw\n276: \n277:         # set mask to intersection mask if pred and gt convention\n278:         # are different\n279:         if self.pred_kps3d_convention != self.gt_kps3d_convention:\n280:             if self.eval_kps3d_convention != 'human_data':\n281:                 self.logger.warning(\n282:                     'Predicion and ground truth is having'\n283:                     'different convention. It is recommended to set '\n284:                     'eval_kps3d_convention to human_data to avoid error.')\n285: ",
+        "end_line": 285,
+        "path_lines": 352,
+        "start_line": 245
+      }
+    },
+    "usage": {
+      "input_tokens": 10670,
+      "input_tokens_details": {
+        "cached_tokens": 6400
+      },
+      "output_tokens": 2123,
+      "output_tokens_details": {
+        "reasoning_tokens": 1042
+      },
+      "total_tokens": 12793
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 330,
+      "path": "xrmocap/core/evaluation/end2end_evaluation.py",
+      "start_line": 250
+    },
+    "response_chars": 314,
+    "round": 6,
+    "tool_result": {
+      "content": "250:                         pred_file_path\n251:                     self.dataset_visualization.run(overwrite=overwrite)\n252: \n253:         return accuracy\n254: \n255:     def align_keypoints3d_convention_for_metric_manager(\n256:             self, pred_keypoints3d_raw: Keypoints,\n257:             gt_keypoints3d_raw: Keypoints):\n258:         \"\"\"Align pred and gt keypoints convention before metric_manager.\"\"\"\n259:         # convert pred and gt to the same convention before passing\n260:         # to metric manager, human_data recommended\n261:         if self.pred_kps3d_convention != self.eval_kps3d_convention:\n262:             pred_keypoints3d = convert_keypoints(\n263:                 pred_keypoints3d_raw,\n264:                 dst=self.eval_kps3d_convention,\n265:                 approximate=True)\n266:         else:\n267:             pred_keypoints3d = pred_keypoints3d_raw\n268: \n269:         if self.gt_kps3d_convention != self.eval_kps3d_convention:\n270:             gt_keypoints3d = convert_keypoints(\n271:                 gt_keypoints3d_raw,\n272:                 dst=self.eval_kps3d_convention,\n273:                 approximate=True)\n274:         else:\n275:             gt_keypoints3d = gt_keypoints3d_raw\n276: \n277:         # set mask to intersection mask if pred and gt convention\n278:         # are different\n279:         if self.pred_kps3d_convention != self.gt_kps3d_convention:\n280:             if self.eval_kps3d_convention != 'human_data':\n281:                 self.logger.warning(\n282:                     'Predicion and ground truth is having'\n283:                     'different convention. It is recommended to set '\n284:                     'eval_kps3d_convention to human_data to avoid error.')\n285: \n286:             intersection_mask = get_intersection_mask(\n287:                 self.pred_kps3d_convention, self.gt_kps3d_convention,\n288:                 self.eval_kps3d_convention)\n289:             gt_intersection_mask = np.multiply(gt_keypoints3d.get_mask(),\n290:                                                intersection_mask)\n291:             pred_intersection_mask = np.multiply(pred_keypoints3d.get_mask(),\n292:                                                  intersection_mask)\n293:             gt_keypoints3d.set_mask(gt_intersection_mask)\n294:             pred_keypoints3d.set_mask(pred_intersection_mask)\n295: \n296:         return pred_keypoints3d, gt_keypoints3d\n297: \n298:     def model_validate(self, model: BaseArchitecture, threshold: float):\n299:         \"\"\"Validate model during training or testing.\n300: \n301:         Args:\n302:             model (BaseArchitecture):\n303:                 Model to be evaluated.\n304:             threshold (float):\n305:                 Confidence threshold to filter non-human keypoints.\n306:         \"\"\"\n307:         batch_time = AverageMeter()\n308:         data_time = AverageMeter()\n309: \n310:         model.eval()\n311: \n312:         preds = []\n313:         with torch.no_grad():\n314:             end = time.time()\n315:             for i, (inputs, meta) in enumerate(self.test_loader):\n316:                 data_time.update(time.time() - end)\n317:                 assert len(inputs) == self.dataset.n_views\n318:                 output = model(views=inputs, meta=meta)\n319: \n320:                 gt_kps3d = meta[0]['kps3d'].float()\n321:                 n_kps = gt_kps3d.shape[2]\n322:                 bs, n_queries = output['pred_logits'].shape[:2]\n323: \n324:                 src_poses = output['pred_poses']['outputs_coord']. \\\n325:                     view(bs, n_queries, n_kps, 3)\n326:                 src_poses = norm2absolute(src_poses, model.module.grid_size,\n327:                                           model.module.grid_center)\n328:                 score = output['pred_logits'][:, :, 1:2].sigmoid()\n329:                 score = score.unsqueeze(2).expand(-1, -1, n_kps, -1)\n330:                 temp = (score > threshold).float() - 1",
+      "end_line": 330,
+      "path_lines": 352,
+      "start_line": 250
+    },
+    "usage": {
+      "input_tokens": 11756,
+      "input_tokens_details": {
+        "cached_tokens": 10496
+      },
+      "output_tokens": 547,
+      "output_tokens_details": {
+        "reasoning_tokens": 434
+      },
+      "total_tokens": 12303
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 7,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__openxrlab__xrmocap__pull_79__comment_1122545791__modularity.patch"
+    },
+    "usage": {
+      "input_tokens": 12831,
+      "input_tokens_details": {
+        "cached_tokens": 11520
+      },
+      "output_tokens": 527,
+      "output_tokens_details": {
+        "reasoning_tokens": 516
+      },
+      "total_tokens": 13358
+    }
+  }
+]

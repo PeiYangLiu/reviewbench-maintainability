@@ -1,0 +1,39 @@
+--- a/exporter/datasetexporter/logs_exporter.go
++++ b/exporter/datasetexporter/logs_exporter.go
+@@ -133,6 +133,23 @@
+ 	return dataSetSeverity
+ }
+ 
++func buildLogTimestamp(log plog.LogRecord, observedTs time.Time) string {
++	if timestamp := log.Timestamp().AsTime(); !timestamp.Equal(time.Unix(0, 0)) {
++		return strconv.FormatInt(timestamp.UnixNano(), 10)
++	}
++
++	// ObservedTimestamp should always be set, but in case if it's not, we fall back to
++	// current time
++	// TODO: We should probably also do a rate limited log message here since this
++	// could indicate an issue with the current setup in case most events don't contain
++	// a timestamp.
++	if !observedTs.Equal(time.Unix(0, 0)) {
++		return strconv.FormatInt(observedTs.UnixNano(), 10)
++	}
++
++	return strconv.FormatInt(now().UnixNano(), 10)
++}
++
+ func buildEventFromLog(
+ 	log plog.LogRecord,
+ 	resource pcommon.Resource,
+@@ -145,10 +162,8 @@
+ 	observedTs := log.ObservedTimestamp().AsTime()
+ 
+ 	event.Sev = otelSeverityToDataSetSeverity(log)
+-
+-	if timestamp := log.Timestamp().AsTime(); !timestamp.Equal(time.Unix(0, 0)) {
+-		event.Ts = strconv.FormatInt(timestamp.UnixNano(), 10)
+-	}
++	// Event needs to always have timestamp set otherwise it will get set to unix epoch start time
++	event.Ts = buildLogTimestamp(log, observedTs)
+ 
+ 	if body := log.Body().AsString(); body != "" {
+ 		attrs["message"] = buildBody(attrs, log.Body())

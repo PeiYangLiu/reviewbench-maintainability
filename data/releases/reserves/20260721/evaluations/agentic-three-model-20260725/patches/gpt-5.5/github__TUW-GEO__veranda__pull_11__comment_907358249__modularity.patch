@@ -1,0 +1,112 @@
+diff --git a/src/veranda/raster/mosaic/netcdf.py b/src/veranda/raster/mosaic/netcdf.py
+index c01bda6..d425ae3 100644
+--- a/src/veranda/raster/mosaic/netcdf.py
++++ b/src/veranda/raster/mosaic/netcdf.py
+@@ -56,6 +56,52 @@ class NetCdfReader(RasterDataReader):
+             self._ref_space_dims = nc_file.space_dims
+             self._ref_stack_dims = nc_file.stack_dims
+ 
++    @staticmethod
++    def _read_tile_attrs(filepath):
++        """Read the spatial attributes needed to construct a tile from a NetCDF file."""
++        with NetCdf4File(filepath, 'r') as nc_file:
++            return nc_file.sref_wkt, nc_file.geotrans, nc_file.raster_shape
++
++    @classmethod
++    def _tile_from_filepath(cls, filepath, tile_class, name, **tile_kwargs):
++        """Create a mosaic tile from the spatial attributes of a NetCDF file."""
++        sref_wkt, geotrans, (n_rows, n_cols) = cls._read_tile_attrs(filepath)
++        return tile_class(n_rows, n_cols, sref=SpatialRef(sref_wkt), geotrans=geotrans,
++                          name=str(name), **tile_kwargs)
++
++    @classmethod
++    def _mosaic_file_register_and_tiles(cls, filepaths, mosaic_class, stack_dimension):
++        """Create the file register entries and tiles for a mosaic of NetCDF files."""
++        file_register_dict = dict()
++        file_register_dict['filepath'] = filepaths
++
++        tile_ids = []
++        layer_ids = []
++        tiles = []
++        tile_idx = 0
++        tile_class = mosaic_class.get_tile_class()
++        for filepath in filepaths:
++            curr_tile = cls._tile_from_filepath(filepath, tile_class, tile_idx)
++            curr_tile_idx = None
++            for tile in tiles:
++                if curr_tile == tile:
++                    curr_tile_idx = tile.name
++                    break
++            if curr_tile_idx is None:
++                tiles.append(curr_tile)
++                curr_tile_idx = tile_idx
++                tile_idx += 1
++
++            tile_ids.append(curr_tile_idx)
++            layer_id = sum(np.array(tile_ids) == curr_tile_idx)
++            layer_ids.append(layer_id)
++
++        file_register_dict['tile_id'] = tile_ids
++        file_register_dict[stack_dimension] = layer_ids
++        file_register = pd.DataFrame(file_register_dict)
++
++        return file_register, tiles
++
+     @classmethod
+     def from_filepaths(cls, filepaths, mosaic_class=MosaicGeometry, mosaic_kwargs=None, tile_kwargs=None,
+                        stack_dimension='layer_id', **kwargs):
+@@ -94,14 +140,8 @@ class NetCdfReader(RasterDataReader):
+         file_register_dict[stack_dimension] = list(range(n_filepaths))
+         file_register = pd.DataFrame(file_register_dict)
+ 
+-        ref_filepath = filepaths[0]
+-        with NetCdf4File(ref_filepath, 'r') as nc_file:
+-            sref_wkt = nc_file.sref_wkt
+-            geotrans = nc_file.geotrans
+-            n_rows, n_cols = nc_file.raster_shape
+-
+         tile_class = mosaic_class.get_tile_class()
+-        tile = tile_class(n_rows, n_cols, sref=SpatialRef(sref_wkt), geotrans=geotrans, name='0', **tile_kwargs)
++        tile = cls._tile_from_filepath(filepaths[0], tile_class, '0', **tile_kwargs)
+         mosaic_geom = mosaic_class.from_tile_list([tile], check_consistency=False, **mosaic_kwargs)
+ 
+         return cls(file_register, mosaic_geom, stack_dimension=stack_dimension, **kwargs)
+@@ -133,37 +173,7 @@ class NetCdfReader(RasterDataReader):
+ 
+         """
+         mosaic_kwargs = mosaic_kwargs or dict()
+-        file_register_dict = dict()
+-        file_register_dict['filepath'] = filepaths
+-
+-        tile_ids = []
+-        layer_ids = []
+-        tiles = []
+-        tile_idx = 0
+-        tile_class = mosaic_class.get_tile_class()
+-        for filepath in filepaths:
+-            with NetCdf4File(filepath, 'r') as nc_file:
+-                sref_wkt = nc_file.sref_wkt
+-                geotrans = nc_file.geotrans
+-                n_rows, n_cols = nc_file.raster_shape
+-            curr_tile = tile_class(n_rows, n_cols, sref=SpatialRef(sref_wkt), geotrans=geotrans, name=str(tile_idx))
+-            curr_tile_idx = None
+-            for tile in tiles:
+-                if curr_tile == tile:
+-                    curr_tile_idx = tile.name
+-                    break
+-            if curr_tile_idx is None:
+-                tiles.append(curr_tile)
+-                curr_tile_idx = tile_idx
+-                tile_idx += 1
+-
+-            tile_ids.append(curr_tile_idx)
+-            layer_id = sum(np.array(tile_ids) == curr_tile_idx)
+-            layer_ids.append(layer_id)
+-
+-        file_register_dict['tile_id'] = tile_ids
+-        file_register_dict[stack_dimension] = layer_ids
+-        file_register = pd.DataFrame(file_register_dict)
++        file_register, tiles = cls._mosaic_file_register_and_tiles(filepaths, mosaic_class, stack_dimension)
+ 
+         mosaic_geom = mosaic_class.from_tile_list(tiles, check_consistency=False, **mosaic_kwargs)
+ 

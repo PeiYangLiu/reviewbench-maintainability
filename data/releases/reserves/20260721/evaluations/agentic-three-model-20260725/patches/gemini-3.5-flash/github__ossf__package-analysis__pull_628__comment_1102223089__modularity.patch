@@ -1,0 +1,158 @@
+diff --git a/internal/staticanalysis/parsing/js_parsing.go b/internal/staticanalysis/parsing/js_parsing.go
+index 276dfcf..483faf3 100644
+--- a/internal/staticanalysis/parsing/js_parsing.go
++++ b/internal/staticanalysis/parsing/js_parsing.go
+@@ -117,73 +117,94 @@ func (p parseOutputJSON) process() languageResult {
+ 
+ 	// convert the elements into more natural data structure
+ 	for filename, data := range p {
+-		fileData := languageData{
+-			ValidInput: true,
+-		}
+-		for _, t := range data.Tokens {
+-			switch t.TokenType {
+-			case identifier:
+-				symbolSubtype := token.CheckIdentifierType(t.TokenSubType)
+-				if symbolSubtype == token.Other || symbolSubtype == token.Unknown {
+-					break
+-				}
+-				fileData.Identifiers = append(fileData.Identifiers, parsedIdentifier{
+-					Type: token.CheckIdentifierType(t.TokenSubType),
+-					Name: t.Data.(string),
+-					Pos:  t.Pos,
+-				})
+-			case literal:
+-				literal := parsedLiteral[any]{
+-					Type:     t.TokenSubType,
+-					GoType:   fmt.Sprintf("%T", t.Data),
+-					Value:    t.Data,
+-					RawValue: t.Extra["raw"].(string),
+-					InArray:  t.Extra["array"] == true,
+-					Pos:      t.Pos,
+-				}
+-				// check for BigInteger types which have to be represented as strings in JSON
+-				if literal.Type == "Numeric" && literal.GoType == "string" {
+-					if intAsString, ok := literal.Value.(string); ok {
+-						var bigInt big.Int
+-						if _, valid := bigInt.SetString(intAsString, 0); valid {
+-							literal.Value = &bigInt
+-							literal.GoType = fmt.Sprintf("%T", bigInt)
+-						}
+-					}
+-				}
+-				fileData.Literals = append(fileData.Literals, literal)
+-			case comment:
+-				fileData.Comments = append(fileData.Comments, parsedComment{
+-					Type: t.TokenSubType,
+-					Data: t.Data.(string),
+-					Pos:  t.Pos,
+-				})
+-			default:
+-				log.Warn(fmt.Sprintf("parseJS: unrecognised token type %s", t.TokenType))
++		processedOutput[filename] = processFileData(data)
++	}
++
++	return processedOutput
++}
++
++func processFileData(data parseDataJSON) languageData {
++	fileData := languageData{
++		ValidInput: true,
++	}
++	for _, t := range data.Tokens {
++		switch t.TokenType {
++		case identifier:
++			if id, ok := identifierFromToken(t); ok {
++				fileData.Identifiers = append(fileData.Identifiers, id)
+ 			}
++		case literal:
++			fileData.Literals = append(fileData.Literals, literalFromToken(t))
++		case comment:
++			fileData.Comments = append(fileData.Comments, commentFromToken(t))
++		default:
++			log.Warn(fmt.Sprintf("parseJS: unrecognised token type %s", t.TokenType))
+ 		}
+-		for _, s := range data.Status {
+-			status := parserStatus{
+-				Type:    s.StatusType,
+-				Name:    s.StatusSubType,
+-				Message: s.Message,
+-				Pos:     s.Pos,
++	}
++	for _, s := range data.Status {
++		status := statusFromJSON(s)
++		switch s.StatusType {
++		case parseInfo:
++			fileData.Info = append(fileData.Info, status)
++		case parseError:
++			fileData.Errors = append(fileData.Errors, status)
++			if strings.Contains(status.Message, fatalSyntaxErrorMarker) {
++				fileData.ValidInput = false
+ 			}
+-			switch s.StatusType {
+-			case parseInfo:
+-				fileData.Info = append(fileData.Info, status)
+-			case parseError:
+-				fileData.Errors = append(fileData.Errors, status)
+-				if strings.Contains(status.Message, fatalSyntaxErrorMarker) {
+-					fileData.ValidInput = false
+-				}
++		}
++	}
++	return fileData
++}
++
++func identifierFromToken(t parserTokenJSON) (parsedIdentifier, bool) {
++	symbolSubtype := token.CheckIdentifierType(t.TokenSubType)
++	if symbolSubtype == token.Other || symbolSubtype == token.Unknown {
++		return parsedIdentifier{}, false
++	}
++	return parsedIdentifier{
++		Type: symbolSubtype,
++		Name: t.Data.(string),
++		Pos:  t.Pos,
++	}, true
++}
++
++func literalFromToken(t parserTokenJSON) parsedLiteral[any] {
++	lit := parsedLiteral[any]{
++		Type:     t.TokenSubType,
++		GoType:   fmt.Sprintf("%T", t.Data),
++		Value:    t.Data,
++		RawValue: t.Extra["raw"].(string),
++		InArray:  t.Extra["array"] == true,
++		Pos:      t.Pos,
++	}
++	// check for BigInteger types which have to be represented as strings in JSON
++	if lit.Type == "Numeric" && lit.GoType == "string" {
++		if intAsString, ok := lit.Value.(string); ok {
++			var bigInt big.Int
++			if _, valid := bigInt.SetString(intAsString, 0); valid {
++				lit.Value = &bigInt
++				lit.GoType = fmt.Sprintf("%T", bigInt)
+ 			}
+ 		}
++	}
++	return lit
++}
+ 
+-		processedOutput[filename] = fileData
++func commentFromToken(t parserTokenJSON) parsedComment {
++	return parsedComment{
++		Type: t.TokenSubType,
++		Data: t.Data.(string),
++		Pos:  t.Pos,
+ 	}
++}
+ 
+-	return processedOutput
++func statusFromJSON(s parserStatusJSON) parserStatus {
++	return parserStatus{
++		Type:    s.StatusType,
++		Name:    s.StatusSubType,
++		Message: s.Message,
++		Pos:     s.Pos,
++	}
+ }
+ 
+ /*

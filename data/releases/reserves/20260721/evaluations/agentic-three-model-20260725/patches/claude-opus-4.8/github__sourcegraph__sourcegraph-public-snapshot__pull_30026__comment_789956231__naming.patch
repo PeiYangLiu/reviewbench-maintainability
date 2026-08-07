@@ -1,0 +1,111 @@
+diff --git a/monitoring/monitoring/monitoring.go b/monitoring/monitoring/monitoring.go
+index ae7eee7..2d38a9c 100644
+--- a/monitoring/monitoring/monitoring.go
++++ b/monitoring/monitoring/monitoring.go
+@@ -319,7 +319,7 @@ func (c *Container) renderRules() (*promRulesFile, error) {
+ 						"level":        level,
+ 						"service_name": c.Name,
+ 						"description":  description,
+-						"owner":        o.Owner.name,
++						"owner":        o.Owner.identifier,
+ 
+ 						// in the corresponding dashboard, this label should indicate
+ 						// the panel associated with this rule
+@@ -469,61 +469,72 @@ func (r Row) validate() error {
+ // ObservableOwner denotes a team that owns an Observable. The current teams are described in
+ // the handbook: https://handbook.sourcegraph.com/engineering/eng_org#current-organization
+ type ObservableOwner struct {
+-	name             string
++	// identifier is the team's name, used for routing alerts and identifying the
++	// team in a uniform, machine-friendly format (for example, for Opsgenie
++	// routing). It must be all lowercase alphanumeric with dashes, and must not
++	// contain spaces - see ObservableOwner.validate.
++	identifier       string
+ 	handbookSlug     string
+ 	handbookTeamName string
+ }
+ 
++func (o *ObservableOwner) validate() error {
++	if strings.Contains(o.identifier, " ") || strings.ToLower(o.identifier) != o.identifier {
++		return errors.Errorf("ObservableOwner identifier must be all lowercase with no spaces; found \"%s\"", o.identifier)
++	}
++	return nil
++}
++
+ func (o *ObservableOwner) String() string {
+-	return o.name
++	return o.identifier
+ }
+ 
+ var (
+ 	ObservableOwnerSearch = ObservableOwner{
+-		name:             "search",
++		identifier:       "search",
+ 		handbookSlug:     "code-graph/search/product",
+ 		handbookTeamName: "Search",
+ 	}
+ 
+ 	ObservableOwnerSearchCore = ObservableOwner{
+-		name:             "search-core",
++		identifier:       "search-core",
+ 		handbookSlug:     "code-graph/search/core",
+ 		handbookTeamName: "Search Core",
+ 	}
+ 	ObservableOwnerBatches = ObservableOwner{
+-		name:             "batch-changes",
++		identifier:       "batch-changes",
+ 		handbookSlug:     "code-graph/batch-changes",
+ 		handbookTeamName: "Batch Changes",
+ 	}
+ 
+ 	ObservableOwnerCodeIntel = ObservableOwner{
+-		name:             "code-intel",
++		identifier:       "code-intel",
+ 		handbookSlug:     "code-graph/code-intelligence",
+ 		handbookTeamName: "Code intelligence",
+ 	}
+ 
+ 	ObservableOwnerSecurity = ObservableOwner{
+-		name:             "security",
++		identifier:       "security",
+ 		handbookSlug:     "cloud/security",
+ 		handbookTeamName: "Security",
+ 	}
+ 	ObservableOwnerRepoManagement = ObservableOwner{
+-		name:             "repo-management",
++		identifier:       "repo-management",
+ 		handbookSlug:     "enablement/repo-management",
+ 		handbookTeamName: "Repo Management",
+ 	}
+ 	ObservableOwnerCodeInsights = ObservableOwner{
+-		name:             "code-insights",
++		identifier:       "code-insights",
+ 		handbookSlug:     "code-graph/code-insights",
+ 		handbookTeamName: "Code Insights",
+ 	}
+ 	ObservableOwnerDevOps = ObservableOwner{
+-		name:             "devops",
++		identifier:       "devops",
+ 		handbookSlug:     "cloud/devops",
+ 		handbookTeamName: "Cloud DevOps",
+ 	}
+ 	ObservableOwnerCloudSaaS = ObservableOwner{
+-		name:             "cloud-saas",
++		identifier:       "cloud-saas",
+ 		handbookSlug:     "cloud/saas",
+ 		handbookTeamName: "Cloud Software-as-a-Service",
+ 	}
+@@ -667,9 +678,12 @@ func (o Observable) validate() error {
+ 	if first, second := string([]rune(o.Description)[0]), string([]rune(o.Description)[1]); first != strings.ToLower(first) && second == strings.ToLower(second) {
+ 		return errors.Errorf("Description must be lowercase except for acronyms; found \"%s\"", o.Description)
+ 	}
+-	if o.Owner.name == "" && !o.NoAlert {
++	if o.Owner.identifier == "" && !o.NoAlert {
+ 		return errors.New("Owner must be defined for observables with alerts")
+ 	}
++	if err := o.Owner.validate(); err != nil {
++		return err
++	}
+ 	if !o.Panel.panelType.validate() {
+ 		return errors.New(`Panel.panelType must be "graph" or "heatmap"`)
+ 	}

@@ -1,0 +1,70 @@
+diff --git a/pwndbg/heap/ptmalloc.py b/pwndbg/heap/ptmalloc.py
+index 480a6cc..f879912 100644
+--- a/pwndbg/heap/ptmalloc.py
++++ b/pwndbg/heap/ptmalloc.py
+@@ -32,6 +32,14 @@ def heap_for_ptr(ptr):
+     return ptr & ~(HEAP_MAX_SIZE - 1)
+ 
+ 
++# Some chunk struct fields were renamed in newer glibc versions; map the new
++# names to the old names used throughout pwndbg.
++CHUNK_FIELD_RENAMES = {
++    "mchunk_prev_size": "prev_size",
++    "mchunk_size": "size",
++}
++
++
+ class Chunk:
+     def __init__(self, addr):
+         self._gdbValue = pwndbg.gdblib.memory.poi(pwndbg.heap.current.malloc_chunk, addr)
+@@ -43,33 +51,32 @@ class Chunk:
+         self._bk = None
+         # TODO fd_nextsize, bk_nextsize, key, REVEAL_PTR etc.
+ 
++    def _read_field(self, name):
++        """Read a field from the chunk, accounting for fields that were renamed
++        in newer glibc versions.
++        """
++        field_names = [field.name for field in self._gdbValue.type.fields()]
++        for new_name, old_name in CHUNK_FIELD_RENAMES.items():
++            if old_name == name and new_name in field_names:
++                name = new_name
++                break
++
++        try:
++            return int(self._gdbValue[name])
++        except gdb.MemoryError:
++            return None
++
+     @property
+     def prev_size(self):
+         if self._prev_size is None:
+-            if "mchunk_prev_size" in (field.name for field in self._gdbValue.type.fields()):
+-                prev_size_field_name = "mchunk_prev_size"
+-            else:
+-                prev_size_field_name = "prev_size"
+-
+-            try:
+-                self._prev_size = int(self._gdbValue[prev_size_field_name])
+-            except gdb.MemoryError:
+-                pass
++            self._prev_size = self._read_field("prev_size")
+ 
+         return self._prev_size
+ 
+     @property
+     def size(self):
+         if self._size is None:
+-            if "mchunk_size" in (field.name for field in self._gdbValue.type.fields()):
+-                size_field_name = "mchunk_size"
+-            else:
+-                size_field_name = "size"
+-
+-            try:
+-                self._size = int(self._gdbValue[size_field_name])
+-            except gdb.MemoryError:
+-                pass
++            self._size = self._read_field("size")
+ 
+         return self._size
+ 

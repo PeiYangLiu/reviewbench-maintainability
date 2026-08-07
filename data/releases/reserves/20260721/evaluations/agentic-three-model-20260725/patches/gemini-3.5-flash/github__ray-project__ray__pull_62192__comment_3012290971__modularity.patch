@@ -1,0 +1,137 @@
+diff --git a/python/ray/util/client/worker.py b/python/ray/util/client/worker.py
+index d054ee4..c3dad56 100644
+--- a/python/ray/util/client/worker.py
++++ b/python/ray/util/client/worker.py
+@@ -880,57 +880,8 @@ class Worker:
+             ray_init_kwargs = {}
+         else:
+             ray_init_kwargs = dict(ray_init_kwargs)
+-        if "logging_config" in ray_init_kwargs and isinstance(
+-            ray_init_kwargs["logging_config"], LoggingConfig
+-        ):
+-            lc = ray_init_kwargs["logging_config"]
+-            # Convert LoggingConfig to dict before client sends it over JSON in InitRequest
+-            ray_init_kwargs["logging_config"] = dataclasses.asdict(lc)
+-        # If JobConfig has no py_logging_config, copy logging_config onto JobConfig for the pickled job.
+-        if job_config is not None:
+-            lc_raw = ray_init_kwargs.get("logging_config")
+-            if lc_raw is not None and job_config.py_logging_config is None:
+-                if isinstance(lc_raw, dict):
+-                    field_names = {f.name for f in dataclasses.fields(LoggingConfig)}
+-                    job_config.set_py_logging_config(
+-                        LoggingConfig(
+-                            **{k: v for k, v in lc_raw.items() if k in field_names}
+-                        )
+-                    )
+-                elif isinstance(lc_raw, LoggingConfig):
+-                    job_config.set_py_logging_config(lc_raw)
+         try:
+-            if job_config is None:
+-                serialized_job_config = None
+-            else:
+-                with tempfile.TemporaryDirectory() as tmp_dir:
+-                    from ray._private.ray_constants import (
+-                        RAY_RUNTIME_ENV_IGNORE_GITIGNORE,
+-                    )
+-
+-                    runtime_env = job_config.runtime_env or {}
+-                    # Determine whether to respect .gitignore files based on environment variable
+-                    # Default is True (respect .gitignore). Set to False if env var is "1".
+-                    include_gitignore = (
+-                        os.environ.get(RAY_RUNTIME_ENV_IGNORE_GITIGNORE, "0") != "1"
+-                    )
+-                    runtime_env = upload_py_modules_if_needed(
+-                        runtime_env,
+-                        scratch_dir=tmp_dir,
+-                        include_gitignore=include_gitignore,
+-                        logger=logger,
+-                    )
+-                    runtime_env = upload_working_dir_if_needed(
+-                        runtime_env,
+-                        scratch_dir=tmp_dir,
+-                        include_gitignore=include_gitignore,
+-                        logger=logger,
+-                    )
+-                    # Remove excludes, it isn't relevant after the upload step.
+-                    runtime_env.pop("excludes", None)
+-                    job_config.set_runtime_env(runtime_env, validate=True)
+-
+-                serialized_job_config = pickle.dumps(job_config)
++            serialized_job_config = prepare_job_config(job_config, ray_init_kwargs)
+ 
+             response = self.data_client.Init(
+                 ray_client_pb2.InitRequest(
+@@ -946,7 +897,6 @@ class Worker:
+ 
+         except grpc.RpcError as e:
+             raise decode_exception(e)
+-
+     def _convert_actor(self, actor: "ActorClass") -> str:
+         """Register a ClientActorClass for the ActorClass and return a UUID"""
+         key = uuid.uuid4().hex
+@@ -974,10 +924,62 @@ class Worker:
+         return dumps_from_client(val, self._client_id)
+ 
+ 
+-def make_client_id() -> str:
+-    id = uuid.uuid4()
+-    return id.hex
++def prepare_job_config(
++    job_config: Optional[JobConfig],
++    ray_init_kwargs: Dict[str, Any],
++) -> Optional[bytes]:
++    if "logging_config" in ray_init_kwargs and isinstance(
++        ray_init_kwargs["logging_config"], LoggingConfig
++    ):
++        lc = ray_init_kwargs["logging_config"]
++        # Convert LoggingConfig to dict before client sends it over JSON in InitRequest
++        ray_init_kwargs["logging_config"] = dataclasses.asdict(lc)
++    # If JobConfig has no py_logging_config, copy logging_config onto JobConfig for the pickled job.
++    if job_config is not None:
++        lc_raw = ray_init_kwargs.get("logging_config")
++        if lc_raw is not None and job_config.py_logging_config is None:
++            if isinstance(lc_raw, dict):
++                field_names = {f.name for f in dataclasses.fields(LoggingConfig)}
++                job_config.set_py_logging_config(
++                    LoggingConfig(
++                        **{k: v for k, v in lc_raw.items() if k in field_names}
++                    )
++                )
++            elif isinstance(lc_raw, LoggingConfig):
++                job_config.set_py_logging_config(lc_raw)
++    if job_config is None:
++        return None
++    with tempfile.TemporaryDirectory() as tmp_dir:
++        from ray._private.ray_constants import (
++            RAY_RUNTIME_ENV_IGNORE_GITIGNORE,
++        )
++
++        runtime_env = job_config.runtime_env or {}
++        # Determine whether to respect .gitignore files based on environment variable
++        # Default is True (respect .gitignore). Set to False if env var is "1".
++        include_gitignore = (
++            os.environ.get(RAY_RUNTIME_ENV_IGNORE_GITIGNORE, "0") != "1"
++        )
++        runtime_env = upload_py_modules_if_needed(
++            runtime_env,
++            scratch_dir=tmp_dir,
++            include_gitignore=include_gitignore,
++            logger=logger,
++        )
++        runtime_env = upload_working_dir_if_needed(
++            runtime_env,
++            scratch_dir=tmp_dir,
++            include_gitignore=include_gitignore,
++            logger=logger,
++        )
++        # Remove excludes, it isn't relevant after the upload step.
++        runtime_env.pop("excludes", None)
++        job_config.set_runtime_env(runtime_env, validate=True)
+ 
++    return pickle.dumps(job_config)
++
++
++def make_client_id() -> str:
+ 
+ def decode_exception(e: grpc.RpcError) -> Exception:
+     if e.code() != grpc.StatusCode.ABORTED:

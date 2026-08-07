@@ -1,0 +1,103 @@
+--- a/pkg/reconciler/apis/crdcleanup/crdcleanup_controller.go
++++ b/pkg/reconciler/apis/crdcleanup/crdcleanup_controller.go
+@@ -37,7 +37,6 @@
+ 	apisv1alpha1 "github.com/kcp-dev/kcp/pkg/apis/apis/v1alpha1"
+ 	kcpclient "github.com/kcp-dev/kcp/pkg/client/clientset/versioned"
+ 	apisinformers "github.com/kcp-dev/kcp/pkg/client/informers/externalversions/apis/v1alpha1"
+-	apislisters "github.com/kcp-dev/kcp/pkg/client/listers/apis/v1alpha1"
+ 	"github.com/kcp-dev/kcp/pkg/indexers"
+ 	"github.com/kcp-dev/kcp/pkg/logging"
+ 	"github.com/kcp-dev/kcp/pkg/reconciler/apis/apibinding"
+@@ -45,7 +44,6 @@
+ 	// apiextensionsv1informers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions/apiextensions/v1"
+ 	// apiextensionsv1listers "k8s.io/apiextensions-apiserver/pkg/client/listers/apiextensions/v1"
+ 	kcpapiextensionsv1informers "github.com/kcp-dev/apiextensions-apiserver/pkg/client/informers/externalversions/apiextensions/v1"
+-	kcpapiextensionsv1listers "github.com/kcp-dev/apiextensions-apiserver/pkg/client/listers/apiextensions/v1"
+ )
+ 
+ const (
+@@ -64,13 +62,19 @@
+ 	queue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), ControllerName)
+ 
+ 	c := &controller{
+-		queue:               queue,
+-		crdLister:           crdInformer.Lister(),
+-		crdIndexer:          crdInformer.Informer().GetIndexer(),
+-		apiBindingLister:    apiBindingInformer.Lister(),
+-		apiBindingIndexer:   apiBindingInformer.Informer().GetIndexer(),
+-		apiExtensionsClient: crdClusterClient,
+-		kcpClusterClient:    kcpClusterClient,
++		queue: queue,
++		getCRD: func(clusterName logicalcluster.Name, name string) (*apiextensionsv1.CustomResourceDefinition, error) {
++			return crdInformer.Lister().Cluster(clusterName).Get(name)
++		},
++		deleteCRD: func(ctx context.Context, clusterName logicalcluster.Name, name string) error {
++			return crdClusterClient.ApiextensionsV1().CustomResourceDefinitions().Cluster(clusterName).Delete(ctx, name, metav1.DeleteOptions{})
++		},
++		getAPIBindingsByBoundResourceUID: func(uid string) ([]interface{}, error) {
++			return apiBindingInformer.Informer().GetIndexer().ByIndex(indexers.APIBindingByBoundResourceUID, uid)
++		},
++		listAPIBindings: func() ([]*apisv1alpha1.APIBinding, error) {
++			return apiBindingInformer.Lister().List(labels.Everything())
++		},
+ 	}
+ 
+ 	indexers.AddIfNotPresentOrDie(
+@@ -124,14 +128,10 @@
+ type controller struct {
+ 	queue workqueue.RateLimitingInterface
+ 
+-	apiExtensionsClient kcpapiextensionsclientset.ClusterInterface
+-	kcpClusterClient    kcpclient.Interface
+-
+-	crdLister  kcpapiextensionsv1listers.CustomResourceDefinitionClusterLister
+-	crdIndexer cache.Indexer
+-
+-	apiBindingLister  apislisters.APIBindingLister
+-	apiBindingIndexer cache.Indexer
++	getCRD                           func(clusterName logicalcluster.Name, name string) (*apiextensionsv1.CustomResourceDefinition, error)
++	deleteCRD                        func(ctx context.Context, clusterName logicalcluster.Name, name string) error
++	getAPIBindingsByBoundResourceUID func(uid string) ([]interface{}, error)
++	listAPIBindings                  func() ([]*apisv1alpha1.APIBinding, error)
+ }
+ 
+ // enqueueCRD enqueues a CRD.
+@@ -215,7 +215,7 @@
+ 		return err
+ 	}
+ 
+-	obj, err := c.crdLister.Cluster(clusterName).Get(name)
++	obj, err := c.getCRD(clusterName, name)
+ 	if err != nil {
+ 		if errors.IsNotFound(err) {
+ 			return nil // object deleted before we handled it
+@@ -226,13 +226,13 @@
+ 	logger := logging.WithObject(klog.FromContext(ctx), obj)
+ 	ctx = klog.NewContext(ctx, logger)
+ 
+-	result, err := c.apiBindingIndexer.ByIndex(indexers.APIBindingByBoundResourceUID, obj.Name)
+-
+-	if err != nil {
+-		return err
+-	}
+-
+-	bindingList, err := c.apiBindingLister.List(labels.Everything())
++	result, err := c.getAPIBindingsByBoundResourceUID(obj.Name)
++
++	if err != nil {
++		return err
++	}
++
++	bindingList, err := c.listAPIBindings()
+ 
+ 	if err != nil {
+ 		return err
+@@ -253,7 +253,7 @@
+ 
+ 	if len(result) == 0 {
+ 		logger.V(1).Info("Deleting CRD")
+-		if err := c.apiExtensionsClient.ApiextensionsV1().CustomResourceDefinitions().Cluster(apibinding.ShadowWorkspaceName).Delete(ctx, obj.Name, metav1.DeleteOptions{}); err != nil {
++		if err := c.deleteCRD(ctx, apibinding.ShadowWorkspaceName, obj.Name); err != nil {
+ 			if errors.IsNotFound(err) {
+ 				return nil // object deleted before we handled it
+ 			}

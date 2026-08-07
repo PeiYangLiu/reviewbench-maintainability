@@ -1,0 +1,94 @@
+--- a/pkg/api/scylla/validation/scylladbcluster_validation.go
++++ b/pkg/api/scylla/validation/scylladbcluster_validation.go
+@@ -83,6 +83,50 @@
+ 	return allErrs
+ }
+ 
++func ValidateStorageOptions(storage *scyllav1alpha1.StorageOptions, fldPath *field.Path) field.ErrorList {
++	allErrs := field.ErrorList{}
++
++	if storage.Metadata != nil {
++		allErrs = append(allErrs, apimachinerymetav1validation.ValidateLabels(storage.Metadata.Labels, fldPath.Child("metadata", "labels"))...)
++		allErrs = append(allErrs, apimachineryvalidation.ValidateAnnotations(storage.Metadata.Annotations, fldPath.Child("metadata", "annotations"))...)
++	}
++
++	storageCapacity, err := resource.ParseQuantity(storage.Capacity)
++	if err != nil {
++		allErrs = append(allErrs, field.Invalid(fldPath.Child("capacity"), storage.Capacity, fmt.Sprintf("unable to parse capacity: %v", err)))
++	} else if storageCapacity.CmpInt64(0) <= 0 {
++		allErrs = append(allErrs, field.Invalid(fldPath.Child("capacity"), storage.Capacity, "must be greater than zero"))
++	}
++
++	if storage.StorageClassName != nil {
++		for _, msg := range apimachineryvalidation.NameIsDNSSubdomain(*storage.StorageClassName, false) {
++			allErrs = append(allErrs, field.Invalid(fldPath.Child("storageClassName"), *storage.StorageClassName, msg))
++		}
++	}
++
++	return allErrs
++}
++
++func ValidateCustomConfigMapRef(customConfigMapRef *string, fldPath *field.Path) field.ErrorList {
++	allErrs := field.ErrorList{}
++	if customConfigMapRef != nil {
++		for _, msg := range apimachineryvalidation.NameIsDNSSubdomain(*customConfigMapRef, false) {
++			allErrs = append(allErrs, field.Invalid(fldPath, *customConfigMapRef, msg))
++		}
++	}
++	return allErrs
++}
++
++func ValidateCustomConfigSecretRef(customConfigSecretRef *string, fldPath *field.Path) field.ErrorList {
++	allErrs := field.ErrorList{}
++	if customConfigSecretRef != nil {
++		for _, msg := range apimachineryvalidation.NameIsDNSSubdomain(*customConfigSecretRef, false) {
++			allErrs = append(allErrs, field.Invalid(fldPath, *customConfigSecretRef, msg))
++		}
++	}
++	return allErrs
++}
++
+ func ValidateScyllaDBClusterDatacenterTemplate(dcTemplate *scyllav1alpha1.ScyllaDBClusterDatacenterTemplate, fldPath *field.Path) field.ErrorList {
+ 	allErrs := field.ErrorList{}
+ 
+@@ -107,37 +151,17 @@
+ 
+ 	if dcTemplate.ScyllaDB != nil {
+ 		if dcTemplate.ScyllaDB.Storage != nil {
+-			if dcTemplate.ScyllaDB.Storage.Metadata != nil {
+-				allErrs = append(allErrs, apimachinerymetav1validation.ValidateLabels(dcTemplate.ScyllaDB.Storage.Metadata.Labels, fldPath.Child("scyllaDB", "storage", "metadata", "labels"))...)
+-				allErrs = append(allErrs, apimachineryvalidation.ValidateAnnotations(dcTemplate.ScyllaDB.Storage.Metadata.Annotations, fldPath.Child("scyllaDB", "storage", "metadata", "annotations"))...)
+-			}
+-
+-			storageCapacity, err := resource.ParseQuantity(dcTemplate.ScyllaDB.Storage.Capacity)
+-			if err != nil {
+-				allErrs = append(allErrs, field.Invalid(fldPath.Child("scyllaDB", "storage", "capacity"), dcTemplate.ScyllaDB.Storage.Capacity, fmt.Sprintf("unable to parse capacity: %v", err)))
+-			} else if storageCapacity.CmpInt64(0) <= 0 {
+-				allErrs = append(allErrs, field.Invalid(fldPath.Child("scyllaDB", "storage", "capacity"), dcTemplate.ScyllaDB.Storage.Capacity, "must be greater than zero"))
+-			}
+-
+-			if dcTemplate.ScyllaDB.Storage.StorageClassName != nil {
+-				for _, msg := range apimachineryvalidation.NameIsDNSSubdomain(*dcTemplate.ScyllaDB.Storage.StorageClassName, false) {
+-					allErrs = append(allErrs, field.Invalid(fldPath.Child("scyllaDB", "storage", "storageClassName"), *dcTemplate.ScyllaDB.Storage.StorageClassName, msg))
+-				}
+-			}
++			allErrs = append(allErrs, ValidateStorageOptions(dcTemplate.ScyllaDB.Storage, fldPath.Child("scyllaDB", "storage"))...)
+ 		}
+ 
+ 		if dcTemplate.ScyllaDB.CustomConfigMapRef != nil {
+-			for _, msg := range apimachineryvalidation.NameIsDNSSubdomain(*dcTemplate.ScyllaDB.CustomConfigMapRef, false) {
+-				allErrs = append(allErrs, field.Invalid(fldPath.Child("scyllaDB", "customConfigMapRef"), *dcTemplate.ScyllaDB.CustomConfigMapRef, msg))
+-			}
++			allErrs = append(allErrs, ValidateCustomConfigMapRef(dcTemplate.ScyllaDB.CustomConfigMapRef, fldPath.Child("scyllaDB", "customConfigMapRef"))...)
+ 		}
+ 	}
+ 
+ 	if dcTemplate.ScyllaDBManagerAgent != nil {
+ 		if dcTemplate.ScyllaDBManagerAgent.CustomConfigSecretRef != nil {
+-			for _, msg := range apimachineryvalidation.NameIsDNSSubdomain(*dcTemplate.ScyllaDBManagerAgent.CustomConfigSecretRef, false) {
+-				allErrs = append(allErrs, field.Invalid(fldPath.Child("scyllaDBManagerAgent", "customConfigSecretRef"), *dcTemplate.ScyllaDBManagerAgent.CustomConfigSecretRef, msg))
+-			}
++			allErrs = append(allErrs, ValidateCustomConfigSecretRef(dcTemplate.ScyllaDBManagerAgent.CustomConfigSecretRef, fldPath.Child("scyllaDBManagerAgent", "customConfigSecretRef"))...)
+ 		}
+ 	}
+ 

@@ -1,0 +1,68 @@
+diff --git a/bundle/direct/bundle_plan.go b/bundle/direct/bundle_plan.go
+index 2825aca..1780a79 100644
+--- a/bundle/direct/bundle_plan.go
++++ b/bundle/direct/bundle_plan.go
+@@ -933,32 +933,21 @@ func (b *DeploymentBundle) makePlan(ctx context.Context, configRoot *config.Root
+ 		// This means input and state must be compatible: input can have more fields, but existing fields should not be moved
+ 		// This means one cannot refer to fields not present in state (e.g. ${resources.jobs.foo.permissions})
+ 
+-		refs, err := extractReferences(configRoot.Value(), node)
++		// References are resolved against the resource's state type, not its input
++		// config (see dresources.TestInputSubset). A field that exists in input
++		// but not in state — most notably a bundle:"readonly" field such as
++		// volumes' computed volume_path — is dropped from state before deploy,
++		// so a reference it carries cannot be resolved into the state and must
++		// not be treated as a dependency here. Such references are still made
++		// available to other resources that read the field (for example
++		// ${resources.volumes.x.volume_path}) earlier during initialize.
++		refs, err := extractReferences(configRoot.Value(), node, adapter.StateType())
+ 		if err != nil {
+ 			return nil, fmt.Errorf("failed to read references from config for %s: %w", node, err)
+ 		}
+ 
+ 		maps.Copy(refs, baseRefs)
+ 
+-		// References are resolved against the resource's state type, not its input
+-		// config (see the note above and dresources.TestInputSubset). A field that
+-		// exists in input but not in state — most notably a bundle:"readonly" field
+-		// such as volumes' computed volume_path — is dropped from state before
+-		// deploy, so a reference it carries cannot be resolved into the state and
+-		// must not be treated as a dependency here. Such references are still made
+-		// available to other resources that read the field (for example
+-		// ${resources.volumes.x.volume_path}) earlier during initialize.
+-		stateType := adapter.StateType()
+-		for fieldPath := range refs {
+-			parsed, err := structpath.ParsePath(fieldPath)
+-			if err != nil {
+-				return nil, fmt.Errorf("%s: parsing reference path %q: %w", prefix, fieldPath, err)
+-			}
+-			if structaccess.ValidatePath(stateType, parsed) != nil {
+-				delete(refs, fieldPath)
+-			}
+-		}
+-
+ 		var dependsOn []deployplan.DependsOnEntry
+ 		for _, reference := range refs {
+ 			ref, ok := dynvar.NewRef(dyn.V(reference))
+@@ -1036,7 +1025,7 @@ func (b *DeploymentBundle) makePlan(ctx context.Context, configRoot *config.Root
+ 	return p, nil
+ }
+ 
+-func extractReferences(root dyn.Value, node string) (map[string]string, error) {
++func extractReferences(root dyn.Value, node string, stateType reflect.Type) (map[string]string, error) {
+ 	nodeType := config.GetResourceTypeFromKey(node)
+ 	refs := make(map[string]string)
+ 
+@@ -1068,7 +1057,11 @@ func extractReferences(root dyn.Value, node string) (map[string]string, error) {
+ 		// Convert dyn.Path to structpath string because refs are later parsed by structpath.ParsePath.
+ 		// dyn.Path.String() uses dot notation which is ambiguous for keys containing dots;
+ 		// structpath uses bracket notation (['key.with.dots']) which round-trips correctly.
+-		refs[dynPathToStructPath(p).String()] = ref.Str
++		structPath := dynPathToStructPath(p)
++		if structaccess.ValidatePath(stateType, structPath) != nil {
++			return nil
++		}
++		refs[structPath.String()] = ref.Str
+ 		return nil
+ 	})
+ 	if err != nil {

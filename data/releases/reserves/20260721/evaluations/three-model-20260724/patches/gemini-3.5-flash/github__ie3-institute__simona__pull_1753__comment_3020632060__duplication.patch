@@ -1,0 +1,37 @@
+--- a/src/main/scala/edu/ie3/simona/service/results/ResultServiceProxy.scala
++++ b/src/main/scala/edu/ie3/simona/service/results/ResultServiceProxy.scala
+@@ -545,26 +545,19 @@
+         AggregatedTransformer3wResult.EMPTY,
+       )
+     // add partial result
+-    partialResult.add(result).map { updatedResult =>
++    val updatedResults = partialResult.add(result).flatMap { updatedResult =>
+       if updatedResult.ready then {
+         // if result is complete, we can write it out
+-        updatedResult.consolidate match {
+-          case Failure(exception) =>
+-            log.warn(
+-              "Failure when handling partial Transformer3w result",
+-              exception,
+-            )
+-            // on failure, we just continue with previous results
+-            (allPartialResults, allResults)
+-          case Success(res) =>
+-            (allPartialResults.removed(key), allResults.appended(res))
++        updatedResult.consolidate.map { res =>
++          (allPartialResults.removed(key), allResults.appended(res))
+         }
+-
+       } else {
+         // if result is not complete yet, just update it
+-        (allPartialResults + (key -> updatedResult), allResults)
+-      }
+-    } match {
++        Success((allPartialResults + (key -> updatedResult), allResults))
++      }
++    }
++
++    updatedResults match {
+       case Success(results) => results
+       case Failure(exception) =>
+         log.warn(

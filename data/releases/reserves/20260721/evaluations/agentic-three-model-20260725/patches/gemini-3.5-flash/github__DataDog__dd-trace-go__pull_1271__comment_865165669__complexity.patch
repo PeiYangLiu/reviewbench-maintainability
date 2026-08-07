@@ -1,0 +1,66 @@
+diff --git a/ddtrace/tracer/textmap.go b/ddtrace/tracer/textmap.go
+index b02f76a..3b5bb85 100644
+--- a/ddtrace/tracer/textmap.go
++++ b/ddtrace/tracer/textmap.go
+@@ -263,34 +263,38 @@ func (p *propagator) injectTextMap(spanCtx ddtrace.SpanContext, writer TextMapWr
+ 		return nil
+ 	}
+ 	// propagate trace tags
+-	var sb strings.Builder
+ 	if ctx.trace != nil {
+-		ctx.trace.mu.Lock()
+-		for k, v := range ctx.trace.propagatingTags {
+-			if err := isValidPropagatableTraceTag(k, v); err != nil {
+-				log.Warn("won't propagate tag '%s' (err: %s)", k, err.Error())
+-				ctx.trace.setTag(propagationErrorKey, "encoding_error")
+-				continue
+-			}
+-			if sb.Len()+len(k)+len(v) > p.cfg.MaxTagsHeaderLen {
+-				sb.Reset()
+-				log.Warn("won't propagate trace tags (err: max trace tags header len (%d) reached)", p.cfg.MaxTagsHeaderLen)
+-				ctx.trace.setTag(propagationErrorKey, "max_size")
+-				break
+-			}
+-			if sb.Len() > 0 {
+-				sb.WriteByte(',')
+-			}
+-			sb.WriteString(k)
+-			sb.WriteByte('=')
+-			sb.WriteString(v)
++		if tags := p.traceTags(ctx.trace); tags != "" {
++			writer.Set(traceTagsHeader, tags)
++		}
++	}
++	return nil
++}
++
++func (p *propagator) traceTags(t *trace) string {
++	t.mu.Lock()
++	defer t.mu.Unlock()
++	var sb strings.Builder
++	for k, v := range t.propagatingTags {
++		if err := isValidPropagatableTraceTag(k, v); err != nil {
++			log.Warn("won't propagate tag '%s' (err: %s)", k, err.Error())
++			t.setTag(propagationErrorKey, "encoding_error")
++			continue
++		}
++		if sb.Len()+len(k)+len(v) > p.cfg.MaxTagsHeaderLen {
++			sb.Reset()
++			log.Warn("won't propagate trace tags (err: max trace tags header len (%d) reached)", p.cfg.MaxTagsHeaderLen)
++			t.setTag(propagationErrorKey, "max_size")
++			break
+ 		}
+-		ctx.trace.mu.Unlock()
+ 		if sb.Len() > 0 {
+-			writer.Set(traceTagsHeader, sb.String())
++			sb.WriteByte(',')
+ 		}
++		sb.WriteString(k)
++		sb.WriteByte('=')
++		sb.WriteString(v)
+ 	}
+-	return nil
++	return sb.String()
+ }
+ 
+ func (p *propagator) Extract(carrier interface{}) (ddtrace.SpanContext, error) {

@@ -1,0 +1,134 @@
+--- a/monitoring/monitoring/monitoring.go
++++ b/monitoring/monitoring/monitoring.go
+@@ -17,8 +17,10 @@
+ //
+ // These correspond to dashboards in Grafana.
+ type Container struct {
+-	// Name of the Docker container, e.g. "syntect-server".
+-	Name string
++	// Identifier of the Docker container, e.g. "syntect-server".
++	// This is used for Grafana dashboard UIDs, Prometheus alerting, and OpsGenie routing.
++	// It must be in a uniform format safe for use as an identifier (all lowercase, no spaces, alphanumeric and dashes only).
++	Identifier string
+ 
+ 	// Title of the Docker container, e.g. "Syntect Server".
+ 	Title string
+@@ -48,8 +50,17 @@
+ }
+ 
+ func (c *Container) validate() error {
+-	if !isValidGrafanaUID(c.Name) {
+-		return errors.Errorf("Name must be lowercase alphanumeric + dashes; found \"%s\"", c.Name)
++	if c.Identifier == "" {
++		return errors.New("Identifier must be set")
++	}
++	if strings.Contains(c.Identifier, " ") {
++		return errors.Errorf("Identifier must not contain spaces; found %q", c.Identifier)
++	}
++	if strings.ToLower(c.Identifier) != c.Identifier {
++		return errors.Errorf("Identifier must be all lowercase; found %q", c.Identifier)
++	}
++	if !isValidGrafanaUID(c.Identifier) {
++		return errors.Errorf("Identifier must be lowercase alphanumeric + dashes; found %q", c.Identifier)
+ 	}
+ 	if c.Title != strings.Title(c.Title) {
+ 		return errors.Errorf("Title must be in Title Case; found \"%s\" want \"%s\"", c.Title, strings.Title(c.Title))
+@@ -59,7 +70,7 @@
+ 	}
+ 	for i, v := range c.Variables {
+ 		if err := v.validate(); err != nil {
+-			return errors.Errorf("Variable %d %q: %v", i, c.Name, err)
++			return errors.Errorf("Variable %d %q: %v", i, c.Identifier, err)
+ 		}
+ 	}
+ 	for i, g := range c.Groups {
+@@ -74,7 +85,7 @@
+ func (c *Container) renderDashboard() *sdk.Board {
+ 	board := sdk.NewBoard(c.Title)
+ 	board.Version = uint(rand.Uint32())
+-	board.UID = c.Name
++	board.UID = c.Identifier
+ 	board.ID = 0
+ 	board.Timezone = "utc"
+ 	board.Timepicker.RefreshIntervals = []string{"5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "2h", "1d"}
+@@ -97,7 +108,7 @@
+ 		Name:       "Alert events",
+ 		Datasource: StringPtr("Prometheus"),
+ 		// Show alerts matching the selected alert_level (see template variable above)
+-		Expr:        fmt.Sprintf(`ALERTS{service_name=%q,level=~"$alert_level",alertstate="firing"}`, c.Name),
++		Expr:        fmt.Sprintf(`ALERTS{service_name=%q,level=~"$alert_level",alertstate="firing"}`, c.Identifier),
+ 		Step:        "60s",
+ 		TitleFormat: "{{ description }} ({{ name }})",
+ 		TagKeys:     "level,owner",
+@@ -114,7 +125,7 @@
+ 			// Per version, instance generate an annotation whenever labels change
+ 			// inspired by https://github.com/grafana/grafana/issues/11948#issuecomment-403841249
+ 			// We use `job=~.*SERVICE` because of frontend being called sourcegraph-frontend in certain environments
+-			Expr:        fmt.Sprintf(`group by(version, instance) (src_service_metadata{job=~".*%[1]s"} unless (src_service_metadata{job=~".*%[1]s"} offset 1m))`, c.Name),
++			Expr:        fmt.Sprintf(`group by(version, instance) (src_service_metadata{job=~".*%[1]s"} unless (src_service_metadata{job=~".*%[1]s"} offset 1m))`, c.Identifier),
+ 			Step:        "60s",
+ 			TitleFormat: "v{{ version }}",
+ 			TagKeys:     "instance",
+@@ -133,14 +144,14 @@
+ 	  <img src="https://sourcegraphstatic.com/sourcegraph-logo-light.png" style="height:30px; margin:0.5rem"></img>
+ 	  <div style="margin-left: 1rem; margin-top: 0.5rem; font-size: 20px;"><b>%s:</b> %s <a style="font-size: 15px" target="_blank" href="https://docs.sourcegraph.com/dev/background-information/architecture">(⧉ architecture diagram)</a></span>
+ 	</div>
+-	`, c.Name, c.Description)
++	`, c.Identifier, c.Description)
+ 	board.Panels = append(board.Panels, description)
+ 
+ 	alertsDefined := grafana.NewContainerAlertsDefinedTable(sdk.Target{
+ 		Expr: fmt.Sprintf(`label_replace(
+ 			sum(max by (level,service_name,name,description,grafana_panel_id)(alert_count{service_name="%s",name!="",level=~"$alert_level"})) by (level,description,service_name,grafana_panel_id),
+ 			"description", "$1", "description", ".*: (.*)"
+-		)`, c.Name),
++		)`, c.Identifier),
+ 		Format:  "table",
+ 		Instant: true,
+ 	})
+@@ -176,7 +187,7 @@
+ 		},
+ 	}
+ 	alertsFiring.AddTarget(&sdk.Target{
+-		Expr:         fmt.Sprintf(`sum by (service_name,level,name,grafana_panel_id)(max by (level,service_name,name,description,grafana_panel_id)(alert_count{service_name="%s",name!="",level=~"$alert_level"}) >= 1)`, c.Name),
++		Expr:         fmt.Sprintf(`sum by (service_name,level,name,grafana_panel_id)(max by (level,service_name,name,description,grafana_panel_id)(alert_count{service_name="%s",name!="",level=~"$alert_level"}) >= 1)`, c.Identifier),
+ 		LegendFormat: "{{level}}: {{name}}",
+ 	})
+ 	alertsFiring.GraphPanel.FieldConfig = &sdk.FieldConfig{}
+@@ -265,10 +276,10 @@
+ 	units := o.Panel.unitType.short()
+ 	if alert.greaterThan {
+ 		// e.g. "zoekt-indexserver: 20+ indexed search request errors every 5m by code"
+-		description = fmt.Sprintf("%s: %v%s+ %s", c.Name, alert.threshold, units, o.Description)
++		description = fmt.Sprintf("%s: %v%s+ %s", c.Identifier, alert.threshold, units, o.Description)
+ 	} else if alert.lessThan {
+ 		// e.g. "zoekt-indexserver: less than 20 indexed search requests every 5m by code"
+-		description = fmt.Sprintf("%s: less than %v%s %s", c.Name, alert.threshold, units, o.Description)
++		description = fmt.Sprintf("%s: less than %v%s %s", c.Identifier, alert.threshold, units, o.Description)
+ 	} else {
+ 		return "", errors.Errorf("unable to generate description for observable %+v", o)
+ 	}
+@@ -287,7 +298,7 @@
+ // https://docs.sourcegraph.com/admin/observability/metrics#high-level-alerting-metrics
+ //
+ func (c *Container) renderRules() (*promRulesFile, error) {
+-	group := promGroup{Name: c.Name}
++	group := promGroup{Name: c.Identifier}
+ 	for groupIndex, g := range c.Groups {
+ 		for rowIndex, r := range g.Rows {
+ 			for observableIndex, o := range r {
+@@ -312,12 +323,12 @@
+ 					description, err := c.alertDescription(o, a)
+ 					if err != nil {
+ 						return nil, errors.Errorf("%s.%s.%s: unable to generate labels: %+v",
+-							c.Name, o.Name, level, err)
++							c.Identifier, o.Name, level, err)
+ 					}
+ 					group.appendRow(alertQuery, map[string]string{
+ 						"name":         o.Name,
+ 						"level":        level,
+-						"service_name": c.Name,
++						"service_name": c.Identifier,
+ 						"description":  description,
+ 						"owner":        o.Owner.name,
+ 

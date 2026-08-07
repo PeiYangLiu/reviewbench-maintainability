@@ -1,0 +1,110 @@
+[
+  {
+    "action": {
+      "action": "find",
+      "path": "pkg/providers/tinkerbell/stack.go",
+      "query": "func newStack"
+    },
+    "response_chars": 84,
+    "round": 1,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 43,
+          "text": "func newStack(bundle releasev1alpha1.TinkerbellStackBundle, docker Docker, filewriter filewriter.FileWriter, helm Helm, ip string) *stack {"
+        }
+      ],
+      "query": "func newStack",
+      "truncated": false
+    },
+    "usage": {
+      "completion_tokens": 176,
+      "prompt_tokens": 3508,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 3684
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 160,
+      "path": "pkg/providers/tinkerbell/stack.go",
+      "start_line": 1
+    },
+    "response_chars": 90,
+    "round": 2,
+    "tool_result": {
+      "content": "1: package tinkerbell\n2: \n3: import (\n4: \t\"context\"\n5: \t\"fmt\"\n6: \t\"path/filepath\"\n7: \n8: \t\"github.com/aws/eks-anywhere/pkg/filewriter\"\n9: \t\"github.com/aws/eks-anywhere/pkg/logger\"\n10: \treleasev1alpha1 \"github.com/aws/eks-anywhere/release/api/v1alpha1\"\n11: \t\"sigs.k8s.io/yaml\"\n12: )\n13: \n14: const (\n15: \targs            = \"args\"\n16: \tcreateNamespace = \"createNamespace\"\n17: \tdeploy          = \"deploy\"\n18: \tenv             = \"env\"\n19: \timage           = \"image\"\n20: \tnamespace       = \"namespace\"\n21: \n22: \tboots          = \"boots\"\n23: \thegel          = \"hegel\"\n24: \ttinkController = \"tinkController\"\n25: \ttinkServer     = \"tinkServer\"\n26: \tgrpcPort       = \"42113\"\n27: \n28: \t// TODO: remove this once the chart is added to bundle\n29: \thelmChartOci     = \"oci://public.ecr.aws/h6q6q4n4/tinkerbell\"\n30: \thelmChartName    = \"tinkerbell\"\n31: \thelmChartVersion = \"0.1.0\"\n32: )\n33: \n34: type stack struct {\n35: \tbundle     releasev1alpha1.TinkerbellStackBundle\n36: \tdocker     Docker\n37: \tfilewriter filewriter.FileWriter\n38: \thelm       Helm\n39: \tip         string\n40: \tvalues     map[string]interface{}\n41: }\n42: \n43: func newStack(bundle releasev1alpha1.TinkerbellStackBundle, docker Docker, filewriter filewriter.FileWriter, helm Helm, ip string) *stack {\n44: \treturn &stack{\n45: \t\tbundle:     bundle,\n46: \t\tdocker:     docker,\n47: \t\tfilewriter: filewriter,\n48: \t\thelm:       helm,\n49: \t\tip:         ip,\n50: \t\tvalues:     make(map[string]interface{}),\n51: \t}\n52: }\n53: \n54: func (s *stack) withBoots() *stack {\n55: \tenvironment := []map[string]string{}\n56: \tfor k, v := range s.getBootsEnv() {\n57: \t\tenvironment = append(environment, map[string]string{\n58: \t\t\t\"name\":  k,\n59: \t\t\t\"value\": v,\n60: \t\t})\n61: \t}\n62: \n63: \ts.values[boots] = map[string]interface{}{\n64: \t\tdeploy: true,\n65: \t\timage:  s.bundle.Boots.Image.URI,\n66: \t\tenv:    environment,\n67: \t}\n68: \treturn s\n69: }\n70: \n71: func (s *stack) withoutBoots() *stack {\n72: \ts.values[boots] = map[string]interface{}{\n73: \t\tdeploy: false,\n74: \t}\n75: \treturn s\n76: }\n77: \n78: func (s *stack) withHegel() *stack {\n79: \ts.values[hegel] = map[string]interface{}{\n80: \t\tdeploy: true,\n81: \t\timage:  s.bundle.Hegel.Image.URI,\n82: \t\targs:   []string{\"--grpc-use-tls=false\"},\n83: \t}\n84: \treturn s\n85: }\n86: \n87: func (s *stack) withTinkController() *stack {\n88: \ts.values[tinkController] = map[string]interface{}{\n89: \t\tdeploy: true,\n90: \t\timage:  s.bundle.Tink.TinkController.URI,\n91: \t}\n92: \treturn s\n93: }\n94: \n95: func (s *stack) withTinkServer() *stack {\n96: \ts.values[tinkServer] = map[string]interface{}{\n97: \t\tdeploy: true,\n98: \t\timage:  s.bundle.Tink.TinkServer.URI,\n99: \t\targs:   []string{\"--tls=false\"},\n100: \t}\n101: \treturn s\n102: }\n103: \n104: func (s *stack) withNamespace(ns string, create bool) *stack {\n105: \ts.values[namespace] = ns\n106: \ts.values[createNamespace] = create\n107: \treturn s\n108: }\n109: \n110: func (s *stack) getValues() []string {\n111: \tvalues := []string{}\n112: \tfor k, v := range s.values {\n113: \t\tvalues = append(values, fmt.Sprintf(\"%s=%s\", k, v))\n114: \t}\n115: \treturn values\n116: }\n117: \n118: func (s *stack) install(ctx context.Context, kubeconfig string) error {\n119: \tlogger.V(6).Info(\"Installing Tinkerbell helm chart\")\n120: \n121: \tvalues, err := yaml.Marshal(s.values)\n122: \tif err != nil {\n123: \t\treturn fmt.Errorf(\"marshalling values override for Tinkerbell stack helm chart: %s\", err)\n124: \t}\n125: \n126: \tvaluesPath, err := s.filewriter.Write(\"tinkerbell-chart-values.yaml\", values)\n127: \tif err != nil {\n128: \t\treturn fmt.Errorf(\"writing values override for Tinkerbell stack helm chart: %s\", err)\n129: \t}\n130: \n131: \tif err := s.helm.InstallChartWithValuesFile(ctx, helmChartName, helmChartOci, helmChartVersion, kubeconfig, valuesPath); err != nil {\n132: \t\treturn fmt.Errorf(\"installing Tinkerbell helm chart: %v\", err)\n133: \t}\n134: \treturn nil\n135: }\n136: \n137: func (s *stack) installBootsOnDocker(ctx context.Context, kubeconfig string) error {\n138: \tkubeconfig, err := filepath.Abs(kubeconfig)\n139: \tif err != nil {\n140: \t\treturn fmt.Errorf(\"getting absolute path for kubeconfig: %v\", err)\n141: \t}\n142: \n143: \tflags := []string{\n144: \t\t\"-v\", fmt.Sprintf(\"%s:/kubeconfig\", kubeconfig),\n145: \t\t\"--network\", \"host\",\n146: \t}\n147: \n148: \tfor name, value := range s.getBootsEnv() {\n149: \t\tflags = append(flags, \"-e\", fmt.Sprintf(\"%s=%s\", name, value))\n150: \t}\n151: \n152: \tcmd := []string{\"-kubeconfig\", \"/kubeconfig\", \"-dhcp-addr\", \"0.0.0.0:67\"}\n153: \tif err := s.docker.Run(ctx, s.bundle.Boots.Image.URI, boots, cmd, flags...); err != nil {\n154: \t\treturn fmt.Errorf(\"run boots with docker: %v\", err)\n155: \t}\n156: \n157: \treturn nil\n158: }\n159: \n160: func (s *stack) getBootsEnv() map[string]string {",
+      "end_line": 160,
+      "path_lines": 169,
+      "start_line": 1
+    },
+    "usage": {
+      "completion_tokens": 85,
+      "prompt_tokens": 3680,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 3765
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\tif err := stack.installBootsOnDocker(ctx, cluster.KubeconfigFile); err != nil {\n\t\treturn fmt.Errorf(\"install Tinkerbell boots on bootstrap cluster: %v\", err)\n\t}",
+          "end_line": 70,
+          "start_line": 68
+        }
+      ]
+    },
+    "response_chars": 376,
+    "round": 3,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 70,
+          "replacement_lines": 3,
+          "start_line": 68
+        }
+      ],
+      "current_file_lines": 148,
+      "updated_excerpt": {
+        "content": "58: \t\twithNamespace(constants.EksaSystemNamespace, false).\n59: \t\twithoutBoots().\n60: \t\twithHegel().\n61: \t\twithTinkController().\n62: \t\twithTinkServer()\n63: \n64: \tif err := stack.install(ctx, cluster.KubeconfigFile); err != nil {\n65: \t\treturn fmt.Errorf(\"install Tinkerbell stack on bootstrap cluster: %v\", err)\n66: \t}\n67: \n68: \tif err := stack.installBootsOnDocker(ctx, cluster.KubeconfigFile); err != nil {\n69: \t\treturn fmt.Errorf(\"install Tinkerbell boots on bootstrap cluster: %v\", err)\n70: \t}\n71: \n72: \treturn nil\n73: }\n74: \n75: func (p *Provider) PostBootstrapSetup(ctx context.Context, clusterConfig *v1alpha1.Cluster, cluster *types.Cluster) error {\n76: \t// hardwareSpec, err := hardware.MarshalCatalogue(p.catalogue)\n77: \t// if err != nil {\n78: \t// \treturn fmt.Errorf(\"failed marshalling resources for hardware spec: %v\", err)\n79: \t// }\n80: \terr := p.providerKubectlClient.ApplyKubeSpec(ctx, cluster, p.hardwareManifestPath)\n81: \tif err != nil {\n82: \t\treturn fmt.Errorf(\"applying hardware yaml: %v\", err)\n83: \t}\n84: \treturn nil\n85: }\n86: \n87: func (p *Provider) PostWorkloadInit(ctx context.Context, cluster *types.Cluster, clusterSpec *cluster.Spec) error {\n88: \tif !p.setupTinkerbell {\n89: \t\treturn nil\n90: \t}\n91: \n92: \tlogger.V(4).Info(\"Installing Tinkerbell stack on workload cluster\")\n93: \n94: \tip, err := networkutils.GetLocalIP(p.netClient)\n95: \tif err != nil {\n96: \t\treturn err\n97: \t}\n98: ",
+        "end_line": 98,
+        "path_lines": 148,
+        "start_line": 58
+      }
+    },
+    "usage": {
+      "completion_tokens": 734,
+      "prompt_tokens": 6482,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 7216
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 4,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/claude-opus-4.8/patches/github__aws__eks-anywhere__pull_2274__comment_883014057__modularity.patch"
+    },
+    "usage": {
+      "completion_tokens": 519,
+      "prompt_tokens": 7513,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 8032
+    }
+  }
+]

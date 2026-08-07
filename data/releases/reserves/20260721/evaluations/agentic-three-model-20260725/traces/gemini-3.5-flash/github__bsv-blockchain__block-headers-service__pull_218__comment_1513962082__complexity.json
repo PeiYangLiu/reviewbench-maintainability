@@ -1,0 +1,90 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 280,
+      "path": "transports/p2p/connmgr/connmanager.go",
+      "start_line": 230
+    },
+    "response_chars": 96,
+    "response_object_count": 1,
+    "round": 1,
+    "tool_result": {
+      "content": "230: \tcm.failedAttemptsMutex.RLock()\n231: \tdefer cm.failedAttemptsMutex.RUnlock()\n232: \n233: \treturn cm.failedAttempts[addr]\n234: }\n235: \n236: // handleFailedConn handles a connection failed due to a disconnect or any\n237: // other failure. If permanent, it retries the connection after the configured\n238: // retry duration. Otherwise, if required, it makes a new connection request.\n239: // After maxFailedConnectionAttempts new connections will be retried after the\n240: // configured retry duration.\n241: func (cm *ConnManager) handleFailedConn(c *ConnReq) {\n242: \tif atomic.LoadInt32(&cm.stop) != 0 {\n243: \t\treturn\n244: \t}\n245: \tif c.Permanent {\n246: \t\tc.retryCount++\n247: \t\td := time.Duration(c.retryCount) * cm.cfg.RetryDuration\n248: \t\tif d > maxRetryDuration {\n249: \t\t\td = maxRetryDuration\n250: \t\t}\n251: \t\tcm.log.Debug().Msgf(\"Retrying connection to %v in %v\", c, d)\n252: \t\ttime.AfterFunc(d, func() {\n253: \t\t\tcm.Connect(c)\n254: \t\t})\n255: \t} else if cm.cfg.GetNewAddress != nil {\n256: \t\tif c.Addr != nil && c.Addr.String() != \"\" && cm.cfg.BanAddress != nil {\n257: \t\t\tcm.incAddrConnAttempt(c.Addr.String())\n258: \t\t\tif cm.getAddrConnAttempt(c.Addr.String()) >= maxFailedAttempts {\n259: \t\t\t\tcm.cfg.BanAddress(c.Addr.String())\n260: \t\t\t\treturn\n261: \t\t\t}\n262: \t\t} else {\n263: \t\t\tcm.incGlobalFailedAttempts()\n264: \t\t\tif cm.getGlobalFailedAttempts() >= maxFailedAttempts {\n265: \t\t\t\tcm.log.Debug().Msgf(\"Max failed connection attempts reached: [%d] \"+\n266: \t\t\t\t\t\"-- retrying connection in: %v\", maxFailedAttempts,\n267: \t\t\t\t\tcm.cfg.RetryDuration)\n268: \t\t\t\ttime.AfterFunc(cm.cfg.RetryDuration, func() {\n269: \t\t\t\t\tcm.NewConnReq()\n270: \t\t\t\t})\n271: \t\t\t\treturn\n272: \t\t\t}\n273: \t\t}\n274: \t\tgo cm.NewConnReq()\n275: \t}\n276: }\n277: \n278: // connHandler handles all connection related requests.  It must be run as a\n279: // goroutine.\n280: //",
+      "end_line": 280,
+      "path_lines": 640,
+      "start_line": 230
+    },
+    "usage": {
+      "completion_tokens": 39,
+      "prompt_tokens": 8725,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "reasoning_tokens": 633,
+      "total_tokens": 9397
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "func (cm *ConnManager) handleFailedConn(c *ConnReq) {\n\tif atomic.LoadInt32(&cm.stop) != 0 {\n\t\treturn\n\t}\n\tif c.Permanent {\n\t\tc.retryCount++\n\t\td := time.Duration(c.retryCount) * cm.cfg.RetryDuration\n\t\tif d > maxRetryDuration {\n\t\t\td = maxRetryDuration\n\t\t}\n\t\tcm.log.Debug().Msgf(\"Retrying connection to %v in %v\", c, d)\n\t\ttime.AfterFunc(d, func() {\n\t\t\tcm.Connect(c)\n\t\t})\n\t} else if cm.cfg.GetNewAddress != nil {\n\t\tif cm.registerFailedConnectionTo(c) {\n\t\t\treturn\n\t\t}\n\t\tgo cm.NewConnReq()\n\t}\n}\n\n// registerFailedConnectionTo registers a failed connection attempt to the given address or globally.\n// It returns true if further action (such as trying to connect again immediately) should be stopped.\nfunc (cm *ConnManager) registerFailedConnectionTo(c *ConnReq) bool {\n\tif c.Addr != nil && c.Addr.String() != \"\" && cm.cfg.BanAddress != nil {\n\t\tcm.incAddrConnAttempt(c.Addr.String())\n\t\tif cm.getAddrConnAttempt(c.Addr.String()) >= maxFailedAttempts {\n\t\t\tcm.cfg.BanAddress(c.Addr.String())\n\t\t\treturn true\n\t\t}\n\t} else {\n\t\tcm.incGlobalFailedAttempts()\n\t\tif cm.getGlobalFailedAttempts() >= maxFailedAttempts {\n\t\t\tcm.log.Debug().Msgf(\"Max failed connection attempts reached: [%d] \"+\n\t\t\t\t\"-- retrying connection in: %v\", maxFailedAttempts,\n\t\t\t\tcm.cfg.RetryDuration)\n\t\t\ttime.AfterFunc(cm.cfg.RetryDuration, func() {\n\t\t\t\tcm.NewConnReq()\n\t\t\t})\n\t\t\treturn true\n\t\t}\n\t}\n\treturn false\n}",
+          "end_line": 276,
+          "start_line": 241
+        }
+      ]
+    },
+    "raw_response_tail": "{\"action\": \"edit\", \"edits\": [{\"content\": \"func (cm *ConnManager) handleFailedConn(c *ConnReq) {\\n\\tif atomic.LoadInt32(&cm.stop) != 0 {\\n\\t\\treturn\\n\\t}\\n\\tif c.Permanent {\\n\\t\\tc.retryCount++\\n\\t\\td := time.Duration(c.retryCount) * cm.cfg.RetryDuration\\n\\t\\tif d > maxRetryDuration {\\n\\t\\t\\td = maxRetryDuration\\n\\t\\t}\\n\\t\\tcm.log.Debug().Msgf(\\\"Retrying connection to %v in %v\\\", c, d)\\n\\t\\ttime.AfterFunc(d, func() {\\n\\t\\t\\tcm.Connect(c)\\n\\t\\t})\\n\\t} else if cm.cfg.GetNewAddress != nil {\\n\\t\\tif cm.registerFailedConnectionTo(c) {\\n\\t\\t\\treturn\\n\\t\\t}\\n\\t\\tgo cm.NewConnReq()\\n\\t}\\n}\\n\\n// registerFailedConnectionTo registers a failed connection attempt to the given address or globally.\\n// It returns true if further action (such as trying to connect again immediately) should be stopped.\\nfunc (cm *ConnManager) registerFailedConnectionTo(c *ConnReq) bool {\\n\\tif c.Addr != nil && c.Addr.String() != \\\"\\\" && cm.cfg.BanAddress != nil {\\n\\t\\tcm.incAddrConnAttempt(c.Addr.String())\\n\\t\\tif cm.getAddrConnAttempt(c.Addr.String()) >= maxFailedAttempts {\\n\\t\\t\\tcm.cfg.BanAddress(c.Addr.String())\\n\\t\\t\\treturn true\\n\\t\\t}\\n\\t} else {\\n\\t\\tcm.incGlobalFailedAttempts()\\n\\t\\tif cm.getGlobalFailedAttempts() >= maxFailedAttempts {\\n\\t\\t\\tcm.log.Debug().Msgf(\\\"Max failed connection attempts reached: [%d] \\\"+\\n\\t\\t\\t\\t\\\"-- retrying connection in: %v\\\", maxFailedAttempts,\\n\\t\\t\\t\\tcm.cfg.RetryDuration)\\n\\t\\t\\ttime.AfterFunc(cm.cfg.RetryDuration, func() {\\n\\t\\t\\t\\tcm.NewConnReq()\\n\\t\\t\\t})\\n\\t\\t\\treturn true\\n\\t\\t}\\n\\t}\\n\\treturn false\\n}\", \"end_line\": 276, \"start_line\": 241}]}",
+    "response_chars": 1580,
+    "response_object_count": 2,
+    "round": 2,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 276,
+          "replacement_lines": 45,
+          "start_line": 241
+        }
+      ],
+      "current_file_lines": 649,
+      "updated_excerpt": {
+        "content": "231: \tdefer cm.failedAttemptsMutex.RUnlock()\n232: \n233: \treturn cm.failedAttempts[addr]\n234: }\n235: \n236: // handleFailedConn handles a connection failed due to a disconnect or any\n237: // other failure. If permanent, it retries the connection after the configured\n238: // retry duration. Otherwise, if required, it makes a new connection request.\n239: // After maxFailedConnectionAttempts new connections will be retried after the\n240: // configured retry duration.\n241: func (cm *ConnManager) handleFailedConn(c *ConnReq) {\n242: \tif atomic.LoadInt32(&cm.stop) != 0 {\n243: \t\treturn\n244: \t}\n245: \tif c.Permanent {\n246: \t\tc.retryCount++\n247: \t\td := time.Duration(c.retryCount) * cm.cfg.RetryDuration\n248: \t\tif d > maxRetryDuration {\n249: \t\t\td = maxRetryDuration\n250: \t\t}\n251: \t\tcm.log.Debug().Msgf(\"Retrying connection to %v in %v\", c, d)\n252: \t\ttime.AfterFunc(d, func() {\n253: \t\t\tcm.Connect(c)\n254: \t\t})\n255: \t} else if cm.cfg.GetNewAddress != nil {\n256: \t\tif cm.registerFailedConnectionTo(c) {\n257: \t\t\treturn\n258: \t\t}\n259: \t\tgo cm.NewConnReq()\n260: \t}\n261: }\n262: \n263: // registerFailedConnectionTo registers a failed connection attempt to the given address or globally.\n264: // It returns true if further action (such as trying to connect again immediately) should be stopped.\n265: func (cm *ConnManager) registerFailedConnectionTo(c *ConnReq) bool {\n266: \tif c.Addr != nil && c.Addr.String() != \"\" && cm.cfg.BanAddress != nil {\n267: \t\tcm.incAddrConnAttempt(c.Addr.String())\n268: \t\tif cm.getAddrConnAttempt(c.Addr.String()) >= maxFailedAttempts {\n269: \t\t\tcm.cfg.BanAddress(c.Addr.String())\n270: \t\t\treturn true\n271: \t\t}",
+        "end_line": 271,
+        "path_lines": 649,
+        "start_line": 231
+      }
+    },
+    "usage": {
+      "completion_tokens": 621,
+      "prompt_tokens": 9687,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "reasoning_tokens": 2688,
+      "total_tokens": 12996
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "response_object_count": 1,
+    "round": 3,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gemini-3.5-flash/patches/github__bsv-blockchain__block-headers-service__pull_218__comment_1513962082__complexity.patch"
+    },
+    "usage": {
+      "completion_tokens": 5,
+      "prompt_tokens": 11076,
+      "prompt_tokens_details": {
+        "cached_tokens": 8163
+      },
+      "reasoning_tokens": 371,
+      "total_tokens": 11452
+    }
+  }
+]

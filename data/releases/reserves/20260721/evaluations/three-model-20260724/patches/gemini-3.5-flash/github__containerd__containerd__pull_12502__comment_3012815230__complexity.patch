@@ -1,0 +1,88 @@
+--- a/plugins/mount/erofs/plugin_linux.go
++++ b/plugins/mount/erofs/plugin_linux.go
+@@ -88,40 +88,9 @@
+ 		devicePath := dmverity.DevicePath(deviceName)
+ 
+ 		// Try to create dm-verity device first (avoids TOCTOU race)
+-		log.G(ctx).WithFields(log.Fields{
+-			"source":      m.Source,
+-			"device-name": deviceName,
+-			"hash-offset": metadata.HashOffset,
+-		}).Debug("opening dm-verity device")
+-
+-		_, err = dmverity.Open(m.Source, deviceName, m.Source, metadata.RootHash, metadata.HashOffset, nil)
++		dmverityDevice, err = setupDmverityDevice(ctx, m.Source, deviceName, devicePath, metadata)
+ 		if err != nil {
+-			if _, statErr := os.Stat(devicePath); statErr == nil {
+-				if verifyErr := dmverity.VerifyDevice(deviceName, metadata.RootHash); verifyErr != nil {
+-					return mount.ActiveMount{}, fmt.Errorf("existing dm-verity device %q verification failed: %w", deviceName, verifyErr)
+-				}
+-				log.G(ctx).WithField("device", devicePath).Debug("dm-verity device already exists and verified, reusing")
+-			} else {
+-				return mount.ActiveMount{}, fmt.Errorf("failed to open dm-verity device: %w", err)
+-			}
+-		} else {
+-			// Open succeeded, ensure cleanup on any subsequent error
+-			dmverityDevice = deviceName
+-
+-			// Wait for device to appear
+-			for range 100 {
+-				if _, err := os.Stat(devicePath); err == nil {
+-					break
+-				}
+-				time.Sleep(10 * time.Millisecond)
+-			}
+-
+-			// Verify device exists
+-			if _, err := os.Stat(devicePath); err != nil {
+-				return mount.ActiveMount{}, fmt.Errorf("dm-verity device %q not found after creation: %w", devicePath, err)
+-			}
+-
+-			log.G(ctx).WithField("device", devicePath).Info("dm-verity device created successfully")
++			return mount.ActiveMount{}, err
+ 		}
+ 		m.Source = devicePath
+ 	}
+@@ -207,6 +176,42 @@
+ 	return nil
+ }
+ 
++func setupDmverityDevice(ctx context.Context, source, deviceName, devicePath string, metadata *dmverity.Metadata) (string, error) {
++	log.G(ctx).WithFields(log.Fields{
++		"source":      source,
++		"device-name": deviceName,
++		"hash-offset": metadata.HashOffset,
++	}).Debug("opening dm-verity device")
++
++	_, err := dmverity.Open(source, deviceName, source, metadata.RootHash, metadata.HashOffset, nil)
++	if err != nil {
++		if _, statErr := os.Stat(devicePath); statErr != nil {
++			return "", fmt.Errorf("failed to open dm-verity device: %w", err)
++		}
++		if verifyErr := dmverity.VerifyDevice(deviceName, metadata.RootHash); verifyErr != nil {
++			return "", fmt.Errorf("existing dm-verity device %q verification failed: %w", deviceName, verifyErr)
++		}
++		log.G(ctx).WithField("device", devicePath).Debug("dm-verity device already exists and verified, reusing")
++		return "", nil
++	}
++
++	// Wait for device to appear
++	for range 100 {
++		if _, err := os.Stat(devicePath); err == nil {
++			break
++		}
++		time.Sleep(10 * time.Millisecond)
++	}
++
++	// Verify device exists
++	if _, err := os.Stat(devicePath); err != nil {
++		return "", fmt.Errorf("dm-verity device %q not found after creation: %w", devicePath, err)
++	}
++
++	log.G(ctx).WithField("device", devicePath).Info("dm-verity device created successfully")
++	return deviceName, nil
++}
++
+ func (h *erofsMountHandler) Unmount(ctx context.Context, path string) error {
+ 	// Check what's currently mounted to determine if dm-verity device cleanup is needed
+ 	var deviceName string

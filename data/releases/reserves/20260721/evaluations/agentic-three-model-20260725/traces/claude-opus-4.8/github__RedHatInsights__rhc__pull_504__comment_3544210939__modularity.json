@@ -1,0 +1,59 @@
+[
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "def parse_args() -> argparse.Namespace:\n    parser = argparse.ArgumentParser(\n        description=\"Select test targets based on changed files.\"\n    )\n    parser.add_argument(\"--base\", required=True, help=\"Base git ref/sha\")\n    parser.add_argument(\"--head\", required=True, help=\"Head git ref/sha\")\n    parser.add_argument(\n        \"--map-file\",\n        default=\"scripts/its_test_map.yml\",\n        help=\"Path to YAML map describing test selection rules.\",\n    )\n    parser.add_argument(\n        \"--output-json\",\n        default=\"selector-output.json\",\n        help=\"Where to write structured selection output.\",\n    )\n    parser.add_argument(\n        \"--github-output\",\n        default=\"\",\n        help=\"Optional path to GitHub output file ($GITHUB_OUTPUT).\",\n    )\n    return parser.parse_args()\n\n\ndef load_config(map_file: str) -> dict[str, Any]:\n    with open(map_file, \"r\", encoding=\"utf-8\") as file:\n        return yaml.safe_load(file)\n\n\ndef select_considered_files(\n    changed_files: list[str], config: dict[str, Any]\n) -> tuple[list[str], bool]:\n    ignore_patterns = compile_patterns(config.get(\"ignore_patterns\", []))\n    docs_patterns = compile_patterns(config.get(\"docs_only_patterns\", []))\n\n    considered_files = [\n        path for path in changed_files if not matches_any(path, ignore_patterns)\n    ]\n    docs_only_change = bool(considered_files) and all(\n        matches_any(path, docs_patterns) for path in considered_files\n    )\n    return considered_files, docs_only_change\n\n\ndef apply_rules(\n    considered_files: list[str], config: dict[str, Any]\n) -> tuple[set[str], set[str], list[str], list[str], dict[str, list[str]]]:\n    selected_go_packages: set[str] = set()\n    selected_pytest_files: set[str] = set()\n    matched_rules: list[str] = []\n    reasons: list[str] = []\n\n    rule_match_by_file: dict[str, list[str]] = {path: [] for path in considered_files}\n    for rule in config.get(\"rules\", []):\n        compiled_rule_patterns = compile_patterns(rule.get(\"patterns\", []))\n        matched = [\n            path for path in considered_files if matches_any(path, compiled_rule_patterns)\n        ]\n        if not matched:\n            continue\n        matched_rules.append(rule[\"id\"])\n        selected_go_packages.update(rule.get(\"go_packages\", []))\n        selected_pytest_files.update(rule.get(\"pytest_files\", []))\n        reasons.append(f\"rule:{rule['id']}\")\n        for path in matched:\n            rule_match_by_file[path].append(rule[\"id\"])\n\n    return (\n        selected_go_packages,\n        selected_pytest_files,\n        matched_rules,\n        reasons,\n        rule_match_by_file,\n    )\n\n\ndef apply_direct_and_derived(\n    considered_files: list[str],\n    go_package_roots: set[str],\n    rule_match_by_file: dict[str, list[str]],\n    selected_go_packages: set[str],\n    selected_pytest_files: set[str],\n    reasons: list[str],\n) -> None:\n    for path in considered_files:\n        if path.startswith(\"integration-tests/test_\") and path.endswith(\".py\"):\n            selected_pytest_files.add(path)\n            reasons.append(f\"direct-test-file:{path}\")\n        package = normalize_go_package(path, go_package_roots)\n        if package and not rule_match_by_file[path]:\n            selected_go_packages.add(package)\n            reasons.append(f\"derived-go-package:{package}\")\n\n\ndef resolve_full_run(\n    considered_files: list[str],\n    config: dict[str, Any],\n    docs_only_change: bool,\n    selected_go_packages: set[str],\n    selected_pytest_files: set[str],\n    reasons: list[str],\n) -> tuple[bool, str]:\n    fallback_patterns = compile_patterns(config.get(\"fallback_patterns\", []))\n    smoke = config.get(\"smoke\", {})\n    smoke_go = set(smoke.get(\"go_packages\", []))\n    smoke_pytest = set(smoke.get(\"pytest_files\", []))\n\n    full_run_triggers = [\n        path for path in considered_files if matches_any(path, fallback_patterns)\n    ]\n    run_full_integration = bool(full_run_triggers)\n\n    if not considered_files:\n        run_full_integration = True\n        reasons.append(\"no-considered-files\")\n\n    if run_full_integration:\n        reasons.extend(f\"full-trigger:{path}\" for path in full_run_triggers)\n    else:\n        selected_go_packages.update(smoke_go)\n        # Keep docs-only changes very cheap while still exercising basic CLI output.\n        selected_pytest_files.update(smoke_pytest)\n        if docs_only_change:\n            reasons.append(\"docs-only-change\")\n\n    if run_full_integration:\n        risk_level = \"high\"\n    elif docs_only_change:\n        risk_level = \"low\"\n    else:\n        risk_level = \"medium\"\n\n    return run_full_integration, risk_level\n\n\ndef build_selection(\n    args: argparse.Namespace,\n    changed_files: list[str],\n    considered_files: list[str],\n    docs_only_change: bool,\n    matched_rules: list[str],\n    selected_go_packages: set[str],\n    selected_pytest_files: set[str],\n    run_full_integration: bool,\n    risk_level: str,\n    reasons: list[str],\n) -> dict[str, Any]:\n    return {\n        \"base\": args.base,\n        \"head\": args.head,\n        \"changed_files\": changed_files,\n        \"considered_files\": considered_files,\n        \"docs_only_change\": docs_only_change,\n        \"matched_rules\": sorted(set(matched_rules)),\n        \"selected_go_packages\": sorted(selected_go_packages),\n        \"selected_pytest_files\": sorted(selected_pytest_files),\n        \"run_full_integration\": run_full_integration,\n        \"risk_level\": risk_level,\n        \"reasons\": sorted(set(reasons)),\n        \"recommended_commands\": {\n            \"go\": (\n                f\"go test {' '.join(sorted(selected_go_packages))}\"\n                if selected_go_packages\n                else \"go test ./...\"\n            ),\n            \"pytest\": (\n                \"pytest -v integration-tests\"\n                if run_full_integration\n                else (\n                    \"pytest -v \" + \" \".join(sorted(selected_pytest_files))\n                    if selected_pytest_files\n                    else \"pytest -v integration-tests/test_version.py\"\n                )\n            ),\n        },\n    }\n\n\ndef write_selection(args: argparse.Namespace, selection: dict[str, Any]) -> None:\n    with open(args.output_json, \"w\", encoding=\"utf-8\") as file:\n        json.dump(selection, file, indent=2, sort_keys=True)\n        file.write(\"\\n\")\n\n    if args.github_output:\n        write_github_outputs(args.github_output, selection)\n\n    print(json.dumps(selection, indent=2, sort_keys=True))\n\n\ndef main() -> int:\n    args = parse_args()\n    config = load_config(args.map_file)\n\n    changed_files = git_changed_files(args.base, args.head)\n    go_package_roots = load_go_package_roots(config)\n\n    considered_files, docs_only_change = select_considered_files(changed_files, config)\n\n    (\n        selected_go_packages,\n        selected_pytest_files,\n        matched_rules,\n        reasons,\n        rule_match_by_file,\n    ) = apply_rules(considered_files, config)\n\n    apply_direct_and_derived(\n        considered_files,\n        go_package_roots,\n        rule_match_by_file,\n        selected_go_packages,\n        selected_pytest_files,\n        reasons,\n    )\n\n    run_full_integration, risk_level = resolve_full_run(\n        considered_files,\n        config,\n        docs_only_change,\n        selected_go_packages,\n        selected_pytest_files,\n        reasons,\n    )\n\n    selection = build_selection(\n        args,\n        changed_files,\n        considered_files,\n        docs_only_change,\n        matched_rules,\n        selected_go_packages,\n        selected_pytest_files,\n        run_full_integration,\n        risk_level,\n        reasons,\n    )\n\n    write_selection(args, selection)\n    return 0",
+          "end_line": 226,
+          "start_line": 91
+        }
+      ]
+    },
+    "response_chars": 8152,
+    "round": 1,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 226,
+          "replacement_lines": 239,
+          "start_line": 91
+        }
+      ],
+      "current_file_lines": 333,
+      "updated_excerpt": {
+        "content": "81:         \"pytest_files\": \",\".join(selection[\"selected_pytest_files\"]),\n82:         \"changed_files_count\": len(selection[\"changed_files\"]),\n83:         \"docs_only\": \"true\" if selection[\"docs_only_change\"] else \"false\",\n84:     }\n85: \n86:     with open(path, \"a\", encoding=\"utf-8\") as file:\n87:         for key, value in outputs.items():\n88:             file.write(f\"{key}={value}\\n\")\n89: \n90: \n91: def parse_args() -> argparse.Namespace:\n92:     parser = argparse.ArgumentParser(\n93:         description=\"Select test targets based on changed files.\"\n94:     )\n95:     parser.add_argument(\"--base\", required=True, help=\"Base git ref/sha\")\n96:     parser.add_argument(\"--head\", required=True, help=\"Head git ref/sha\")\n97:     parser.add_argument(\n98:         \"--map-file\",\n99:         default=\"scripts/its_test_map.yml\",\n100:         help=\"Path to YAML map describing test selection rules.\",\n101:     )\n102:     parser.add_argument(\n103:         \"--output-json\",\n104:         default=\"selector-output.json\",\n105:         help=\"Where to write structured selection output.\",\n106:     )\n107:     parser.add_argument(\n108:         \"--github-output\",\n109:         default=\"\",\n110:         help=\"Optional path to GitHub output file ($GITHUB_OUTPUT).\",\n111:     )\n112:     return parser.parse_args()\n113: \n114: \n115: def load_config(map_file: str) -> dict[str, Any]:\n116:     with open(map_file, \"r\", encoding=\"utf-8\") as file:\n117:         return yaml.safe_load(file)\n118: \n119: \n120: def select_considered_files(\n121:     changed_files: list[str], config: dict[str, Any]",
+        "end_line": 121,
+        "path_lines": 333,
+        "start_line": 81
+      }
+    },
+    "usage": {
+      "completion_tokens": 3364,
+      "prompt_tokens": 3974,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 7338
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 2,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/claude-opus-4.8/patches/github__RedHatInsights__rhc__pull_504__comment_3544210939__modularity.patch"
+    },
+    "usage": {
+      "completion_tokens": 26,
+      "prompt_tokens": 8059,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 8085
+    }
+  }
+]

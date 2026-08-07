@@ -1,0 +1,40 @@
+--- a/pkg/operator/webhook/validation/auditpolicy/add.go
++++ b/pkg/operator/webhook/validation/auditpolicy/add.go
+@@ -74,18 +74,25 @@
+ 			return ""
+ 		},
+ 		AdmitGardenConfig: func(auditPolicyRaw string) (int32, error) {
+-			obj, schemaVersion, err := decoder.Decode([]byte(auditPolicyRaw), nil, nil)
+-			if err != nil {
+-				return http.StatusUnprocessableEntity, fmt.Errorf("failed to decode the provided audit policy: %w", err)
+-			}
+-			policy, ok := obj.(*audit.Policy)
+-			if !ok {
+-				return http.StatusInternalServerError, fmt.Errorf("failed to cast to audit policy type: %v", schemaVersion)
+-			}
+-			if errList := auditvalidation.ValidatePolicy(policy); len(errList) != 0 {
+-				return http.StatusUnprocessableEntity, fmt.Errorf("provided invalid audit policy: %v", errList)
+-			}
+-			return 0, nil
++			return Validate(auditPolicyRaw)
+ 		},
+ 	}
+ }
++
++// Validate decodes the given raw audit policy and validates it. It returns an HTTP status code and an error in case the
++// audit policy is invalid or cannot be decoded. This function is shared by the operator and admission controller audit
++// policy webhook handlers to avoid code duplication.
++func Validate(auditPolicyRaw string) (int32, error) {
++	obj, schemaVersion, err := decoder.Decode([]byte(auditPolicyRaw), nil, nil)
++	if err != nil {
++		return http.StatusUnprocessableEntity, fmt.Errorf("failed to decode the provided audit policy: %w", err)
++	}
++	policy, ok := obj.(*audit.Policy)
++	if !ok {
++		return http.StatusInternalServerError, fmt.Errorf("failed to cast to audit policy type: %v", schemaVersion)
++	}
++	if errList := auditvalidation.ValidatePolicy(policy); len(errList) != 0 {
++		return http.StatusUnprocessableEntity, fmt.Errorf("provided invalid audit policy: %v", errList)
++	}
++	return 0, nil
++}

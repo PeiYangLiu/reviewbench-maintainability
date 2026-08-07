@@ -1,0 +1,59 @@
+[
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "def translate(pat, sep=None):\n    \"\"\"Translate a shell PATTERN to a regular expression.\n\n    A path separator character may be supplied to the *sep* argument. If\n    given, '*' and '?' wildcards will not match separators; '*' wildcards in\n    standalone pattern segments match precisely one path segment; and  '**'\n    wildcards in standalone segments match any number of path segments.\n\n    There is no way to quote meta-characters.\n    \"\"\"\n    if sep:\n        res = _translate_path(pat, sep)\n    else:\n        res = _translate(pat)\n    return fr'(?s:{res})\\Z'\n\n\ndef _translate_bracket(pat, i, n, DOT):\n    \"\"\"Translate a '[...]' character set starting at index *i* (just after the\n    opening '['). Returns the regular expression fragment and the index of the\n    first character after the set.\n    \"\"\"\n    j = i\n    if j < n and pat[j] == '!':\n        j = j+1\n    if j < n and pat[j] == ']':\n        j = j+1\n    while j < n and pat[j] != ']':\n        j = j+1\n    if j >= n:\n        return '\\\\[', i\n    stuff = pat[i:j]\n    if '-' not in stuff:\n        stuff = stuff.replace('\\\\', r'\\\\')\n    else:\n        chunks = []\n        k = i+2 if pat[i] == '!' else i+1\n        while True:\n            k = pat.find('-', k, j)\n            if k < 0:\n                break\n            chunks.append(pat[i:k])\n            i = k+1\n            k = k+3\n        chunk = pat[i:j]\n        if chunk:\n            chunks.append(chunk)\n        else:\n            chunks[-1] += '-'\n        # Remove empty ranges -- invalid in RE.\n        for k in range(len(chunks)-1, 0, -1):\n            if chunks[k-1][-1] > chunks[k][0]:\n                chunks[k-1] = chunks[k-1][:-1] + chunks[k][1:]\n                del chunks[k]\n        # Escape backslashes and hyphens for set difference (--).\n        # Hyphens that create ranges shouldn't be escaped.\n        stuff = '-'.join(s.replace('\\\\', r'\\\\').replace('-', r'\\-')\n                         for s in chunks)\n    # Escape set operations (&&, ~~ and ||).\n    stuff = re.sub(r'([&~|])', r'\\\\\\1', stuff)\n    i = j+1\n    if not stuff:\n        # Empty range: never match.\n        return '(?!)', i\n    elif stuff == '!':\n        # Negated empty range: match any character.\n        return DOT, i\n    else:\n        if stuff[0] == '!':\n            stuff = '^' + stuff[1:]\n        elif stuff[0] in ('^', '['):\n            stuff = '\\\\' + stuff\n        return f'[{stuff}]', i\n\n\ndef _translate(pat):\n    \"\"\"Translate a shell PATTERN to a regular expression body (without the\n    surrounding group). Separators are not treated specially.\n    \"\"\"\n    STAR = object()\n    res = []\n    add = res.append\n    i, n = 0, len(pat)\n    while i < n:\n        c = pat[i]\n        i = i+1\n        if c == '*':\n            # compress consecutive `*` into one\n            while i < n and pat[i] == '*':\n                i = i+1\n            add(STAR)\n        elif c == '?':\n            add('.')\n        elif c == '[':\n            piece, i = _translate_bracket(pat, i, n, '.')\n            add(piece)\n        else:\n            add(re.escape(c))\n    assert i == n\n\n    # Deal with STARs.\n    inp = res\n    res = []\n    add = res.append\n    i, n = 0, len(inp)\n    # Fixed pieces at the start?\n    while i < n and inp[i] is not STAR:\n        add(inp[i])\n        i += 1\n    # Now deal with STAR fixed STAR fixed ...\n    # For an interior `STAR fixed` pairing, we want to do a minimal\n    # .*? match followed by `fixed`, with no possibility of backtracking.\n    # Atomic groups (\"(?>...)\") allow us to spell that directly.\n    # Note: people rely on the undocumented ability to join multiple\n    # translate() results together via \"|\" to build large regexps matching\n    # \"one of many\" shell patterns.\n    while i < n:\n        assert inp[i] is STAR\n        i += 1\n        if i == n:\n            add(\".*\")\n            break\n        assert inp[i] is not STAR\n        fixed = []\n        while i < n and inp[i] is not STAR:\n            fixed.append(inp[i])\n            i += 1\n        fixed = \"\".join(fixed)\n        if i == n:\n            add(\".*\")\n            add(fixed)\n        else:\n            add(f\"(?>.*?{fixed})\")\n    assert i == n\n    return \"\".join(res)\n\n\ndef _translate_path(pat, sep):\n    \"\"\"Translate a shell PATTERN to a regular expression body (without the\n    surrounding group), treating *sep* as a path separator.\n    \"\"\"\n    SEP = re.escape(sep)\n    DOT = f'[^{SEP}]'\n    res = []\n    add = res.append\n    i, n = 0, len(pat)\n    while i < n:\n        c = pat[i]\n        i = i+1\n        if c == '*':\n            # compress consecutive `*` into one\n            h = i-1\n            while i < n and pat[i] == '*':\n                i = i+1\n            star_count = i-h\n            is_segment = (h == 0 or pat[h-1] == sep) and (i == n or pat[i] == sep)\n            if star_count == 1:\n                if is_segment:\n                    add(f'{DOT}+')\n                else:\n                    add(f'{DOT}*')\n            elif star_count == 2 and is_segment:\n                if i == n:\n                    add('.*')\n                else:\n                    add(f'(.*{SEP})?')\n                    i = i+1\n            else:\n                raise ValueError(\"Invalid pattern: '**' can only be an entire path component\")\n        elif c == '?':\n            add(DOT)\n        elif c == '[':\n            piece, i = _translate_bracket(pat, i, n, DOT)\n            add(piece)\n        else:\n            add(re.escape(c))\n    assert i == n\n    return \"\".join(res)\n",
+          "end_line": 215,
+          "start_line": 74
+        }
+      ]
+    },
+    "response_chars": 5767,
+    "round": 1,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 215,
+          "replacement_lines": 178,
+          "start_line": 74
+        }
+      ],
+      "current_file_lines": 251,
+      "updated_excerpt": {
+        "content": "64: def fnmatchcase(name, pat):\n65:     \"\"\"Test whether FILENAME matches PATTERN, including case.\n66: \n67:     This is a version of fnmatch() which doesn't case-normalize\n68:     its arguments.\n69:     \"\"\"\n70:     match = _compile_pattern(pat)\n71:     return match(name) is not None\n72: \n73: \n74: def translate(pat, sep=None):\n75:     \"\"\"Translate a shell PATTERN to a regular expression.\n76: \n77:     A path separator character may be supplied to the *sep* argument. If\n78:     given, '*' and '?' wildcards will not match separators; '*' wildcards in\n79:     standalone pattern segments match precisely one path segment; and  '**'\n80:     wildcards in standalone segments match any number of path segments.\n81: \n82:     There is no way to quote meta-characters.\n83:     \"\"\"\n84:     if sep:\n85:         res = _translate_path(pat, sep)\n86:     else:\n87:         res = _translate(pat)\n88:     return fr'(?s:{res})\\Z'\n89: \n90: \n91: def _translate_bracket(pat, i, n, DOT):\n92:     \"\"\"Translate a '[...]' character set starting at index *i* (just after the\n93:     opening '['). Returns the regular expression fragment and the index of the\n94:     first character after the set.\n95:     \"\"\"\n96:     j = i\n97:     if j < n and pat[j] == '!':\n98:         j = j+1\n99:     if j < n and pat[j] == ']':\n100:         j = j+1\n101:     while j < n and pat[j] != ']':\n102:         j = j+1\n103:     if j >= n:\n104:         return '\\\\[', i",
+        "end_line": 104,
+        "path_lines": 251,
+        "start_line": 64
+      }
+    },
+    "usage": {
+      "completion_tokens": 5410,
+      "prompt_tokens": 3604,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 9014
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 2,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/claude-opus-4.8/patches/github__python__cpython__pull_106703__comment_1284815427__modularity.patch"
+    },
+    "usage": {
+      "completion_tokens": 42,
+      "prompt_tokens": 6757,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 6799
+    }
+  }
+]

@@ -1,0 +1,76 @@
+diff --git a/internal/discovery/namespace_filter.go b/internal/discovery/namespace_filter.go
+index 5b597e0..8008714 100644
+--- a/internal/discovery/namespace_filter.go
++++ b/internal/discovery/namespace_filter.go
+@@ -55,26 +55,33 @@ func (nf *NamespaceFilter) IsAllowed(namespace string) bool {
+ 		return true
+ 	}
+ 
+-	// Check if the namespace is already in the cache.
++	return nf.cachedIsAllowed(namespace)
++}
++
++func (nf *NamespaceFilter) cachedIsAllowed(namespace string) bool {
+ 	var allowed bool
+ 	if _, err := nf.storer.Get(namespace, &allowed); err == nil {
+ 		return allowed
+ 	}
+ 
++	allowed, cacheable := nf.isAllowed(namespace)
++	if cacheable {
++		_ = nf.storer.Set(namespace, allowed)
++	}
++
++	return allowed
++}
++
++func (nf *NamespaceFilter) isAllowed(namespace string) (allowed bool, cacheable bool) {
+ 	// Scrape namespaces by honoring the matchLabels values.
+ 	if nf.c.MatchLabels != nil {
+ 		namespaceList, err := nf.lister.List(labels.SelectorFromSet(nf.c.MatchLabels))
+ 		if err != nil {
+ 			nf.logger.Errorf("listing namespaces with MatchLabels: %v", err)
+-			return true
++			return true, false
+ 		}
+ 
+-		allowed = containsNamespace(namespace, namespaceList)
+-
+-		// Save the namespace in the cache.
+-		_ = nf.storer.Set(namespace, allowed)
+-
+-		return allowed
++		return containsNamespace(namespace, namespaceList), true
+ 	}
+ 
+ 	// Scrape namespaces by honoring the matchExpressions values.
+@@ -84,25 +91,22 @@ func (nf *NamespaceFilter) IsAllowed(namespace string) bool {
+ 			selector, err := labels.Parse(expression.String())
+ 			if err != nil {
+ 				nf.logger.Errorf("parsing labels: %v", err)
+-				return true
++				return true, false
+ 			}
+ 
+ 			namespaceList, err := nf.lister.List(selector)
+ 			if err != nil {
+ 				nf.logger.Errorf("listing namespaces with MatchExpressions: %v", err)
+-				return true
++				return true, false
+ 			}
+ 
+ 			if !containsNamespace(namespace, namespaceList) {
+-				return false
++				return false, false
+ 			}
+ 		}
+ 	}
+ 
+-	// Save the namespace in the cache.
+-	_ = nf.storer.Set(namespace, true)
+-
+-	return true
++	return true, true
+ }
+ 
+ // Close closes the stop channel and implements the Closer interface.

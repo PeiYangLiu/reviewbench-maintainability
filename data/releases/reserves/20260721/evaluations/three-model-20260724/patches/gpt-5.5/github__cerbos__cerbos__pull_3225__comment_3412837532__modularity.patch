@@ -1,0 +1,58 @@
+--- a/internal/auxdata/jwt.go
++++ b/internal/auxdata/jwt.go
+@@ -31,6 +31,34 @@
+ 	errNoKeySetToVerify = errors.New("cannot determine keyset to use for validating the JWT")
+ )
+ 
++type jwtParseError struct {
++	friendly error
++	actual   error
++}
++
++func newJWTParseError(message string, actual error) error {
++	return &jwtParseError{
++		friendly: errors.New(message),
++		actual:   actual,
++	}
++}
++
++func (e *jwtParseError) Error() string {
++	return e.friendly.Error()
++}
++
++func (e *jwtParseError) Unwrap() error {
++	return e.actual
++}
++
++func (e *jwtParseError) FriendlyError() error {
++	return e.friendly
++}
++
++func (e *jwtParseError) ActualError() error {
++	return e.actual
++}
++
+ type jwtHelper struct {
+ 	keySets        map[string]keySet
+ 	verify         bool
+@@ -152,15 +180,15 @@
+ 	if err != nil {
+ 		switch {
+ 		case errors.Is(err, jwt.InvalidAudienceError()):
+-			return nil, fmt.Errorf("invalid audience ('aud')")
++			return nil, newJWTParseError("invalid audience ('aud')", err)
+ 		case errors.Is(err, jwt.InvalidIssuedAtError()):
+-			return nil, fmt.Errorf("issued at time is in the future ('iat')")
++			return nil, newJWTParseError("issued at time is in the future ('iat')", err)
+ 		case errors.Is(err, jwt.InvalidIssuerError()):
+-			return nil, fmt.Errorf("invalid issuer ('iss')")
++			return nil, newJWTParseError("invalid issuer ('iss')", err)
+ 		case errors.Is(err, jwt.TokenExpiredError()):
+-			return nil, fmt.Errorf("token has expired ('exp')")
++			return nil, newJWTParseError("token has expired ('exp')", err)
+ 		case errors.Is(err, jwt.TokenNotYetValidError()):
+-			return nil, fmt.Errorf("token is not yet valid ('nbf')")
++			return nil, newJWTParseError("token is not yet valid ('nbf')", err)
+ 		default:
+ 			return nil, fmt.Errorf("failed to parse: %w", err)
+ 		}

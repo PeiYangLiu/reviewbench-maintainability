@@ -1,0 +1,55 @@
+diff --git a/pkg/reconciler/builder/builder.go b/pkg/reconciler/builder/builder.go
+index 56ca096..e3b2edc 100644
+--- a/pkg/reconciler/builder/builder.go
++++ b/pkg/reconciler/builder/builder.go
+@@ -40,6 +40,21 @@ type BuilderCreator interface {
+ 	CreateBuilder(ctx context.Context, builderKeychain authn.Keychain, keychain authn.Keychain, fetcher cnb.RemoteBuildpackFetcher, clusterStack *buildapi.ClusterStack, spec buildapi.BuilderSpec, signingSecrets []corev1.Secret) (buildapi.BuilderRecord, error)
+ }
+ 
++// SigningSecretFetcher retrieves the cosign signing secrets associated with a
++// builder's service account. It hides the raw Kubernetes client from the
++// reconciler, exposing only the narrow capability the reconcile loop needs.
++type SigningSecretFetcher interface {
++	FetchBuilderSigningSecrets(ctx context.Context, namespace, serviceAccount string) ([]corev1.Secret, error)
++}
++
++type k8sSigningSecretFetcher struct {
++	client k8sclient.Interface
++}
++
++func (f k8sSigningSecretFetcher) FetchBuilderSigningSecrets(ctx context.Context, namespace, serviceAccount string) ([]corev1.Secret, error) {
++	return cosign.FetchBuilderSigningSecrets(ctx, f.client, namespace, serviceAccount)
++}
++
+ func NewController(
+ 	ctx context.Context,
+ 	opt reconciler.Options,
+@@ -61,7 +76,7 @@ func NewController(
+ 		BuildpackLister:        buildpackInformer.Lister(),
+ 		ClusterBuildpackLister: clusterBuildpackInformer.Lister(),
+ 		ClusterStackLister:     clusterStackInformer.Lister(),
+-		K8sClient:              k8sClient,
++		SigningSecretFetcher:   k8sSigningSecretFetcher{client: k8sClient},
+ 	}
+ 
+ 	logger := opt.Logger.With(
+@@ -114,7 +129,7 @@ type Reconciler struct {
+ 	BuildpackLister        buildlisters.BuildpackLister
+ 	ClusterBuildpackLister buildlisters.ClusterBuildpackLister
+ 	ClusterStackLister     buildlisters.ClusterStackLister
+-	K8sClient              k8sclient.Interface
++	SigningSecretFetcher   SigningSecretFetcher
+ }
+ 
+ func (c *Reconciler) Reconcile(ctx context.Context, key string) error {
+@@ -231,9 +246,8 @@ func (c *Reconciler) reconcileBuilder(ctx context.Context, builder *buildapi.Bui
+ 
+ 	fetcher := cnb.NewRemoteBuildpackFetcher(c.KeychainFactory, clusterStore, buildpacks, clusterBuildpacks)
+ 
+-	signerSecrets, err := cosign.FetchBuilderSigningSecrets(
++	signerSecrets, err := c.SigningSecretFetcher.FetchBuilderSigningSecrets(
+ 		ctx,
+-		c.K8sClient,
+ 		builder.Namespace,
+ 		builder.Spec.ServiceAccount())
+ 	if err != nil {

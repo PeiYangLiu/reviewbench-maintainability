@@ -1,0 +1,51 @@
+diff --git a/filter/accesslog/filter.go b/filter/accesslog/filter.go
+index 2758081..1c8924d 100644
+--- a/filter/accesslog/filter.go
++++ b/filter/accesslog/filter.go
+@@ -273,18 +273,24 @@ func (f *Filter) writeLogToFile(data Data) {
+ 	}
+ }
+ 
++// isCurrentDateFile checks if the log file's modification time matches the current date
++func isCurrentDateFile(logFile *os.File) bool {
++	now := time.Now().Format(FileDateFormat)
++	if fileInfo, err := logFile.Stat(); err == nil {
++		last := fileInfo.ModTime().Format(FileDateFormat)
++		return now == last
++	}
++	return false
++}
++
+ // getOrOpenLogFile gets or opens the log file with proper caching and handle management
+ func (f *Filter) getOrOpenLogFile(accessLog string) (*os.File, error) {
+ 	f.fileLock.RLock()
+ 	if logFile, exists := f.fileCache[accessLog]; exists {
+ 		// Check if we need to rotate the log
+-		now := time.Now().Format(FileDateFormat)
+-		if fileInfo, err := logFile.Stat(); err == nil {
+-			last := fileInfo.ModTime().Format(FileDateFormat)
+-			if now == last {
+-				f.fileLock.RUnlock()
+-				return logFile, nil
+-			}
++		if isCurrentDateFile(logFile) {
++			f.fileLock.RUnlock()
++			return logFile, nil
+ 		}
+ 	}
+ 	f.fileLock.RUnlock()
+@@ -295,12 +301,8 @@ func (f *Filter) getOrOpenLogFile(accessLog string) (*os.File, error) {
+ 
+ 	// Double-check after acquiring write lock
+ 	if logFile, exists := f.fileCache[accessLog]; exists {
+-		now := time.Now().Format(FileDateFormat)
+-		if fileInfo, err := logFile.Stat(); err == nil {
+-			last := fileInfo.ModTime().Format(FileDateFormat)
+-			if now == last {
+-				return logFile, nil
+-			}
++		if isCurrentDateFile(logFile) {
++			return logFile, nil
+ 		}
+ 		// Close the old file before rotation
+ 		logFile.Close()

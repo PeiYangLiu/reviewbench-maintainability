@@ -1,0 +1,42 @@
+diff --git a/spinta/backends/postgresql/commands/write.py b/spinta/backends/postgresql/commands/write.py
+index 5c7c0c0..abbb21f 100644
+--- a/spinta/backends/postgresql/commands/write.py
++++ b/spinta/backends/postgresql/commands/write.py
+@@ -11,6 +11,15 @@ from spinta.backends.postgresql.components import PostgreSQL
+ from spinta.backends.postgresql.sqlalchemy import utcnow
+ 
+ 
++def _parse_foreign_key_violation(error_message: str) -> tuple:
++    """Extract referencing property name and referenced id from a
++    PostgreSQL ForeignKeyViolation error detail message.
++    """
++    error_property_name = re.search('Key \((.*?)\)', error_message).group(1).split(".")[0]
++    error_ref_id = re.search('\)=\((.*?)\)', error_message).group(1)
++    return error_property_name, error_ref_id
++
++
+ @commands.insert.register(Context, Model, PostgreSQL)
+ async def insert(
+     context: Context,
+@@ -46,9 +55,7 @@ async def insert(
+             rollback_full = True
+             savepoint.rollback()
+             if type(error.orig) is psycopg2.errors.ForeignKeyViolation:
+-                error_message = error.orig.diag.message_detail
+-                error_property_name = re.search('Key \((.*?)\)', error_message).group(1).split(".")[0]
+-                error_ref_id = re.search('\)=\((.*?)\)', error_message).group(1)
++                error_property_name, error_ref_id = _parse_foreign_key_violation(error.orig.diag.message_detail)
+                 error_property = model.properties.get(error_property_name)
+                 exception = exceptions.ReferencedObjectNotFound(error_property, id=error_ref_id)
+                 error_list.append(exception)
+@@ -113,9 +120,7 @@ async def update(
+             rollback_full = True
+             savepoint.rollback()
+             if type(error.orig) is psycopg2.errors.ForeignKeyViolation:
+-                error_message = error.orig.diag.message_detail
+-                error_property_name = re.search('Key \((.*?)\)', error_message).group(1).split(".")[0]
+-                error_ref_id = re.search('\)=\((.*?)\)', error_message).group(1)
++                error_property_name, error_ref_id = _parse_foreign_key_violation(error.orig.diag.message_detail)
+                 error_property = model.properties.get(error_property_name)
+                 exception = exceptions.ReferencedObjectNotFound(error_property, id=error_ref_id)
+                 error_list.append(exception)

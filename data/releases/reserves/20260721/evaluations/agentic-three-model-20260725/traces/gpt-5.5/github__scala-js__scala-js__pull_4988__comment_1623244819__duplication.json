@@ -1,0 +1,129 @@
+[
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "  // Helpers to build structured control flow\n\n  def sigToBlockType(sig: FunctionType): BlockType = sig match {\n    case FunctionType(Nil, Nil) =>\n      BlockType.ValueType()\n    case FunctionType(Nil, resultType :: Nil) =>\n      BlockType.ValueType(resultType)\n    case _ =>\n      BlockType.FunctionType(moduleBuilder.functionTypeToTypeID(sig))\n  }\n\n  private def toBlockType[A](value: A)(implicit blockTypeLike: BlockTypeLike[A]): BlockType =\n    blockTypeLike.toBlockType(this, value)\n\n  private def ifThenElseWith[A](blockTypeLike: A)(thenp: => Unit)(elsep: => Unit)(\n      implicit ev: BlockTypeLike[A]): Unit = {\n    instrs += If(toBlockType(blockTypeLike))\n    thenp\n    instrs += Else\n    elsep\n    instrs += End\n  }\n\n  def ifThenElse(blockType: BlockType)(thenp: => Unit)(elsep: => Unit): Unit =\n    ifThenElseWith(blockType)(thenp)(elsep)\n\n  def ifThenElse(resultType: Type)(thenp: => Unit)(elsep: => Unit): Unit =\n    ifThenElseWith(resultType)(thenp)(elsep)\n\n  def ifThenElse(sig: FunctionType)(thenp: => Unit)(elsep: => Unit): Unit =\n    ifThenElseWith(sig)(thenp)(elsep)\n\n  def ifThenElse(resultTypes: List[Type])(thenp: => Unit)(elsep: => Unit): Unit =\n    ifThenElseWith(resultTypes)(thenp)(elsep)\n\n  def ifThenElse()(thenp: => Unit)(elsep: => Unit): Unit =\n    ifThenElseWith(BlockType.ValueType())(thenp)(elsep)\n\n  private def ifThenWith[A](blockTypeLike: A)(thenp: => Unit)(\n      implicit ev: BlockTypeLike[A]): Unit = {\n    instrs += If(toBlockType(blockTypeLike))\n    thenp\n    instrs += End\n  }\n\n  def ifThen(blockType: BlockType)(thenp: => Unit): Unit =\n    ifThenWith(blockType)(thenp)\n\n  def ifThen(sig: FunctionType)(thenp: => Unit): Unit =\n    ifThenWith(sig)(thenp)\n\n  def ifThen(resultTypes: List[Type])(thenp: => Unit): Unit =\n    ifThenWith(resultTypes)(thenp)\n\n  def ifThen()(thenp: => Unit): Unit =\n    ifThenWith(BlockType.ValueType())(thenp)\n\n  private def blockWith[B, A](blockTypeLike: B)(body: LabelID => A)(\n      implicit ev: BlockTypeLike[B]): A = {\n    val label = genLabel()\n    instrs += Block(toBlockType(blockTypeLike), Some(label))\n    val result = body(label)\n    instrs += End\n    result\n  }\n\n  def block[A](blockType: BlockType)(body: LabelID => A): A =\n    blockWith(blockType)(body)\n\n  def block[A](resultType: Type)(body: LabelID => A): A =\n    blockWith(resultType)(body)\n\n  def block[A]()(body: LabelID => A): A =\n    blockWith(BlockType.ValueType())(body)\n\n  def block[A](sig: FunctionType)(body: LabelID => A): A =\n    blockWith(sig)(body)\n\n  def block[A](resultTypes: List[Type])(body: LabelID => A): A =\n    blockWith(resultTypes)(body)\n\n  private def loopWith[B, A](blockTypeLike: B)(body: LabelID => A)(\n      implicit ev: BlockTypeLike[B]): A = {\n    val label = genLabel()\n    instrs += Loop(toBlockType(blockTypeLike), Some(label))\n    val result = body(label)\n    instrs += End\n    result\n  }\n\n  def loop[A](blockType: BlockType)(body: LabelID => A): A =\n    loopWith(blockType)(body)\n\n  def loop[A](resultType: Type)(body: LabelID => A): A =\n    loopWith(resultType)(body)\n\n  def loop[A]()(body: LabelID => A): A =\n    loopWith(BlockType.ValueType())(body)\n\n  def loop[A](sig: FunctionType)(body: LabelID => A): A =\n    loopWith(sig)(body)\n\n  def loop[A](resultTypes: List[Type])(body: LabelID => A): A =\n    loopWith(resultTypes)(body)\n\n  def whileLoop()(cond: => Unit)(body: => Unit): Unit = {\n    loop() { loopLabel =>\n      cond\n      ifThen() {\n        body\n        instrs += Br(loopLabel)\n      }\n    }\n  }\n\n  private def tryTableWith[B, A](blockTypeLike: B)(clauses: List[CatchClause])(body: => A)(\n      implicit ev: BlockTypeLike[B]): A = {\n    instrs += TryTable(toBlockType(blockTypeLike), clauses)\n    val result = body\n    instrs += End\n    result\n  }\n\n  def tryTable[A](blockType: BlockType)(clauses: List[CatchClause])(body: => A): A =\n    tryTableWith(blockType)(clauses)(body)\n\n  def tryTable[A](resultType: Type)(clauses: List[CatchClause])(body: => A): A =\n    tryTableWith(resultType)(clauses)(body)\n\n  def tryTable[A]()(clauses: List[CatchClause])(body: => A): A =\n    tryTableWith(BlockType.ValueType())(clauses)(body)\n\n  def tryTable[A](sig: FunctionType)(clauses: List[CatchClause])(body: => A): A =\n    tryTableWith(sig)(clauses)(body)\n\n  def tryTable[A](resultTypes: List[Type])(clauses: List[CatchClause])(body: => A): A =\n    tryTableWith(resultTypes)(clauses)(body)\n",
+          "end_line": 203,
+          "start_line": 90
+        },
+        {
+          "content": "  private trait BlockTypeLike[-A] {\n    def toBlockType(functionBuilder: FunctionBuilder, value: A): BlockType\n  }\n\n  private implicit object BlockTypeIsBlockType extends BlockTypeLike[BlockType] {\n    def toBlockType(functionBuilder: FunctionBuilder, value: BlockType): BlockType =\n      value\n  }\n\n  private implicit object TypeIsBlockType extends BlockTypeLike[Type] {\n    def toBlockType(functionBuilder: FunctionBuilder, value: Type): BlockType =\n      BlockType.ValueType(value)\n  }\n\n  private implicit object FunctionTypeIsBlockType extends BlockTypeLike[FunctionType] {\n    def toBlockType(functionBuilder: FunctionBuilder, value: FunctionType): BlockType =\n      functionBuilder.sigToBlockType(value)\n  }\n\n  private implicit object ResultTypesAreBlockType extends BlockTypeLike[List[Type]] {\n    def toBlockType(functionBuilder: FunctionBuilder, value: List[Type]): BlockType =\n      functionBuilder.sigToBlockType(FunctionType(Nil, value))\n  }\n\n",
+          "end_line": 388,
+          "start_line": 389
+        }
+      ]
+    },
+    "response_chars": 11514,
+    "round": 1,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 203,
+          "replacement_lines": 137,
+          "start_line": 90
+        },
+        {
+          "end_line": 388,
+          "replacement_lines": 24,
+          "start_line": 389
+        }
+      ],
+      "current_file_lines": 453,
+      "updated_excerpt": {
+        "content": "80: \n81:   def ++=(instrs: Iterable[Instr]): Unit =\n82:     this.instrs ++= instrs\n83: \n84:   def markCurrentInstructionIndex(): InstructionIndex =\n85:     new InstructionIndex(instrs.size)\n86: \n87:   def insert(index: InstructionIndex, instr: Instr): Unit =\n88:     instrs.insert(index.value, instr)\n89: \n90:   // Helpers to build structured control flow\n91: \n92:   def sigToBlockType(sig: FunctionType): BlockType = sig match {\n93:     case FunctionType(Nil, Nil) =>\n94:       BlockType.ValueType()\n95:     case FunctionType(Nil, resultType :: Nil) =>\n96:       BlockType.ValueType(resultType)\n97:     case _ =>\n98:       BlockType.FunctionType(moduleBuilder.functionTypeToTypeID(sig))\n99:   }\n100: \n101:   private def toBlockType[A](value: A)(implicit blockTypeLike: BlockTypeLike[A]): BlockType =\n102:     blockTypeLike.toBlockType(this, value)\n103: \n104:   private def ifThenElseWith[A](blockTypeLike: A)(thenp: => Unit)(elsep: => Unit)(\n105:       implicit ev: BlockTypeLike[A]): Unit = {\n106:     instrs += If(toBlockType(blockTypeLike))\n107:     thenp\n108:     instrs += Else\n109:     elsep\n110:     instrs += End\n111:   }\n112: \n113:   def ifThenElse(blockType: BlockType)(thenp: => Unit)(elsep: => Unit): Unit =\n114:     ifThenElseWith(blockType)(thenp)(elsep)\n115: \n116:   def ifThenElse(resultType: Type)(thenp: => Unit)(elsep: => Unit): Unit =\n117:     ifThenElseWith(resultType)(thenp)(elsep)\n118: \n119:   def ifThenElse(sig: FunctionType)(thenp: => Unit)(elsep: => Unit): Unit =\n120:     ifThenElseWith(sig)(thenp)(elsep)",
+        "end_line": 120,
+        "path_lines": 453,
+        "start_line": 80
+      }
+    },
+    "usage": {
+      "input_tokens": 4702,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 6980,
+      "output_tokens_details": {
+        "reasoning_tokens": 3423
+      },
+      "total_tokens": 11682
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 240,
+      "path": "linker/shared/src/main/scala/org/scalajs/linker/backend/webassembly/FunctionBuilder.scala",
+      "start_line": 90
+    },
+    "response_chars": 1686,
+    "round": 2,
+    "tool_result": {
+      "content": "90:   // Helpers to build structured control flow\n91: \n92:   def sigToBlockType(sig: FunctionType): BlockType = sig match {\n93:     case FunctionType(Nil, Nil) =>\n94:       BlockType.ValueType()\n95:     case FunctionType(Nil, resultType :: Nil) =>\n96:       BlockType.ValueType(resultType)\n97:     case _ =>\n98:       BlockType.FunctionType(moduleBuilder.functionTypeToTypeID(sig))\n99:   }\n100: \n101:   private def toBlockType[A](value: A)(implicit blockTypeLike: BlockTypeLike[A]): BlockType =\n102:     blockTypeLike.toBlockType(this, value)\n103: \n104:   private def ifThenElseWith[A](blockTypeLike: A)(thenp: => Unit)(elsep: => Unit)(\n105:       implicit ev: BlockTypeLike[A]): Unit = {\n106:     instrs += If(toBlockType(blockTypeLike))\n107:     thenp\n108:     instrs += Else\n109:     elsep\n110:     instrs += End\n111:   }\n112: \n113:   def ifThenElse(blockType: BlockType)(thenp: => Unit)(elsep: => Unit): Unit =\n114:     ifThenElseWith(blockType)(thenp)(elsep)\n115: \n116:   def ifThenElse(resultType: Type)(thenp: => Unit)(elsep: => Unit): Unit =\n117:     ifThenElseWith(resultType)(thenp)(elsep)\n118: \n119:   def ifThenElse(sig: FunctionType)(thenp: => Unit)(elsep: => Unit): Unit =\n120:     ifThenElseWith(sig)(thenp)(elsep)\n121: \n122:   def ifThenElse(resultTypes: List[Type])(thenp: => Unit)(elsep: => Unit): Unit =\n123:     ifThenElseWith(resultTypes)(thenp)(elsep)\n124: \n125:   def ifThenElse()(thenp: => Unit)(elsep: => Unit): Unit =\n126:     ifThenElseWith(BlockType.ValueType())(thenp)(elsep)\n127: \n128:   private def ifThenWith[A](blockTypeLike: A)(thenp: => Unit)(\n129:       implicit ev: BlockTypeLike[A]): Unit = {\n130:     instrs += If(toBlockType(blockTypeLike))\n131:     thenp\n132:     instrs += End\n133:   }\n134: \n135:   def ifThen(blockType: BlockType)(thenp: => Unit): Unit =\n136:     ifThenWith(blockType)(thenp)\n137: \n138:   def ifThen(sig: FunctionType)(thenp: => Unit): Unit =\n139:     ifThenWith(sig)(thenp)\n140: \n141:   def ifThen(resultTypes: List[Type])(thenp: => Unit): Unit =\n142:     ifThenWith(resultTypes)(thenp)\n143: \n144:   def ifThen()(thenp: => Unit): Unit =\n145:     ifThenWith(BlockType.ValueType())(thenp)\n146: \n147:   private def blockWith[B, A](blockTypeLike: B)(body: LabelID => A)(\n148:       implicit ev: BlockTypeLike[B]): A = {\n149:     val label = genLabel()\n150:     instrs += Block(toBlockType(blockTypeLike), Some(label))\n151:     val result = body(label)\n152:     instrs += End\n153:     result\n154:   }\n155: \n156:   def block[A](blockType: BlockType)(body: LabelID => A): A =\n157:     blockWith(blockType)(body)\n158: \n159:   def block[A](resultType: Type)(body: LabelID => A): A =\n160:     blockWith(resultType)(body)\n161: \n162:   def block[A]()(body: LabelID => A): A =\n163:     blockWith(BlockType.ValueType())(body)\n164: \n165:   def block[A](sig: FunctionType)(body: LabelID => A): A =\n166:     blockWith(sig)(body)\n167: \n168:   def block[A](resultTypes: List[Type])(body: LabelID => A): A =\n169:     blockWith(resultTypes)(body)\n170: \n171:   private def loopWith[B, A](blockTypeLike: B)(body: LabelID => A)(\n172:       implicit ev: BlockTypeLike[B]): A = {\n173:     val label = genLabel()\n174:     instrs += Loop(toBlockType(blockTypeLike), Some(label))\n175:     val result = body(label)\n176:     instrs += End\n177:     result\n178:   }\n179: \n180:   def loop[A](blockType: BlockType)(body: LabelID => A): A =\n181:     loopWith(blockType)(body)\n182: \n183:   def loop[A](resultType: Type)(body: LabelID => A): A =\n184:     loopWith(resultType)(body)\n185: \n186:   def loop[A]()(body: LabelID => A): A =\n187:     loopWith(BlockType.ValueType())(body)\n188: \n189:   def loop[A](sig: FunctionType)(body: LabelID => A): A =\n190:     loopWith(sig)(body)\n191: \n192:   def loop[A](resultTypes: List[Type])(body: LabelID => A): A =\n193:     loopWith(resultTypes)(body)\n194: \n195:   def whileLoop()(cond: => Unit)(body: => Unit): Unit = {\n196:     loop() { loopLabel =>\n197:       cond\n198:       ifThen() {\n199:         body\n200:         instrs += Br(loopLabel)\n201:       }\n202:     }\n203:   }\n204: \n205:   private def tryTableWith[B, A](blockTypeLike: B)(clauses: List[CatchClause])(body: => A)(\n206:       implicit ev: BlockTypeLike[B]): A = {\n207:     instrs += TryTable(toBlockType(blockTypeLike), clauses)\n208:     val result = body\n209:     instrs += End\n210:     result\n211:   }\n212: \n213:   def tryTable[A](blockType: BlockType)(clauses: List[CatchClause])(body: => A): A =\n214:     tryTableWith(blockType)(clauses)(body)\n215: \n216:   def tryTable[A](resultType: Type)(clauses: List[CatchClause])(body: => A): A =\n217:     tryTableWith(resultType)(clauses)(body)\n218: \n219:   def tryTable[A]()(clauses: List[CatchClause])(body: => A): A =\n220:     tryTableWith(BlockType.ValueType())(clauses)(body)\n221: \n222:   def tryTable[A](sig: FunctionType)(clauses: List[CatchClause])(body: => A): A =\n223:     tryTableWith(sig)(clauses)(body)\n224: \n225:   def tryTable[A](resultTypes: List[Type])(clauses: List[CatchClause])(body: => A): A =\n226:     tryTableWith(resultTypes)(clauses)(body)\n227: \n228:   /** Builds a `switch` over a scrutinee using a `br_table` instruction.\n229:    *\n230:    *  This function produces code that encodes the following control-flow:\n231:    *\n232:    *  {{{\n233:    *  switch (scrutinee) {\n234:    *    case clause0_alt0 | ... | clause0_altN => clause0_body\n235:    *    ...\n236:    *    case clauseM_alt0 | ... | clauseM_altN => clauseM_body\n237:    *    case _ => default\n238:    *  }\n239:    *  }}}\n240:    *",
+      "end_line": 240,
+      "path_lines": 453,
+      "start_line": 90
+    },
+    "usage": {
+      "input_tokens": 7043,
+      "input_tokens_details": {
+        "cached_tokens": 4352
+      },
+      "output_tokens": 5430,
+      "output_tokens_details": {
+        "reasoning_tokens": 4936
+      },
+      "total_tokens": 12473
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 453,
+      "path": "linker/shared/src/main/scala/org/scalajs/linker/backend/webassembly/FunctionBuilder.scala",
+      "start_line": 410
+    },
+    "response_chars": 148,
+    "round": 3,
+    "tool_result": {
+      "content": "410: \n411: object FunctionBuilder {\n412:   private trait BlockTypeLike[-A] {\n413:     def toBlockType(functionBuilder: FunctionBuilder, value: A): BlockType\n414:   }\n415: \n416:   private implicit object BlockTypeIsBlockType extends BlockTypeLike[BlockType] {\n417:     def toBlockType(functionBuilder: FunctionBuilder, value: BlockType): BlockType =\n418:       value\n419:   }\n420: \n421:   private implicit object TypeIsBlockType extends BlockTypeLike[Type] {\n422:     def toBlockType(functionBuilder: FunctionBuilder, value: Type): BlockType =\n423:       BlockType.ValueType(value)\n424:   }\n425: \n426:   private implicit object FunctionTypeIsBlockType extends BlockTypeLike[FunctionType] {\n427:     def toBlockType(functionBuilder: FunctionBuilder, value: FunctionType): BlockType =\n428:       functionBuilder.sigToBlockType(value)\n429:   }\n430: \n431:   private implicit object ResultTypesAreBlockType extends BlockTypeLike[List[Type]] {\n432:     def toBlockType(functionBuilder: FunctionBuilder, value: List[Type]): BlockType =\n433:       functionBuilder.sigToBlockType(FunctionType(Nil, value))\n434:   }\n435: \n436:   private final class ParamIDImpl(index: Int, originalName: OriginalName) extends LocalID {\n437:     override def toString(): String =\n438:       if (originalName.isDefined) originalName.get.toString()\n439:       else s\"<param $index>\"\n440:   }\n441: \n442:   private final class LocalIDImpl(index: Int, originalName: OriginalName) extends LocalID {\n443:     override def toString(): String =\n444:       if (originalName.isDefined) originalName.get.toString()\n445:       else s\"<local $index>\"\n446:   }\n447: \n448:   private final class LabelIDImpl(index: Int) extends LabelID {\n449:     override def toString(): String = s\"<label $index>\"\n450:   }\n451: \n452:   final class InstructionIndex(private[FunctionBuilder] val value: Int) extends AnyVal\n453: }",
+      "end_line": 453,
+      "path_lines": 453,
+      "start_line": 410
+    },
+    "usage": {
+      "input_tokens": 9029,
+      "input_tokens_details": {
+        "cached_tokens": 6912
+      },
+      "output_tokens": 59,
+      "output_tokens_details": {
+        "reasoning_tokens": 15
+      },
+      "total_tokens": 9088
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 4,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__scala-js__scala-js__pull_4988__comment_1623244819__duplication.patch"
+    },
+    "usage": {
+      "input_tokens": 9636,
+      "input_tokens_details": {
+        "cached_tokens": 8448
+      },
+      "output_tokens": 1549,
+      "output_tokens_details": {
+        "reasoning_tokens": 1538
+      },
+      "total_tokens": 11185
+    }
+  }
+]

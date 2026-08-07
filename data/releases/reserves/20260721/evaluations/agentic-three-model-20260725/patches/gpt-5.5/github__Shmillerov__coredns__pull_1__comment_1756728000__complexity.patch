@@ -1,0 +1,96 @@
+diff --git a/core/dnsserver/register.go b/core/dnsserver/register.go
+index 0d88a11..9986c4c 100644
+--- a/core/dnsserver/register.go
++++ b/core/dnsserver/register.go
+@@ -162,45 +162,11 @@ func (h *dnsContext) MakeServers() ([]caddy.Server, error) {
+ 	// then we create a server for each group
+ 	var servers []caddy.Server
+ 	for addr, group := range groups {
+-		for range group[0].NumSocks {
+-			// switch on addr
+-			switch tr, _ := parse.Transport(addr); tr {
+-			case transport.DNS:
+-				s, err := NewServer(addr, group)
+-				if err != nil {
+-					return nil, err
+-				}
+-				servers = append(servers, s)
+-
+-			case transport.TLS:
+-				s, err := NewServerTLS(addr, group)
+-				if err != nil {
+-					return nil, err
+-				}
+-				servers = append(servers, s)
+-
+-			case transport.QUIC:
+-				s, err := NewServerQUIC(addr, group)
+-				if err != nil {
+-					return nil, err
+-				}
+-				servers = append(servers, s)
+-
+-			case transport.GRPC:
+-				s, err := NewServergRPC(addr, group)
+-				if err != nil {
+-					return nil, err
+-				}
+-				servers = append(servers, s)
+-
+-			case transport.HTTPS:
+-				s, err := NewServerHTTPS(addr, group)
+-				if err != nil {
+-					return nil, err
+-				}
+-				servers = append(servers, s)
+-			}
++		groupServers, err := serversForGroup(addr, group)
++		if err != nil {
++			return nil, err
+ 		}
++		servers = append(servers, groupServers...)
+ 	}
+ 
+ 	// For each server config, check for View Filter plugins
+@@ -227,6 +193,41 @@ func (h *dnsContext) MakeServers() ([]caddy.Server, error) {
+ 	return servers, nil
+ }
+ 
++func serversForGroup(addr string, group []*Config) ([]caddy.Server, error) {
++	servers := make([]caddy.Server, 0, group[0].NumSocks)
++	for range group[0].NumSocks {
++		s, ok, err := newServerForAddr(addr, group)
++		if err != nil {
++			return nil, err
++		}
++		if ok {
++			servers = append(servers, s)
++		}
++	}
++	return servers, nil
++}
++
++func newServerForAddr(addr string, group []*Config) (caddy.Server, bool, error) {
++	switch tr, _ := parse.Transport(addr); tr {
++	case transport.DNS:
++		s, err := NewServer(addr, group)
++		return s, true, err
++	case transport.TLS:
++		s, err := NewServerTLS(addr, group)
++		return s, true, err
++	case transport.QUIC:
++		s, err := NewServerQUIC(addr, group)
++		return s, true, err
++	case transport.GRPC:
++		s, err := NewServergRPC(addr, group)
++		return s, true, err
++	case transport.HTTPS:
++		s, err := NewServerHTTPS(addr, group)
++		return s, true, err
++	}
++	return nil, false, nil
++}
++
+ // AddPlugin adds a plugin to a site's plugin stack.
+ func (c *Config) AddPlugin(m plugin.Plugin) {
+ 	c.Plugin = append(c.Plugin, m)

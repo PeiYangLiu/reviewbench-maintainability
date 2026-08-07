@@ -1,0 +1,206 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 220,
+      "path": "draco/core/containers.py",
+      "start_line": 1
+    },
+    "response_chars": 81,
+    "round": 1,
+    "tool_result": {
+      "content": "1: \"\"\"Distributed containers for holding various types of analysis data.\n2: \n3: Containers\n4: ==========\n5: - :py:class:`Map`\n6: - :py:class:`SiderealStream`\n7: - :py:class:`SystemSensitivity`\n8: - :py:class:`RFIMask`\n9: - :py:class:`TimeStream`\n10: - :py:class:`GridBeam`\n11: - :py:class:`TrackBeam`\n12: - :py:class:`MModes`\n13: - :py:class:`SVDModes`\n14: - :py:class:`KLModes`\n15: - :py:class:`VisGridStream`\n16: - :py:class:`HybridVisStream`\n17: - :py:class:`HybridVisMModes`\n18: - :py:class:`RingMap`\n19: - :py:class:`RingMapMask`\n20: - :py:class:`CommonModeGainData`\n21: - :py:class:`CommonModeSiderealGainData`\n22: - :py:class:`GainData`\n23: - :py:class:`SiderealGainData`\n24: - :py:class:`StaticGainData`\n25: - :py:class:`DelayCutoff`\n26: - :py:class:`DelaySpectrum`\n27: - :py:class:`Powerspectrum2D`\n28: - :py:class:`SVDSpectrum`\n29: - :py:class:`FrequencyStack`\n30: - :py:class:`FrequencyStackByPol`\n31: - :py:class:`MockFrequencyStack`\n32: - :py:class:`MockFrequencyStackByPol`\n33: - :py:class:`SourceCatalog`\n34: - :py:class:`SpectroscopicCatalog`\n35: - :py:class:`FormedBeam`\n36: - :py:class:`FormedBeamHA`\n37: - :py:class:`FormedBeamMask`\n38: - :py:class:`FormedBeamHAMask`\n39: - :py:class:`LocalizedRFIMask`\n40: - :py:class:`LocalizedSiderealRFIMask`\n41: \n42: Container Base Classes\n43: ----------------------\n44: - :py:class:`ContainerBase`\n45: - :py:class:`TableBase`\n46: - :py:class:`TODContainer`\n47: - :py:class:`VisContainer`\n48: - :py:class:`SampleVarianceContainer`\n49: - :py:class:`FreqContainer`\n50: - :py:class:`SiderealContainer`\n51: - :py:class:`MContainer`\n52: \n53: Helper Routines\n54: ---------------\n55: These routines are designed to be replaced by other packages trying to insert\n56: their own custom container types.\n57: \n58: - :py:meth:`empty_like`\n59: - :py:meth:`empty_timestream`\n60: \"\"\"\n61: \n62: import inspect\n63: from typing import ClassVar\n64: \n65: import numpy as np\n66: from caput import memh5, mpiarray, tod\n67: from cora.util.cosmology import Cosmology\n68: \n69: from ..util import tools\n70: \n71: # Try to import bitshuffle to set the default compression options\n72: try:\n73:     import bitshuffle.h5\n74: \n75:     COMPRESSION = bitshuffle.h5.H5FILTER\n76:     COMPRESSION_OPTS = (0, bitshuffle.h5.H5_COMPRESS_LZ4)\n77: except ImportError:\n78:     COMPRESSION = None\n79:     COMPRESSION_OPTS = None\n80: \n81: \n82: class ContainerBase(memh5.BasicCont):\n83:     \"\"\"A base class for pipeline containers.\n84: \n85:     This class is designed to do much of the work of setting up pipeline\n86:     containers. It should be derived from, and two variables set `_axes` and\n87:     `_dataset_spec`. See the :ref:`Notes <containerbase_notes>` section for details.\n88: \n89:     Parameters\n90:     ----------\n91:     data_group : `memh5.MemDiskGroup`\n92:         A container to pass through for making a shallow copy. This is used by\n93:         routine like `caput.tod.concatenate` and generally shouldn't be used\n94:         directly. Either a keyword argument, or the first positional argument.\n95:     axes_from : `memh5.BasicCont`, optional\n96:         Another container to copy axis definitions from. Must be supplied as\n97:         keyword argument.\n98:     attrs_from : `memh5.BasicCont`, optional\n99:         Another container to copy attributes from. Must be supplied as keyword\n100:         argument. This applies to attributes in default datasets too.\n101:     dsets_from : `memh5.BasicCont`, optional\n102:         A container to copy datasets from. Any dataset which an axis whose definition\n103:         has been explicitly set (i.e. does not come from `axes_from`) will not be\n104:         copied.\n105:     copy_from : `memh5.BasicCont`, optional\n106:         Set `axes_from`, `attrs_from` and `dsets_from` to this instance if they are\n107:         not set explicitly.\n108:     skip_datasets : bool, optional\n109:         Skip creating datasets. They must all be added manually with\n110:         `.add_dataset` regardless of the entry in `.dataset_spec`. Default is False.\n111:     distributed : bool, optional\n112:         Should this be a distributed container. Defaults to True.\n113:     comm : mpi4py.MPI.Comm, optional\n114:         The MPI communicator to distribute over. Use COMM_WORLD if not set.\n115:     allow_chunked : bool, optional\n116:         Allow the datasets to be chunked. Default is True.\n117: \n118:     kwargs : dict\n119:         Should contain entries for all other axes.\n120: \n121:     Notes\n122:     -----\n123:     .. _containerbase_notes:\n124: \n125:     Inheritance from other `ContainerBase` subclasses should work as expected,\n126:     with datasets defined in super classes appearing as expected, and being\n127:     overridden where they are redefined in the derived class.\n128: \n129:     The variable `_axes` should be a tuple containing the names of axes that\n130:     datasets in this container will use.\n131: \n132:     The variable `_dataset_spec` should define the datasets. It's a dictionary\n133:     with the name of the dataset as key. Each entry should be another\n134:     dictionary, the entry 'axes' is mandatory and should be a list of the axes\n135:     the dataset has (these should correspond to entries in `_axes`), as is\n136:     `dtype` which should be a datatype understood by numpy. Other possible\n137:     entries are:\n138: \n139:     - `initialise` : if set to `True` the dataset will be created as the\n140:       container is initialised.\n141: \n142:     - `distributed` : the dataset will be distributed if the entry is `True`, if\n143:       `False` it won't be, and if not set it will be distributed if the\n144:       container is set to be.\n145: \n146:     - `distributed_axis` : the axis to distribute over. Should be a name given\n147:       in the `axes` entry.\n148:     \"\"\"\n149: \n150:     _axes = ()\n151: \n152:     _dataset_spec: ClassVar = {}\n153: \n154:     convert_attribute_strings = True\n155:     convert_dataset_strings = True\n156:     allow_chunked = True\n157: \n158:     def __init__(self, *args, **kwargs):\n159:         # Arguments for pulling in definitions from other containers\n160:         copy_from = kwargs.pop(\"copy_from\", None)\n161:         axes_from = kwargs.pop(\"axes_from\", copy_from)\n162:         attrs_from = kwargs.pop(\"attrs_from\", copy_from)\n163:         dsets_from = kwargs.pop(\"dsets_from\", copy_from)\n164: \n165:         # MPI distribution arguments\n166:         dist = kwargs.pop(\"distributed\", True)\n167:         comm = kwargs.pop(\"comm\", None)\n168: \n169:         # Extract misc options\n170:         self.allow_chunked = kwargs.pop(\"allow_chunked\", self.allow_chunked)\n171:         skip_datasets = kwargs.pop(\"skip_datasets\", False)\n172: \n173:         # Handle the data_group argument. We need to identify if the argument\n174:         # was actually supplied or not (both as a positional or keyword\n175:         # argument), and infer what its value should be, or None if not\n176:         # provided\n177:         if args and \"data_group\" in kwargs:\n178:             raise ValueError(\n179:                 \"Received conflicting definitions of `data_group`, as both the first \"\n180:                 \"positional and a keyword argument.\"\n181:             )\n182:         has_data_group = args or (\"data_group\" in kwargs)\n183:         data_group = args[0] if args else kwargs.get(\"data_group\", None)\n184: \n185:         # Run base initialiser, and exit early if data_group was provided\n186:         super().__init__(data_group=data_group, distributed=dist, comm=comm)\n187: \n188:         # If data_group was provided we need to exit early to behave like\n189:         # memh5.MemDiskGroup would have. In this case we're probably trying to\n190:         # create a bare container, or a shallow clone, so don't initialise any\n191:         # datasets. This behaviour is needed to support tod.concatenate\n192:         if has_data_group:\n193:             return\n194: \n195:         # Create axis entries\n196:         for axis in self.axes:\n197:             axis_map = None\n198: \n199:             # Check if axis is specified in initialiser\n200:             if axis in kwargs:\n201:                 axis_map = kwargs[axis]\n202:                 copy_axis_attrs = False\n203: \n204:                 # If axis is an integer, turn into an arange as a default definition\n205:                 if isinstance(axis_map, int | np.integer):\n206:                     axis_map = np.arange(axis_map)\n207: \n208:             # If no valid map provided in arguments copy from another object if set\n209:             elif axes_from is not None:\n210:                 axis_map = axes_from.index_map.get(axis, None)\n211:                 copy_axis_attrs = True\n212: \n213:             # Set the index_map[axis] if we have a definition, otherwise throw an error\n214:             if axis_map is None:\n215:                 raise RuntimeError(f\"No definition of axis {axis} supplied.\")\n216: \n217:             self.create_index_map(axis, axis_map)\n218: \n219:             if copy_axis_attrs:\n220:                 # Copy over axis attributes if we're copying the axis from another dataset",
+      "end_line": 220,
+      "path_lines": 3728,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 10930,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 243,
+      "output_tokens_details": {
+        "reasoning_tokens": 213
+      },
+      "total_tokens": 11173
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "draco/core/containers.py",
+      "query": "def _class_dataset_spec"
+    },
+    "response_chars": 888,
+    "round": 2,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 401,
+          "text": "    def _class_dataset_spec(cls):"
+        }
+      ],
+      "query": "def _class_dataset_spec",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 13585,
+      "input_tokens_details": {
+        "cached_tokens": 10496
+      },
+      "output_tokens": 959,
+      "output_tokens_details": {
+        "reasoning_tokens": 683
+      },
+      "total_tokens": 14544
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 430,
+      "path": "draco/core/containers.py",
+      "start_line": 360
+    },
+    "response_chars": 83,
+    "round": 3,
+    "tool_result": {
+      "content": "360:             if \"chunks\" in self.dataset_spec[dset] and self[dset].chunks is None:\n361:                 # ensure chunks aren't larger than dataset shape\n362:                 chunks = ()\n363:                 for i, l in enumerate(self[dset].shape):\n364:                     chunks += (min(self.dataset_spec[dset][\"chunks\"][i], l),)\n365:                 self._data._storage_root[dset].chunks = chunks\n366:             if (\n367:                 \"compression\" in self.dataset_spec[dset]\n368:                 and self[dset].compression is None\n369:             ):\n370:                 self._data._storage_root[dset].compression = self.dataset_spec[dset][\n371:                     \"compression\"\n372:                 ]\n373:             if (\n374:                 \"compression_opts\" in self.dataset_spec[dset]\n375:                 and self[dset].compression_opts is None\n376:             ):\n377:                 self._data._storage_root[dset].compression_opts = self.dataset_spec[\n378:                     dset\n379:                 ][\"compression_opts\"]\n380: \n381:     @property\n382:     def datasets(self):\n383:         \"\"\"Return the datasets in this container.\n384: \n385:         Do not try to add a new dataset by assigning to an item of this\n386:         property. Use `create_dataset` instead.\n387: \n388:         Returns\n389:         -------\n390:         datasets : read only dictionary\n391:             Entries are :mod:`caput.memh5` datasets.\n392: \n393:         \"\"\"\n394:         out = {}\n395:         for name, value in self._data.items():\n396:             if not memh5.is_group(value):\n397:                 out[name] = value\n398:         return memh5.ro_dict(out)\n399: \n400:     @classmethod\n401:     def _class_dataset_spec(cls):\n402:         \"\"\"Get the inherited set of dataset spec entries.\"\"\"\n403:         ddict = {}\n404: \n405:         # Iterate over the reversed MRO and look for _dataset_spec attributes\n406:         # which get added to a temporary dict. We go over the reversed MRO so\n407:         # that the `ddict.update` overrides datasets in base classes.`\n408:         for cls in inspect.getmro(cls)[::-1]:\n409:             try:\n410:                 # NOTE: this is a little ugly as the following line will drop\n411:                 # down to base classes if dataset_spec isn't present, and thus\n412:                 # try and `update` with the same values again.\n413:                 ddict.update(cls._dataset_spec)\n414:             except AttributeError:\n415:                 pass\n416: \n417:         # Ensure that the dataset_spec is the same order on all ranks\n418:         return {k: ddict[k] for k in sorted(ddict)}\n419: \n420:     @property\n421:     def dataset_spec(self):\n422:         \"\"\"Return a copy of the fully resolved dataset specifiction as a dictionary.\"\"\"\n423:         ddict = self.__class__._class_dataset_spec()\n424: \n425:         # Add in any _dataset_spec found on the instance\n426:         ddict.update(self.__dict__.get(\"_dataset_spec\", {}))\n427: \n428:         # Ensure that the dataset_spec is the same order on all ranks\n429:         return {k: ddict[k] for k in sorted(ddict)}\n430: ",
+      "end_line": 430,
+      "path_lines": 3728,
+      "start_line": 360
+    },
+    "usage": {
+      "input_tokens": 13659,
+      "input_tokens_details": {
+        "cached_tokens": 13056
+      },
+      "output_tokens": 46,
+      "output_tokens_details": {
+        "reasoning_tokens": 16
+      },
+      "total_tokens": 13705
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 360,
+      "path": "draco/core/containers.py",
+      "start_line": 220
+    },
+    "response_chars": 335,
+    "round": 4,
+    "tool_result": {
+      "content": "220:                 # Copy over axis attributes if we're copying the axis from another dataset\n221:                 memh5.copyattrs(axes_from.index_attrs[axis], self.index_attrs[axis])\n222: \n223:         # Iterate over datasets and initialise any that specify it\n224:         if not skip_datasets:\n225:             for name, spec in self.dataset_spec.items():\n226:                 if spec.get(\"initialise\"):\n227:                     self.add_dataset(name)\n228: \n229:         # Copy over datasets that have compatible axes\n230:         if dsets_from is not None:\n231:             # Get the list of axes names that have been overriden\n232:             changed_axes = {ax for ax in self.axes if ax in kwargs}\n233: \n234:             for name in self.dataset_spec.keys():\n235:                 if name not in dsets_from:\n236:                     continue\n237: \n238:                 source_dset = dsets_from[name]\n239:                 source_axes = set(source_dset.attrs[\"axis\"])\n240: \n241:                 # Check if any of the axes of this dataset have been changed, if that's\n242:                 # the case then we can't copy the data over\n243:                 if not source_axes.isdisjoint(changed_axes):\n244:                     continue\n245: \n246:                 # The dataset may not have been initialised by default, if not, create\n247:                 # it\n248:                 if name not in self:\n249:                     self.add_dataset(name)\n250: \n251:                 self[name][:] = source_dset[:]\n252: \n253:         # Copy over attributes\n254:         if attrs_from is not None:\n255:             # Copy attributes from container root\n256:             memh5.copyattrs(attrs_from.attrs, self.attrs)\n257: \n258:             # Copy attributes over from any common datasets\n259:             for name in self.dataset_spec.keys():\n260:                 if name in self.datasets and name in attrs_from.datasets:\n261:                     attrs_no_axis = {\n262:                         k: v\n263:                         for k, v in attrs_from.datasets[name].attrs.items()\n264:                         if k != \"axis\"\n265:                     }\n266:                     memh5.copyattrs(attrs_no_axis, self.datasets[name].attrs)\n267: \n268:             # Make sure that the __memh5_subclass attribute is accurate\n269:             clspath = self.__class__.__module__ + \".\" + self.__class__.__name__\n270:             clsattr = self.attrs.get(\"__memh5_subclass\", None)\n271:             if clsattr and (clsattr != clspath):\n272:                 self.attrs[\"__memh5_subclass\"] = clspath\n273: \n274:     def add_dataset(self, name):\n275:         \"\"\"Create an empty dataset.\n276: \n277:         The dataset must be defined in the specification for the container.\n278: \n279:         Parameters\n280:         ----------\n281:         name : string\n282:             Name of the dataset to create.\n283: \n284:         Returns\n285:         -------\n286:         dset : `memh5.MemDataset`\n287:         \"\"\"\n288:         # Normalise name\n289:         name = name.strip(\"/\")\n290: \n291:         # Dataset must be specified\n292:         if name not in self.dataset_spec:\n293:             raise RuntimeError(f\"Dataset {name} not known.\")\n294: \n295:         dspec = self.dataset_spec[name]\n296: \n297:         # Fetch dataset properties\n298:         axes = dspec[\"axes\"]\n299:         dtype = dspec[\"dtype\"]\n300:         chunks, compression, compression_opts = None, None, None\n301:         if self.allow_chunked:\n302:             chunks = dspec.get(\"chunks\", None)\n303:             compression = dspec.get(\"compression\", None)\n304:             compression_opts = dspec.get(\"compression_opts\", None)\n305: \n306:         # Get distribution properties\n307:         dist = self.distributed and dspec.get(\"distributed\", True)\n308:         shape = ()\n309: \n310:         # Check that all the specified axes are defined, and fetch their lengths\n311:         for axis in axes:\n312:             if axis not in self.index_map:\n313:                 if isinstance(axis, int):\n314:                     l = axis\n315:                 else:\n316:                     raise RuntimeError(f\"Axis {axis} not defined in index_map\")\n317:             else:\n318:                 l = len(self.index_map[axis])\n319: \n320:             shape += (l,)\n321: \n322:         # Fetch distributed axis, and turn into axis index\n323:         dist_axis = (\n324:             dspec[\"distributed_axis\"] if \"distributed_axis\" in dspec else axes[0]\n325:         )\n326:         dist_axis = list(axes).index(dist_axis)\n327: \n328:         # Check chunk dimensions are consistent with axis\n329:         if chunks is not None:\n330:             final_chunks = ()\n331:             for i, l in enumerate(shape):\n332:                 final_chunks += (min(chunks[i], l),)\n333:             chunks = final_chunks\n334: \n335:         # Create dataset\n336:         dset = self.create_dataset(\n337:             name,\n338:             shape=shape,\n339:             dtype=dtype,\n340:             distributed=dist,\n341:             distributed_axis=dist_axis,\n342:             chunks=chunks,\n343:             compression=compression,\n344:             compression_opts=compression_opts,\n345:         )\n346: \n347:         dset.attrs[\"axis\"] = np.array(axes)\n348: \n349:         return dset\n350: \n351:     def _ensure_chunked(self):\n352:         \"\"\"Ensure datasets that have chunk/compression specs are chunked.\n353: \n354:         For every dataset, check if chunks and compression are set, and\n355:         if not set them to dataset_spec values.\n356:         \"\"\"\n357:         for dset in self.dataset_spec:\n358:             if dset not in self:\n359:                 continue\n360:             if \"chunks\" in self.dataset_spec[dset] and self[dset].chunks is None:",
+      "end_line": 360,
+      "path_lines": 3728,
+      "start_line": 220
+    },
+    "usage": {
+      "input_tokens": 14543,
+      "input_tokens_details": {
+        "cached_tokens": 13056
+      },
+      "output_tokens": 479,
+      "output_tokens_details": {
+        "reasoning_tokens": 356
+      },
+      "total_tokens": 15022
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "draco/core/containers.py",
+      "query": "PowerSpectrum3D"
+    },
+    "response_chars": 1107,
+    "round": 5,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 2696,
+          "text": "class PowerSpectrum3D(SpatialDelayCube):"
+        }
+      ],
+      "query": "PowerSpectrum3D",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 16092,
+      "input_tokens_details": {
+        "cached_tokens": 14080
+      },
+      "output_tokens": 1167,
+      "output_tokens_details": {
+        "reasoning_tokens": 836
+      },
+      "total_tokens": 17259
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "    _dataset_spec: ClassVar = {\n        # Override the inherited spatial-delay data cube so it is not created for\n        # power spectra, while leaving it available for backwards compatibility.\n        \"data\": {\n            \"axes\": [\"pol\", \"delay\", \"u\", \"v\"],\n            \"dtype\": np.complex128,\n            \"initialise\": False,\n            \"distributed\": True,\n            \"distributed_axis\": \"delay\",\n        },\n        \"spectrum\": {",
+          "end_line": 2700,
+          "start_line": 2699
+        }
+      ]
+    },
+    "response_chars": 1179,
+    "round": 6,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 2700,
+          "replacement_lines": 11,
+          "start_line": 2699
+        }
+      ],
+      "current_file_lines": 3737,
+      "updated_excerpt": {
+        "content": "2689: \n2690:     @property\n2691:     def freq_center(self):\n2692:         \"\"\"Get the central frequency attrs.\"\"\"\n2693:         return self.attrs[\"freq_center\"]\n2694: \n2695: \n2696: class PowerSpectrum3D(SpatialDelayCube):\n2697:     \"\"\"Container for a 3D power spectrum.\"\"\"\n2698: \n2699:     _dataset_spec: ClassVar = {\n2700:         # Override the inherited spatial-delay data cube so it is not created for\n2701:         # power spectra, while leaving it available for backwards compatibility.\n2702:         \"data\": {\n2703:             \"axes\": [\"pol\", \"delay\", \"u\", \"v\"],\n2704:             \"dtype\": np.complex128,\n2705:             \"initialise\": False,\n2706:             \"distributed\": True,\n2707:             \"distributed_axis\": \"delay\",\n2708:         },\n2709:         \"spectrum\": {\n2710:             \"axes\": [\"pol\", \"delay\", \"u\", \"v\"],\n2711:             \"dtype\": np.float64,\n2712:             \"initialise\": True,\n2713:             \"distributed\": True,\n2714:             \"distributed_axis\": \"delay\",\n2715:         }\n2716:     }\n2717: \n2718:     @property\n2719:     def spectrum(self):\n2720:         \"\"\"Get the 3D power spectrum.\"\"\"\n2721:         return self.datasets[\"spectrum\"]\n2722: \n2723:     @property\n2724:     def ps_norm(self):\n2725:         \"\"\"Get the power spectrum normalizaiton attrs.\"\"\"\n2726:         return self.attrs[\"ps_norm\"]\n2727: \n2728: \n2729: class PowerSpectrum2D(CosmologyContainer):",
+        "end_line": 2729,
+        "path_lines": 3737,
+        "start_line": 2689
+      }
+    },
+    "usage": {
+      "input_tokens": 16167,
+      "input_tokens_details": {
+        "cached_tokens": 15616
+      },
+      "output_tokens": 1058,
+      "output_tokens_details": {
+        "reasoning_tokens": 742
+      },
+      "total_tokens": 17225
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 7,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__radiocosmology__draco__pull_245__comment_2008307739__dead_code.patch"
+    },
+    "usage": {
+      "input_tokens": 16847,
+      "input_tokens_details": {
+        "cached_tokens": 15616
+      },
+      "output_tokens": 194,
+      "output_tokens_details": {
+        "reasoning_tokens": 183
+      },
+      "total_tokens": 17041
+    }
+  }
+]

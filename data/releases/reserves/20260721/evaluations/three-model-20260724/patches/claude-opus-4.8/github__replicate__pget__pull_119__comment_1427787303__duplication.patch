@@ -1,0 +1,58 @@
+--- a/pkg/download/consistent_hashing.go
++++ b/pkg/download/consistent_hashing.go
+@@ -293,6 +293,21 @@
+ 	return resp, nil
+ }
+ 
++// hashKey computes the consistent hash sum for the given cache key. It is the
++// single place where the hashstructure key calculation is defined so that the
++// consistent-hashing logic is not duplicated across call sites.
++func hashKey(key CacheKey) (uint64, error) {
++	// we set IgnoreZeroValue so that we can add fields to the hash key
++	// later without breaking things.
++	// note that it's not safe to share a HashOptions so we create a fresh one each time.
++	hashopts := &hashstructure.HashOptions{IgnoreZeroValue: true}
++	hash, err := hashstructure.Hash(key, hashstructure.FormatV2, hashopts)
++	if err != nil {
++		return 0, fmt.Errorf("error calculating hash of key: %w", err)
++	}
++	return hash, nil
++}
++
+ func (m *ConsistentHashingMode) consistentHashIfNeeded(req *http.Request, start int64, end int64) (cachePodIndex int, err error) {
+ 	logger := logging.GetLogger()
+ 	for _, host := range m.DomainsToCache {
+@@ -303,14 +318,9 @@
+ 			slice := start / m.SliceSize
+ 
+ 			key := CacheKey{URL: req.URL, Slice: slice}
+-			// we set IgnoreZeroValue so that we can add fields to the hash key
+-			// later without breaking things.
+-			// note that it's not safe to share a HashOptions so we create a fresh one each time.
+-			hashopts := &hashstructure.HashOptions{IgnoreZeroValue: true}
+ 			var hash uint64
+-			hash, err = hashstructure.Hash(key, hashstructure.FormatV2, hashopts)
+-			if err != nil {
+-				err = fmt.Errorf("error calculating hash of key: %w", err)
++			hash, err = hashKey(key)
++			if err != nil {
+ 				return
+ 			}
+ 
+@@ -345,13 +355,9 @@
+ 			slice := start / m.SliceSize
+ 
+ 			key := CacheKey{URL: req.URL, Slice: slice, Retry: true}
+-			// we set IgnoreZeroValue so that we can add fields to the hash key
+-			// later without breaking things.
+-			// note that it's not safe to share a HashOptions so we create a fresh one each time.
+-			hashopts := &hashstructure.HashOptions{IgnoreZeroValue: true}
+-			hash, err := hashstructure.Hash(key, hashstructure.FormatV2, hashopts)
+-			if err != nil {
+-				return fmt.Errorf("error calculating hash of key: %w", err)
++			hash, err := hashKey(key)
++			if err != nil {
++				return err
+ 			}
+ 
+ 			logger.Debug().Uint64("hash_sum", hash).Int("len_cache_hosts", len(m.CacheHosts)).Msg("consistent hashing")

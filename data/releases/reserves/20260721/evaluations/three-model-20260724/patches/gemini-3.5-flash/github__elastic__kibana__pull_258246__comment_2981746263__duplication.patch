@@ -1,0 +1,65 @@
+--- a/src/platform/packages/shared/kbn-unified-chart-section-viewer/src/components/observability/traces/trace_charts_definition.ts
++++ b/src/platform/packages/shared/kbn-unified-chart-section-viewer/src/components/observability/traces/trace_charts_definition.ts
+@@ -47,6 +47,17 @@
+   return metadataFields.length ? `METADATA ${metadataFields}` : undefined;
+ }
+ 
++function buildBaseQuery(indexes: string, filters: string[], metadataFields: string[]) {
++  const whereClauses = getWhereClauses(filters);
++  const metadataDirective = getMetadataDirective(metadataFields);
++  const source = metadataDirective ? `${indexes} ${metadataDirective}` : indexes;
++  const query = esql(`FROM ${source}`);
++  for (const clause of whereClauses) {
++    query.pipe(`WHERE ${clause}`);
++  }
++  return query;
++}
++
+ export function getErrorRateChart({
+   indexes,
+   filters,
+@@ -57,13 +68,7 @@
+   metadataFields: string[];
+ }): TraceChart | null {
+   try {
+-    const whereClauses = getWhereClauses(filters);
+-    const metadataDirective = getMetadataDirective(metadataFields);
+-    const source = metadataDirective ? `${indexes} ${metadataDirective}` : indexes;
+-    const query = esql(`FROM ${source}`);
+-    for (const clause of whereClauses) {
+-      query.pipe(`WHERE ${clause}`);
+-    }
++    const query = buildBaseQuery(indexes, filters, metadataFields);
+     query.pipe(
+       `STATS failure = COUNT(*) WHERE TO_STRING(${EVENT_OUTCOME}) == "failure" OR TO_STRING(${STATUS_CODE}) == "Error", all = COUNT(*) BY timestamp = BUCKET(${AT_TIMESTAMP}, 100, ?_tstart, ?_tend)`
+     );
+@@ -96,13 +101,7 @@
+   metadataFields: string[];
+ }): TraceChart | null {
+   try {
+-    const whereClauses = getWhereClauses(filters);
+-    const metadataDirective = getMetadataDirective(metadataFields);
+-    const source = metadataDirective ? `${indexes} ${metadataDirective}` : indexes;
+-    const query = esql(`FROM ${source}`);
+-    for (const clause of whereClauses) {
+-      query.pipe(`WHERE ${clause}`);
+-    }
++    const query = buildBaseQuery(indexes, filters, metadataFields);
+     // apm duration is in us
+     query.pipe(
+       `EVAL duration_ms_ecs = CASE(${TRANSACTION_DURATION} IS NOT NULL, TO_DOUBLE(${TRANSACTION_DURATION})/1000, ${SPAN_DURATION} IS NOT NULL, TO_DOUBLE(${SPAN_DURATION})/1000, null)`
+@@ -138,13 +137,7 @@
+   metadataFields: string[];
+ }): TraceChart | null {
+   try {
+-    const whereClauses = getWhereClauses(filters);
+-    const metadataDirective = getMetadataDirective(metadataFields);
+-    const source = metadataDirective ? `${indexes} ${metadataDirective}` : indexes;
+-    const query = esql(`FROM ${source}`);
+-    for (const clause of whereClauses) {
+-      query.pipe(`WHERE ${clause}`);
+-    }
++    const query = buildBaseQuery(indexes, filters, metadataFields);
+     query.pipe(`EVAL id = COALESCE(${TRANSACTION_ID}, ${SPAN_ID})`);
+     query.pipe(`STATS COUNT(id) BY BUCKET(${AT_TIMESTAMP}, 100, ?_tstart, ?_tend)`);
+ 

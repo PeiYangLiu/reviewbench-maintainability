@@ -1,0 +1,107 @@
+diff --git a/src/material/schematics/ng-generate/mdc-migration/rules/components/chips/chips-template.ts b/src/material/schematics/ng-generate/mdc-migration/rules/components/chips/chips-template.ts
+index e829d52..3f6f689 100644
+--- a/src/material/schematics/ng-generate/mdc-migration/rules/components/chips/chips-template.ts
++++ b/src/material/schematics/ng-generate/mdc-migration/rules/components/chips/chips-template.ts
+@@ -10,28 +10,12 @@ import * as compiler from '@angular/compiler';
+ import {TemplateMigrator, Update} from '../../template-migrator';
+ import {replaceStartTag, replaceEndTag} from '../../tree-traversal';
+ 
+-/** Stores a mat-chip-list with the mat-chip elements nested within it. */
+-interface ChipMap {
+-  chipList: compiler.TmplAstElement;
+-  chips: compiler.TmplAstElement[];
+-}
+-
+ export class ChipsTemplateMigrator extends TemplateMigrator {
+   /** The matChipInputFor attributes found while traversing the template ast. */
+   private _chipInputAttrs: compiler.TmplAstBoundAttribute[] = [];
+ 
+-  /** The current ChipMap being built. */
+-  private _chipMap: ChipMap | null;
+-
+-  /** Contains all of the ChipMaps found while traversing the template ast. */
+-  private _chipMaps: ChipMap[] = [];
+-
+-  override postorder(node: compiler.TmplAstElement): void {
+-    if (node.name === 'mat-chip-list') {
+-      this._chipMaps.push(this._chipMap!);
+-      this._chipMap = null;
+-    }
+-  }
++  /** The mat-chip elements that are handled as descendants of a mat-chip-list. */
++  private _chipsInsideChipLists = new WeakSet<compiler.TmplAstElement>();
+ 
+   override preorder(node: compiler.TmplAstElement): void {
+     switch (node.name) {
+@@ -47,36 +31,23 @@ export class ChipsTemplateMigrator extends TemplateMigrator {
+     }
+   }
+ 
+-  override getUpdates(): Update[] {
+-    this._chipMaps.forEach(chipMap => {
+-      chipMap.chips.forEach(chip => {
+-        this.updates.push(
+-          ...this._buildUpdates(chip, chipMap.chipList, 'mat-chip-row', 'mat-chip-option'),
+-        );
+-      });
+-    });
+-
+-    return this.updates;
+-  }
+-
+   override reset(): void {
+     super.reset();
+     this._chipInputAttrs = [];
+-    this._chipMaps = [];
++    this._chipsInsideChipLists = new WeakSet<compiler.TmplAstElement>();
+   }
+ 
+   private _handleChipListNode(node: compiler.TmplAstElement): void {
+-    this._chipMap = {
+-      chipList: node,
+-      chips: [],
+-    };
+-
+     this.updates.push(...this._buildUpdates(node, node, 'mat-chip-grid', 'mat-chip-listbox'));
++
++    this._visitChipsInsideChipList(node, chip => {
++      this._chipsInsideChipLists.add(chip);
++      this.updates.push(...this._buildUpdates(chip, node, 'mat-chip-row', 'mat-chip-option'));
++    });
+   }
+ 
+   private _handleChipNode(node: compiler.TmplAstElement): void {
+-    if (this._chipMap) {
+-      this._chipMap.chips.push(node);
++    if (this._chipsInsideChipLists.has(node)) {
+       return;
+     }
+ 
+@@ -92,6 +63,27 @@ export class ChipsTemplateMigrator extends TemplateMigrator {
+     );
+   }
+ 
++  /**
++   * Visits chips that belong to the given chip list in the same order as the shared
++   * template traversal, stopping at nested chip lists that will handle their own chips.
++   */
++  private _visitChipsInsideChipList(
++    node: compiler.TmplAstElement,
++    visitor: (chip: compiler.TmplAstElement) => void,
++  ): void {
++    for (let i = node.children.length - 1; i >= 0; i--) {
++      const child = node.children[i];
++
++      if (child instanceof compiler.TmplAstElement && child.name !== 'mat-chip-list') {
++        if (child.name === 'mat-chip') {
++          visitor(child);
++        }
++
++        this._visitChipsInsideChipList(child, visitor);
++      }
++    }
++  }
++
+   /**
+    * Returns start and end tag updates for the given node.
+    *

@@ -1,0 +1,51 @@
+diff --git a/internal/auxdata/jwt.go b/internal/auxdata/jwt.go
+index b3ee984..dc53607 100644
+--- a/internal/auxdata/jwt.go
++++ b/internal/auxdata/jwt.go
+@@ -31,6 +31,25 @@ var (
+ 	errNoKeySetToVerify = errors.New("cannot determine keyset to use for validating the JWT")
+ )
+ 
++// friendlyError wraps a user-friendly error message alongside the original
++// underlying error so that both can be accessed at the point of logging.
++type friendlyError struct {
++	friendly string
++	cause    error
++}
++
++func newFriendlyError(cause error, friendly string) *friendlyError {
++	return &friendlyError{friendly: friendly, cause: cause}
++}
++
++func (e *friendlyError) Error() string {
++	return e.friendly
++}
++
++func (e *friendlyError) Unwrap() error {
++	return e.cause
++}
++
+ type jwtHelper struct {
+ 	keySets        map[string]keySet
+ 	verify         bool
+@@ -152,15 +171,15 @@ func (j *jwtHelper) doExtract(ctx context.Context, auxJWT *requestv1.AuxData_JWT
+ 	if err != nil {
+ 		switch {
+ 		case errors.Is(err, jwt.InvalidAudienceError()):
+-			return nil, fmt.Errorf("invalid audience ('aud')")
++			return nil, newFriendlyError(err, "invalid audience ('aud')")
+ 		case errors.Is(err, jwt.InvalidIssuedAtError()):
+-			return nil, fmt.Errorf("issued at time is in the future ('iat')")
++			return nil, newFriendlyError(err, "issued at time is in the future ('iat')")
+ 		case errors.Is(err, jwt.InvalidIssuerError()):
+-			return nil, fmt.Errorf("invalid issuer ('iss')")
++			return nil, newFriendlyError(err, "invalid issuer ('iss')")
+ 		case errors.Is(err, jwt.TokenExpiredError()):
+-			return nil, fmt.Errorf("token has expired ('exp')")
++			return nil, newFriendlyError(err, "token has expired ('exp')")
+ 		case errors.Is(err, jwt.TokenNotYetValidError()):
+-			return nil, fmt.Errorf("token is not yet valid ('nbf')")
++			return nil, newFriendlyError(err, "token is not yet valid ('nbf')")
+ 		default:
+ 			return nil, fmt.Errorf("failed to parse: %w", err)
+ 		}

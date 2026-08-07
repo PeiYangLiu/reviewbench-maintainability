@@ -1,0 +1,172 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 300,
+      "path": "src/neuroconv/tools/nwb_helpers/_configuration_models/_base_dataset_io.py",
+      "start_line": 230
+    },
+    "response_chars": 132,
+    "round": 1,
+    "tool_result": {
+      "content": "230:         return values\n231: \n232:     # Pydantic models have several API calls for retrieving the schema - override all of them to work\n233:     @classmethod\n234:     def schema(cls, **kwargs) -> Dict[str, Any]:\n235:         return cls.model_json_schema(**kwargs)\n236: \n237:     @classmethod\n238:     def schema_json(cls, **kwargs) -> Dict[str, Any]:\n239:         return cls.model_json_schema(**kwargs)\n240: \n241:     @classmethod\n242:     def model_json_schema(cls, **kwargs) -> Dict[str, Any]:\n243:         assert \"mode\" not in kwargs, \"The 'mode' of this method is fixed to be 'validation' and cannot be changed.\"\n244:         assert \"schema_generator\" not in kwargs, \"The 'schema_generator' of this method cannot be changed.\"\n245:         return super().model_json_schema(mode=\"validation\", schema_generator=PureJSONSchemaGenerator, **kwargs)\n246: \n247:     @classmethod\n248:     def from_neurodata_object(cls, neurodata_object: Container, dataset_name: Literal[\"data\", \"timestamps\"]) -> Self:\n249:         \"\"\"\n250:         Construct an instance of a DatasetIOConfiguration for a dataset in a neurodata object in an NWBFile.\n251: \n252:         Parameters\n253:         ----------\n254:         neurodata_object : hdmf.Container\n255:             The neurodata object containing the field that will become a dataset when written to disk.\n256:         dataset_name : \"data\" or \"timestamps\"\n257:             The name of the field that will become a dataset when written to disk.\n258:             Some neurodata objects can have multiple such fields, such as `pynwb.TimeSeries` which can have both `data`\n259:             and `timestamps`, each of which can be configured separately.\n260:         \"\"\"\n261:         location_in_file = _find_location_in_memory_nwbfile(neurodata_object=neurodata_object, field_name=dataset_name)\n262: \n263:         candidate_dataset = getattr(neurodata_object, dataset_name)\n264:         full_shape = get_data_shape(data=candidate_dataset)\n265:         dtype = _infer_dtype(dataset=candidate_dataset)\n266: \n267:         if isinstance(candidate_dataset, GenericDataChunkIterator):\n268:             chunk_shape = candidate_dataset.chunk_shape\n269:             buffer_shape = candidate_dataset.buffer_shape\n270:             compression_method = \"gzip\"\n271:         elif dtype != np.dtype(\"object\"):\n272:             chunk_shape = SliceableDataChunkIterator.estimate_default_chunk_shape(\n273:                 chunk_mb=10.0, maxshape=full_shape, dtype=np.dtype(dtype)\n274:             )\n275:             buffer_shape = SliceableDataChunkIterator.estimate_default_buffer_shape(\n276:                 buffer_gb=0.5, chunk_shape=chunk_shape, maxshape=full_shape, dtype=np.dtype(dtype)\n277:             )\n278:             compression_method = \"gzip\"\n279:         elif dtype == np.dtype(\"object\"):  # Unclear what default chunking/compression should be for compound objects\n280:             raise NotImplementedError(\n281:                 f\"Unable to create a `DatasetIOConfiguration` for the dataset at '{location_in_file}'\"\n282:                 f\"for neurodata object '{neurodata_object}' of type '{type(neurodata_object)}'!\"\n283:             )\n284: \n285:         return cls(\n286:             object_id=neurodata_object.object_id,\n287:             object_name=neurodata_object.name,\n288:             location_in_file=location_in_file,\n289:             dataset_name=dataset_name,\n290:             full_shape=full_shape,\n291:             dtype=dtype,\n292:             chunk_shape=chunk_shape,\n293:             buffer_shape=buffer_shape,\n294:             compression_method=compression_method,\n295:         )",
+      "end_line": 295,
+      "path_lines": 295,
+      "start_line": 230
+    },
+    "usage": {
+      "completion_tokens": 77,
+      "prompt_tokens": 2805,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 2882
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/neuroconv/tools/nwb_helpers/_configuration_models/_base_dataset_io.py",
+      "query": "def from_neurodata_object"
+    },
+    "response_chars": 205,
+    "round": 2,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 248,
+          "text": "    def from_neurodata_object(cls, neurodata_object: Container, dataset_name: Literal[\"data\", \"timestamps\"]) -> Self:"
+        }
+      ],
+      "query": "def from_neurodata_object",
+      "truncated": false
+    },
+    "usage": {
+      "completion_tokens": 331,
+      "prompt_tokens": 4414,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 4745
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "    @classmethod\n    def from_neurodata_object(cls, neurodata_object: Container, dataset_name: Literal[\"data\", \"timestamps\"]) -> Self:\n        dataset_io_configuration = super().from_neurodata_object(\n            neurodata_object=neurodata_object, dataset_name=dataset_name\n        )\n\n        candidate_dataset = getattr(neurodata_object, dataset_name)\n        if isinstance(candidate_dataset, h5py.Dataset):  # For HDF5, update the compression info from the on-disk dataset\n            dataset_io_configuration.compression_method = candidate_dataset.compression\n            dataset_io_configuration.compression_options = dict(compression_opts=candidate_dataset.compression_opts)\n\n        return dataset_io_configuration",
+          "end_line": 107,
+          "start_line": 84
+        }
+      ]
+    },
+    "response_chars": 808,
+    "round": 3,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 107,
+          "replacement_lines": 12,
+          "start_line": 84
+        }
+      ],
+      "current_file_lines": 95,
+      "updated_excerpt": {
+        "content": "74:                 compression_bundle = dict(compression=False)\n75:         else:\n76:             # Base filters only take particular form of a single input; single int for GZIP; 2-tuple for SZIP\n77:             compression_opts = None\n78:             if self.compression_options is not None:\n79:                 compression_opts = list(self.compression_options.values())[0]\n80:             compression_bundle = dict(compression=self.compression_method, compression_opts=compression_opts)\n81: \n82:         return dict(chunks=self.chunk_shape, **compression_bundle)\n83: \n84:     @classmethod\n85:     def from_neurodata_object(cls, neurodata_object: Container, dataset_name: Literal[\"data\", \"timestamps\"]) -> Self:\n86:         dataset_io_configuration = super().from_neurodata_object(\n87:             neurodata_object=neurodata_object, dataset_name=dataset_name\n88:         )\n89: \n90:         candidate_dataset = getattr(neurodata_object, dataset_name)\n91:         if isinstance(candidate_dataset, h5py.Dataset):  # For HDF5, update the compression info from the on-disk dataset\n92:             dataset_io_configuration.compression_method = candidate_dataset.compression\n93:             dataset_io_configuration.compression_options = dict(compression_opts=candidate_dataset.compression_opts)\n94: \n95:         return dataset_io_configuration",
+        "end_line": 95,
+        "path_lines": 95,
+        "start_line": 74
+      }
+    },
+    "usage": {
+      "completion_tokens": 572,
+      "prompt_tokens": 4589,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 5161
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 12,
+      "path": "src/neuroconv/tools/nwb_helpers/_configuration_models/_hdf5_dataset_io.py",
+      "start_line": 1
+    },
+    "response_chars": 129,
+    "round": 4,
+    "tool_result": {
+      "content": "1: \"\"\"Base Pydantic models for the HDF5DatasetConfiguration.\"\"\"\n2: \n3: from typing import Any, Dict, Literal, Union\n4: \n5: import h5py\n6: from hdmf import Container\n7: from pydantic import Field, InstanceOf\n8: from typing_extensions import Self\n9: \n10: from ._base_dataset_io import DatasetIOConfiguration, _find_location_in_memory_nwbfile\n11: from ...importing import is_package_installed\n12: ",
+      "end_line": 12,
+      "path_lines": 95,
+      "start_line": 1
+    },
+    "usage": {
+      "completion_tokens": 100,
+      "prompt_tokens": 5510,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 5610
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "from ._base_dataset_io import DatasetIOConfiguration",
+          "end_line": 10,
+          "start_line": 10
+        }
+      ]
+    },
+    "response_chars": 124,
+    "round": 5,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 10,
+          "replacement_lines": 1,
+          "start_line": 10
+        }
+      ],
+      "current_file_lines": 95,
+      "updated_excerpt": {
+        "content": "1: \"\"\"Base Pydantic models for the HDF5DatasetConfiguration.\"\"\"\n2: \n3: from typing import Any, Dict, Literal, Union\n4: \n5: import h5py\n6: from hdmf import Container\n7: from pydantic import Field, InstanceOf\n8: from typing_extensions import Self\n9: \n10: from ._base_dataset_io import DatasetIOConfiguration\n11: from ...importing import is_package_installed\n12: \n13: _base_hdf5_filters = set(h5py.filters.decode)\n14: _excluded_hdf5_filters = set(\n15:     (\n16:         \"shuffle\",  # controlled via H5DataIO\n17:         \"fletcher32\",  # controlled via H5DataIO\n18:         \"scaleoffset\",  # enforced indrectly by HDMF/PyNWB data types\n19:     )\n20: )\n21: _available_hdf5_filters = set(_base_hdf5_filters - _excluded_hdf5_filters)\n22: AVAILABLE_HDF5_COMPRESSION_METHODS = {filter_name: filter_name for filter_name in _available_hdf5_filters}\n23: if is_package_installed(package_name=\"hdf5plugin\"):\n24:     import hdf5plugin\n25: \n26:     AVAILABLE_HDF5_COMPRESSION_METHODS.update(\n27:         {\n28:             str(hdf5plugin_filter).rstrip(\"'>\").split(\".\")[-1]: hdf5plugin_filter\n29:             for hdf5plugin_filter in hdf5plugin.get_filters()\n30:         }\n31:     )\n32: \n33: \n34: class HDF5DatasetIOConfiguration(DatasetIOConfiguration):\n35:     \"\"\"A data model for configuring options about an object that will become a HDF5 Dataset in the file.\"\"\"\n36: \n37:     compression_method: Union[\n38:         Literal[tuple(AVAILABLE_HDF5_COMPRESSION_METHODS.keys())], InstanceOf[h5py._hl.filters.FilterRefBase], None\n39:     ] = Field(\n40:         default=\"gzip\",",
+        "end_line": 40,
+        "path_lines": 95,
+        "start_line": 1
+      }
+    },
+    "usage": {
+      "completion_tokens": 91,
+      "prompt_tokens": 5812,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 5903
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 6,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/claude-opus-4.8/patches/github__catalystneuro__neuroconv__pull_1003__comment_1715516440__complexity.patch"
+    },
+    "usage": {
+      "completion_tokens": 39,
+      "prompt_tokens": 6767,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 6806
+    }
+  }
+]

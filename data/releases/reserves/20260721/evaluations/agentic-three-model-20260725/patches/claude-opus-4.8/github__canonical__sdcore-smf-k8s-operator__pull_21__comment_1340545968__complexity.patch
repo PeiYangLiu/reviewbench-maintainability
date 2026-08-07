@@ -1,0 +1,84 @@
+diff --git a/src/charm.py b/src/charm.py
+index 3a935d5..5c14d20 100644
+--- a/src/charm.py
++++ b/src/charm.py
+@@ -118,50 +118,69 @@ class SMFOperatorCharm(CharmBase):
+             return
+         self._write_ue_config_file()
+ 
+-    def _configure_sdcore_smf(self, event: EventBase) -> None:  # noqa C901
++    def _configure_sdcore_smf(self, event: EventBase) -> None:
+         """Adds pebble layer and manages Juju unit status.
+ 
+         Args:
+             event: Juju event
+         """
++        if not self._prerequisites_are_met(event):
++            return
++        self._configure_smf_workload()
++        self.unit.status = ActiveStatus()
++
++    def _prerequisites_are_met(self, event: EventBase) -> bool:
++        """Checks whether all prerequisites to configure the workload are met.
++
++        Sets the unit status and defers the event when appropriate.
++
++        Args:
++            event: Juju event
++
++        Returns:
++            bool: Whether all prerequisites are met.
++        """
+         for relation in ["database", "fiveg_nrf", "certificates"]:
+             if not self._relation_created(relation):
+                 self.unit.status = BlockedStatus(
+                     f"Waiting for `{relation}` relation to be created"
+                 )
+-                return
++                return False
+         if not self._container.can_connect():
+             self.unit.status = WaitingStatus("Waiting for container to be ready")
+-            return
++            return False
+         if not self._database_is_available():
+             self.unit.status = WaitingStatus("Waiting for `database` relation to be available")
+-            return
++            return False
+         if not self._nrf_is_available():
+             self.unit.status = WaitingStatus("Waiting for NRF relation to be available")
+-            return
++            return False
+         if not self._storage_is_attached():
+             self.unit.status = WaitingStatus("Waiting for storage to be attached")
+             event.defer()
+-            return
++            return False
+         if not _get_pod_ip():
+             self.unit.status = WaitingStatus("Waiting for pod IP address to be available")
+             event.defer()
+-            return
++            return False
+         if not self._ue_config_file_is_written():
+             event.defer()
+             self.unit.status = WaitingStatus(
+                 f"Waiting for `{UEROUTING_CONFIG_FILE}` config file to be pushed to workload container"  # noqa: W505, E501
+             )
+-            return
++            return False
+         if not self._certificate_is_stored():
+             self.unit.status = WaitingStatus("Waiting for certificates to be stored")
+             event.defer()
+-            return
++            return False
++        return True
++
++    def _configure_smf_workload(self) -> None:
++        """Updates the config file and (re)configures the Pebble layer."""
+         if self._update_config_file():
+             self._configure_pebble(restart=True)
+         else:
+             self._configure_pebble()
+-        self.unit.status = ActiveStatus()
+ 
+     def _on_nrf_broken(self, event: EventBase) -> None:
+         """Event handler for NRF relation broken.

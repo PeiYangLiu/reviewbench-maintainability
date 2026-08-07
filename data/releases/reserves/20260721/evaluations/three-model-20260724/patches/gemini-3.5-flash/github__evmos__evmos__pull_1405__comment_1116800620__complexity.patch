@@ -1,0 +1,82 @@
+--- a/app/ante/cosmos/fees.go
++++ b/app/ante/cosmos/fees.go
+@@ -121,7 +121,8 @@
+ 	if feeGranter != nil {
+ 		if dfd.feegrantKeeper == nil {
+ 			return errortypes.ErrInvalidRequest.Wrap("fee grants are not enabled")
+-		} else if !feeGranter.Equals(feePayer) {
++		}
++		if !feeGranter.Equals(feePayer) {
+ 			err := dfd.feegrantKeeper.UseGrantedFees(ctx, feeGranter, feePayer, fees, sdkTx.GetMsgs())
+ 			if err != nil {
+ 				return errorsmod.Wrapf(err, "%s does not not allow to pay fees for %s", feeGranter, feePayer)
+@@ -160,18 +161,21 @@
+ // If the account does not have sufficient staking rewards, it returns an error.
+ func (dfd DeductFeeDecorator) deductFeesFromBalanceOrUnclaimedRewards(ctx sdk.Context, deductFeesFromAcc authtypes.AccountI, fees sdk.Coins) error {
+ 	balance := dfd.bankKeeper.GetBalance(ctx, deductFeesFromAcc.GetAddress(), fees[0].Denom)
+-	if balance.IsLT(fees[0]) {
+-		difference := fees[0].Sub(balance)
+-		// Try to claim enough staking rewards to cover the difference between the
+-		// transaction cost and the account balance.
+-		err := evm.ClaimSufficientStakingRewards(ctx, dfd.stakingKeeper, dfd.distributionKeeper, deductFeesFromAcc.GetAddress(), sdk.Coins{difference})
+-		if err != nil {
+-			return errortypes.ErrInsufficientFunds.Wrapf(
+-				"insufficient funds and failed to claim sufficient staking rewards for %s to pay for fees; %s",
+-				deductFeesFromAcc.GetAddress(),
+-				err.Error(),
+-			)
+-		}
++	if !balance.IsLT(fees[0]) {
++		// deduct the fees if possible
++		return authante.DeductFees(dfd.bankKeeper, ctx, deductFeesFromAcc, fees)
++	}
++
++	difference := fees[0].Sub(balance)
++	// Try to claim enough staking rewards to cover the difference between the
++	// transaction cost and the account balance.
++	err := evm.ClaimSufficientStakingRewards(ctx, dfd.stakingKeeper, dfd.distributionKeeper, deductFeesFromAcc.GetAddress(), sdk.Coins{difference})
++	if err != nil {
++		return errortypes.ErrInsufficientFunds.Wrapf(
++			"insufficient funds and failed to claim sufficient staking rewards for %s to pay for fees; %s",
++			deductFeesFromAcc.GetAddress(),
++			err.Error(),
++		)
+ 	}
+ 	// deduct the fees if possible
+ 	return authante.DeductFees(dfd.bankKeeper, ctx, deductFeesFromAcc, fees)
+@@ -191,22 +195,20 @@
+ 	// Ensure that the provided fees meets a minimum threshold for the validator,
+ 	// if this is a CheckTx. This is only for local mempool purposes, and thus
+ 	// is only ran on CheckTx.
+-	if ctx.IsCheckTx() {
++	if ctx.IsCheckTx() && !ctx.MinGasPrices().IsZero() {
+ 		minGasPrices := ctx.MinGasPrices()
+-		if !minGasPrices.IsZero() {
+-			requiredFees := make(sdk.Coins, len(minGasPrices))
+-
+-			// Determine the required fees by multiplying each required minimum gas
+-			// price by the gas limit, where fee = ceil(minGasPrice * gasLimit).
+-			glDec := sdk.NewDec(int64(gas)) //#nosec G701 -- gosec warning about integer overflow is not relevant here
+-			for i, gp := range minGasPrices {
+-				fee := gp.Amount.Mul(glDec)
+-				requiredFees[i] = sdk.NewCoin(gp.Denom, fee.Ceil().RoundInt())
+-			}
+-
+-			if !feeCoins.IsAnyGTE(requiredFees) {
+-				return nil, 0, errorsmod.Wrapf(errortypes.ErrInsufficientFee, "insufficient fees; got: %s required: %s", feeCoins, requiredFees)
+-			}
++		requiredFees := make(sdk.Coins, len(minGasPrices))
++
++		// Determine the required fees by multiplying each required minimum gas
++		// price by the gas limit, where fee = ceil(minGasPrice * gasLimit).
++		glDec := sdk.NewDec(int64(gas)) //#nosec G701 -- gosec warning about integer overflow is not relevant here
++		for i, gp := range minGasPrices {
++			fee := gp.Amount.Mul(glDec)
++			requiredFees[i] = sdk.NewCoin(gp.Denom, fee.Ceil().RoundInt())
++		}
++
++		if !feeCoins.IsAnyGTE(requiredFees) {
++			return nil, 0, errorsmod.Wrapf(errortypes.ErrInsufficientFee, "insufficient fees; got: %s required: %s", feeCoins, requiredFees)
+ 		}
+ 	}
+ 

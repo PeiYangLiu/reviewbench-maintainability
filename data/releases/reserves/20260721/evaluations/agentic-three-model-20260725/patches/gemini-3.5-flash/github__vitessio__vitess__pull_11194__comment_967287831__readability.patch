@@ -1,0 +1,29 @@
+diff --git a/go/vt/vttablet/tabletmanager/replmanager.go b/go/vt/vttablet/tabletmanager/replmanager.go
+index dfeab1a..710fb6c 100644
+--- a/go/vt/vttablet/tabletmanager/replmanager.go
++++ b/go/vt/vttablet/tabletmanager/replmanager.go
+@@ -109,15 +109,18 @@ func (rm *replManager) checkActionLocked() {
+ 			return
+ 		}
+ 	} else {
+-		if status.SQLHealthy() && status.IOState == mysql.ReplicationStateConnecting && status.LastIOError != "" {
++		if status.SQLHealthy() || status.IOHealthy() {
+ 			// SQL thread is healthy, but IO thread is in Connecting state with an IO Error,
+-			// then we know that no Vitess operation stopped the IO thread and it is having trouble connecting to the primary
++			// then we know that no Vitess operation stopped the IO thread and it is having trouble connecting to the primary.
+ 			// Maybe the primary host-port changed, or something else happened. This could be an ephemeral error, so we should
+ 			// try and fix it.
+-		} else if status.SQLHealthy() || status.IOHealthy() {
+-			// If only one of the threads is stopped, it's probably
+-			// intentional. So, we don't repair replication.
+-			return
++			//
++			// If that's not the case, then if replication is already running fully or if only one of the threads is stopped,
++			// it's probably intentional. So, we don't repair replication.
++			isIOConnectingWithError := status.SQLHealthy() && status.IOState == mysql.ReplicationStateConnecting && status.LastIOError != ""
++			if !isIOConnectingWithError {
++				return
++			}
+ 		}
+ 	}
+ 

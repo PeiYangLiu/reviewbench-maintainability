@@ -1,0 +1,58 @@
+diff --git a/labelbox/client.py b/labelbox/client.py
+index 9382c24..20a677b 100644
+--- a/labelbox/client.py
++++ b/labelbox/client.py
+@@ -15,6 +15,7 @@ import urllib.parse
+ from google.api_core import retry
+ import requests
+ import requests.exceptions
++from pydantic import BaseModel
+ 
+ import labelbox.exceptions
+ from labelbox import utils
+@@ -52,6 +53,17 @@ logger = logging.getLogger(__name__)
+ _LABELBOX_API_KEY = "LABELBOX_API_KEY"
+ 
+ 
++
++class SendToAnnotateParams(BaseModel):
++    """Configuration for send_to_annotate helpers."""
++    exclude_data_rows_in_project: bool = False
++    ontology_mapping: Optional[Dict[str, str]] = None
++    override_existing_annotations_rule: Union[
++        ConflictResolutionStrategy, str
++    ] = ConflictResolutionStrategy.KeepExisting
++    priority: int = 5
++
++
+ def python_version_info():
+     version_info = sys.version_info
+ 
+@@ -1798,12 +1810,26 @@ class Client:
+             source_project_id: Optional[str],
+             destination_project: str,
+             task_queue_id: Optional[str],
+-            exclude_data_rows_in_project: bool = False,
++            exclude_data_rows_in_project: Union[bool, SendToAnnotateParams] = False,
+             ontology_mapping: Dict[str, str] = None,
+             override_existing_annotations_rule:
+         ConflictResolutionStrategy = ConflictResolutionStrategy.KeepExisting,
+             priority: int = 5):
+ 
++        send_to_annotate_params = (
++            exclude_data_rows_in_project
++            if isinstance(exclude_data_rows_in_project, SendToAnnotateParams)
++            else SendToAnnotateParams.construct(
++                exclude_data_rows_in_project=exclude_data_rows_in_project,
++                ontology_mapping=ontology_mapping,
++                override_existing_annotations_rule=override_existing_annotations_rule,
++                priority=priority))
++        exclude_data_rows_in_project = (
++            send_to_annotate_params.exclude_data_rows_in_project)
++        ontology_mapping = send_to_annotate_params.ontology_mapping
++        override_existing_annotations_rule = (
++            send_to_annotate_params.override_existing_annotations_rule)
++        priority = send_to_annotate_params.priority
+         mutation_str = """mutation SendToAnnotateFromCatalogPyApi($input: SendToAnnotateFromCatalogInput!) {
+                             sendToAnnotateFromCatalog(input: $input) {
+                               taskId

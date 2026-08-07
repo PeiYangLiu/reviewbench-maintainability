@@ -1,0 +1,158 @@
+--- a/pkg/providers/tinkerbell/create.go
++++ b/pkg/providers/tinkerbell/create.go
+@@ -54,22 +54,15 @@
+ 		return err
+ 	}
+ 
+-	stack := newStack(clusterSpec.VersionsBundle.Tinkerbell.TinkerbellStack, p.docker, p.writer, p.helm, ip.String()).
+-		withNamespace(constants.EksaSystemNamespace, false).
+-		withoutBoots().
+-		withHegel().
+-		withTinkController().
+-		withTinkServer()
+-
+-	if err := stack.install(ctx, cluster.KubeconfigFile); err != nil {
+-		return fmt.Errorf("install Tinkerbell stack on bootstrap cluster: %v", err)
+-	}
+-
+-	if err := stack.installBootsOnDocker(ctx, cluster.KubeconfigFile); err != nil {
+-		return err
+-	}
+-
+-	return nil
++	installer := p.newDefaultTinkerbellStackInstaller(
++		clusterSpec,
++		ip.String(),
++		withBootsOnDocker(),
++		withoutTinkerbellNamespaceCreation(),
++		withTinkerbellStackInstallError("install Tinkerbell stack on bootstrap cluster: %v"),
++	)
++
++	return installer.Install(ctx, cluster.KubeconfigFile)
+ }
+ 
+ func (p *Provider) PostBootstrapSetup(ctx context.Context, clusterConfig *v1alpha1.Cluster, cluster *types.Cluster) error {
+@@ -96,23 +89,106 @@
+ 		return err
+ 	}
+ 
+-	stack := newStack(clusterSpec.VersionsBundle.Tinkerbell.TinkerbellStack, p.docker, p.writer, p.helm, ip.String()).
+-		withNamespace(constants.EksaSystemNamespace, true).
+-		withBoots().
+-		withHegel().
+-		withTinkController().
+-		withTinkServer()
+-
+-	if err := stack.install(ctx, cluster.KubeconfigFile); err != nil {
+-		return fmt.Errorf("install stack on workload cluster: %v", err)
+-	}
+-
+-	logger.V(4).Info("Removing local boots container")
+-	if err := p.docker.ForceRemove(ctx, boots); err != nil {
+-		return fmt.Errorf("remove local boots container: %v", err)
+-	}
+-
+-	return nil
++	installer := p.newDefaultTinkerbellStackInstaller(
++		clusterSpec,
++		ip.String(),
++		withLocalBootsCleanup(),
++		withTinkerbellStackInstallError("install stack on workload cluster: %v"),
++	)
++
++	return installer.Install(ctx, cluster.KubeconfigFile)
++}
++
++type tinkerbellStackInstaller interface {
++	Install(ctx context.Context, kubeconfigFile string) error
++}
++
++type tinkerbellStackInstallerFunc func(ctx context.Context, kubeconfigFile string) error
++
++func (i tinkerbellStackInstallerFunc) Install(ctx context.Context, kubeconfigFile string) error {
++	return i(ctx, kubeconfigFile)
++}
++
++type tinkerbellStackInstallerConfig struct {
++	createNamespace       bool
++	installBootsOnCluster bool
++	installBootsOnDocker  bool
++	removeLocalBoots      bool
++	installErrMsg         string
++}
++
++type tinkerbellStackInstallerOption func(*tinkerbellStackInstallerConfig)
++
++func withBootsOnDocker() tinkerbellStackInstallerOption {
++	return func(config *tinkerbellStackInstallerConfig) {
++		config.installBootsOnCluster = false
++		config.installBootsOnDocker = true
++	}
++}
++
++func withoutTinkerbellNamespaceCreation() tinkerbellStackInstallerOption {
++	return func(config *tinkerbellStackInstallerConfig) {
++		config.createNamespace = false
++	}
++}
++
++func withLocalBootsCleanup() tinkerbellStackInstallerOption {
++	return func(config *tinkerbellStackInstallerConfig) {
++		config.removeLocalBoots = true
++	}
++}
++
++func withTinkerbellStackInstallError(message string) tinkerbellStackInstallerOption {
++	return func(config *tinkerbellStackInstallerConfig) {
++		config.installErrMsg = message
++	}
++}
++
++func (p *Provider) newDefaultTinkerbellStackInstaller(clusterSpec *cluster.Spec, ip string, opts ...tinkerbellStackInstallerOption) tinkerbellStackInstaller {
++	config := &tinkerbellStackInstallerConfig{
++		createNamespace:       true,
++		installBootsOnCluster: true,
++		installErrMsg:         "install Tinkerbell stack: %v",
++	}
++
++	for _, opt := range opts {
++		opt(config)
++	}
++
++	return tinkerbellStackInstallerFunc(func(ctx context.Context, kubeconfigFile string) error {
++		stack := newStack(clusterSpec.VersionsBundle.Tinkerbell.TinkerbellStack, p.docker, p.writer, p.helm, ip).
++			withNamespace(constants.EksaSystemNamespace, config.createNamespace)
++
++		if config.installBootsOnCluster {
++			stack = stack.withBoots()
++		} else {
++			stack = stack.withoutBoots()
++		}
++
++		stack = stack.
++			withHegel().
++			withTinkController().
++			withTinkServer()
++
++		if err := stack.install(ctx, kubeconfigFile); err != nil {
++			return fmt.Errorf(config.installErrMsg, err)
++		}
++
++		if config.installBootsOnDocker {
++			if err := stack.installBootsOnDocker(ctx, kubeconfigFile); err != nil {
++				return err
++			}
++		}
++
++		if config.removeLocalBoots {
++			logger.V(4).Info("Removing local boots container")
++			if err := p.docker.ForceRemove(ctx, boots); err != nil {
++				return fmt.Errorf("remove local boots container: %v", err)
++			}
++		}
++
++		return nil
++	})
+ }
+ 
+ func (p *Provider) SetupAndValidateCreateCluster(ctx context.Context, clusterSpec *cluster.Spec) error {

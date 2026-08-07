@@ -1,0 +1,70 @@
+diff --git a/initrd/directory.go b/initrd/directory.go
+index 0663a1c..14b5afc 100644
+--- a/initrd/directory.go
++++ b/initrd/directory.go
+@@ -77,13 +77,42 @@ func (initrd *directory) Build(ctx context.Context) (string, error) {
+ 		return "", fmt.Errorf("could not create output directory: %w", err)
+ 	}
+ 
+-	if initrd.opts.fsType == FsTypeErofs {
+-		return initrd.opts.output, convertToErofs(initrd.opts.output, initrd.path, false, !initrd.opts.keepOwners)
++	var builder directoryFSBuilder
++	switch initrd.opts.fsType {
++	case FsTypeErofs:
++		builder = directoryErofsBuilder{initrd: initrd}
++	default:
++		builder = directoryCpioBuilder{initrd: initrd}
+ 	}
+ 
++	if err := builder.build(ctx); err != nil {
++		return "", err
++	}
++
++	return initrd.opts.output, nil
++}
++
++type directoryFSBuilder interface {
++	build(context.Context) error
++}
++
++type directoryErofsBuilder struct {
++	initrd *directory
++}
++
++func (builder directoryErofsBuilder) build(context.Context) error {
++	return convertToErofs(builder.initrd.opts.output, builder.initrd.path, false, !builder.initrd.opts.keepOwners)
++}
++
++type directoryCpioBuilder struct {
++	initrd *directory
++}
++
++func (builder directoryCpioBuilder) build(ctx context.Context) error {
++	initrd := builder.initrd
+ 	f, err := os.OpenFile(initrd.opts.output, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
+ 	if err != nil {
+-		return "", fmt.Errorf("could not open initramfs file: %w", err)
++		return fmt.Errorf("could not open initramfs file: %w", err)
+ 	}
+ 
+ 	defer f.Close()
+@@ -182,16 +211,16 @@ func (initrd *directory) Build(ctx context.Context) (string, error) {
+ 
+ 		return nil
+ 	}); err != nil {
+-		return "", fmt.Errorf("could not walk output path: %w", err)
++		return fmt.Errorf("could not walk output path: %w", err)
+ 	}
+ 
+ 	if initrd.opts.compress {
+ 		if err := compressFiles(initrd.opts.output, writer, f); err != nil {
+-			return "", fmt.Errorf("could not compress files: %w", err)
++			return fmt.Errorf("could not compress files: %w", err)
+ 		}
+ 	}
+ 
+-	return initrd.opts.output, nil
++	return nil
+ }
+ 
+ // Env implements Initrd.

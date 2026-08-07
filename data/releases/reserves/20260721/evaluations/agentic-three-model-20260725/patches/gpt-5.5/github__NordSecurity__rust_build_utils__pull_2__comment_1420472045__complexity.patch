@@ -1,0 +1,54 @@
+diff --git a/rust_build_utils/msvc.py b/rust_build_utils/msvc.py
+index 37b2c6a..0bddb2c 100644
+--- a/rust_build_utils/msvc.py
++++ b/rust_build_utils/msvc.py
+@@ -2,7 +2,6 @@ import subprocess
+ from pathlib import Path
+ import re
+ import os
+-import itertools
+ from typing import Optional
+ 
+ 
+@@ -75,21 +74,26 @@ def activate_msvc(
+     ]
+     # Multiple versions and multiple editions might be installed, so we iterate over versions installed.
+     # If version preference is given, we filter only matching versions, othervise the highest version is picked.
+-    mvs_versions = sorted(
+-        [
+-            v
+-            for v in itertools.chain.from_iterable(p.iterdir() for p in mvs_paths)
+-            if v.is_dir()  # We only care about directories because we'll be listing them
+-            and any(
+-                e.name in edition_preferences for e in v.iterdir()
+-            )  # The version should have editions inside
+-            and (
+-                version_preference is None or v.name == version_preference
+-            )  # and versios should match the prefrence if given
+-        ],
+-        key=lambda p: p.name,
+-        reverse=True,
+-    )
++    mvs_versions = []
++    for mvs_path in mvs_paths:
++        for version in mvs_path.iterdir():
++            if not version.is_dir():
++                continue
++
++            # The version should have known editions inside.
++            has_known_edition = any(
++                edition.name in edition_preferences for edition in version.iterdir()
++            )
++            if not has_known_edition:
++                continue
++
++            # If a version preference was given, only matching versions are accepted.
++            if version_preference is not None and version.name != version_preference:
++                continue
++
++            mvs_versions.append(version)
++
++    mvs_versions = sorted(mvs_versions, key=lambda p: p.name, reverse=True)
+     if len(mvs_versions) == 0:
+         raise Exception(
+             "Microsoft Visual Studio version not found. Was looking in '{}'".format(

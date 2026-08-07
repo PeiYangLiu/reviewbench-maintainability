@@ -1,0 +1,101 @@
+diff --git a/substrate/client/consensus/beefy/src/round.rs b/substrate/client/consensus/beefy/src/round.rs
+index 270a251..70610a2 100644
+--- a/substrate/client/consensus/beefy/src/round.rs
++++ b/substrate/client/consensus/beefy/src/round.rs
+@@ -93,6 +93,44 @@ pub enum VoteImportResult<B: Block, AuthorityId: AuthorityIdBound> {
+ 
+ pub(crate) type VoteWeight = u32;
+ 
++/// A validator set with pre-calculated voting weights.
++#[derive(Debug, Decode, Encode, PartialEq, Clone)]
++pub(crate) struct WeightedValidatorSet<AuthorityId: AuthorityIdBound> {
++	pub(crate) validator_set: ValidatorSet<AuthorityId>,
++	pub(crate) voting_weights: BTreeMap<AuthorityId, VoteWeight>,
++}
++
++impl<AuthorityId: AuthorityIdBound> WeightedValidatorSet<AuthorityId> {
++	pub(crate) fn new(validator_set: ValidatorSet<AuthorityId>) -> Self {
++		let voting_weights =
++			validator_set.validators().iter().fold(BTreeMap::new(), |mut acc, authority| {
++				*acc.entry(authority.to_owned()).or_insert(0) += 1;
++				acc
++			});
++		Self { validator_set, voting_weights }
++	}
++
++	pub(crate) fn validator_set(&self) -> &ValidatorSet<AuthorityId> {
++		&self.validator_set
++	}
++
++	pub(crate) fn validator_set_id(&self) -> ValidatorSetId {
++		self.validator_set.id()
++	}
++
++	pub(crate) fn validators(&self) -> &[AuthorityId] {
++		self.validator_set.validators()
++	}
++
++	pub(crate) fn len(&self) -> usize {
++		self.validator_set.len()
++	}
++
++	pub(crate) fn voting_weight(&self, authority: &AuthorityId) -> Option<VoteWeight> {
++		self.voting_weights.get(authority).copied()
++	}
++}
++
+ /// Keeps track of all voting rounds (block numbers) within a session.
+ /// Only round numbers > `best_done` are of interest, all others are considered stale.
+ ///
+@@ -105,8 +143,7 @@ pub(crate) struct Rounds<B: Block, AuthorityId: AuthorityIdBound> {
+ 		VoteMessage<NumberFor<B>, AuthorityId, <AuthorityId as RuntimeAppPublic>::Signature>,
+ 	>,
+ 	session_start: NumberFor<B>,
+-	validator_set: ValidatorSet<AuthorityId>,
+-	voting_weights: BTreeMap<AuthorityId, VoteWeight>,
++	validator_set: WeightedValidatorSet<AuthorityId>,
+ 	mandatory_done: bool,
+ 	best_done: Option<NumberFor<B>>,
+ }
+@@ -120,29 +157,22 @@ where
+ 		session_start: NumberFor<B>,
+ 		validator_set: ValidatorSet<AuthorityId>,
+ 	) -> Self {
+-		let voting_weights =
+-			validator_set.validators().iter().fold(BTreeMap::new(), |mut acc, authority| {
+-				*acc.entry(authority.to_owned()).or_insert(0) += 1;
+-				acc
+-			});
+-
+ 		Rounds {
+ 			rounds: BTreeMap::new(),
+ 			previous_votes: BTreeMap::new(),
+ 			session_start,
+-			voting_weights,
+-			validator_set,
++			validator_set: WeightedValidatorSet::new(validator_set),
+ 			mandatory_done: false,
+ 			best_done: None,
+ 		}
+ 	}
+ 
+ 	pub(crate) fn validator_set(&self) -> &ValidatorSet<AuthorityId> {
+-		&self.validator_set
++		self.validator_set.validator_set()
+ 	}
+ 
+ 	pub(crate) fn validator_set_id(&self) -> ValidatorSetId {
+-		self.validator_set.id()
++		self.validator_set.validator_set_id()
+ 	}
+ 
+ 	pub(crate) fn validators(&self) -> &[AuthorityId] {
+@@ -184,7 +214,7 @@ where
+ 			return VoteImportResult::Invalid;
+ 		}
+ 
+-		let Some(vote_weight) = self.voting_weights.get(&vote.id).copied() else {
++		let Some(vote_weight) = self.validator_set.voting_weight(&vote.id) else {
+ 			debug!(
+ 				target: LOG_TARGET,
+ 				"🥩 invalid validator.id (missing vote weight), ignoring vote {:?}",

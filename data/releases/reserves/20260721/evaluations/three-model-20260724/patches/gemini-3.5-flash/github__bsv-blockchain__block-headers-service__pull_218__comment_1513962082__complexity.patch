@@ -1,0 +1,61 @@
+--- a/transports/p2p/connmgr/connmanager.go
++++ b/transports/p2p/connmgr/connmanager.go
+@@ -233,6 +233,32 @@
+ 	return cm.failedAttempts[addr]
+ }
+ 
++// registerFailedConnectionTo registers a failed connection attempt to the given
++// address or globally if there is no address. It returns whether the connection
++// request should be dropped (e.g., if banned or global threshold is reached).
++func (cm *ConnManager) registerFailedConnectionTo(c *ConnReq) bool {
++	if c.Addr != nil && c.Addr.String() != "" && cm.cfg.BanAddress != nil {
++		addrStr := c.Addr.String()
++		cm.incAddrConnAttempt(addrStr)
++		if cm.getAddrConnAttempt(addrStr) >= maxFailedAttempts {
++			cm.cfg.BanAddress(addrStr)
++			return true
++		}
++	} else {
++		cm.incGlobalFailedAttempts()
++		if cm.getGlobalFailedAttempts() >= maxFailedAttempts {
++			cm.log.Debug().Msgf("Max failed connection attempts reached: [%d] "+
++				"-- retrying connection in: %v", maxFailedAttempts,
++				cm.cfg.RetryDuration)
++			time.AfterFunc(cm.cfg.RetryDuration, func() {
++				cm.NewConnReq()
++			})
++			return true
++		}
++	}
++	return false
++}
++
+ // handleFailedConn handles a connection failed due to a disconnect or any
+ // other failure. If permanent, it retries the connection after the configured
+ // retry duration. Otherwise, if required, it makes a new connection request.
+@@ -253,23 +279,8 @@
+ 			cm.Connect(c)
+ 		})
+ 	} else if cm.cfg.GetNewAddress != nil {
+-		if c.Addr != nil && c.Addr.String() != "" && cm.cfg.BanAddress != nil {
+-			cm.incAddrConnAttempt(c.Addr.String())
+-			if cm.getAddrConnAttempt(c.Addr.String()) >= maxFailedAttempts {
+-				cm.cfg.BanAddress(c.Addr.String())
+-				return
+-			}
+-		} else {
+-			cm.incGlobalFailedAttempts()
+-			if cm.getGlobalFailedAttempts() >= maxFailedAttempts {
+-				cm.log.Debug().Msgf("Max failed connection attempts reached: [%d] "+
+-					"-- retrying connection in: %v", maxFailedAttempts,
+-					cm.cfg.RetryDuration)
+-				time.AfterFunc(cm.cfg.RetryDuration, func() {
+-					cm.NewConnReq()
+-				})
+-				return
+-			}
++		if cm.registerFailedConnectionTo(c) {
++			return
+ 		}
+ 		go cm.NewConnReq()
+ 	}

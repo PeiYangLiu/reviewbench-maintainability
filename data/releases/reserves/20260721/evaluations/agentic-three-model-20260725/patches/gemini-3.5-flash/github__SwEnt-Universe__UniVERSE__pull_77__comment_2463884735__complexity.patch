@@ -1,0 +1,245 @@
+diff --git a/app/src/main/java/com/android/universe/ui/profileCreation/AddProfileViewModel.kt b/app/src/main/java/com/android/universe/ui/profileCreation/AddProfileViewModel.kt
+index 286eed6..7122d37 100644
+--- a/app/src/main/java/com/android/universe/ui/profileCreation/AddProfileViewModel.kt
++++ b/app/src/main/java/com/android/universe/ui/profileCreation/AddProfileViewModel.kt
+@@ -6,6 +6,11 @@ import com.android.universe.model.CountryData.countryToIsoCode
+ import com.android.universe.model.user.UserProfile
+ import com.android.universe.model.user.UserRepository
+ import com.android.universe.model.user.UserRepositoryProvider
++import com.android.universe.ui.common.sanitize
++import com.android.universe.ui.common.validateDateTriple
++import com.android.universe.ui.common.validateDescription
++import com.android.universe.ui.common.validateName
++import com.android.universe.ui.common.validateNonEmpty
+ import java.time.DateTimeException
+ import java.time.LocalDate
+ import java.time.Period
+@@ -115,16 +120,11 @@ class AddProfileViewModel(
+   /** Publicly exposed state of the Add Profile UI. */
+   val uiState: StateFlow<AddProfileUIState> = _uiState.asStateFlow()
+ 
+-  private val nameRegex = "^[\\p{L}\\p{M}' -]*$".toRegex()
+-
+   private val usernameRegex = "^[A-Za-z0-9._-]+$".toRegex()
+ 
+   private val oldestYear = 1900
+ 
+   private val currentDate = LocalDate.now()
+-
+-  private val minimumUserAge = 13
+-
+   /** Clears the current error message from the UI state. */
+   fun clearErrorMsg() {
+     _uiState.value = _uiState.value.copy(errorMsg = null)
+@@ -183,17 +183,40 @@ class AddProfileViewModel(
+    */
+   private suspend fun validateAllInputs(): Boolean {
+     val state = _uiState.value
+-    return validate(state.firstName, "First name", InputLimits.FIRST_NAME, nameRegex) &&
+-        validate(state.lastName, "Last name", InputLimits.LAST_NAME, nameRegex) &&
+-        validateDescription(state.description) &&
+-        validateDate(state.day, state.month, state.year) &&
+-        validateCountry(state.country) &&
+-        validateUsername(state.username)
++    val firstNameErr = validateName(state.firstName, "First name", InputLimits.FIRST_NAME)
++    if (firstNameErr != null) {
++      setErrorMsg(firstNameErr)
++      return false
++    }
++
++    val lastNameErr = validateName(state.lastName, "Last name", InputLimits.LAST_NAME)
++    if (lastNameErr != null) {
++      setErrorMsg(lastNameErr)
++      return false
++    }
++
++    if (!validateDescription(state.description)) {
++      return false
++    }
++
++    if (!validateDate(state.day, state.month, state.year)) {
++      return false
++    }
++
++    if (!validateCountry(state.country)) {
++      return false
++    }
++
++    if (!validateUsername(state.username)) {
++      return false
++    }
++
++    return true
+   }
+ 
+   /**
+    * Generic validation function for text fields.
+-   *
++   * 
+    * @return `true` if valid, `false` otherwise, setting an error message on failure.
+    */
+   private fun validate(value: String, fieldName: String, maxLength: Int, regex: Regex): Boolean {
+@@ -216,68 +239,56 @@ class AddProfileViewModel(
+ 
+   /**
+    * Validates the description field.
+-   *
++   * 
+    * @return `true` if valid, `false` otherwise, setting an error message on failure.
+    */
+   private fun validateDescription(description: String?): Boolean {
+-    if (description != null && description.length > InputLimits.DESCRIPTION) {
+-      setErrorMsg("Description is too long")
+-      return false
++    if (description != null) {
++      val error = com.android.universe.ui.common.validateDescription(description, InputLimits.DESCRIPTION)
++      if (error != null) {
++        setErrorMsg(error)
++        return false
++      }
+     }
+     return true
+   }
+ 
+   /**
+    * Validates the date fields and the user's age.
+-   *
++   * 
+    * @return `true` if valid, `false` otherwise, setting an error message on failure.
+    */
+   private fun validateDate(dayStr: String, monthStr: String, yearStr: String): Boolean {
+-    val day = dayStr.toIntOrNull()
+-    val month = monthStr.toIntOrNull()
+-    val year = yearStr.toIntOrNull()
+-
+-    if (day == null || month == null || year == null) {
+-      setErrorMsg("Date fields must be numbers")
++    val (dayErr, monthErr, yearErr) = com.android.universe.ui.common.validateDateTriple(dayStr, monthStr, yearStr)
++    val error = dayErr ?: monthErr ?: yearErr
++    if (error != null) {
++      setErrorMsg(error)
+       return false
+     }
+-
+-    return try {
+-      val dateOfBirth = LocalDate.of(year, month, day)
+-      if (!userOldEnough(dateOfBirth)) {
+-        setErrorMsg("You must be at least 13 years old")
+-        false
+-      } else {
+-        true
+-      }
+-    } catch (_: DateTimeException) {
+-      setErrorMsg("Invalid date")
+-      false
+-    }
++    return true
+   }
+ 
+   /**
+    * Validates the country field.
+-   *
++   * 
+    * @return `true` if valid, `false` otherwise, setting an error message on failure.
+    */
+   private fun validateCountry(country: String): Boolean {
+-    return when {
+-      country.isBlank() -> {
+-        setErrorMsg("Country cannot be empty")
+-        false
+-      }
+-      countryToIsoCode[country] == null -> {
+-        setErrorMsg("Invalid country")
+-        false
+-      }
+-      else -> true
++    val error = com.android.universe.ui.common.validateNonEmpty("Country", country)
++    if (error != null) {
++      setErrorMsg(error)
++      return false
+     }
++    if (countryToIsoCode[country] == null) {
++      setErrorMsg("Invalid country")
++      return false
++    }
++    return true
+   }
+ 
+   /**
+    * Validates the username for format, length, and uniqueness.
+-   *
++   * 
+    * @return `true` if valid, `false` otherwise, setting an error message on failure.
+    */
+   private suspend fun validateUsername(username: String): Boolean {
+@@ -293,16 +304,6 @@ class AddProfileViewModel(
+     return true
+   }
+ 
+-  /**
+-   * Tests if a user is old enough to use the app.
+-   *
+-   * @param dateOfBirth The user's date of birth.
+-   */
+-  private fun userOldEnough(dateOfBirth: LocalDate): Boolean {
+-    // Number of whole years between dob and today
+-    return Period.between(dateOfBirth, currentDate).years.coerceAtLeast(0) >= minimumUserAge
+-  }
+-
+   /**
+    * Updates the username field and its associated error state if any. Also truncates the input to
+    * more than the specified limit to allow an error popup to be displayed
+@@ -348,11 +349,7 @@ class AddProfileViewModel(
+    */
+   fun setDescription(description: String) {
+     val cleaned = trimAndCleanInput(description, InputLimits.DESCRIPTION + 1)
+-    val error =
+-        when {
+-          cleaned.length > InputLimits.DESCRIPTION -> "Description is too long"
+-          else -> null
+-        }
++    val error = com.android.universe.ui.common.validateDescription(cleaned, InputLimits.DESCRIPTION)
+     _uiState.value = _uiState.value.copy(description = cleaned, descriptionError = error)
+   }
+ 
+@@ -424,37 +421,16 @@ class AddProfileViewModel(
+     val trimmed = singleSpaced.take(limit)
+     return trimmed
+   }
+-
+-  /**
+-   * Sanitizes a name string by:
+-   * - Replacing multiple spaces with a single one
+-   * - Trimming leading and trailing spaces Note this function should not be used in live user input
+-   *   handling as trimming user input prevents users from entering spaces.
+-   *
+-   * @param input The string to sanitize.
+-   * @return The sanitized string.
+-   */
+-  private fun sanitize(input: String): String {
+-    val singleSpaced = input.replace(Regex("\\s+"), " ")
+-    val trimmed = singleSpaced.trim()
+-    return trimmed
+-  }
+-
+   /**
+    * Validates a name for the UI by returning the possible error message.
+-   *
++   * 
+    * @param name The name to validate.
+    * @param label The label for the name.
+    * @param limit The maximum length of the name.
+    * @return The error message if the name is invalid, null otherwise.
+    */
+   private fun validateName(name: String, label: String, limit: Int): String? {
+-    return when {
+-      name.isBlank() -> "$label cannot be empty"
+-      name.length > limit -> "$label is too long"
+-      !nameRegex.matches(name) ->
+-          "Invalid name format, allowed characters are letters, apostrophes, hyphens, and spaces"
+-      else -> null
+-    }
++    return com.android.universe.ui.common.validateName(label, name, limit)
++  }
+   }
+ }

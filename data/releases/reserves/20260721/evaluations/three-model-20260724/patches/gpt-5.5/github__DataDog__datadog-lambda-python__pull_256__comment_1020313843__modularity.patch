@@ -1,0 +1,86 @@
+--- a/datadog_lambda/tracing.py
++++ b/datadog_lambda/tracing.py
+@@ -375,6 +375,29 @@
+         return None
+ 
+ 
++def _extract_context_from_event_or_context(
++    event,
++    lambda_context,
++    event_source,
++    extractor=None,
++    decode_authorizer_context: bool = True,
++):
++    if extractor is not None:
++        return extract_context_custom_extractor(extractor, event, lambda_context)
++    elif isinstance(event, (set, dict)) and "headers" in event:
++        return extract_context_from_http_event_or_context(
++            event, lambda_context, event_source, decode_authorizer_context
++        )
++    elif event_source.equals(EventTypes.SNS) or event_source.equals(EventTypes.SQS):
++        return extract_context_from_sqs_or_sns_event_or_context(event, lambda_context)
++    elif event_source.equals(EventTypes.EVENTBRIDGE):
++        return extract_context_from_eventbridge_event(event, lambda_context)
++    elif event_source.equals(EventTypes.KINESIS):
++        return extract_context_from_kinesis_event(event, lambda_context)
++    else:
++        return extract_context_from_lambda_context(lambda_context)
++
++
+ def extract_dd_trace_context(
+     event, lambda_context, extractor=None, decode_authorizer_context: bool = True
+ ):
+@@ -388,42 +411,17 @@
+     trace_context_source = None
+     event_source = parse_event_source(event)
+ 
+-    if extractor is not None:
+-        (
+-            trace_id,
+-            parent_id,
+-            sampling_priority,
+-        ) = extract_context_custom_extractor(extractor, event, lambda_context)
+-    elif isinstance(event, (set, dict)) and "headers" in event:
+-        (
+-            trace_id,
+-            parent_id,
+-            sampling_priority,
+-        ) = extract_context_from_http_event_or_context(
+-            event, lambda_context, event_source, decode_authorizer_context
+-        )
+-    elif event_source.equals(EventTypes.SNS) or event_source.equals(EventTypes.SQS):
+-        (
+-            trace_id,
+-            parent_id,
+-            sampling_priority,
+-        ) = extract_context_from_sqs_or_sns_event_or_context(event, lambda_context)
+-    elif event_source.equals(EventTypes.EVENTBRIDGE):
+-        (
+-            trace_id,
+-            parent_id,
+-            sampling_priority,
+-        ) = extract_context_from_eventbridge_event(event, lambda_context)
+-    elif event_source.equals(EventTypes.KINESIS):
+-        (
+-            trace_id,
+-            parent_id,
+-            sampling_priority,
+-        ) = extract_context_from_kinesis_event(event, lambda_context)
+-    else:
+-        trace_id, parent_id, sampling_priority = extract_context_from_lambda_context(
+-            lambda_context
+-        )
++    (
++        trace_id,
++        parent_id,
++        sampling_priority,
++    ) = _extract_context_from_event_or_context(
++        event,
++        lambda_context,
++        event_source,
++        extractor,
++        decode_authorizer_context,
++    )
+ 
+     if trace_id and parent_id and sampling_priority:
+         logger.debug("Extracted Datadog trace context from event or context")

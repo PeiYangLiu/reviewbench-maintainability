@@ -1,0 +1,96 @@
+--- a/datadog_lambda/tracing.py
++++ b/datadog_lambda/tracing.py
+@@ -225,6 +225,46 @@
+     }
+ 
+ 
++def _get_first_record_from_sns_or_sqs(event):
++    first_record = event.get("Records")[0]
++
++    # logic to deal with SNS => SQS event
++    if "body" in first_record:
++        body_str = first_record.get("body", {})
++        try:
++            body = json.loads(body_str)
++            if body.get("Type", "") == "Notification" and "TopicArn" in body:
++                logger.debug("Found SNS message inside SQS event")
++                return get_first_record(create_sns_event(body))
++        except Exception:
++            pass
++    return first_record
++
++
++def _get_dd_json_data_from_message_attributes(msg_attributes):
++    dd_payload = msg_attributes.get("_datadog", {})
++    # SQS uses dataType and binaryValue/stringValue
++    # SNS uses Type and Value
++    dd_json_data_type = dd_payload.get("Type", dd_payload.get("dataType", ""))
++    if dd_json_data_type == "Binary":
++        dd_json_data = dd_payload.get(
++            "binaryValue",
++            dd_payload.get("Value", r"{}"),
++        )
++        return base64.b64decode(dd_json_data)
++    elif dd_json_data_type == "String":
++        return dd_payload.get(
++            "stringValue",
++            dd_payload.get("Value", r"{}"),
++        )
++    else:
++        logger.debug(
++            "Datadog Lambda Python only supports extracting trace"
++            "context from String or Binary SQS/SNS message attributes"
++        )
++        raise ValueError("Unsupported SQS/SNS message attribute type")
++
++
+ def extract_context_from_sqs_or_sns_event_or_context(event, lambda_context):
+     """
+     Extract Datadog trace context from the first SQS message attributes.
+@@ -232,44 +272,12 @@
+     Falls back to lambda context if no trace data is found in the SQS message attributes.
+     """
+     try:
+-        first_record = event.get("Records")[0]
+-
+-        # logic to deal with SNS => SQS event
+-        if "body" in first_record:
+-            body_str = first_record.get("body", {})
+-            try:
+-                body = json.loads(body_str)
+-                if body.get("Type", "") == "Notification" and "TopicArn" in body:
+-                    logger.debug("Found SNS message inside SQS event")
+-                    first_record = get_first_record(create_sns_event(body))
+-            except Exception:
+-                first_record = event.get("Records")[0]
+-                pass
+-
++        first_record = _get_first_record_from_sns_or_sqs(event)
+         msg_attributes = first_record.get(
+             "messageAttributes",
+             first_record.get("Sns", {}).get("MessageAttributes", {}),
+         )
+-        dd_payload = msg_attributes.get("_datadog", {})
+-        # SQS uses dataType and binaryValue/stringValue
+-        # SNS uses Type and Value
+-        dd_json_data_type = dd_payload.get("Type", dd_payload.get("dataType", ""))
+-        if dd_json_data_type == "Binary":
+-            dd_json_data = dd_payload.get(
+-                "binaryValue",
+-                dd_payload.get("Value", r"{}"),
+-            )
+-            dd_json_data = base64.b64decode(dd_json_data)
+-        elif dd_json_data_type == "String":
+-            dd_json_data = dd_payload.get(
+-                "stringValue",
+-                dd_payload.get("Value", r"{}"),
+-            )
+-        else:
+-            logger.debug(
+-                "Datadog Lambda Python only supports extracting trace"
+-                "context from String or Binary SQS/SNS message attributes"
+-            )
++        dd_json_data = _get_dd_json_data_from_message_attributes(msg_attributes)
+         dd_data = json.loads(dd_json_data)
+         trace_id = dd_data.get(TraceHeader.TRACE_ID)
+         parent_id = dd_data.get(TraceHeader.PARENT_ID)

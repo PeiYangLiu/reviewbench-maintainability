@@ -1,0 +1,80 @@
+--- a/testbench/common.py
++++ b/testbench/common.py
+@@ -696,6 +696,20 @@
+     return limited_response_fn
+ 
+ 
++def get_socket_from_request(request):
++    """Return the underlying socket (or waitress channel) for a request.
++
++    The way to reach the socket depends on the WSGI server in use, which in
++    turn depends on the platform: `waitress` on Windows and `gunicorn`
++    elsewhere. This helper hides that complexity and returns the object that
++    can be used to close the connection, or `None` if it is not available
++    (e.g. in unit tests).
++    """
++    if platform.system().lower() == "windows":
++        return request.environ.get("waitress.channel", None)
++    return request.environ.get("gunicorn.socket", None)
++
++
+ def handle_retry_test_instruction(database, request, method):
+     upload_id = request.args.get("upload_id", None)
+     test_id = request.headers.get("x-retry-test-id", None)
+@@ -725,22 +739,16 @@
+         items = list(retry_connection_matches.groups())
+         if items[0] == "reset-connection":
+             database.dequeue_next_instruction(test_id, method)
+-            fd = None
+-            channel = None
+-            if running_on_windows:
+-                channel = request.environ.get("waitress.channel", None)
+-                if channel is not None:
+-                    channel.socket.setsockopt(
+-                        socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+-                    )
+-                    channel.close()
+-            else:
+-                fd = request.environ.get("gunicorn.socket", None)
+-                if fd is not None:
+-                    fd.setsockopt(
+-                        socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+-                    )
+-                    fd.close()
++            conn_or_channel = get_socket_from_request(request)
++            if conn_or_channel is not None:
++                # On Windows the waitress channel exposes the socket via the
++                # `.socket` attribute, elsewhere gunicorn hands us the socket
++                # directly.
++                sock = getattr(conn_or_channel, "socket", conn_or_channel)
++                sock.setsockopt(
++                    socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
++                )
++                conn_or_channel.close()
+             # This exception is raised to abort the flow control. The connection
+             # has already been closed, causing the client to receive a "connection
+             # reset by peer" (or a similar error). The exception is useful in
+@@ -750,10 +758,7 @@
+                 "Injected 'connection reset by peer' fault", 500
+             )
+         elif items[0] == "broken-stream":
+-            if running_on_windows:
+-                conn_or_channel = request.environ.get("waitress.channel", None)
+-            else:
+-                conn_or_channel = request.environ.get("gunicorn.socket", None)
++            conn_or_channel = get_socket_from_request(request)
+             return __get_streamer_response_fn(
+                 database, method, conn_or_channel, test_id
+             )
+@@ -763,10 +768,7 @@
+     if broken_stream_after_bytes and method == "storage.objects.get":
+         items = list(broken_stream_after_bytes.groups())
+         after_bytes = int(items[0]) * 1024
+-        if running_on_windows:
+-            conn_or_channel = request.environ.get("waitress.channel", None)
+-        else:
+-            conn_or_channel = request.environ.get("gunicorn.socket", None)
++        conn_or_channel = get_socket_from_request(request)
+         return __get_streamer_response_fn(
+             database, method, conn_or_channel, test_id, limit=after_bytes
+         )

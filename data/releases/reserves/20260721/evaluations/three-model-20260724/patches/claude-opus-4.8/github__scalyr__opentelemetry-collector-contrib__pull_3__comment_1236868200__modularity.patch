@@ -1,0 +1,42 @@
+--- a/exporter/datasetexporter/logs_exporter.go
++++ b/exporter/datasetexporter/logs_exporter.go
+@@ -133,6 +133,21 @@
+ 	return dataSetSeverity
+ }
+ 
++// fallbackEventTimestamp returns a timestamp to use when a log record doesn't
++// contain an explicit timestamp. It falls back to the observed timestamp and,
++// if that is also missing, to the current time.
++func fallbackEventTimestamp(observedTs time.Time) string {
++	// ObservedTimestamp should always be set, but in case if it's not, we fall back to
++	// current time
++	// TODO: We should probably also do a rate limited log message here since this
++	// could indicate an issue with the current setup in case most events don't contain
++	// a timestamp.
++	if !observedTs.Equal(time.Unix(0, 0)) {
++		return strconv.FormatInt(observedTs.UnixNano(), 10)
++	}
++	return strconv.FormatInt(now().UnixNano(), 10)
++}
++
+ func buildEventFromLog(
+ 	log plog.LogRecord,
+ 	resource pcommon.Resource,
+@@ -169,16 +184,7 @@
+ 
+ 	// Event needs to always have timestamp set otherwise it will get set to unix epoch start time
+ 	if event.Ts == "" {
+-		// ObservedTimestamp should always be set, but in case if it's not, we fall back to
+-		// current time
+-		// TODO: We should probably also do a rate limited log message here since this
+-		// could indicate an issue with the current setup in case most events don't contain
+-		// a timestamp.
+-		if !observedTs.Equal(time.Unix(0, 0)) {
+-			event.Ts = strconv.FormatInt(observedTs.UnixNano(), 10)
+-		} else {
+-			event.Ts = strconv.FormatInt(now().UnixNano(), 10)
+-		}
++		event.Ts = fallbackEventTimestamp(observedTs)
+ 	}
+ 
+ 	updateWithPrefixedValues(attrs, "attributes.", ".", log.Attributes().AsRaw(), 0)

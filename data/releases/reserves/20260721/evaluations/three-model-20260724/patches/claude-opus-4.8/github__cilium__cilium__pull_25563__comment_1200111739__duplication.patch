@@ -1,0 +1,97 @@
+--- a/pkg/hubble/relay/observer/server.go
++++ b/pkg/hubble/relay/observer/server.go
+@@ -8,7 +8,6 @@
+ 	"fmt"
+ 
+ 	"github.com/sirupsen/logrus"
+-	"golang.org/x/exp/slices"
+ 	"golang.org/x/sync/errgroup"
+ 	"google.golang.org/grpc/codes"
+ 	"google.golang.org/grpc/metadata"
+@@ -18,6 +17,7 @@
+ 	observerpb "github.com/cilium/cilium/api/v1/observer"
+ 	relaypb "github.com/cilium/cilium/api/v1/relay"
+ 	"github.com/cilium/cilium/pkg/hubble/build"
++	"github.com/cilium/cilium/pkg/hubble/observer/namespace"
+ 	poolTypes "github.com/cilium/cilium/pkg/hubble/relay/pool/types"
+ )
+ 
+@@ -244,28 +244,9 @@
+ 	// results over failing on the first error
+ 	g := new(errgroup.Group)
+ 
+-	namespaceCh := make(chan *observerpb.Namespace)
+-	done := make(chan struct{})
+-	// use a map as a set to de-duplicate namespaces returned
+-	namespaceSet := make(map[string]*observerpb.Namespace)
+-
+-	// this go routine aggregates the results by using a map as a set of unique
+-	// namespaces
+-	go func() {
+-		defer close(done)
+-		for {
+-			select {
+-			case <-ctx.Done():
+-				return
+-			case ns, ok := <-namespaceCh:
+-				if !ok {
+-					return
+-				}
+-				key := ns.GetCluster() + "/" + ns.GetNamespace()
+-				namespaceSet[key] = ns
+-			}
+-		}
+-	}()
++	// The namespace manager handles de-duplication, sorting, and is safe for
++	// concurrent use, so we can add namespaces to it directly from each peer.
++	nsManager := namespace.NewNamespaceManager()
+ 
+ 	for _, p := range s.peers.List() {
+ 		if !isAvailable(p.Conn) {
+@@ -289,11 +270,10 @@
+ 			}
+ 
+ 			for _, ns := range nsResp.GetNamespaces() {
+-				select {
+-				case <-ctx.Done():
+-					return ctx.Err()
+-				case namespaceCh <- ns:
++				if err := ctx.Err(); err != nil {
++					return err
+ 				}
++				nsManager.AddNamespace(ns)
+ 			}
+ 			return nil
+ 		})
+@@ -303,30 +283,7 @@
+ 		return nil, err
+ 	}
+ 
+-	// Close namespaceCh as a signal to the aggregator that all producers are
+-	// done, informing it to return
+-	close(namespaceCh)
+-
+-	// Wait for the aggregator Go routine to return
+-	select {
+-	case <-ctx.Done():
+-		return nil, ctx.Err()
+-	case <-done:
+-	}
+-
+-	// Convert our namespaceSet to a list and sort it before returning the results.
+-	namespaces := make([]*observerpb.Namespace, 0, len(namespaceSet))
+-	for _, ns := range namespaceSet {
+-		namespaces = append(namespaces, ns)
+-	}
+-	slices.SortFunc(namespaces, func(a, b *observerpb.Namespace) bool {
+-		if a.Cluster != b.Cluster {
+-			return a.Cluster < b.Cluster
+-		}
+-		return a.Namespace < b.Namespace
+-	})
+-
+-	return &observerpb.GetNamespacesResponse{Namespaces: namespaces}, nil
++	return &observerpb.GetNamespacesResponse{Namespaces: nsManager.GetNamespaces()}, nil
+ }
+ 
+ // ServerStatus implements observerpb.ObserverServer.ServerStatus by aggregating

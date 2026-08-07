@@ -1,0 +1,217 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 154,
+      "path": "instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo/mongo.go",
+      "start_line": 1
+    },
+    "response_chars": 125,
+    "round": 1,
+    "tool_result": {
+      "content": "1: // Copyright The OpenTelemetry Authors\n2: // SPDX-License-Identifier: Apache-2.0\n3: \n4: package otelmongo // import \"go.opentelemetry.io/contrib/instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo\"\n5: \n6: import (\n7: \t\"context\"\n8: \t\"errors\"\n9: \t\"fmt\"\n10: \t\"net\"\n11: \t\"strconv\"\n12: \t\"strings\"\n13: \t\"sync\"\n14: \n15: \t\"go.opentelemetry.io/otel/attribute\"\n16: \t\"go.opentelemetry.io/otel/codes\"\n17: \tsemconv \"go.opentelemetry.io/otel/semconv/v1.26.0\"\n18: \t\"go.opentelemetry.io/otel/trace\"\n19: \n20: \t\"go.mongodb.org/mongo-driver/bson\"\n21: \t\"go.mongodb.org/mongo-driver/event\"\n22: )\n23: \n24: type spanKey struct {\n25: \tConnectionID string\n26: \tRequestID    int64\n27: }\n28: \n29: type monitor struct {\n30: \tsync.Mutex\n31: \tspans map[spanKey]trace.Span\n32: \tcfg   config\n33: }\n34: \n35: func (m *monitor) Started(ctx context.Context, evt *event.CommandStartedEvent) {\n36: \thostname, port := peerInfo(evt)\n37: \n38: \tattrs := []attribute.KeyValue{semconv.DBSystemMongoDB}\n39: \n40: \tattrs = appendOpNameAttrs(attrs, evt.CommandName)\n41: \tattrs = appendDBNamespace(attrs, evt.DatabaseName)\n42: \tattrs = appendNetworkPort(attrs, port)\n43: \tattrs = appendNetworkHost(attrs, hostname)\n44: \tattrs = appendNetworkAddress(attrs, net.JoinHostPort(hostname, strconv.Itoa(port)))\n45: \tattrs = appendNetworkTransport(attrs)\n46: \n47: \tif !m.cfg.CommandAttributeDisabled {\n48: \t\tattrs = appendDBStatement(attrs, sanitizeCommand(evt.Command))\n49: \t}\n50: \n51: \tvar spanName string\n52: \tif collection, err := extractCollection(evt); err == nil && collection != \"\" {\n53: \t\tspanName = collection + \".\"\n54: \n55: \t\tattrs = appendCollection(attrs, collection)\n56: \t}\n57: \n58: \tspanName += evt.CommandName\n59: \topts := []trace.SpanStartOption{\n60: \t\ttrace.WithSpanKind(trace.SpanKindClient),\n61: \t\ttrace.WithAttributes(attrs...),\n62: \t}\n63: \t_, span := m.cfg.Tracer.Start(ctx, spanName, opts...)\n64: \tkey := spanKey{\n65: \t\tConnectionID: evt.ConnectionID,\n66: \t\tRequestID:    evt.RequestID,\n67: \t}\n68: \tm.Lock()\n69: \tm.spans[key] = span\n70: \tm.Unlock()\n71: }\n72: \n73: func (m *monitor) Succeeded(ctx context.Context, evt *event.CommandSucceededEvent) {\n74: \tm.Finished(&evt.CommandFinishedEvent, nil)\n75: }\n76: \n77: func (m *monitor) Failed(ctx context.Context, evt *event.CommandFailedEvent) {\n78: \tm.Finished(&evt.CommandFinishedEvent, fmt.Errorf(\"%s\", evt.Failure))\n79: }\n80: \n81: func (m *monitor) Finished(evt *event.CommandFinishedEvent, err error) {\n82: \tkey := spanKey{\n83: \t\tConnectionID: evt.ConnectionID,\n84: \t\tRequestID:    evt.RequestID,\n85: \t}\n86: \tm.Lock()\n87: \tspan, ok := m.spans[key]\n88: \tif ok {\n89: \t\tdelete(m.spans, key)\n90: \t}\n91: \tm.Unlock()\n92: \tif !ok {\n93: \t\treturn\n94: \t}\n95: \n96: \tif err != nil {\n97: \t\tspan.SetStatus(codes.Error, err.Error())\n98: \t}\n99: \n100: \tspan.End()\n101: }\n102: \n103: // TODO sanitize values where possible, then re-enable `db.statement` span attributes default.\n104: // TODO limit maximum size.\n105: func sanitizeCommand(command bson.Raw) string {\n106: \tb, _ := bson.MarshalExtJSON(command, false, false)\n107: \treturn string(b)\n108: }\n109: \n110: // extractCollection extracts the collection for the given mongodb command event.\n111: // For CRUD operations, this is the first key/value string pair in the bson\n112: // document where key == \"<operation>\" (e.g. key == \"insert\").\n113: // For database meta-level operations, such a key may not exist.\n114: func extractCollection(evt *event.CommandStartedEvent) (string, error) {\n115: \telt, err := evt.Command.IndexErr(0)\n116: \tif err != nil {\n117: \t\treturn \"\", err\n118: \t}\n119: \tif key, err := elt.KeyErr(); err == nil && key == evt.CommandName {\n120: \t\tvar v bson.RawValue\n121: \t\tif v, err = elt.ValueErr(); err != nil || v.Type != bson.TypeString {\n122: \t\t\treturn \"\", err\n123: \t\t}\n124: \t\treturn v.StringValue(), nil\n125: \t}\n126: \treturn \"\", errors.New(\"collection name not found\")\n127: }\n128: \n129: // NewMonitor creates a new mongodb event CommandMonitor.\n130: func NewMonitor(opts ...Option) *event.CommandMonitor {\n131: \tcfg := newConfig(opts...)\n132: \tm := &monitor{\n133: \t\tspans: make(map[spanKey]trace.Span),\n134: \t\tcfg:   cfg,\n135: \t}\n136: \treturn &event.CommandMonitor{\n137: \t\tStarted:   m.Started,\n138: \t\tSucceeded: m.Succeeded,\n139: \t\tFailed:    m.Failed,\n140: \t}\n141: }\n142: \n143: func peerInfo(evt *event.CommandStartedEvent) (hostname string, port int) {\n144: \thostname = evt.ConnectionID\n145: \tport = 27017\n146: \tif idx := strings.IndexByte(hostname, '['); idx >= 0 {\n147: \t\thostname = hostname[:idx]\n148: \t}\n149: \tif idx := strings.IndexByte(hostname, ':'); idx >= 0 {\n150: \t\tport = func(p int, e error) int { return p }(strconv.Atoi(hostname[idx+1:]))\n151: \t\thostname = hostname[:idx]\n152: \t}\n153: \treturn hostname, port\n154: }",
+      "end_line": 154,
+      "path_lines": 154,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 1911,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 115,
+      "output_tokens_details": {
+        "reasoning_tokens": 75
+      },
+      "total_tokens": 2026
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo/mongo.go",
+      "query": "appendOpNameAttrs"
+    },
+    "response_chars": 371,
+    "round": 2,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 40,
+          "text": "\tattrs = appendOpNameAttrs(attrs, evt.CommandName)"
+        }
+      ],
+      "query": "appendOpNameAttrs",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 3706,
+      "input_tokens_details": {
+        "cached_tokens": 1792
+      },
+      "output_tokens": 489,
+      "output_tokens_details": {
+        "reasoning_tokens": 374
+      },
+      "total_tokens": 4195
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 200,
+      "path": "instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo/semconv.go",
+      "start_line": 1
+    },
+    "response_chars": 383,
+    "round": 3,
+    "tool_result": {
+      "content": "1: // Copyright The OpenTelemetry Authors\n2: // SPDX-License-Identifier: Apache-2.0\n3: \n4: package otelmongo // import \"go.opentelemetry.io/contrib/instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo\"\n5: \n6: import (\n7: \t\"os\"\n8: \n9: \t\"go.opentelemetry.io/otel/attribute\"\n10: \tsemconv1210 \"go.opentelemetry.io/otel/semconv/v1.21.0\"\n11: \tsemconv1260 \"go.opentelemetry.io/otel/semconv/v1.26.0\"\n12: )\n13: \n14: const (\n15: \tsemconvOptIn     = \"OTEL_SEMCONV_STABILITY_OPT_IN\"\n16: \tsemconvOptIn1260 = \"mongo\"\n17: \tsemconvOptInDup  = \"mongo/dup\"\n18: )\n19: \n20: func appendAttrs[T string | int](\n21: \tattrs []attribute.KeyValue,\n22: \tsemconvMap1210 func(T) attribute.KeyValue,\n23: \tsemconvMap1260 func(T) attribute.KeyValue,\n24: \tval T,\n25: ) []attribute.KeyValue {\n26: \tswitch os.Getenv(semconvOptIn) {\n27: \tcase semconvOptIn1260:\n28: \t\tif semconvMap1260 != nil {\n29: \t\t\tattrs = append(attrs, semconvMap1260(val))\n30: \t\t}\n31: \tcase semconvOptInDup:\n32: \t\tif semconvMap1210 != nil {\n33: \t\t\tattrs = append(attrs, semconvMap1210(val))\n34: \t\t}\n35: \n36: \t\tif semconvMap1260 != nil {\n37: \t\t\tattrs = append(attrs, semconvMap1260(val))\n38: \t\t}\n39: \tdefault:\n40: \t\tif semconvMap1210 != nil {\n41: \t\t\tattrs = append(attrs, semconvMap1210(val))\n42: \t\t}\n43: \t}\n44: \n45: \treturn attrs\n46: }\n47: \n48: func appendOpNameAttrs(attrs []attribute.KeyValue, op string) []attribute.KeyValue {\n49: \treturn appendAttrs(attrs, semconv1210.DBOperation, semconv1260.DBOperationName, op)\n50: }\n51: \n52: func appendDBNamespace(attrs []attribute.KeyValue, ns string) []attribute.KeyValue {\n53: \treturn appendAttrs(attrs, semconv1210.DBName, semconv1260.DBNamespace, ns)\n54: }\n55: \n56: func appendDBStatement(attrs []attribute.KeyValue, stmt string) []attribute.KeyValue {\n57: \treturn appendAttrs(attrs, semconv1210.DBStatement, semconv1260.DBQueryText, stmt)\n58: }\n59: \n60: func appendNetworkPort(attrs []attribute.KeyValue, p int) []attribute.KeyValue {\n61: \treturn appendAttrs(attrs, semconv1210.NetPeerPort, semconv1260.NetworkPeerPort, p)\n62: }\n63: \n64: func appendNetworkHost(attrs []attribute.KeyValue, h string) []attribute.KeyValue {\n65: \treturn appendAttrs(attrs, semconv1210.NetPeerName, nil, h)\n66: }\n67: \n68: func appendNetworkAddress(attrs []attribute.KeyValue, addr string) []attribute.KeyValue {\n69: \treturn appendAttrs(attrs, nil, semconv1260.NetworkPeerAddress, addr)\n70: }\n71: \n72: func appendNetworkTransport(attrs []attribute.KeyValue) []attribute.KeyValue {\n73: \tswitch os.Getenv(semconvOptIn) {\n74: \tcase semconvOptIn1260:\n75: \t\tattrs = append(attrs, semconv1260.NetworkTransportTCP)\n76: \tcase semconvOptInDup:\n77: \t\tattrs = append(attrs, semconv1260.NetworkTransportTCP)\n78: \t\tfallthrough\n79: \tdefault:\n80: \t\tattrs = append(attrs, semconv1210.NetTransportTCP)\n81: \t}\n82: \n83: \treturn attrs\n84: }\n85: \n86: func appendCollection(attrs []attribute.KeyValue, coll string) []attribute.KeyValue {\n87: \treturn appendAttrs(attrs, semconv1210.DBMongoDBCollection, semconv1260.DBCollectionName, coll)\n88: }",
+      "end_line": 88,
+      "path_lines": 88,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 3793,
+      "input_tokens_details": {
+        "cached_tokens": 3328
+      },
+      "output_tokens": 330,
+      "output_tokens_details": {
+        "reasoning_tokens": 205
+      },
+      "total_tokens": 4123
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\thostname, port := peerInfo(evt)\n\n\tvar collection string\n\tif coll, err := extractCollection(evt); err == nil && coll != \"\" {\n\t\tcollection = coll\n\t}\n\n\tattrs := commandAttributes(evt, hostname, port, collection, !m.cfg.CommandAttributeDisabled)\n\n\tvar spanName string\n\tif collection != \"\" {\n\t\tspanName = collection + \".\"\n\t}",
+          "end_line": 56,
+          "start_line": 36
+        }
+      ]
+    },
+    "response_chars": 1482,
+    "round": 4,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 56,
+          "replacement_lines": 13,
+          "start_line": 36
+        }
+      ],
+      "current_file_lines": 146,
+      "updated_excerpt": {
+        "content": "26: \tRequestID    int64\n27: }\n28: \n29: type monitor struct {\n30: \tsync.Mutex\n31: \tspans map[spanKey]trace.Span\n32: \tcfg   config\n33: }\n34: \n35: func (m *monitor) Started(ctx context.Context, evt *event.CommandStartedEvent) {\n36: \thostname, port := peerInfo(evt)\n37: \n38: \tvar collection string\n39: \tif coll, err := extractCollection(evt); err == nil && coll != \"\" {\n40: \t\tcollection = coll\n41: \t}\n42: \n43: \tattrs := commandAttributes(evt, hostname, port, collection, !m.cfg.CommandAttributeDisabled)\n44: \n45: \tvar spanName string\n46: \tif collection != \"\" {\n47: \t\tspanName = collection + \".\"\n48: \t}\n49: \n50: \tspanName += evt.CommandName\n51: \topts := []trace.SpanStartOption{\n52: \t\ttrace.WithSpanKind(trace.SpanKindClient),\n53: \t\ttrace.WithAttributes(attrs...),\n54: \t}\n55: \t_, span := m.cfg.Tracer.Start(ctx, spanName, opts...)\n56: \tkey := spanKey{\n57: \t\tConnectionID: evt.ConnectionID,\n58: \t\tRequestID:    evt.RequestID,\n59: \t}\n60: \tm.Lock()\n61: \tm.spans[key] = span\n62: \tm.Unlock()\n63: }\n64: \n65: func (m *monitor) Succeeded(ctx context.Context, evt *event.CommandSucceededEvent) {\n66: \tm.Finished(&evt.CommandFinishedEvent, nil)",
+        "end_line": 66,
+        "path_lines": 146,
+        "start_line": 26
+      }
+    },
+    "usage": {
+      "input_tokens": 4953,
+      "input_tokens_details": {
+        "cached_tokens": 3328
+      },
+      "output_tokens": 1036,
+      "output_tokens_details": {
+        "reasoning_tokens": 616
+      },
+      "total_tokens": 5989
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 180,
+      "path": "instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo/mongo.go",
+      "start_line": 1
+    },
+    "response_chars": 1737,
+    "round": 5,
+    "tool_result": {
+      "content": "1: // Copyright The OpenTelemetry Authors\n2: // SPDX-License-Identifier: Apache-2.0\n3: \n4: package otelmongo // import \"go.opentelemetry.io/contrib/instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo\"\n5: \n6: import (\n7: \t\"context\"\n8: \t\"errors\"\n9: \t\"fmt\"\n10: \t\"net\"\n11: \t\"strconv\"\n12: \t\"strings\"\n13: \t\"sync\"\n14: \n15: \t\"go.opentelemetry.io/otel/attribute\"\n16: \t\"go.opentelemetry.io/otel/codes\"\n17: \tsemconv \"go.opentelemetry.io/otel/semconv/v1.26.0\"\n18: \t\"go.opentelemetry.io/otel/trace\"\n19: \n20: \t\"go.mongodb.org/mongo-driver/bson\"\n21: \t\"go.mongodb.org/mongo-driver/event\"\n22: )\n23: \n24: type spanKey struct {\n25: \tConnectionID string\n26: \tRequestID    int64\n27: }\n28: \n29: type monitor struct {\n30: \tsync.Mutex\n31: \tspans map[spanKey]trace.Span\n32: \tcfg   config\n33: }\n34: \n35: func (m *monitor) Started(ctx context.Context, evt *event.CommandStartedEvent) {\n36: \thostname, port := peerInfo(evt)\n37: \n38: \tvar collection string\n39: \tif coll, err := extractCollection(evt); err == nil && coll != \"\" {\n40: \t\tcollection = coll\n41: \t}\n42: \n43: \tattrs := commandAttributes(evt, hostname, port, collection, !m.cfg.CommandAttributeDisabled)\n44: \n45: \tvar spanName string\n46: \tif collection != \"\" {\n47: \t\tspanName = collection + \".\"\n48: \t}\n49: \n50: \tspanName += evt.CommandName\n51: \topts := []trace.SpanStartOption{\n52: \t\ttrace.WithSpanKind(trace.SpanKindClient),\n53: \t\ttrace.WithAttributes(attrs...),\n54: \t}\n55: \t_, span := m.cfg.Tracer.Start(ctx, spanName, opts...)\n56: \tkey := spanKey{\n57: \t\tConnectionID: evt.ConnectionID,\n58: \t\tRequestID:    evt.RequestID,\n59: \t}\n60: \tm.Lock()\n61: \tm.spans[key] = span\n62: \tm.Unlock()\n63: }\n64: \n65: func (m *monitor) Succeeded(ctx context.Context, evt *event.CommandSucceededEvent) {\n66: \tm.Finished(&evt.CommandFinishedEvent, nil)\n67: }\n68: \n69: func (m *monitor) Failed(ctx context.Context, evt *event.CommandFailedEvent) {\n70: \tm.Finished(&evt.CommandFinishedEvent, fmt.Errorf(\"%s\", evt.Failure))\n71: }\n72: \n73: func (m *monitor) Finished(evt *event.CommandFinishedEvent, err error) {\n74: \tkey := spanKey{\n75: \t\tConnectionID: evt.ConnectionID,\n76: \t\tRequestID:    evt.RequestID,\n77: \t}\n78: \tm.Lock()\n79: \tspan, ok := m.spans[key]\n80: \tif ok {\n81: \t\tdelete(m.spans, key)\n82: \t}\n83: \tm.Unlock()\n84: \tif !ok {\n85: \t\treturn\n86: \t}\n87: \n88: \tif err != nil {\n89: \t\tspan.SetStatus(codes.Error, err.Error())\n90: \t}\n91: \n92: \tspan.End()\n93: }\n94: \n95: // TODO sanitize values where possible, then re-enable `db.statement` span attributes default.\n96: // TODO limit maximum size.\n97: func sanitizeCommand(command bson.Raw) string {\n98: \tb, _ := bson.MarshalExtJSON(command, false, false)\n99: \treturn string(b)\n100: }\n101: \n102: // extractCollection extracts the collection for the given mongodb command event.\n103: // For CRUD operations, this is the first key/value string pair in the bson\n104: // document where key == \"<operation>\" (e.g. key == \"insert\").\n105: // For database meta-level operations, such a key may not exist.\n106: func extractCollection(evt *event.CommandStartedEvent) (string, error) {\n107: \telt, err := evt.Command.IndexErr(0)\n108: \tif err != nil {\n109: \t\treturn \"\", err\n110: \t}\n111: \tif key, err := elt.KeyErr(); err == nil && key == evt.CommandName {\n112: \t\tvar v bson.RawValue\n113: \t\tif v, err = elt.ValueErr(); err != nil || v.Type != bson.TypeString {\n114: \t\t\treturn \"\", err\n115: \t\t}\n116: \t\treturn v.StringValue(), nil\n117: \t}\n118: \treturn \"\", errors.New(\"collection name not found\")\n119: }\n120: \n121: // NewMonitor creates a new mongodb event CommandMonitor.\n122: func NewMonitor(opts ...Option) *event.CommandMonitor {\n123: \tcfg := newConfig(opts...)\n124: \tm := &monitor{\n125: \t\tspans: make(map[spanKey]trace.Span),\n126: \t\tcfg:   cfg,\n127: \t}\n128: \treturn &event.CommandMonitor{\n129: \t\tStarted:   m.Started,\n130: \t\tSucceeded: m.Succeeded,\n131: \t\tFailed:    m.Failed,\n132: \t}\n133: }\n134: \n135: func peerInfo(evt *event.CommandStartedEvent) (hostname string, port int) {\n136: \thostname = evt.ConnectionID\n137: \tport = 27017\n138: \tif idx := strings.IndexByte(hostname, '['); idx >= 0 {\n139: \t\thostname = hostname[:idx]\n140: \t}\n141: \tif idx := strings.IndexByte(hostname, ':'); idx >= 0 {\n142: \t\tport = func(p int, e error) int { return p }(strconv.Atoi(hostname[idx+1:]))\n143: \t\thostname = hostname[:idx]\n144: \t}\n145: \treturn hostname, port\n146: }",
+      "end_line": 146,
+      "path_lines": 146,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 5569,
+      "input_tokens_details": {
+        "cached_tokens": 4352
+      },
+      "output_tokens": 1365,
+      "output_tokens_details": {
+        "reasoning_tokens": 901
+      },
+      "total_tokens": 6934
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\nfunc commandAttributes(evt *event.CommandStartedEvent, hostname string, port int, collection string, includeCommand bool) []attribute.KeyValue {\n\tattrs := []attribute.KeyValue{semconv.DBSystemMongoDB}\n\n\tattrs = appendOpNameAttrs(attrs, evt.CommandName)\n\tattrs = appendDBNamespace(attrs, evt.DatabaseName)\n\tattrs = appendNetworkPort(attrs, port)\n\tattrs = appendNetworkHost(attrs, hostname)\n\tattrs = appendNetworkAddress(attrs, net.JoinHostPort(hostname, strconv.Itoa(port)))\n\tattrs = appendNetworkTransport(attrs)\n\n\tif includeCommand {\n\t\tattrs = appendDBStatement(attrs, sanitizeCommand(evt.Command))\n\t}\n\n\tif collection != \"\" {\n\t\tattrs = appendCollection(attrs, collection)\n\t}\n\n\treturn attrs\n}\n",
+          "end_line": 63,
+          "start_line": 64
+        }
+      ]
+    },
+    "response_chars": 1737,
+    "round": 6,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 63,
+          "replacement_lines": 21,
+          "start_line": 64
+        }
+      ],
+      "current_file_lines": 167,
+      "updated_excerpt": {
+        "content": "54: \t}\n55: \t_, span := m.cfg.Tracer.Start(ctx, spanName, opts...)\n56: \tkey := spanKey{\n57: \t\tConnectionID: evt.ConnectionID,\n58: \t\tRequestID:    evt.RequestID,\n59: \t}\n60: \tm.Lock()\n61: \tm.spans[key] = span\n62: \tm.Unlock()\n63: }\n64: \n65: func commandAttributes(evt *event.CommandStartedEvent, hostname string, port int, collection string, includeCommand bool) []attribute.KeyValue {\n66: \tattrs := []attribute.KeyValue{semconv.DBSystemMongoDB}\n67: \n68: \tattrs = appendOpNameAttrs(attrs, evt.CommandName)\n69: \tattrs = appendDBNamespace(attrs, evt.DatabaseName)\n70: \tattrs = appendNetworkPort(attrs, port)\n71: \tattrs = appendNetworkHost(attrs, hostname)\n72: \tattrs = appendNetworkAddress(attrs, net.JoinHostPort(hostname, strconv.Itoa(port)))\n73: \tattrs = appendNetworkTransport(attrs)\n74: \n75: \tif includeCommand {\n76: \t\tattrs = appendDBStatement(attrs, sanitizeCommand(evt.Command))\n77: \t}\n78: \n79: \tif collection != \"\" {\n80: \t\tattrs = appendCollection(attrs, collection)\n81: \t}\n82: \n83: \treturn attrs\n84: }\n85: \n86: func (m *monitor) Succeeded(ctx context.Context, evt *event.CommandSucceededEvent) {\n87: \tm.Finished(&evt.CommandFinishedEvent, nil)\n88: }\n89: \n90: func (m *monitor) Failed(ctx context.Context, evt *event.CommandFailedEvent) {\n91: \tm.Finished(&evt.CommandFinishedEvent, fmt.Errorf(\"%s\", evt.Failure))\n92: }\n93: \n94: func (m *monitor) Finished(evt *event.CommandFinishedEvent, err error) {",
+        "end_line": 94,
+        "path_lines": 167,
+        "start_line": 54
+      }
+    },
+    "usage": {
+      "input_tokens": 7241,
+      "input_tokens_details": {
+        "cached_tokens": 5376
+      },
+      "output_tokens": 976,
+      "output_tokens_details": {
+        "reasoning_tokens": 510
+      },
+      "total_tokens": 8217
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 7,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__open-telemetry__opentelemetry-go-contrib__pull_6172__comment_1851553296__modularity.patch"
+    },
+    "usage": {
+      "input_tokens": 7991,
+      "input_tokens_details": {
+        "cached_tokens": 6912
+      },
+      "output_tokens": 419,
+      "output_tokens_details": {
+        "reasoning_tokens": 408
+      },
+      "total_tokens": 8410
+    }
+  }
+]

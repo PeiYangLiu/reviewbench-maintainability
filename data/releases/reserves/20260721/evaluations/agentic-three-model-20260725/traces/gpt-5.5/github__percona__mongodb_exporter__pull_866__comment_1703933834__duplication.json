@@ -1,0 +1,112 @@
+[
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "func appendPbmMetric(metrics *[]prometheus.Metric, name, help string, value float64, labels map[string]string) {\n\tconst prefix = \"mongodb_pbm_\"\n\td := prometheus.NewDesc(prefix+name, help, nil, labels)\n\t*metrics = append(*metrics, prometheus.MustNewConstMetric(d, prometheus.GaugeValue, value))\n}\n\nfunc (p *pbmCollector) collect(ch chan<- prometheus.Metric) {\n\tdefer measureCollectTime(ch, \"mongodb\", \"pbm\")()\n\n\tvar metrics []prometheus.Metric\n\tlogger := p.base.logger\n\n\tpbmClient, err := sdk.NewClient(p.ctx, p.mongoURI)\n\tif err != nil {\n\t\tlogger.Errorf(\"failed to create PBM client: %s\", err.Error())\n\t\treturn\n\t}\n\n\tpbmConfig, err := pbmClient.GetConfig(p.ctx)\n\tif err != nil {\n\t\tlogger.Errorf(\"failed to get PBM configuration: %s\", err.Error())\n\t\treturn\n\t}\n\n\tif pbmConfig != nil {\n\t\tappendPbmMetric(&metrics, \"cluster_backup_configured\",\n\t\t\t\"PBM backups are configured for the cluster\",\n\t\t\tfloat64(1), nil)\n\n\t\tif pbmConfig.PITR.Enabled {\n\t\t\tappendPbmMetric(&metrics, \"cluster_pitr_backup_enabled\",\n\t\t\t\t\"PBM PITR backups are enabled for the cluster\",\n\t\t\t\tfloat64(1), nil)\n\t\t}\n\t}\n\n\tmetrics = append(metrics, pbmBackupsMetrics(p.ctx, pbmClient, logger)...)\n\tmetrics = append(metrics, p.pbmAgentMetrics(p.ctx, pbmClient, logger)...)\n\n\tfor _, metric := range metrics {\n\t\tch <- metric\n\t}\n}",
+          "end_line": 101,
+          "start_line": 59
+        },
+        {
+          "content": "func (p *pbmCollector) pbmAgentMetrics(ctx context.Context, pbmClient *sdk.Client, l *logrus.Entry) []prometheus.Metric {\n\tclusterStatus, err := cli.ClusterStatus(ctx, pbmClient, cli.RSConfGetter(p.mongoURI))\n\tif err != nil {\n\t\tl.Errorf(\"failed to get cluster status: %s\", err.Error())\n\t\treturn nil\n\t}\n\n\tmetrics := make([]prometheus.Metric, 0, len(clusterStatus))\n\n\tfor replsetName, nodes := range clusterStatus {\n\t\tfor _, node := range nodes {\n\t\t\tswitch {\n\t\t\tcase node.OK:\n\t\t\t\tappendPbmMetric(&metrics, \"agent_status\",\n\t\t\t\t\t\"PBM Agent Status\",\n\t\t\t\t\tfloat64(pbmAgentStatusOK),\n\t\t\t\t\tmap[string]string{\n\t\t\t\t\t\t\"host\":        node.Host,\n\t\t\t\t\t\t\"replica_set\": replsetName,\n\t\t\t\t\t\t\"role\":        string(node.Role),\n\t\t\t\t\t})\n\n\t\t\tcase node.IsAgentLost():\n\t\t\t\tappendPbmMetric(&metrics, \"agent_status\",\n\t\t\t\t\t\"PBM Agent Status\",\n\t\t\t\t\tfloat64(pbmAgentStatusLost),\n\t\t\t\t\tmap[string]string{\n\t\t\t\t\t\t\"host\":        node.Host,\n\t\t\t\t\t\t\"replica_set\": replsetName,\n\t\t\t\t\t\t\"role\":        string(node.Role),\n\t\t\t\t\t})\n\n\t\t\tdefault: // !node.OK\n\t\t\t\tappendPbmMetric(&metrics, \"agent_status\",\n\t\t\t\t\t\"PBM Agent Status\",\n\t\t\t\t\tfloat64(pbmAgentStatusError),\n\t\t\t\t\tmap[string]string{\n\t\t\t\t\t\t\"host\":        node.Host,\n\t\t\t\t\t\t\"replica_set\": replsetName,\n\t\t\t\t\t\t\"role\":        string(node.Role),\n\t\t\t\t\t})\n\t\t\t}\n\t\t}\n\t}\n\n\treturn metrics\n}",
+          "end_line": 154,
+          "start_line": 103
+        },
+        {
+          "content": "func pbmBackupsMetrics(ctx context.Context, pbmClient *sdk.Client, l *logrus.Entry) []prometheus.Metric {\n\tbackupsList, err := pbmClient.GetAllBackups(ctx)\n\tif err != nil {\n\t\tl.Errorf(\"failed to get PBM backup list: %s\", err.Error())\n\t\treturn nil\n\t}\n\n\tmetrics := make([]prometheus.Metric, 0, len(backupsList))\n\n\tfor _, backup := range backupsList {\n\t\tappendPbmMetric(&metrics, \"backup_size\",\n\t\t\t\"Size of PBM backup\",\n\t\t\tfloat64(backup.Size), map[string]string{\n\t\t\t\t\"opid\":   backup.OPID,\n\t\t\t\t\"status\": string(backup.Status),\n\t\t\t\t\"name\":   backup.Name,\n\t\t\t})\n\n\t\tvar endTime int64\n\t\tswitch backup.Status { //nolint:exhaustive\n\t\tcase defs.StatusDone, defs.StatusCancelled, defs.StatusError, defs.StatusDown:\n\t\t\tendTime = backup.LastTransitionTS\n\t\tdefault:\n\t\t\tendTime = time.Now().Unix()\n\t\t}\n\n\t\tduration := time.Unix(endTime-backup.StartTS, 0).Unix()\n\t\tappendPbmMetric(&metrics, \"backup_duration_seconds\",\n\t\t\t\"Duration of PBM backup\",\n\t\t\tfloat64(duration), map[string]string{\n\t\t\t\t\"opid\":   backup.OPID,\n\t\t\t\t\"status\": string(backup.Status),\n\t\t\t\t\"name\":   backup.Name,\n\t\t\t})\n\t}\n\treturn metrics\n}",
+          "end_line": 197,
+          "start_line": 156
+        }
+      ]
+    },
+    "response_chars": 8693,
+    "round": 1,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 101,
+          "replacement_lines": 43,
+          "start_line": 59
+        },
+        {
+          "end_line": 154,
+          "replacement_lines": 47,
+          "start_line": 103
+        },
+        {
+          "end_line": 197,
+          "replacement_lines": 37,
+          "start_line": 156
+        }
+      ],
+      "current_file_lines": 189,
+      "updated_excerpt": {
+        "content": "49: }\n50: \n51: func (p *pbmCollector) Describe(ch chan<- *prometheus.Desc) {\n52: \tp.base.Describe(p.ctx, ch, p.collect)\n53: }\n54: \n55: func (p *pbmCollector) Collect(ch chan<- prometheus.Metric) {\n56: \tp.base.Collect(ch)\n57: }\n58: \n59: func appendPbmMetric(metrics *[]prometheus.Metric, name, help string, value float64, labels map[string]string) {\n60: \tconst prefix = \"mongodb_pbm_\"\n61: \td := prometheus.NewDesc(prefix+name, help, nil, labels)\n62: \t*metrics = append(*metrics, prometheus.MustNewConstMetric(d, prometheus.GaugeValue, value))\n63: }\n64: \n65: func (p *pbmCollector) collect(ch chan<- prometheus.Metric) {\n66: \tdefer measureCollectTime(ch, \"mongodb\", \"pbm\")()\n67: \n68: \tvar metrics []prometheus.Metric\n69: \tlogger := p.base.logger\n70: \n71: \tpbmClient, err := sdk.NewClient(p.ctx, p.mongoURI)\n72: \tif err != nil {\n73: \t\tlogger.Errorf(\"failed to create PBM client: %s\", err.Error())\n74: \t\treturn\n75: \t}\n76: \n77: \tpbmConfig, err := pbmClient.GetConfig(p.ctx)\n78: \tif err != nil {\n79: \t\tlogger.Errorf(\"failed to get PBM configuration: %s\", err.Error())\n80: \t\treturn\n81: \t}\n82: \n83: \tif pbmConfig != nil {\n84: \t\tappendPbmMetric(&metrics, \"cluster_backup_configured\",\n85: \t\t\t\"PBM backups are configured for the cluster\",\n86: \t\t\tfloat64(1), nil)\n87: \n88: \t\tif pbmConfig.PITR.Enabled {\n89: \t\t\tappendPbmMetric(&metrics, \"cluster_pitr_backup_enabled\",",
+        "end_line": 89,
+        "path_lines": 189,
+        "start_line": 49
+      }
+    },
+    "usage": {
+      "input_tokens": 2387,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 3855,
+      "output_tokens_details": {
+        "reasoning_tokens": 1046
+      },
+      "total_tokens": 6242
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 189,
+      "path": "exporter/pbm_collector.go",
+      "start_line": 49
+    },
+    "response_chars": 103,
+    "round": 2,
+    "tool_result": {
+      "content": "49: }\n50: \n51: func (p *pbmCollector) Describe(ch chan<- *prometheus.Desc) {\n52: \tp.base.Describe(p.ctx, ch, p.collect)\n53: }\n54: \n55: func (p *pbmCollector) Collect(ch chan<- prometheus.Metric) {\n56: \tp.base.Collect(ch)\n57: }\n58: \n59: func appendPbmMetric(metrics *[]prometheus.Metric, name, help string, value float64, labels map[string]string) {\n60: \tconst prefix = \"mongodb_pbm_\"\n61: \td := prometheus.NewDesc(prefix+name, help, nil, labels)\n62: \t*metrics = append(*metrics, prometheus.MustNewConstMetric(d, prometheus.GaugeValue, value))\n63: }\n64: \n65: func (p *pbmCollector) collect(ch chan<- prometheus.Metric) {\n66: \tdefer measureCollectTime(ch, \"mongodb\", \"pbm\")()\n67: \n68: \tvar metrics []prometheus.Metric\n69: \tlogger := p.base.logger\n70: \n71: \tpbmClient, err := sdk.NewClient(p.ctx, p.mongoURI)\n72: \tif err != nil {\n73: \t\tlogger.Errorf(\"failed to create PBM client: %s\", err.Error())\n74: \t\treturn\n75: \t}\n76: \n77: \tpbmConfig, err := pbmClient.GetConfig(p.ctx)\n78: \tif err != nil {\n79: \t\tlogger.Errorf(\"failed to get PBM configuration: %s\", err.Error())\n80: \t\treturn\n81: \t}\n82: \n83: \tif pbmConfig != nil {\n84: \t\tappendPbmMetric(&metrics, \"cluster_backup_configured\",\n85: \t\t\t\"PBM backups are configured for the cluster\",\n86: \t\t\tfloat64(1), nil)\n87: \n88: \t\tif pbmConfig.PITR.Enabled {\n89: \t\t\tappendPbmMetric(&metrics, \"cluster_pitr_backup_enabled\",\n90: \t\t\t\t\"PBM PITR backups are enabled for the cluster\",\n91: \t\t\t\tfloat64(1), nil)\n92: \t\t}\n93: \t}\n94: \n95: \tmetrics = append(metrics, pbmBackupsMetrics(p.ctx, pbmClient, logger)...)\n96: \tmetrics = append(metrics, p.pbmAgentMetrics(p.ctx, pbmClient, logger)...)\n97: \n98: \tfor _, metric := range metrics {\n99: \t\tch <- metric\n100: \t}\n101: }\n102: \n103: func (p *pbmCollector) pbmAgentMetrics(ctx context.Context, pbmClient *sdk.Client, l *logrus.Entry) []prometheus.Metric {\n104: \tclusterStatus, err := cli.ClusterStatus(ctx, pbmClient, cli.RSConfGetter(p.mongoURI))\n105: \tif err != nil {\n106: \t\tl.Errorf(\"failed to get cluster status: %s\", err.Error())\n107: \t\treturn nil\n108: \t}\n109: \n110: \tmetrics := make([]prometheus.Metric, 0, len(clusterStatus))\n111: \n112: \tfor replsetName, nodes := range clusterStatus {\n113: \t\tfor _, node := range nodes {\n114: \t\t\tswitch {\n115: \t\t\tcase node.OK:\n116: \t\t\t\tappendPbmMetric(&metrics, \"agent_status\",\n117: \t\t\t\t\t\"PBM Agent Status\",\n118: \t\t\t\t\tfloat64(pbmAgentStatusOK),\n119: \t\t\t\t\tmap[string]string{\n120: \t\t\t\t\t\t\"host\":        node.Host,\n121: \t\t\t\t\t\t\"replica_set\": replsetName,\n122: \t\t\t\t\t\t\"role\":        string(node.Role),\n123: \t\t\t\t\t})\n124: \n125: \t\t\tcase node.IsAgentLost():\n126: \t\t\t\tappendPbmMetric(&metrics, \"agent_status\",\n127: \t\t\t\t\t\"PBM Agent Status\",\n128: \t\t\t\t\tfloat64(pbmAgentStatusLost),\n129: \t\t\t\t\tmap[string]string{\n130: \t\t\t\t\t\t\"host\":        node.Host,\n131: \t\t\t\t\t\t\"replica_set\": replsetName,\n132: \t\t\t\t\t\t\"role\":        string(node.Role),\n133: \t\t\t\t\t})\n134: \n135: \t\t\tdefault: // !node.OK\n136: \t\t\t\tappendPbmMetric(&metrics, \"agent_status\",\n137: \t\t\t\t\t\"PBM Agent Status\",\n138: \t\t\t\t\tfloat64(pbmAgentStatusError),\n139: \t\t\t\t\tmap[string]string{\n140: \t\t\t\t\t\t\"host\":        node.Host,\n141: \t\t\t\t\t\t\"replica_set\": replsetName,\n142: \t\t\t\t\t\t\"role\":        string(node.Role),\n143: \t\t\t\t\t})\n144: \t\t\t}\n145: \t\t}\n146: \t}\n147: \n148: \treturn metrics\n149: }\n150: \n151: func pbmBackupsMetrics(ctx context.Context, pbmClient *sdk.Client, l *logrus.Entry) []prometheus.Metric {\n152: \tbackupsList, err := pbmClient.GetAllBackups(ctx)\n153: \tif err != nil {\n154: \t\tl.Errorf(\"failed to get PBM backup list: %s\", err.Error())\n155: \t\treturn nil\n156: \t}\n157: \n158: \tmetrics := make([]prometheus.Metric, 0, len(backupsList))\n159: \n160: \tfor _, backup := range backupsList {\n161: \t\tappendPbmMetric(&metrics, \"backup_size\",\n162: \t\t\t\"Size of PBM backup\",\n163: \t\t\tfloat64(backup.Size), map[string]string{\n164: \t\t\t\t\"opid\":   backup.OPID,\n165: \t\t\t\t\"status\": string(backup.Status),\n166: \t\t\t\t\"name\":   backup.Name,\n167: \t\t\t})\n168: \n169: \t\tvar endTime int64\n170: \t\tswitch backup.Status { //nolint:exhaustive\n171: \t\tcase defs.StatusDone, defs.StatusCancelled, defs.StatusError, defs.StatusDown:\n172: \t\t\tendTime = backup.LastTransitionTS\n173: \t\tdefault:\n174: \t\t\tendTime = time.Now().Unix()\n175: \t\t}\n176: \n177: \t\tduration := time.Unix(endTime-backup.StartTS, 0).Unix()\n178: \t\tappendPbmMetric(&metrics, \"backup_duration_seconds\",\n179: \t\t\t\"Duration of PBM backup\",\n180: \t\t\tfloat64(duration), map[string]string{\n181: \t\t\t\t\"opid\":   backup.OPID,\n182: \t\t\t\t\"status\": string(backup.Status),\n183: \t\t\t\t\"name\":   backup.Name,\n184: \t\t\t})\n185: \t}\n186: \treturn metrics\n187: }\n188: \n189: var _ prometheus.Collector = (*pbmCollector)(nil)",
+      "end_line": 189,
+      "path_lines": 189,
+      "start_line": 49
+    },
+    "usage": {
+      "input_tokens": 4407,
+      "input_tokens_details": {
+        "cached_tokens": 1792
+      },
+      "output_tokens": 406,
+      "output_tokens_details": {
+        "reasoning_tokens": 363
+      },
+      "total_tokens": 4813
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 3,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__percona__mongodb_exporter__pull_866__comment_1703933834__duplication.patch"
+    },
+    "usage": {
+      "input_tokens": 6298,
+      "input_tokens_details": {
+        "cached_tokens": 3840
+      },
+      "output_tokens": 134,
+      "output_tokens_details": {
+        "reasoning_tokens": 123
+      },
+      "total_tokens": 6432
+    }
+  }
+]

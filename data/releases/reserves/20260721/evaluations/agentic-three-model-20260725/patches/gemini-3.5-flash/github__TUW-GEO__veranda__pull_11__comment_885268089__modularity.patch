@@ -1,0 +1,73 @@
+diff --git a/src/veranda/raster/gdalport.py b/src/veranda/raster/gdalport.py
+index 7ca7288..71cf064 100644
+--- a/src/veranda/raster/gdalport.py
++++ b/src/veranda/raster/gdalport.py
+@@ -194,6 +194,46 @@ def _analyse_gdal_output(output):
+         return False
+ 
+ 
++def _add_scale_option(options, scale, min_stretch, max_stretch, src_nodata):
++    """
++    Add scale option to options dictionary.
++
++    Parameters
++    ----------
++    options : dict
++        Options dictionary for GDAL command.
++    scale : bool
++        If True, pixel values will be scaled.
++    min_stretch : float or int
++        Minimum stretch value.
++    max_stretch : float or int
++        Maximum stretch value.
++    src_nodata : float or int
++        No data value of the input image.
++
++    Returns
++    -------
++    dict :
++        Updated options dictionary.
++
++    """
++    if scale:
++        options["-scale"] = ' '
++    if scale and (min_stretch is not None) and (max_stretch is not None):
++        options['-scale'] = (min_stretch, max_stretch, 0, 255)
++        # stretching should be done differently if nodata value exist.
++        # depending on nodatavalue, first or last position is reserved for nodata value
++        if src_nodata is not None:
++            if src_nodata < min_stretch:
++                options['-scale'] = (min_stretch, max_stretch, 1, 255)
++                options['-a_nodata'] = 0
++            elif src_nodata > max_stretch:
++                options['-scale'] = (min_stretch, max_stretch, 0, 254)
++                options['-a_nodata'] = 255
++
++    return options
++
++
+ def gen_qlook(src_file, dst_file=None, src_nodata=None, stretch=None, resize_factor=('3%', '3%'),
+               ct=None, scale=True, output_format="GTiff", gdal_path=None):
+     """
+@@ -263,20 +303,7 @@ def gen_qlook(src_file, dst_file=None, src_nodata=None, stretch=None, resize_fac
+ 
+     options = options_dict[output_format]
+ 
+-    if scale:
+-        options["-scale"] = ' '
+-    if scale and (min_stretch is not None) and (max_stretch is not None):
+-        options['-scale'] = (min_stretch, max_stretch, 0, 255)
+-        # stretching should be done differently if nodata value exist.
+-        # depending on nodatavalue, first or last position is reserved for nodata value
+-        if src_nodata is not None:
+-            if src_nodata < min_stretch:
+-                options['-scale'] = (min_stretch, max_stretch, 1, 255)
+-                options['-a_nodata'] = 0
+-            elif src_nodata > max_stretch:
+-                options['-scale'] = (min_stretch, max_stretch, 0, 254)
+-                options['-a_nodata'] = 255
+-
++    options = _add_scale_option(options, scale, min_stretch, max_stretch, src_nodata)
+     # call gdal_translate to resize input file
+     successful, output = call_gdal_util('gdal_translate', src_files=src_file,
+                                      dst_file=dst_file, gdal_path=gdal_path,

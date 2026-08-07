@@ -1,0 +1,120 @@
+diff --git a/pkg/providers/tinkerbell/create.go b/pkg/providers/tinkerbell/create.go
+index 4cdc81f..8dce146 100644
+--- a/pkg/providers/tinkerbell/create.go
++++ b/pkg/providers/tinkerbell/create.go
+@@ -49,11 +49,34 @@ func (p *Provider) PreCAPIInstallOnBootstrap(ctx context.Context, cluster *types
+ 
+ 	logger.V(4).Info("Installing Tinkerbell stack on bootstrap cluster")
+ 
+-	ip, err := networkutils.GetLocalIP(p.netClient)
++	installer, err := p.newBootstrapTinkerbellInstaller(clusterSpec)
+ 	if err != nil {
+ 		return err
+ 	}
+ 
++	if err := installer.Install(ctx, cluster.KubeconfigFile); err != nil {
++		return err
++	}
++
++	return nil
++}
++
++type tinkerbellInstaller interface {
++	Install(ctx context.Context, kubeconfigFile string) error
++}
++
++type tinkerbellInstallerFunc func(ctx context.Context, kubeconfigFile string) error
++
++func (f tinkerbellInstallerFunc) Install(ctx context.Context, kubeconfigFile string) error {
++	return f(ctx, kubeconfigFile)
++}
++
++func (p *Provider) newBootstrapTinkerbellInstaller(clusterSpec *cluster.Spec) (tinkerbellInstaller, error) {
++	ip, err := networkutils.GetLocalIP(p.netClient)
++	if err != nil {
++		return nil, err
++	}
++
+ 	stack := newStack(clusterSpec.VersionsBundle.Tinkerbell.TinkerbellStack, p.docker, p.writer, p.helm, ip.String()).
+ 		withNamespace(constants.EksaSystemNamespace, false).
+ 		withoutBoots().
+@@ -61,15 +84,44 @@ func (p *Provider) PreCAPIInstallOnBootstrap(ctx context.Context, cluster *types
+ 		withTinkController().
+ 		withTinkServer()
+ 
+-	if err := stack.install(ctx, cluster.KubeconfigFile); err != nil {
+-		return fmt.Errorf("install Tinkerbell stack on bootstrap cluster: %v", err)
+-	}
++	return tinkerbellInstallerFunc(func(ctx context.Context, kubeconfigFile string) error {
++		if err := stack.install(ctx, kubeconfigFile); err != nil {
++			return fmt.Errorf("install Tinkerbell stack on bootstrap cluster: %v", err)
++		}
+ 
+-	if err := stack.installBootsOnDocker(ctx, cluster.KubeconfigFile); err != nil {
+-		return err
++		if err := stack.installBootsOnDocker(ctx, kubeconfigFile); err != nil {
++			return err
++		}
++
++		return nil
++	}), nil
++}
++
++func (p *Provider) newWorkloadTinkerbellInstaller(clusterSpec *cluster.Spec) (tinkerbellInstaller, error) {
++	ip, err := networkutils.GetLocalIP(p.netClient)
++	if err != nil {
++		return nil, err
+ 	}
+ 
+-	return nil
++	stack := newStack(clusterSpec.VersionsBundle.Tinkerbell.TinkerbellStack, p.docker, p.writer, p.helm, ip.String()).
++		withNamespace(constants.EksaSystemNamespace, true).
++		withBoots().
++		withHegel().
++		withTinkController().
++		withTinkServer()
++
++	return tinkerbellInstallerFunc(func(ctx context.Context, kubeconfigFile string) error {
++		if err := stack.install(ctx, kubeconfigFile); err != nil {
++			return fmt.Errorf("install stack on workload cluster: %v", err)
++		}
++
++		logger.V(4).Info("Removing local boots container")
++		if err := p.docker.ForceRemove(ctx, boots); err != nil {
++			return fmt.Errorf("remove local boots container: %v", err)
++		}
++
++		return nil
++	}), nil
+ }
+ 
+ func (p *Provider) PostBootstrapSetup(ctx context.Context, clusterConfig *v1alpha1.Cluster, cluster *types.Cluster) error {
+@@ -91,25 +143,13 @@ func (p *Provider) PostWorkloadInit(ctx context.Context, cluster *types.Cluster,
+ 
+ 	logger.V(4).Info("Installing Tinkerbell stack on workload cluster")
+ 
+-	ip, err := networkutils.GetLocalIP(p.netClient)
++	installer, err := p.newWorkloadTinkerbellInstaller(clusterSpec)
+ 	if err != nil {
+ 		return err
+ 	}
+ 
+-	stack := newStack(clusterSpec.VersionsBundle.Tinkerbell.TinkerbellStack, p.docker, p.writer, p.helm, ip.String()).
+-		withNamespace(constants.EksaSystemNamespace, true).
+-		withBoots().
+-		withHegel().
+-		withTinkController().
+-		withTinkServer()
+-
+-	if err := stack.install(ctx, cluster.KubeconfigFile); err != nil {
+-		return fmt.Errorf("install stack on workload cluster: %v", err)
+-	}
+-
+-	logger.V(4).Info("Removing local boots container")
+-	if err := p.docker.ForceRemove(ctx, boots); err != nil {
+-		return fmt.Errorf("remove local boots container: %v", err)
++	if err := installer.Install(ctx, cluster.KubeconfigFile); err != nil {
++		return err
+ 	}
+ 
+ 	return nil

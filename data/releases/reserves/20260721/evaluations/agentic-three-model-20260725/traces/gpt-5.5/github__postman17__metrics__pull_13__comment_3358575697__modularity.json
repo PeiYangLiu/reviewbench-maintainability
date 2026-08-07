@@ -1,0 +1,320 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 426,
+      "path": "internal/repository/memory.go",
+      "start_line": 1
+    },
+    "response_chars": 12936,
+    "round": 1,
+    "tool_result": {
+      "content": "1: package repository\n2: \n3: import (\n4: \t\"context\"\n5: \t\"database/sql\"\n6: \t\"fmt\"\n7: \t\"log/slog\"\n8: \t\"os\"\n9: \t\"path/filepath\"\n10: \t\"sync\"\n11: \t\"time\"\n12: \n13: \t\"github.com/mailru/easyjson\"\n14: \tmodels \"github.com/postman17/metrics/internal/model\"\n15: )\n16: \n17: type MemStorage struct {\n18: \tData      map[string]any\n19: \tStoreSync bool\n20: \tFilePath  string\n21: \tmu        sync.Mutex\n22: \tDB        *sql.DB\n23: \tctx       context.Context\n24: \tWithDB    bool\n25: }\n26: \n27: func (m *MemStorage) AddGauge(name string, value float64) {\n28: \tm.mu.Lock()\n29: \tm.Data[name] = value\n30: \tstoreSync := m.StoreSync\n31: \tfilePath := m.FilePath\n32: \tm.mu.Unlock()\n33: \n34: \tif m.WithDB {\n35: \t\terr := m.AddGaugeToDB(name, value)\n36: \t\tif err != nil {\n37: \t\t\tslog.Error(\"cant save to db\", \"err\", err)\n38: \t\t}\n39: \t\treturn\n40: \t}\n41: \n42: \tif storeSync && filePath != \"\" {\n43: \t\tif err := m.SaveToFile(); err != nil {\n44: \t\t\tslog.Error(\n45: \t\t\t\t\"memory save to file failed\", \"err\", err,\n46: \t\t\t)\n47: \t\t}\n48: \t}\n49: }\n50: \n51: func (m *MemStorage) CheckGaugeType(name string) bool {\n52: \tm.mu.Lock()\n53: \tdefer m.mu.Unlock()\n54: \tval, ok := m.Data[name]\n55: \t_, okType := val.(float64)\n56: \tif ok && okType {\n57: \t\treturn true\n58: \t}\n59: \treturn false\n60: }\n61: \n62: func (m *MemStorage) AddCounter(name string, value int64) {\n63: \tm.mu.Lock()\n64: \t// новое значение должно добавляться к предыдущему\n65: \toldValue, ok := m.Data[name].(int64)\n66: \tvar newValue int64\n67: \tif ok {\n68: \t\tnewValue = oldValue + value\n69: \t} else {\n70: \t\tnewValue = value\n71: \t}\n72: \tm.Data[name] = newValue\n73: \tstoreSync := m.StoreSync\n74: \tfilePath := m.FilePath\n75: \tm.mu.Unlock()\n76: \n77: \tif m.WithDB {\n78: \t\terr := m.AddCounterToDB(name, value)\n79: \t\tif err != nil {\n80: \t\t\tslog.Error(\"cant save to db\", \"err\", err)\n81: \t\t}\n82: \t\treturn\n83: \t}\n84: \n85: \tif storeSync && filePath != \"\" {\n86: \t\tif err := m.SaveToFile(); err != nil {\n87: \t\t\tslog.Error(\n88: \t\t\t\t\"memory save to file failed\", \"err\", err,\n89: \t\t\t)\n90: \t\t}\n91: \t}\n92: }\n93: \n94: func (m *MemStorage) CheckCounterType(name string) bool {\n95: \tm.mu.Lock()\n96: \tdefer m.mu.Unlock()\n97: \tval, ok := m.Data[name]\n98: \t_, okType := val.(int64)\n99: \tif ok && okType {\n100: \t\treturn true\n101: \t}\n102: \treturn false\n103: }\n104: \n105: func (m *MemStorage) GetTypeValue(name string) any {\n106: \tm.mu.Lock()\n107: \tdefer m.mu.Unlock()\n108: \tval, ok := m.Data[name]\n109: \tif !ok {\n110: \t\treturn nil\n111: \t}\n112: \treturn val\n113: }\n114: \n115: func (m *MemStorage) LoadFromFile() error {\n116: \tif m.FilePath == \"\" {\n117: \t\treturn fmt.Errorf(\"path to storage file is empty\")\n118: \t}\n119: \n120: \tdata, err := os.ReadFile(m.FilePath)\n121: \tif os.IsNotExist(err) {\n122: \t\treturn nil\n123: \t}\n124: \tif err != nil {\n125: \t\treturn fmt.Errorf(\"failed to read file: %w\", err)\n126: \t}\n127: \n128: \tm.mu.Lock()\n129: \tdefer m.mu.Unlock()\n130: \n131: \tvar list models.MetricsList\n132: \tif err := easyjson.Unmarshal(data, &list); err != nil {\n133: \t\treturn fmt.Errorf(\"failed to unmarshal metrics: %w\", err)\n134: \t}\n135: \n136: \tfor _, metric := range list {\n137: \t\tswitch metric.MType {\n138: \t\tcase models.Counter:\n139: \t\t\tif metric.Delta != nil {\n140: \t\t\t\tm.Data[metric.ID] = *metric.Delta\n141: \t\t\t}\n142: \t\tcase models.Gauge:\n143: \t\t\tif metric.Value != nil {\n144: \t\t\t\tm.Data[metric.ID] = *metric.Value\n145: \t\t\t}\n146: \t\t}\n147: \t}\n148: \tslog.Info(\"Data load from file\")\n149: \treturn nil\n150: }\n151: \n152: func (m *MemStorage) SaveToFile() error {\n153: \tm.mu.Lock()\n154: \tlist := make(models.MetricsList, 0, len(m.Data))\n155: \n156: \tfor id, v := range m.Data {\n157: \t\tswitch val := v.(type) {\n158: \t\tcase float64:\n159: \t\t\tvalue := val\n160: \t\t\tlist = append(list, models.Metrics{\n161: \t\t\t\tID:    id,\n162: \t\t\t\tMType: models.Gauge,\n163: \t\t\t\tValue: &value,\n164: \t\t\t})\n165: \t\tcase int64:\n166: \t\t\tdelta := val\n167: \t\t\tlist = append(list, models.Metrics{\n168: \t\t\t\tID:    id,\n169: \t\t\t\tMType: models.Counter,\n170: \t\t\t\tDelta: &delta,\n171: \t\t\t})\n172: \t\t}\n173: \t}\n174: \tm.mu.Unlock()\n175: \n176: \tdata, err := easyjson.Marshal(list)\n177: \tif err != nil {\n178: \t\treturn fmt.Errorf(\"failed to marshal metrics via easyjson: %w\", err)\n179: \t}\n180: \n181: \tdir := filepath.Dir(m.FilePath)\n182: \tif err := os.MkdirAll(dir, 0755); err != nil {\n183: \t\treturn fmt.Errorf(\"failed to create directory %s: %w\", dir, err)\n184: \t}\n185: \n186: \ttmpPath := m.FilePath + \".tmp\"\n187: \tif err := os.WriteFile(tmpPath, data, 0644); err != nil {\n188: \t\treturn fmt.Errorf(\"failed to write temp file: %w\", err)\n189: \t}\n190: \n191: \tif err := os.Rename(tmpPath, m.FilePath); err != nil {\n192: \t\t_ = os.Remove(tmpPath)\n193: \t\treturn fmt.Errorf(\"failed to rename temp file to destination: %w\", err)\n194: \t}\n195: \n196: \tslog.Info(\"Data saved to file\")\n197: \n198: \treturn nil\n199: }\n200: \n201: func (m *MemStorage) AddGaugeToDB(name string, value float64) error {\n202: \tvar (\n203: \t\tid    int64\n204: \t\tmType string\n205: \t)\n206: \tgetCtx, getCancel := context.WithTimeout(m.ctx, 5*time.Second)\n207: \tdefer getCancel()\n208: \trow := m.DB.QueryRowContext(\n209: \t\tgetCtx, \"SELECT id, m_type FROM metrics WHERE name = $1\", name,\n210: \t)\n211: \terr := row.Scan(&id, &mType)\n212: \tif err != nil && err != sql.ErrNoRows {\n213: \t\treturn err\n214: \t}\n215: \tif err == nil && mType == \"gauge\" {\n216: \t\tupdateCtx, updateCancel := context.WithTimeout(m.ctx, 5*time.Second)\n217: \t\tdefer updateCancel()\n218: \t\t_, err := m.DB.ExecContext(\n219: \t\t\tupdateCtx, \"UPDATE metrics SET value = $1 WHERE id = $2\",\n220: \t\t\tvalue, id,\n221: \t\t)\n222: \t\tif err != nil {\n223: \t\t\treturn err\n224: \t\t}\n225: \t\treturn nil\n226: \t} else if err == nil && mType == \"counter\" {\n227: \t\tupdateCtx, updateCancel := context.WithTimeout(m.ctx, 5*time.Second)\n228: \t\tdefer updateCancel()\n229: \t\t_, err := m.DB.ExecContext(\n230: \t\t\tupdateCtx, \"UPDATE metrics SET value = $1, m_type = $2, delta = $3 WHERE id = $4\",\n231: \t\t\tvalue, \"gauge\", 0, id,\n232: \t\t)\n233: \t\tif err != nil {\n234: \t\t\treturn err\n235: \t\t}\n236: \t\treturn nil\n237: \t}\n238: \tinsertCtx, insertCancel := context.WithTimeout(m.ctx, 5*time.Second)\n239: \tdefer insertCancel()\n240: \t_, err = m.DB.ExecContext(\n241: \t\tinsertCtx, \"INSERT INTO metrics (name, m_type, value) VALUES ($1, $2, $3)\",\n242: \t\tname, \"gauge\", value,\n243: \t)\n244: \tif err != nil {\n245: \t\treturn err\n246: \t}\n247: \treturn nil\n248: }\n249: \n250: func (m *MemStorage) AddCounterToDB(name string, value int64) error {\n251: \tvar (\n252: \t\tid    int64\n253: \t\tmType string\n254: \t\tdelta int64\n255: \t)\n256: \tgetCtx, getCancel := context.WithTimeout(m.ctx, 5*time.Second)\n257: \tdefer getCancel()\n258: \trow := m.DB.QueryRowContext(\n259: \t\tgetCtx, \"SELECT id, m_type, delta FROM metrics WHERE name = $1\", name,\n260: \t)\n261: \terr := row.Scan(&id, &mType, &delta)\n262: \tif err != nil && err != sql.ErrNoRows {\n263: \t\treturn err\n264: \t}\n265: \tif err == nil && mType == \"counter\" {\n266: \t\tvalue = delta + value\n267: \t\tupdateCtx, updateCancel := context.WithTimeout(m.ctx, 5*time.Second)\n268: \t\tdefer updateCancel()\n269: \t\t_, err := m.DB.ExecContext(\n270: \t\t\tupdateCtx, \"UPDATE metrics SET delta = $1 WHERE id = $2\",\n271: \t\t\tvalue, id,\n272: \t\t)\n273: \t\tif err != nil {\n274: \t\t\treturn err\n275: \t\t}\n276: \t\treturn nil\n277: \t} else if err == nil && mType == \"gauge\" {\n278: \t\tupdateCtx, updateCancel := context.WithTimeout(m.ctx, 5*time.Second)\n279: \t\tdefer updateCancel()\n280: \t\t_, err := m.DB.ExecContext(\n281: \t\t\tupdateCtx, \"UPDATE metrics SET delta = $1, m_type = $2, value = $3 WHERE id = $4\",\n282: \t\t\tvalue, \"counter\", 0, id,\n283: \t\t)\n284: \t\tif err != nil {\n285: \t\t\treturn err\n286: \t\t}\n287: \t\treturn nil\n288: \t}\n289: \tinsertCtx, insertCancel := context.WithTimeout(m.ctx, 5*time.Second)\n290: \tdefer insertCancel()\n291: \t_, err = m.DB.ExecContext(\n292: \t\tinsertCtx, \"INSERT INTO metrics (name, m_type, delta) VALUES ($1, $2, $3)\",\n293: \t\tname, \"counter\", value,\n294: \t)\n295: \tif err != nil {\n296: \t\treturn err\n297: \t}\n298: \treturn nil\n299: }\n300: \n301: func (m *MemStorage) AddBatch(data models.MetricsList) error {\n302: \tfor _, metric := range data {\n303: \t\tif metric.ID == \"\" {\n304: \t\t\treturn fmt.Errorf(\"metric id is empty\")\n305: \t\t}\n306: \t\tif metric.MType != models.Gauge && metric.MType != models.Counter {\n307: \t\t\treturn fmt.Errorf(\"invalid metric type: %s\", metric.MType)\n308: \t\t}\n309: \t\tswitch metric.MType {\n310: \t\tcase models.Gauge:\n311: \t\t\tif metric.Value == nil {\n312: \t\t\t\treturn fmt.Errorf(\"gauge value is nil for metric %s\", metric.ID)\n313: \t\t\t}\n314: \t\tcase models.Counter:\n315: \t\t\tif metric.Delta == nil {\n316: \t\t\t\treturn fmt.Errorf(\"counter delta is nil for metric %s\", metric.ID)\n317: \t\t\t}\n318: \t\t}\n319: \t}\n320: \n321: \tm.mu.Lock()\n322: \tfor _, metric := range data {\n323: \t\tswitch metric.MType {\n324: \t\tcase models.Gauge:\n325: \t\t\tm.Data[metric.ID] = *metric.Value\n326: \t\tcase models.Counter:\n327: \t\t\toldValue, ok := m.Data[metric.ID].(int64)\n328: \t\t\tvar newValue int64\n329: \t\t\tif ok {\n330: \t\t\t\tnewValue = oldValue + *metric.Delta\n331: \t\t\t} else {\n332: \t\t\t\tnewValue = *metric.Delta\n333: \t\t\t}\n334: \t\t\tm.Data[metric.ID] = newValue\n335: \t\t}\n336: \t}\n337: \tstoreSync := m.StoreSync\n338: \tfilePath := m.FilePath\n339: \twithDB := m.WithDB\n340: \tm.mu.Unlock()\n341: \n342: \tif withDB {\n343: \t\tif err := m.AddBatchToDB(data); err != nil {\n344: \t\t\treturn err\n345: \t\t}\n346: \t\treturn nil\n347: \t}\n348: \n349: \tif storeSync && filePath != \"\" {\n350: \t\tif err := m.SaveToFile(); err != nil {\n351: \t\t\tslog.Error(\n352: \t\t\t\t\"memory save to file failed\", \"err\", err,\n353: \t\t\t)\n354: \t\t}\n355: \t}\n356: \n357: \treturn nil\n358: }\n359: \n360: func (m *MemStorage) AddBatchToDB(data models.MetricsList) error {\n361: \ttxCtx, cancel := context.WithTimeout(m.ctx, 30*time.Second)\n362: \tdefer cancel()\n363: \n364: \ttx, err := m.DB.BeginTx(txCtx, nil)\n365: \tif err != nil {\n366: \t\treturn err\n367: \t}\n368: \tdefer func() {\n369: \t\t_ = tx.Rollback()\n370: \t}()\n371: \n372: \tstmtGauge, err := tx.PrepareContext(txCtx, `\n373: \t\tINSERT INTO metrics (name, m_type, value, delta) VALUES ($1, 'gauge', $2, 0)\n374: \t\tON CONFLICT (name) DO UPDATE SET\n375: \t\t\tm_type = 'gauge',\n376: \t\t\tvalue = EXCLUDED.value,\n377: \t\t\tdelta = 0\n378: \t`)\n379: \tif err != nil {\n380: \t\treturn err\n381: \t}\n382: \tdefer stmtGauge.Close()\n383: \n384: \tstmtCounter, err := tx.PrepareContext(txCtx, `\n385: \t\tINSERT INTO metrics (name, m_type, delta, value) VALUES ($1, 'counter', $2, 0)\n386: \t\tON CONFLICT (name) DO UPDATE SET\n387: \t\t\tm_type = 'counter',\n388: \t\t\tdelta = CASE WHEN metrics.m_type = 'counter' THEN metrics.delta + EXCLUDED.delta ELSE EXCLUDED.delta END,\n389: \t\t\tvalue = 0\n390: \t`)\n391: \tif err != nil {\n392: \t\treturn err\n393: \t}\n394: \tdefer stmtCounter.Close()\n395: \n396: \tfor _, metric := range data {\n397: \t\tswitch metric.MType {\n398: \t\tcase models.Gauge:\n399: \t\t\t_, err = stmtGauge.ExecContext(txCtx, metric.ID, *metric.Value)\n400: \t\tcase models.Counter:",
+      "end_line": 400,
+      "path_lines": 426,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 4333,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 7883,
+      "output_tokens_details": {
+        "reasoning_tokens": 3771
+      },
+      "total_tokens": 12216
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "internal/repository/memory.go",
+      "query": "WithDB"
+    },
+    "response_chars": 221,
+    "round": 2,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 24,
+          "text": "\tWithDB    bool"
+        },
+        {
+          "line": 34,
+          "text": "\tif m.WithDB {"
+        },
+        {
+          "line": 77,
+          "text": "\tif m.WithDB {"
+        },
+        {
+          "line": 339,
+          "text": "\twithDB := m.WithDB"
+        },
+        {
+          "line": 418,
+          "text": "\t\tWithDB:    withDB,"
+        }
+      ],
+      "query": "WithDB",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 8919,
+      "input_tokens_details": {
+        "cached_tokens": 3840
+      },
+      "output_tokens": 338,
+      "output_tokens_details": {
+        "reasoning_tokens": 261
+      },
+      "total_tokens": 9257
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": ".",
+      "query": "NewMemStorage"
+    },
+    "error": "invalid repository path: '.'",
+    "raw_response": "{\"action\":\"find\",\"path\":\".\",\"query\":\"NewMemStorage\"}\n{\"action\":\"find\",\"path\":\"internal/repository/memory.go\",\"query\":\"AddGaugeToDB\"}\n{\"action\":\"read\",\"path\":\"cmd/server/main.go\",\"start_line\":1,\"end_line\":200}\n{\"action\":\"read\",\"path\":\"cmd/server/main.go\",\"start_line\":1,\"end_line\":200}",
+    "response_chars": 284,
+    "round": 3,
+    "usage": {
+      "input_tokens": 9055,
+      "input_tokens_details": {
+        "cached_tokens": 8448
+      },
+      "output_tokens": 672,
+      "output_tokens_details": {
+        "reasoning_tokens": 565
+      },
+      "total_tokens": 9727
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "type MetricsRepository interface {\n\tAddGauge(name string, value float64)\n\tAddCounter(name string, value int64)\n\tCheckGaugeType(name string) bool\n\tCheckCounterType(name string) bool\n\tGetTypeValue(name string) any\n\tAddBatch(data models.MetricsList) error\n}\n\ntype FileStorage struct {\n\t*MemStorage\n}\n\ntype DBStorage struct {\n\t*MemStorage\n}\n\ntype MemStorage struct {\n\tData      map[string]any\n\tStoreSync bool\n\tFilePath  string\n\tmu        sync.Mutex\n\tDB        *sql.DB\n\tctx       context.Context\n\tWithDB    bool\n}\n\nvar _ MetricsRepository = (*MemStorage)(nil)\nvar _ MetricsRepository = (*FileStorage)(nil)\nvar _ MetricsRepository = (*DBStorage)(nil)\n\nfunc NewFileStorage(ctx context.Context, storeSync bool, filePath string, restore bool) *FileStorage {\n\treturn &FileStorage{\n\t\tMemStorage: NewMemStorage(ctx, storeSync, filePath, restore, nil, false),\n\t}\n}\n\nfunc NewDBStorage(ctx context.Context, db *sql.DB) *DBStorage {\n\treturn &DBStorage{\n\t\tMemStorage: NewMemStorage(ctx, false, \"\", false, db, true),\n\t}\n}",
+          "end_line": 25,
+          "start_line": 17
+        }
+      ]
+    },
+    "response_chars": 2369,
+    "round": 4,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 25,
+          "replacement_lines": 42,
+          "start_line": 17
+        }
+      ],
+      "current_file_lines": 459,
+      "updated_excerpt": {
+        "content": "7: \t\"log/slog\"\n8: \t\"os\"\n9: \t\"path/filepath\"\n10: \t\"sync\"\n11: \t\"time\"\n12: \n13: \t\"github.com/mailru/easyjson\"\n14: \tmodels \"github.com/postman17/metrics/internal/model\"\n15: )\n16: \n17: type MetricsRepository interface {\n18: \tAddGauge(name string, value float64)\n19: \tAddCounter(name string, value int64)\n20: \tCheckGaugeType(name string) bool\n21: \tCheckCounterType(name string) bool\n22: \tGetTypeValue(name string) any\n23: \tAddBatch(data models.MetricsList) error\n24: }\n25: \n26: type FileStorage struct {\n27: \t*MemStorage\n28: }\n29: \n30: type DBStorage struct {\n31: \t*MemStorage\n32: }\n33: \n34: type MemStorage struct {\n35: \tData      map[string]any\n36: \tStoreSync bool\n37: \tFilePath  string\n38: \tmu        sync.Mutex\n39: \tDB        *sql.DB\n40: \tctx       context.Context\n41: \tWithDB    bool\n42: }\n43: \n44: var _ MetricsRepository = (*MemStorage)(nil)\n45: var _ MetricsRepository = (*FileStorage)(nil)\n46: var _ MetricsRepository = (*DBStorage)(nil)\n47: ",
+        "end_line": 47,
+        "path_lines": 459,
+        "start_line": 7
+      }
+    },
+    "usage": {
+      "input_tokens": 9066,
+      "input_tokens_details": {
+        "cached_tokens": 8448
+      },
+      "output_tokens": 3077,
+      "output_tokens_details": {
+        "reasoning_tokens": 2381
+      },
+      "total_tokens": 12143
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 120,
+      "path": "internal/repository/memory.go",
+      "start_line": 1
+    },
+    "response_chars": 173,
+    "round": 5,
+    "tool_result": {
+      "content": "1: package repository\n2: \n3: import (\n4: \t\"context\"\n5: \t\"database/sql\"\n6: \t\"fmt\"\n7: \t\"log/slog\"\n8: \t\"os\"\n9: \t\"path/filepath\"\n10: \t\"sync\"\n11: \t\"time\"\n12: \n13: \t\"github.com/mailru/easyjson\"\n14: \tmodels \"github.com/postman17/metrics/internal/model\"\n15: )\n16: \n17: type MetricsRepository interface {\n18: \tAddGauge(name string, value float64)\n19: \tAddCounter(name string, value int64)\n20: \tCheckGaugeType(name string) bool\n21: \tCheckCounterType(name string) bool\n22: \tGetTypeValue(name string) any\n23: \tAddBatch(data models.MetricsList) error\n24: }\n25: \n26: type FileStorage struct {\n27: \t*MemStorage\n28: }\n29: \n30: type DBStorage struct {\n31: \t*MemStorage\n32: }\n33: \n34: type MemStorage struct {\n35: \tData      map[string]any\n36: \tStoreSync bool\n37: \tFilePath  string\n38: \tmu        sync.Mutex\n39: \tDB        *sql.DB\n40: \tctx       context.Context\n41: \tWithDB    bool\n42: }\n43: \n44: var _ MetricsRepository = (*MemStorage)(nil)\n45: var _ MetricsRepository = (*FileStorage)(nil)\n46: var _ MetricsRepository = (*DBStorage)(nil)\n47: \n48: func NewFileStorage(ctx context.Context, storeSync bool, filePath string, restore bool) *FileStorage {\n49: \treturn &FileStorage{\n50: \t\tMemStorage: NewMemStorage(ctx, storeSync, filePath, restore, nil, false),\n51: \t}\n52: }\n53: \n54: func NewDBStorage(ctx context.Context, db *sql.DB) *DBStorage {\n55: \treturn &DBStorage{\n56: \t\tMemStorage: NewMemStorage(ctx, false, \"\", false, db, true),\n57: \t}\n58: }\n59: \n60: func (m *MemStorage) AddGauge(name string, value float64) {\n61: \tm.mu.Lock()\n62: \tm.Data[name] = value\n63: \tstoreSync := m.StoreSync\n64: \tfilePath := m.FilePath\n65: \tm.mu.Unlock()\n66: \n67: \tif m.WithDB {\n68: \t\terr := m.AddGaugeToDB(name, value)\n69: \t\tif err != nil {\n70: \t\t\tslog.Error(\"cant save to db\", \"err\", err)\n71: \t\t}\n72: \t\treturn\n73: \t}\n74: \n75: \tif storeSync && filePath != \"\" {\n76: \t\tif err := m.SaveToFile(); err != nil {\n77: \t\t\tslog.Error(\n78: \t\t\t\t\"memory save to file failed\", \"err\", err,\n79: \t\t\t)\n80: \t\t}\n81: \t}\n82: }\n83: \n84: func (m *MemStorage) CheckGaugeType(name string) bool {\n85: \tm.mu.Lock()\n86: \tdefer m.mu.Unlock()\n87: \tval, ok := m.Data[name]\n88: \t_, okType := val.(float64)\n89: \tif ok && okType {\n90: \t\treturn true\n91: \t}\n92: \treturn false\n93: }\n94: \n95: func (m *MemStorage) AddCounter(name string, value int64) {\n96: \tm.mu.Lock()\n97: \t// новое значение должно добавляться к предыдущему\n98: \toldValue, ok := m.Data[name].(int64)\n99: \tvar newValue int64\n100: \tif ok {\n101: \t\tnewValue = oldValue + value\n102: \t} else {\n103: \t\tnewValue = value\n104: \t}\n105: \tm.Data[name] = newValue\n106: \tstoreSync := m.StoreSync\n107: \tfilePath := m.FilePath\n108: \tm.mu.Unlock()\n109: \n110: \tif m.WithDB {\n111: \t\terr := m.AddCounterToDB(name, value)\n112: \t\tif err != nil {\n113: \t\t\tslog.Error(\"cant save to db\", \"err\", err)\n114: \t\t}\n115: \t\treturn\n116: \t}\n117: \n118: \tif storeSync && filePath != \"\" {\n119: \t\tif err := m.SaveToFile(); err != nil {\n120: \t\t\tslog.Error(",
+      "end_line": 120,
+      "path_lines": 459,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 9826,
+      "input_tokens_details": {
+        "cached_tokens": 8448
+      },
+      "output_tokens": 384,
+      "output_tokens_details": {
+        "reasoning_tokens": 323
+      },
+      "total_tokens": 10210
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 459,
+      "path": "internal/repository/memory.go",
+      "start_line": 301
+    },
+    "response_chars": 177,
+    "round": 6,
+    "tool_result": {
+      "content": "301: \t\tdefer updateCancel()\n302: \t\t_, err := m.DB.ExecContext(\n303: \t\t\tupdateCtx, \"UPDATE metrics SET delta = $1 WHERE id = $2\",\n304: \t\t\tvalue, id,\n305: \t\t)\n306: \t\tif err != nil {\n307: \t\t\treturn err\n308: \t\t}\n309: \t\treturn nil\n310: \t} else if err == nil && mType == \"gauge\" {\n311: \t\tupdateCtx, updateCancel := context.WithTimeout(m.ctx, 5*time.Second)\n312: \t\tdefer updateCancel()\n313: \t\t_, err := m.DB.ExecContext(\n314: \t\t\tupdateCtx, \"UPDATE metrics SET delta = $1, m_type = $2, value = $3 WHERE id = $4\",\n315: \t\t\tvalue, \"counter\", 0, id,\n316: \t\t)\n317: \t\tif err != nil {\n318: \t\t\treturn err\n319: \t\t}\n320: \t\treturn nil\n321: \t}\n322: \tinsertCtx, insertCancel := context.WithTimeout(m.ctx, 5*time.Second)\n323: \tdefer insertCancel()\n324: \t_, err = m.DB.ExecContext(\n325: \t\tinsertCtx, \"INSERT INTO metrics (name, m_type, delta) VALUES ($1, $2, $3)\",\n326: \t\tname, \"counter\", value,\n327: \t)\n328: \tif err != nil {\n329: \t\treturn err\n330: \t}\n331: \treturn nil\n332: }\n333: \n334: func (m *MemStorage) AddBatch(data models.MetricsList) error {\n335: \tfor _, metric := range data {\n336: \t\tif metric.ID == \"\" {\n337: \t\t\treturn fmt.Errorf(\"metric id is empty\")\n338: \t\t}\n339: \t\tif metric.MType != models.Gauge && metric.MType != models.Counter {\n340: \t\t\treturn fmt.Errorf(\"invalid metric type: %s\", metric.MType)\n341: \t\t}\n342: \t\tswitch metric.MType {\n343: \t\tcase models.Gauge:\n344: \t\t\tif metric.Value == nil {\n345: \t\t\t\treturn fmt.Errorf(\"gauge value is nil for metric %s\", metric.ID)\n346: \t\t\t}\n347: \t\tcase models.Counter:\n348: \t\t\tif metric.Delta == nil {\n349: \t\t\t\treturn fmt.Errorf(\"counter delta is nil for metric %s\", metric.ID)\n350: \t\t\t}\n351: \t\t}\n352: \t}\n353: \n354: \tm.mu.Lock()\n355: \tfor _, metric := range data {\n356: \t\tswitch metric.MType {\n357: \t\tcase models.Gauge:\n358: \t\t\tm.Data[metric.ID] = *metric.Value\n359: \t\tcase models.Counter:\n360: \t\t\toldValue, ok := m.Data[metric.ID].(int64)\n361: \t\t\tvar newValue int64\n362: \t\t\tif ok {\n363: \t\t\t\tnewValue = oldValue + *metric.Delta\n364: \t\t\t} else {\n365: \t\t\t\tnewValue = *metric.Delta\n366: \t\t\t}\n367: \t\t\tm.Data[metric.ID] = newValue\n368: \t\t}\n369: \t}\n370: \tstoreSync := m.StoreSync\n371: \tfilePath := m.FilePath\n372: \twithDB := m.WithDB\n373: \tm.mu.Unlock()\n374: \n375: \tif withDB {\n376: \t\tif err := m.AddBatchToDB(data); err != nil {\n377: \t\t\treturn err\n378: \t\t}\n379: \t\treturn nil\n380: \t}\n381: \n382: \tif storeSync && filePath != \"\" {\n383: \t\tif err := m.SaveToFile(); err != nil {\n384: \t\t\tslog.Error(\n385: \t\t\t\t\"memory save to file failed\", \"err\", err,\n386: \t\t\t)\n387: \t\t}\n388: \t}\n389: \n390: \treturn nil\n391: }\n392: \n393: func (m *MemStorage) AddBatchToDB(data models.MetricsList) error {\n394: \ttxCtx, cancel := context.WithTimeout(m.ctx, 30*time.Second)\n395: \tdefer cancel()\n396: \n397: \ttx, err := m.DB.BeginTx(txCtx, nil)\n398: \tif err != nil {\n399: \t\treturn err\n400: \t}\n401: \tdefer func() {\n402: \t\t_ = tx.Rollback()\n403: \t}()\n404: \n405: \tstmtGauge, err := tx.PrepareContext(txCtx, `\n406: \t\tINSERT INTO metrics (name, m_type, value, delta) VALUES ($1, 'gauge', $2, 0)\n407: \t\tON CONFLICT (name) DO UPDATE SET\n408: \t\t\tm_type = 'gauge',\n409: \t\t\tvalue = EXCLUDED.value,\n410: \t\t\tdelta = 0\n411: \t`)\n412: \tif err != nil {\n413: \t\treturn err\n414: \t}\n415: \tdefer stmtGauge.Close()\n416: \n417: \tstmtCounter, err := tx.PrepareContext(txCtx, `\n418: \t\tINSERT INTO metrics (name, m_type, delta, value) VALUES ($1, 'counter', $2, 0)\n419: \t\tON CONFLICT (name) DO UPDATE SET\n420: \t\t\tm_type = 'counter',\n421: \t\t\tdelta = CASE WHEN metrics.m_type = 'counter' THEN metrics.delta + EXCLUDED.delta ELSE EXCLUDED.delta END,\n422: \t\t\tvalue = 0\n423: \t`)\n424: \tif err != nil {\n425: \t\treturn err\n426: \t}\n427: \tdefer stmtCounter.Close()\n428: \n429: \tfor _, metric := range data {\n430: \t\tswitch metric.MType {\n431: \t\tcase models.Gauge:\n432: \t\t\t_, err = stmtGauge.ExecContext(txCtx, metric.ID, *metric.Value)\n433: \t\tcase models.Counter:\n434: \t\t\t_, err = stmtCounter.ExecContext(txCtx, metric.ID, *metric.Delta)\n435: \t\t}\n436: \t\tif err != nil {\n437: \t\t\treturn err\n438: \t\t}\n439: \t}\n440: \n441: \treturn tx.Commit()\n442: }\n443: \n444: func NewMemStorage(ctx context.Context, storeSync bool, filePath string, restore bool, db *sql.DB, withDB bool) *MemStorage {\n445: \tmem := MemStorage{\n446: \t\tData:      make(map[string]any),\n447: \t\tStoreSync: storeSync,\n448: \t\tFilePath:  filePath,\n449: \t\tDB:        db,\n450: \t\tctx:       ctx,\n451: \t\tWithDB:    withDB,\n452: \t}\n453: \tif restore {\n454: \t\tif err := mem.LoadFromFile(); err != nil {\n455: \t\t\tslog.Error(\"memory load from file failed\", \"err\", err)\n456: \t\t}\n457: \t}\n458: \treturn &mem\n459: }",
+      "end_line": 459,
+      "path_lines": 459,
+      "start_line": 301
+    },
+    "usage": {
+      "input_tokens": 11071,
+      "input_tokens_details": {
+        "cached_tokens": 9472
+      },
+      "output_tokens": 746,
+      "output_tokens_details": {
+        "reasoning_tokens": 685
+      },
+      "total_tokens": 11817
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 180,
+      "path": "internal/repository/memory.go",
+      "start_line": 60
+    },
+    "response_chars": 263,
+    "round": 7,
+    "tool_result": {
+      "content": "60: func (m *MemStorage) AddGauge(name string, value float64) {\n61: \tm.mu.Lock()\n62: \tm.Data[name] = value\n63: \tstoreSync := m.StoreSync\n64: \tfilePath := m.FilePath\n65: \tm.mu.Unlock()\n66: \n67: \tif m.WithDB {\n68: \t\terr := m.AddGaugeToDB(name, value)\n69: \t\tif err != nil {\n70: \t\t\tslog.Error(\"cant save to db\", \"err\", err)\n71: \t\t}\n72: \t\treturn\n73: \t}\n74: \n75: \tif storeSync && filePath != \"\" {\n76: \t\tif err := m.SaveToFile(); err != nil {\n77: \t\t\tslog.Error(\n78: \t\t\t\t\"memory save to file failed\", \"err\", err,\n79: \t\t\t)\n80: \t\t}\n81: \t}\n82: }\n83: \n84: func (m *MemStorage) CheckGaugeType(name string) bool {\n85: \tm.mu.Lock()\n86: \tdefer m.mu.Unlock()\n87: \tval, ok := m.Data[name]\n88: \t_, okType := val.(float64)\n89: \tif ok && okType {\n90: \t\treturn true\n91: \t}\n92: \treturn false\n93: }\n94: \n95: func (m *MemStorage) AddCounter(name string, value int64) {\n96: \tm.mu.Lock()\n97: \t// новое значение должно добавляться к предыдущему\n98: \toldValue, ok := m.Data[name].(int64)\n99: \tvar newValue int64\n100: \tif ok {\n101: \t\tnewValue = oldValue + value\n102: \t} else {\n103: \t\tnewValue = value\n104: \t}\n105: \tm.Data[name] = newValue\n106: \tstoreSync := m.StoreSync\n107: \tfilePath := m.FilePath\n108: \tm.mu.Unlock()\n109: \n110: \tif m.WithDB {\n111: \t\terr := m.AddCounterToDB(name, value)\n112: \t\tif err != nil {\n113: \t\t\tslog.Error(\"cant save to db\", \"err\", err)\n114: \t\t}\n115: \t\treturn\n116: \t}\n117: \n118: \tif storeSync && filePath != \"\" {\n119: \t\tif err := m.SaveToFile(); err != nil {\n120: \t\t\tslog.Error(\n121: \t\t\t\t\"memory save to file failed\", \"err\", err,\n122: \t\t\t)\n123: \t\t}\n124: \t}\n125: }\n126: \n127: func (m *MemStorage) CheckCounterType(name string) bool {\n128: \tm.mu.Lock()\n129: \tdefer m.mu.Unlock()\n130: \tval, ok := m.Data[name]\n131: \t_, okType := val.(int64)\n132: \tif ok && okType {\n133: \t\treturn true\n134: \t}\n135: \treturn false\n136: }\n137: \n138: func (m *MemStorage) GetTypeValue(name string) any {\n139: \tm.mu.Lock()\n140: \tdefer m.mu.Unlock()\n141: \tval, ok := m.Data[name]\n142: \tif !ok {\n143: \t\treturn nil\n144: \t}\n145: \treturn val\n146: }\n147: \n148: func (m *MemStorage) LoadFromFile() error {\n149: \tif m.FilePath == \"\" {\n150: \t\treturn fmt.Errorf(\"path to storage file is empty\")\n151: \t}\n152: \n153: \tdata, err := os.ReadFile(m.FilePath)\n154: \tif os.IsNotExist(err) {\n155: \t\treturn nil\n156: \t}\n157: \tif err != nil {\n158: \t\treturn fmt.Errorf(\"failed to read file: %w\", err)\n159: \t}\n160: \n161: \tm.mu.Lock()\n162: \tdefer m.mu.Unlock()\n163: \n164: \tvar list models.MetricsList\n165: \tif err := easyjson.Unmarshal(data, &list); err != nil {\n166: \t\treturn fmt.Errorf(\"failed to unmarshal metrics: %w\", err)\n167: \t}\n168: \n169: \tfor _, metric := range list {\n170: \t\tswitch metric.MType {\n171: \t\tcase models.Counter:\n172: \t\t\tif metric.Delta != nil {\n173: \t\t\t\tm.Data[metric.ID] = *metric.Delta\n174: \t\t\t}\n175: \t\tcase models.Gauge:\n176: \t\t\tif metric.Value != nil {\n177: \t\t\t\tm.Data[metric.ID] = *metric.Value\n178: \t\t\t}\n179: \t\t}\n180: \t}",
+      "end_line": 180,
+      "path_lines": 459,
+      "start_line": 60
+    },
+    "usage": {
+      "input_tokens": 13017,
+      "input_tokens_details": {
+        "cached_tokens": 10496
+      },
+      "output_tokens": 2666,
+      "output_tokens_details": {
+        "reasoning_tokens": 2574
+      },
+      "total_tokens": 15683
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "internal/repository/memory.go",
+      "query": "NewMemStorage"
+    },
+    "response_chars": 232,
+    "round": 8,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 50,
+          "text": "\t\tMemStorage: NewMemStorage(ctx, storeSync, filePath, restore, nil, false),"
+        },
+        {
+          "line": 56,
+          "text": "\t\tMemStorage: NewMemStorage(ctx, false, \"\", false, db, true),"
+        },
+        {
+          "line": 444,
+          "text": "func NewMemStorage(ctx context.Context, storeSync bool, filePath string, restore bool, db *sql.DB, withDB bool) *MemStorage {"
+        }
+      ],
+      "query": "NewMemStorage",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 14323,
+      "input_tokens_details": {
+        "cached_tokens": 12544
+      },
+      "output_tokens": 437,
+      "output_tokens_details": {
+        "reasoning_tokens": 353
+      },
+      "total_tokens": 14760
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\nfunc NewMetricsRepository(ctx context.Context, storeSync bool, filePath string, restore bool, db *sql.DB, withDB bool) MetricsRepository {\n\tif withDB {\n\t\treturn NewDBStorage(ctx, db)\n\t}\n\tif filePath != \"\" || storeSync || restore {\n\t\treturn NewFileStorage(ctx, storeSync, filePath, restore)\n\t}\n\treturn NewMemStorage(ctx, storeSync, filePath, restore, nil, false)\n}",
+          "end_line": 58,
+          "start_line": 59
+        }
+      ]
+    },
+    "response_chars": 999,
+    "round": 9,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 58,
+          "replacement_lines": 10,
+          "start_line": 59
+        }
+      ],
+      "current_file_lines": 469,
+      "updated_excerpt": {
+        "content": "49: \treturn &FileStorage{\n50: \t\tMemStorage: NewMemStorage(ctx, storeSync, filePath, restore, nil, false),\n51: \t}\n52: }\n53: \n54: func NewDBStorage(ctx context.Context, db *sql.DB) *DBStorage {\n55: \treturn &DBStorage{\n56: \t\tMemStorage: NewMemStorage(ctx, false, \"\", false, db, true),\n57: \t}\n58: }\n59: \n60: func NewMetricsRepository(ctx context.Context, storeSync bool, filePath string, restore bool, db *sql.DB, withDB bool) MetricsRepository {\n61: \tif withDB {\n62: \t\treturn NewDBStorage(ctx, db)\n63: \t}\n64: \tif filePath != \"\" || storeSync || restore {\n65: \t\treturn NewFileStorage(ctx, storeSync, filePath, restore)\n66: \t}\n67: \treturn NewMemStorage(ctx, storeSync, filePath, restore, nil, false)\n68: }\n69: \n70: func (m *MemStorage) AddGauge(name string, value float64) {\n71: \tm.mu.Lock()\n72: \tm.Data[name] = value\n73: \tstoreSync := m.StoreSync\n74: \tfilePath := m.FilePath\n75: \tm.mu.Unlock()\n76: \n77: \tif m.WithDB {\n78: \t\terr := m.AddGaugeToDB(name, value)\n79: \t\tif err != nil {\n80: \t\t\tslog.Error(\"cant save to db\", \"err\", err)\n81: \t\t}\n82: \t\treturn\n83: \t}\n84: \n85: \tif storeSync && filePath != \"\" {\n86: \t\tif err := m.SaveToFile(); err != nil {\n87: \t\t\tslog.Error(\n88: \t\t\t\t\"memory save to file failed\", \"err\", err,\n89: \t\t\t)",
+        "end_line": 89,
+        "path_lines": 469,
+        "start_line": 49
+      }
+    },
+    "usage": {
+      "input_tokens": 14480,
+      "input_tokens_details": {
+        "cached_tokens": 14080
+      },
+      "output_tokens": 2671,
+      "output_tokens_details": {
+        "reasoning_tokens": 2363
+      },
+      "total_tokens": 17151
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 10,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__postman17__metrics__pull_13__comment_3358575697__modularity.patch"
+    },
+    "usage": {
+      "input_tokens": 15171,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 1045,
+      "output_tokens_details": {
+        "reasoning_tokens": 1034
+      },
+      "total_tokens": 16216
+    }
+  }
+]

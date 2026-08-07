@@ -1,0 +1,107 @@
+diff --git a/druidctl/cmd/listresources/listresources.go b/druidctl/cmd/listresources/listresources.go
+index e670855..f63f70d 100644
+--- a/druidctl/cmd/listresources/listresources.go
++++ b/druidctl/cmd/listresources/listresources.go
+@@ -15,8 +15,10 @@ import (
+ 	"github.com/gardener/etcd-druid/druidctl/internal/log"
+ 	"github.com/gardener/etcd-druid/druidctl/internal/printer"
+ 
++	"k8s.io/apimachinery/pkg/api/meta"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
++	"k8s.io/apimachinery/pkg/runtime/schema"
+ )
+ 
+ // ResourceKey identifies a Kubernetes resource kind by group/version/resource/Kind.
+@@ -104,8 +106,7 @@ func (l *listResourcesCmdCtx) execute(ctx context.Context) error {
+ 	if len(tokens) == 0 || (len(tokens) == 1 && tokens[0] == "all") {
+ 		tokens = defaultResourceTokens()
+ 	}
+-	resolver := newRESTMapperResolver(genClient.RESTMapper())
+-	metas, err := resolver.resolve(tokens)
++	resourceMappings, err := resolveResourceMappings(genClient.RESTMapper(), tokens)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -134,20 +135,20 @@ func (l *listResourcesCmdCtx) execute(ctx context.Context) error {
+ 		}
+ 
+ 		labelSelector := fmt.Sprintf("app.kubernetes.io/part-of=%s", etcd.Name)
+-		for _, resMeta := range metas {
++		for _, mapping := range resourceMappings {
+ 			resourceNamespace := ""
+-			if resMeta.Namespaced {
++			if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
+ 				resourceNamespace = etcd.Namespace
+ 			}
+-			resourceList, err := genClient.Dynamic().Resource(resMeta.GVR).Namespace(resourceNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
++			resourceList, err := genClient.Dynamic().Resource(mapping.Resource).Namespace(resourceNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+ 			if err != nil {
+-				out.Warning(l.IOStreams.Out, "Failed to list ", resMeta.GVR.Resource, " for etcd ", etcd.Name, ": ", err.Error())
++				out.Warning(l.IOStreams.Out, "Failed to list ", mapping.Resource.Resource, " for etcd ", etcd.Name, ": ", err.Error())
+ 				continue
+ 			}
+ 			if len(resourceList.Items) == 0 {
+ 				continue
+ 			}
+-			resourceKey := ResourceKey{Group: resMeta.GVR.Group, Version: resMeta.GVR.Version, Resource: resMeta.GVR.Resource, Kind: resMeta.Kind}
++			resourceKey := ResourceKey{Group: mapping.Resource.Group, Version: mapping.Resource.Version, Resource: mapping.Resource.Resource, Kind: mapping.GroupVersionKind.Kind}
+ 			for _, item := range resourceList.Items {
+ 				found := false
+ 				for idx, resourceListPerKey := range etcdResult.Items {
+@@ -225,6 +226,55 @@ func defaultResourceTokens() []string {
+ 	return []string{"po", "sts", "svc", "cm", "secret", "pvc", "lease", "pdb", "role", "rolebinding", "sa"}
+ }
+ 
++func resolveResourceMappings(mapper meta.RESTMapper, tokens []string) ([]*meta.RESTMapping, error) {
++	if len(tokens) == 0 {
++		return nil, fmt.Errorf("no resource tokens provided")
++	}
++
++	resourceMappings := make([]*meta.RESTMapping, 0, len(tokens))
++	seen := map[schema.GroupVersionResource]struct{}{}
++	var unknown []string
++	for _, token := range tokens {
++		mapping, err := resolveResourceMapping(mapper, token)
++		if err != nil {
++			unknown = append(unknown, token)
++			continue
++		}
++		if _, ok := seen[mapping.Resource]; ok {
++			continue
++		}
++		seen[mapping.Resource] = struct{}{}
++		resourceMappings = append(resourceMappings, mapping)
++	}
++
++	if len(unknown) > 0 {
++		return nil, fmt.Errorf("unknown resource tokens: %v", unknown)
++	}
++
++	return resourceMappings, nil
++}
++
++func resolveResourceMapping(mapper meta.RESTMapper, token string) (*meta.RESTMapping, error) {
++	resource, err := mapper.ResourceFor(schema.GroupVersionResource{Resource: token})
++	if err == nil {
++		return restMappingForResource(mapper, resource)
++	}
++
++	kind, err := mapper.KindFor(schema.GroupVersionResource{Resource: token})
++	if err != nil {
++		return nil, err
++	}
++	return mapper.RESTMapping(kind.GroupKind(), kind.Version)
++}
++
++func restMappingForResource(mapper meta.RESTMapper, resource schema.GroupVersionResource) (*meta.RESTMapping, error) {
++	kind, err := mapper.KindFor(resource)
++	if err != nil {
++		return nil, err
++	}
++	return mapper.RESTMapping(kind.GroupKind(), kind.Version)
++}
++
+ func toResourceRef(u *unstructured.Unstructured) ResourceRef {
+ 	age := time.Since(u.GetCreationTimestamp().Time)
+ 	return ResourceRef{

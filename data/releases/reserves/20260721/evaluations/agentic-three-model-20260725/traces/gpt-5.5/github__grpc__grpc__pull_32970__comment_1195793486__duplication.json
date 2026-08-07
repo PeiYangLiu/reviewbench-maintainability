@@ -1,0 +1,139 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 200,
+      "path": "src/core/lib/gprpp/match.h",
+      "start_line": 1
+    },
+    "response_chars": 83,
+    "round": 1,
+    "tool_result": {
+      "content": "1: // Copyright 2021 gRPC authors.\n2: //\n3: // Licensed under the Apache License, Version 2.0 (the \"License\");\n4: // you may not use this file except in compliance with the License.\n5: // You may obtain a copy of the License at\n6: //\n7: //     http://www.apache.org/licenses/LICENSE-2.0\n8: //\n9: // Unless required by applicable law or agreed to in writing, software\n10: // distributed under the License is distributed on an \"AS IS\" BASIS,\n11: // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n12: // See the License for the specific language governing permissions and\n13: // limitations under the License.\n14: \n15: #ifndef GRPC_SRC_CORE_LIB_GPRPP_MATCH_H\n16: #define GRPC_SRC_CORE_LIB_GPRPP_MATCH_H\n17: \n18: #include <grpc/support/port_platform.h>\n19: \n20: #include <type_traits>\n21: \n22: #include \"absl/types/variant.h\"\n23: \n24: #include \"src/core/lib/gprpp/overload.h\"\n25: \n26: namespace grpc_core {\n27: \n28: namespace detail {\n29: \n30: template <typename... Cases>\n31: struct MatchPointerExtractor {\n32:   OverloadType<Cases...> cases;\n33:   template <typename T>\n34:   auto operator()(T& value) -> decltype(cases(&value)) {\n35:     return cases(&value);\n36:   }\n37: };\n38: \n39: }  // namespace detail\n40: \n41: /// Match on a variant.\n42: /// Given variant \\a value, and a set of callables \\a fs, call the appropriate\n43: /// callable based on the type contained in \\a value.\n44: ///\n45: /// Example (prints \"hoorah\"):\n46: ///   variant<int, string> v = 42;\n47: ///   Match(v,\n48: ///         [](int i) { puts(\"hoorah\"); },\n49: ///         [](string s) { puts(\"boo\"); });\n50: template <typename... Fs, typename T0, typename... Ts>\n51: auto Match(const absl::variant<T0, Ts...>& value, Fs... fs)\n52:     -> decltype(std::declval<OverloadType<Fs...>>()(std::declval<T0>())) {\n53:   return absl::visit(Overload(std::move(fs)...), value);\n54: }\n55: \n56: /// A version of Match that takes a mutable pointer to a variant and calls its\n57: /// overload callables with a mutable pointer to the current variant value.\n58: ///\n59: /// Example:\n60: ///   variant<int, string> v = 42;\n61: ///   MatchMutable(&v,\n62: ///                [](int* i) { *i = 1; },\n63: ///                [](string* s) { *s = \"foo\"; });\n64: ///   // v now contains 1.\n65: template <typename... Fs, typename T0, typename... Ts>\n66: auto MatchMutable(absl::variant<T0, Ts...>* value, Fs... fs)\n67:     -> decltype(std::declval<OverloadType<Fs...>>()(std::declval<T0*>())) {\n68:   return absl::visit(detail::MatchPointerExtractor<Fs...>{OverloadType<Fs...>(\n69:                          std::move(fs)...)},\n70:                      *value);\n71: }\n72: \n73: }  // namespace grpc_core\n74: \n75: #endif  // GRPC_SRC_CORE_LIB_GPRPP_MATCH_H",
+      "end_line": 75,
+      "path_lines": 75,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 1725,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 120,
+      "output_tokens_details": {
+        "reasoning_tokens": 87
+      },
+      "total_tokens": 1845
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "#include \"src/core/lib/gprpp/match.h\"\n#include \"src/core/lib/gprpp/validation_errors.h\"",
+          "end_line": 33,
+          "start_line": 33
+        },
+        {
+          "content": "absl::optional<Json> ValidateAndWrapAuditLoggerConfig(\n    absl::string_view name, Json json_config, ValidationErrors* errors) {\n  auto result = AuditLoggerRegistry::ParseConfig(name, json_config);\n  if (!result.ok()) {\n    errors->AddError(result.status().message());\n    return Json();\n  }\n  return Json::FromObject({{std::string(name), std::move(json_config)}});\n}\n\n}  // namespace",
+          "end_line": 61,
+          "start_line": 61
+        },
+        {
+          "content": "    auto result = MatchMutable(\n        &extension->value,\n        [this, &context, &extension, errors](absl::string_view* serialized_value)\n            -> absl::optional<Json> {\n          auto config_factory_it =\n              audit_logger_config_factories_.find(extension->type);\n          if (config_factory_it == audit_logger_config_factories_.end()) {\n            return absl::nullopt;\n          }\n          auto json_config = Json::FromObject(\n              config_factory_it->second->ConvertXdsAuditLoggerConfig(\n                  context, *serialized_value, errors));\n          return ValidateAndWrapAuditLoggerConfig(\n              config_factory_it->second->name(), std::move(json_config), errors);\n        },\n        [&extension, errors](Json* json) -> absl::optional<Json> {\n          if (!AuditLoggerRegistry::FactoryExists(extension->type)) {\n            return absl::nullopt;\n          }\n          return ValidateAndWrapAuditLoggerConfig(extension->type,\n                                                 std::move(*json), errors);\n        });\n    if (result.has_value()) return std::move(*result);",
+          "end_line": 119,
+          "start_line": 88
+        }
+      ]
+    },
+    "response_chars": 1907,
+    "round": 2,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 33,
+          "replacement_lines": 2,
+          "start_line": 33
+        },
+        {
+          "end_line": 61,
+          "replacement_lines": 11,
+          "start_line": 61
+        },
+        {
+          "end_line": 119,
+          "replacement_lines": 23,
+          "start_line": 88
+        }
+      ],
+      "current_file_lines": 130,
+      "updated_excerpt": {
+        "content": "23: \n24: #include \"absl/status/status.h\"\n25: #include \"absl/status/statusor.h\"\n26: #include \"absl/strings/string_view.h\"\n27: #include \"absl/types/optional.h\"\n28: #include \"absl/types/variant.h\"\n29: #include \"envoy/config/core/v3/extension.upb.h\"\n30: #include \"envoy/config/rbac/v3/rbac.upb.h\"\n31: \n32: #include \"src/core/ext/xds/xds_common_types.h\"\n33: #include \"src/core/lib/gprpp/match.h\"\n34: #include \"src/core/lib/gprpp/validation_errors.h\"\n35: #include \"src/core/lib/security/authorization/audit_logging.h\"\n36: \n37: namespace grpc_core {\n38: \n39: namespace {\n40: \n41: using experimental::AuditLoggerRegistry;\n42: \n43: class StdoutLoggerConfigFactory : public XdsAuditLoggerRegistry::ConfigFactory {\n44:  public:\n45:   Json::Object ConvertXdsAuditLoggerConfig(\n46:       const XdsResourceType::DecodeContext& /*context*/,\n47:       absl::string_view /*configuration*/,\n48:       ValidationErrors* /*errors*/) override {\n49:     // Stdout logger has no configuration right now. So we don't process the\n50:     // config protobuf.\n51:     return {};\n52:   }\n53: \n54:   absl::string_view type() override { return Type(); }\n55:   absl::string_view name() override { return \"stdout_logger\"; }\n56: \n57:   static absl::string_view Type() {\n58:     return \"envoy.extensions.rbac.audit_loggers.stream.v3.StdoutAuditLog\";\n59:   }\n60: };\n61: \n62: absl::optional<Json> ValidateAndWrapAuditLoggerConfig(\n63:     absl::string_view name, Json json_config, ValidationErrors* errors) {",
+        "end_line": 63,
+        "path_lines": 130,
+        "start_line": 23
+      }
+    },
+    "usage": {
+      "input_tokens": 2679,
+      "input_tokens_details": {
+        "cached_tokens": 1280
+      },
+      "output_tokens": 2089,
+      "output_tokens_details": {
+        "reasoning_tokens": 1599
+      },
+      "total_tokens": 4768
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 130,
+      "path": "src/core/ext/xds/xds_audit_logger_registry.cc",
+      "start_line": 55
+    },
+    "response_chars": 309,
+    "round": 3,
+    "tool_result": {
+      "content": "55:   absl::string_view name() override { return \"stdout_logger\"; }\n56: \n57:   static absl::string_view Type() {\n58:     return \"envoy.extensions.rbac.audit_loggers.stream.v3.StdoutAuditLog\";\n59:   }\n60: };\n61: \n62: absl::optional<Json> ValidateAndWrapAuditLoggerConfig(\n63:     absl::string_view name, Json json_config, ValidationErrors* errors) {\n64:   auto result = AuditLoggerRegistry::ParseConfig(name, json_config);\n65:   if (!result.ok()) {\n66:     errors->AddError(result.status().message());\n67:     return Json();\n68:   }\n69:   return Json::FromObject({{std::string(name), std::move(json_config)}});\n70: }\n71: \n72: }  // namespace\n73: \n74: XdsAuditLoggerRegistry::XdsAuditLoggerRegistry() {\n75:   audit_logger_config_factories_.emplace(\n76:       StdoutLoggerConfigFactory::Type(),\n77:       std::make_unique<StdoutLoggerConfigFactory>());\n78: }\n79: \n80: Json XdsAuditLoggerRegistry::ConvertXdsAuditLoggerConfig(\n81:     const XdsResourceType::DecodeContext& context,\n82:     const envoy_config_rbac_v3_RBAC_AuditLoggingOptions_AuditLoggerConfig*\n83:         logger_config,\n84:     ValidationErrors* errors) const {\n85:   const auto* typed_extension_config =\n86:       envoy_config_rbac_v3_RBAC_AuditLoggingOptions_AuditLoggerConfig_audit_logger(\n87:           logger_config);\n88:   ValidationErrors::ScopedField field(errors, \".audit_logger\");\n89:   if (typed_extension_config == nullptr) {\n90:     errors->AddError(\"field not present\");\n91:     return Json();  // A null Json object.\n92:   } else {\n93:     ValidationErrors::ScopedField field(errors, \".typed_config\");\n94:     const auto* typed_config =\n95:         envoy_config_core_v3_TypedExtensionConfig_typed_config(\n96:             typed_extension_config);\n97:     auto extension = ExtractXdsExtension(context, typed_config, errors);\n98:     if (!extension.has_value()) return Json();\n99:     auto result = MatchMutable(\n100:         &extension->value,\n101:         [this, &context, &extension, errors](absl::string_view* serialized_value)\n102:             -> absl::optional<Json> {\n103:           auto config_factory_it =\n104:               audit_logger_config_factories_.find(extension->type);\n105:           if (config_factory_it == audit_logger_config_factories_.end()) {\n106:             return absl::nullopt;\n107:           }\n108:           auto json_config = Json::FromObject(\n109:               config_factory_it->second->ConvertXdsAuditLoggerConfig(\n110:                   context, *serialized_value, errors));\n111:           return ValidateAndWrapAuditLoggerConfig(\n112:               config_factory_it->second->name(), std::move(json_config), errors);\n113:         },\n114:         [&extension, errors](Json* json) -> absl::optional<Json> {\n115:           if (!AuditLoggerRegistry::FactoryExists(extension->type)) {\n116:             return absl::nullopt;\n117:           }\n118:           return ValidateAndWrapAuditLoggerConfig(extension->type,\n119:                                                  std::move(*json), errors);\n120:         });\n121:     if (result.has_value()) return std::move(*result);\n122:   }\n123:   // Add validation error only if the config is not marked optional.\n124:   if (!envoy_config_rbac_v3_RBAC_AuditLoggingOptions_AuditLoggerConfig_is_optional(\n125:           logger_config)) {\n126:     errors->AddError(\"unsupported audit logger type\");\n127:   }\n128:   return Json();\n129: }\n130: }  // namespace grpc_core",
+      "end_line": 130,
+      "path_lines": 130,
+      "start_line": 55
+    },
+    "usage": {
+      "input_tokens": 3712,
+      "input_tokens_details": {
+        "cached_tokens": 2304
+      },
+      "output_tokens": 735,
+      "output_tokens_details": {
+        "reasoning_tokens": 625
+      },
+      "total_tokens": 4447
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 4,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__grpc__grpc__pull_32970__comment_1195793486__duplication.patch"
+    },
+    "usage": {
+      "input_tokens": 4724,
+      "input_tokens_details": {
+        "cached_tokens": 3328
+      },
+      "output_tokens": 527,
+      "output_tokens_details": {
+        "reasoning_tokens": 516
+      },
+      "total_tokens": 5251
+    }
+  }
+]

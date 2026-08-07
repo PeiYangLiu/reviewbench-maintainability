@@ -1,0 +1,151 @@
+--- a/packages/dds/merge-tree/src/partialLengths.ts
++++ b/packages/dds/merge-tree/src/partialLengths.ts
+@@ -439,26 +439,36 @@
+ 		return bst;
+ 	}
+ 
++	private static accumulateOverlap(
++		tree: RedBlackTree<number, IOverlapClient> | undefined,
++		clientIds: number[],
++		seglen: number,
++	): RedBlackTree<number, IOverlapClient> {
++		if (tree) {
++			for (const clientId of clientIds) {
++				const overlapClientNode = tree.get(clientId);
++				if (!overlapClientNode) {
++					tree.put(clientId, { clientId, seglen });
++				} else {
++					overlapClientNode.data.seglen += seglen;
++				}
++			}
++			return tree;
++		} else {
++			return PartialSequenceLengths.getOverlapClients(clientIds, seglen);
++		}
++	}
++
+ 	private static accumulateRemoveClientOverlap(
+ 		partialLength: PartialSequenceLength,
+ 		overlapRemoveClientIds: number[],
+ 		seglen: number,
+ 	) {
+-		if (partialLength.overlapRemoveClients) {
+-			for (const clientId of overlapRemoveClientIds) {
+-				const overlapClientNode = partialLength.overlapRemoveClients.get(clientId);
+-				if (!overlapClientNode) {
+-					partialLength.overlapRemoveClients.put(clientId, { clientId, seglen });
+-				} else {
+-					overlapClientNode.data.seglen += seglen;
+-				}
+-			}
+-		} else {
+-			partialLength.overlapRemoveClients = PartialSequenceLengths.getOverlapClients(
+-				overlapRemoveClientIds,
+-				seglen,
+-			);
+-		}
++		partialLength.overlapRemoveClients = PartialSequenceLengths.accumulateOverlap(
++			partialLength.overlapRemoveClients,
++			overlapRemoveClientIds,
++			seglen,
++		);
+ 	}
+ 
+ 	private static accumulateMoveClientOverlap(
+@@ -466,21 +476,11 @@
+ 		overlapMoveClientIds: number[],
+ 		seglen: number,
+ 	) {
+-		if (partialLength.overlapObliterateClients) {
+-			for (const clientId of overlapMoveClientIds) {
+-				const overlapClientNode = partialLength.overlapObliterateClients.get(clientId);
+-				if (!overlapClientNode) {
+-					partialLength.overlapObliterateClients.put(clientId, { clientId, seglen });
+-				} else {
+-					overlapClientNode.data.seglen += seglen;
+-				}
+-			}
+-		} else {
+-			partialLength.overlapObliterateClients = PartialSequenceLengths.getOverlapClients(
+-				overlapMoveClientIds,
+-				seglen,
+-			);
+-		}
++		partialLength.overlapObliterateClients = PartialSequenceLengths.accumulateOverlap(
++			partialLength.overlapObliterateClients,
++			overlapMoveClientIds,
++			seglen,
++		);
+ 	}
+ 
+ 	static accumulateMoveOverlapForExisting(
+@@ -1305,40 +1305,36 @@
+  *
+  * Combination is performed additively on `seglen` on a per-client basis.
+  */
++function combineRBTrees(
++	a: RedBlackTree<number, IOverlapClient> | undefined,
++	b: RedBlackTree<number, IOverlapClient> | undefined,
++): RedBlackTree<number, IOverlapClient> | undefined {
++	if (!a) {
++		return cloneOverlapRemoveClients(b);
++	}
++	if (b) {
++		b.map((bProp: Property<number, IOverlapClient>) => {
++			const aProp = a.get(bProp.key);
++			if (aProp) {
++				aProp.data.seglen += bProp.data.seglen;
++			} else {
++				a.put(bProp.data.clientId, { ...bProp.data });
++			}
++			return true;
++		});
++	}
++	return a;
++}
++
++/**
++ * Combines the `overlapRemoveClients` field of two `PartialSequenceLength` objects,
++ * modifying the first PartialSequenceLength's bookkeeping in-place.
++ *
++ * Combination is performed additively on `seglen` on a per-client basis.
++ */
+ export function combineOverlapClients(a: PartialSequenceLength, b: PartialSequenceLength) {
+-	const overlapRemoveClientsA = a.overlapRemoveClients;
+-	if (overlapRemoveClientsA) {
+-		if (b.overlapRemoveClients) {
+-			b.overlapRemoveClients.map((bProp: Property<number, IOverlapClient>) => {
+-				const aProp = overlapRemoveClientsA.get(bProp.key);
+-				if (aProp) {
+-					aProp.data.seglen += bProp.data.seglen;
+-				} else {
+-					overlapRemoveClientsA.put(bProp.data.clientId, { ...bProp.data });
+-				}
+-				return true;
+-			});
+-		}
+-	} else {
+-		a.overlapRemoveClients = cloneOverlapRemoveClients(b.overlapRemoveClients);
+-	}
+-
+-	const overlapObliterateClientsA = a.overlapObliterateClients;
+-	if (overlapObliterateClientsA) {
+-		if (b.overlapObliterateClients) {
+-			b.overlapObliterateClients.map((bProp: Property<number, IOverlapClient>) => {
+-				const aProp = overlapObliterateClientsA.get(bProp.key);
+-				if (aProp) {
+-					aProp.data.seglen += bProp.data.seglen;
+-				} else {
+-					overlapObliterateClientsA.put(bProp.data.clientId, { ...bProp.data });
+-				}
+-				return true;
+-			});
+-		}
+-	} else {
+-		a.overlapObliterateClients = cloneOverlapRemoveClients(b.overlapObliterateClients);
+-	}
++	a.overlapRemoveClients = combineRBTrees(a.overlapRemoveClients, b.overlapRemoveClients);
++	a.overlapObliterateClients = combineRBTrees(a.overlapObliterateClients, b.overlapObliterateClients);
+ }
+ 
+ /**

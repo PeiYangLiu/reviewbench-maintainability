@@ -1,0 +1,45 @@
+diff --git a/internal/telemetry/client.go b/internal/telemetry/client.go
+index abd1a96..bd3ba64 100644
+--- a/internal/telemetry/client.go
++++ b/internal/telemetry/client.go
+@@ -126,6 +126,8 @@ type client struct {
+ 	// https://dtdg.co/3bv2MMv.
+ 	// DD_INSTRUMENTATION_TELEMETRY_DEBUG configures this field.
+ 	debug bool
++	// syncFlushOnStop makes Stop() block until the final flush completes.
++	syncFlushOnStop bool
+ 	// started is true in between when Start() returns and the next call to
+ 	// Stop()
+ 	started bool
+@@ -186,6 +188,7 @@ func (c *client) start(configuration []Configuration, namespace Namespace, flush
+ 	c.started = true
+ 	c.metrics = make(map[Namespace]map[string]*metric)
+ 	c.debug = internal.BoolEnv("DD_INSTRUMENTATION_TELEMETRY_DEBUG", false)
++	c.syncFlushOnStop = c.syncFlushOnStop || internal.BoolEnv("DD_CIVISIBILITY_ENABLED", false)
+ 
+ 	productInfo := Products{
+ 		AppSec: ProductDetails{
+@@ -280,7 +283,7 @@ func (c *client) Stop() {
+ 	// close request types have no body
+ 	r := c.newRequest(RequestTypeAppClosing)
+ 	c.scheduleSubmit(r)
+-	if internal.BoolEnv("DD_CIVISIBILITY_ENABLED", false) {
++	if c.syncFlushOnStop {
+ 		cnn := make(chan struct{})
+ 		c.flushWithCallback(func() {
+ 			cnn <- struct{}{}
+@@ -292,6 +295,14 @@ func (c *client) Stop() {
+ 	}
+ }
+ 
++// WithSyncFlushOnStop configures the telemetry client so that Stop() blocks
++// until the final flush of outstanding telemetry completes. Usable with ApplyOps.
++func WithSyncFlushOnStop() Option {
++	return func(client *client) {
++		client.syncFlushOnStop = true
++	}
++}
++
+ // Disabled returns whether instrumentation telemetry is disabled
+ // according to the DD_INSTRUMENTATION_TELEMETRY_ENABLED env var
+ func Disabled() bool {

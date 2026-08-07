@@ -1,0 +1,80 @@
+diff --git a/internal/vendors/asrockrack/asrockrack.go b/internal/vendors/asrockrack/asrockrack.go
+index f903455..2f27970 100644
+--- a/internal/vendors/asrockrack/asrockrack.go
++++ b/internal/vendors/asrockrack/asrockrack.go
+@@ -25,6 +25,8 @@ type ASRockRack struct {
+ 	dstCfg    *config.S3Bucket
+ }
+ 
++var errFirmwareExists = errors.New("firmware already exists at dst")
++
+ func New(ctx context.Context, firmwares []*serverservice.ComponentFirmwareVersion, cfgSyncer *config.Syncer, logger *logrus.Logger) (vendors.Vendor, error) {
+ 	// RepositoryURL required
+ 	if cfgSyncer.RepositoryURL == "" {
+@@ -88,7 +90,7 @@ func (a *ASRockRack) Sync(ctx context.Context) error {
+ 			},
+ 		).Info("sync ASRockRack")
+ 
+-		err := a.copyFile(ctx, fw)
++		err := a.syncFile(ctx, fw)
+ 		if err != nil {
+ 			return err
+ 		}
+@@ -123,7 +125,7 @@ func (a *ASRockRack) initRcloneFs(ctx context.Context, fw *serverservice.Compone
+ 	return dstFs, tmpFs, srcFs, nil
+ }
+ 
+-func (a *ASRockRack) copyFile(ctx context.Context, fw *serverservice.ComponentFirmwareVersion) error {
++func (a *ASRockRack) syncFile(ctx context.Context, fw *serverservice.ComponentFirmwareVersion) error {
+ 	var err error
+ 
+ 	dstFs, tmpFs, srcFs, err := a.initRcloneFs(ctx, fw, a.logger)
+@@ -133,11 +135,7 @@ func (a *ASRockRack) copyFile(ctx context.Context, fw *serverservice.ComponentFi
+ 
+ 	// In case the file already exists in dst, don't verify/copy it
+ 	if exists, _ := rcloneFs.FileExists(ctx, dstFs, vendors.DstPath(fw)); exists {
+-		a.logger.WithFields(
+-			logrus.Fields{
+-				"filename": fw.Filename,
+-			},
+-		).Debug("firmware already exists at dst")
++		a.logExistingFirmware(fw)
+ 
+ 		return nil
+ 	}
+@@ -147,7 +145,22 @@ func (a *ASRockRack) copyFile(ctx context.Context, fw *serverservice.ComponentFi
+ 		return err
+ 	}
+ 
+-	err = rcloneOperations.CopyFile(ctx, dstFs, srcFs, vendors.DstPath(fw), vendors.SrcPath(fw))
++	err = a.copyFile(ctx, fw, dstFs, srcFs)
++	if errors.Is(err, errFirmwareExists) {
++		a.logExistingFirmware(fw)
++
++		return nil
++	}
++
++	return err
++}
++
++func (a *ASRockRack) copyFile(ctx context.Context, fw *serverservice.ComponentFirmwareVersion, dstFs, srcFs rcloneFs.Fs) error {
++	if exists, _ := rcloneFs.FileExists(ctx, dstFs, vendors.DstPath(fw)); exists {
++		return errFirmwareExists
++	}
++
++	err := rcloneOperations.CopyFile(ctx, dstFs, srcFs, vendors.DstPath(fw), vendors.SrcPath(fw))
+ 	if err != nil {
+ 		if errors.Is(err, rcloneFs.ErrorObjectNotFound) {
+ 			return errors.Wrap(vendors.ErrCopy, err.Error()+" :"+fw.Filename)
+@@ -158,3 +171,11 @@ func (a *ASRockRack) copyFile(ctx context.Context, fw *serverservice.ComponentFi
+ 
+ 	return nil
+ }
++
++func (a *ASRockRack) logExistingFirmware(fw *serverservice.ComponentFirmwareVersion) {
++	a.logger.WithFields(
++		logrus.Fields{
++			"filename": fw.Filename,
++		},
++	).Debug("firmware already exists at dst")
++}

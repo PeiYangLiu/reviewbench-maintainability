@@ -1,0 +1,46 @@
+--- a/workflow/controller/exec_control.go
++++ b/workflow/controller/exec_control.go
+@@ -74,6 +74,22 @@
+ 	}
+ }
+ 
++// getTransientChildren returns the given node and all of its descendants
++func (woc *wfOperationCtx) getTransientChildren(nodeID string) []wfv1.NodeStatus {
++	node := woc.wf.Status.Nodes[nodeID]
++	children := []wfv1.NodeStatus{}
++	q := []wfv1.NodeStatus{node}
++	for len(q) > 0 {
++		childNode := q[0]
++		q = q[1:]
++		for _, childID := range childNode.Children {
++			q = append(q, woc.wf.Status.Nodes[childID])
++		}
++		children = append(children, childNode)
++	}
++	return children
++}
++
+ // handleExecutionControlError marks a node as failed with an error message
+ func (woc *wfOperationCtx) handleExecutionControlError(nodeID string, wfNodesLock *sync.RWMutex, errorMsg string) {
+ 	wfNodesLock.Lock()
+@@ -82,19 +98,7 @@
+ 	node := woc.wf.Status.Nodes[nodeID]
+ 	woc.markNodePhase(node.Name, wfv1.NodeFailed, errorMsg)
+ 
+-	children := []wfv1.NodeStatus{}
+-	q := []wfv1.NodeStatus{node}
+-	for {
+-		if len(q) <= 0 {
+-			break
+-		}
+-		childNode := q[0]
+-		q = q[1:]
+-		for _, nodeID := range childNode.Children {
+-			q = append(q, woc.wf.Status.Nodes[nodeID])
+-		}
+-		children = append(children, childNode)
+-	}
++	children := woc.getTransientChildren(nodeID)
+ 
+ 	// if node is a pod created from ContainerSet template
+ 	// then need to fail child nodes so they will not hang in Pending after pod deletion

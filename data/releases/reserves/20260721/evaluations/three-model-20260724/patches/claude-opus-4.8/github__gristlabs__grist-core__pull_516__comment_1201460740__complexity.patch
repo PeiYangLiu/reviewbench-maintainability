@@ -1,0 +1,150 @@
+--- a/app/server/lib/NSandbox.ts
++++ b/app/server/lib/NSandbox.ts
+@@ -140,61 +140,9 @@
+     this._logMeta = {sandboxPid: this.childProc?.pid, ...options.logMeta};
+ 
+     if (this.childProc) {
+-      if (options.minimalPipeMode) {
+-        log.rawDebug("3-pipe Sandbox started", this._logMeta);
+-        if (sandboxProcess.dataToSandboxDescriptor) {
+-          this._streamToSandbox =
+-            (this.childProc.stdio as Stream[])[sandboxProcess.dataToSandboxDescriptor] as Writable;
+-        } else {
+-          this._streamToSandbox = this.childProc.stdin!;
+-        }
+-        if (sandboxProcess.dataFromSandboxDescriptor) {
+-          this._streamFromSandbox =
+-            (this.childProc.stdio as Stream[])[sandboxProcess.dataFromSandboxDescriptor];
+-        } else {
+-          this._streamFromSandbox = this.childProc.stdout!;
+-        }
+-      } else {
+-        log.rawDebug("5-pipe Sandbox started", this._logMeta);
+-        if (sandboxProcess.dataFromSandboxDescriptor || sandboxProcess.dataToSandboxDescriptor) {
+-          throw new Error('cannot override file descriptors in 5 pipe mode');
+-        }
+-        this._streamToSandbox = (this.childProc.stdio as Stream[])[3] as Writable;
+-        this._streamFromSandbox = (this.childProc.stdio as Stream[])[4];
+-        this.childProc.stdout!.on('data', sandboxUtil.makeLinePrefixer('Sandbox stdout: ', this._logMeta));
+-      }
+-      const sandboxStderrLogger = sandboxUtil.makeLinePrefixer('Sandbox stderr: ', this._logMeta);
+-      this.childProc.stderr!.on('data', data => {
+-        this._lastStderr = data;
+-        sandboxStderrLogger(data);
+-      });
+-
+-      this.childProc.on('close', this._onExit.bind(this));
+-      this.childProc.on('error', this._onError.bind(this));
+-
+-      this._streamFromSandbox.on('data', (data) => this._onSandboxData(data));
+-      this._streamFromSandbox.on('end', () => this._onSandboxClose());
+-      this._streamFromSandbox.on('error', (err) => {
+-        log.rawError(`Sandbox error reading: ${err}`, this._logMeta);
+-        this._onSandboxClose();
+-      });
+-
+-      this._streamToSandbox.on('error', (err) => {
+-        if (!this._isWriteClosed) {
+-          log.rawError(`Sandbox error writing: ${err}`, this._logMeta);
+-        }
+-      });
++      this._initializeChildProcess(this.childProc, sandboxProcess, options);
+     } else {
+-      // No child process. In this case, there should be a callback for
+-      // receiving and sending data.
+-      if (!sandboxProcess.getData) {
+-        throw new Error('no way to get data from sandbox');
+-      }
+-      if (!sandboxProcess.sendData) {
+-        throw new Error('no way to send data to sandbox');
+-      }
+-      sandboxProcess.getData((data) => this._onSandboxData(data));
+-      this._dataToSandbox = sandboxProcess.sendData;
++      this._initializeCallbacks(sandboxProcess);
+     }
+ 
+     // On shutdown, shutdown the child process cleanly, and wait for it to exit.
+@@ -204,6 +152,83 @@
+       log.rawDebug(`Recording sandbox buffers in ${this._recordBuffersDir}`, this._logMeta);
+       fs.mkdirSync(this._recordBuffersDir, {recursive: true});
+     }
++  }
++
++  /**
++   * Wire up the data streams and lifecycle handlers for a sandbox backed by a
++   * child process.
++   */
++  private _initializeChildProcess(childProc: ChildProcess, sandboxProcess: SandboxProcess,
++                                  options: ISandboxOptions) {
++    if (options.minimalPipeMode) {
++      this._setupMinimalPipes(childProc, sandboxProcess);
++    } else {
++      this._setupFivePipes(childProc, sandboxProcess);
++    }
++
++    const sandboxStderrLogger = sandboxUtil.makeLinePrefixer('Sandbox stderr: ', this._logMeta);
++    childProc.stderr!.on('data', data => {
++      this._lastStderr = data;
++      sandboxStderrLogger(data);
++    });
++
++    childProc.on('close', this._onExit.bind(this));
++    childProc.on('error', this._onError.bind(this));
++
++    this._streamFromSandbox.on('data', (data) => this._onSandboxData(data));
++    this._streamFromSandbox.on('end', () => this._onSandboxClose());
++    this._streamFromSandbox.on('error', (err) => {
++      log.rawError(`Sandbox error reading: ${err}`, this._logMeta);
++      this._onSandboxClose();
++    });
++
++    this._streamToSandbox!.on('error', (err) => {
++      if (!this._isWriteClosed) {
++        log.rawError(`Sandbox error writing: ${err}`, this._logMeta);
++      }
++    });
++  }
++
++  /**
++   * Set up the newer 3-pipe operation, optionally using overridden file descriptors
++   * for the data streams.
++   */
++  private _setupMinimalPipes(childProc: ChildProcess, sandboxProcess: SandboxProcess) {
++    log.rawDebug("3-pipe Sandbox started", this._logMeta);
++    const stdio = childProc.stdio as Stream[];
++    this._streamToSandbox = sandboxProcess.dataToSandboxDescriptor ?
++      stdio[sandboxProcess.dataToSandboxDescriptor] as Writable : childProc.stdin!;
++    this._streamFromSandbox = sandboxProcess.dataFromSandboxDescriptor ?
++      stdio[sandboxProcess.dataFromSandboxDescriptor] : childProc.stdout!;
++  }
++
++  /**
++   * Set up the 5-pipe operation, using dedicated file descriptors 3 and 4 for data.
++   */
++  private _setupFivePipes(childProc: ChildProcess, sandboxProcess: SandboxProcess) {
++    log.rawDebug("5-pipe Sandbox started", this._logMeta);
++    if (sandboxProcess.dataFromSandboxDescriptor || sandboxProcess.dataToSandboxDescriptor) {
++      throw new Error('cannot override file descriptors in 5 pipe mode');
++    }
++    const stdio = childProc.stdio as Stream[];
++    this._streamToSandbox = stdio[3] as Writable;
++    this._streamFromSandbox = stdio[4];
++    childProc.stdout!.on('data', sandboxUtil.makeLinePrefixer('Sandbox stdout: ', this._logMeta));
++  }
++
++  /**
++   * Wire up a sandbox that communicates via callbacks rather than a child process
++   * (e.g. a web worker).
++   */
++  private _initializeCallbacks(sandboxProcess: SandboxProcess) {
++    if (!sandboxProcess.getData) {
++      throw new Error('no way to get data from sandbox');
++    }
++    if (!sandboxProcess.sendData) {
++      throw new Error('no way to send data to sandbox');
++    }
++    sandboxProcess.getData((data) => this._onSandboxData(data));
++    this._dataToSandbox = sandboxProcess.sendData;
+   }
+ 
+   /**

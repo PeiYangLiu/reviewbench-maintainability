@@ -1,0 +1,101 @@
+--- a/lib/srv/db/sqlserver/connect.go
++++ b/lib/srv/db/sqlserver/connect.go
+@@ -83,45 +83,9 @@
+ 		PacketSize:   loginPacket.PacketSize(),
+ 	}
+ 
+-	var connector *mssql.Connector
+-	if sessionCtx.Database.IsAzure() && sessionCtx.Database.GetAD().Domain == "" {
+-		// If the client is connecting to Azure SQL, and no AD configuration is
+-		// provided, authenticate using the Azure AD Integrated authentication
+-		// method.
+-		managedIdentityID, err := c.DBAuth.GetAzureIdentityResourceID(ctx, sessionCtx.DatabaseUser)
+-		if err != nil {
+-			return nil, nil, trace.Wrap(err)
+-		}
+-
+-		connector, err = azuread.NewConnectorFromConfig(dsnConfig, map[string]string{
+-			"fedauth":     azuread.ActiveDirectoryManagedIdentity,
+-			"resource id": managedIdentityID,
+-		})
+-		if err != nil {
+-			return nil, nil, trace.Wrap(err)
+-		}
+-	} else {
+-		var kt *client.Client
+-		if sessionCtx.Database.GetAD().KeytabFile != "" {
+-			kt, err = keytabClient(sessionCtx)
+-			if err != nil {
+-				return nil, nil, trace.Wrap(err)
+-			}
+-		} else if sessionCtx.Database.GetAD().KDCHostName != "" && sessionCtx.Database.GetAD().LDAPCert != "" {
+-			kt, err = kinitClient(ctx, sessionCtx, c.AuthClient, c.DataDir)
+-			if err != nil {
+-				return nil, nil, trace.Wrap(err)
+-			}
+-		} else {
+-			return nil, nil, trace.Wrap(fmt.Errorf("configuration must have either keytab or kdc_host_name and ldap_cert"))
+-		}
+-
+-		auth, err := c.getAuth(sessionCtx, kt)
+-		if err != nil {
+-			return nil, nil, trace.Wrap(err)
+-		}
+-
+-		connector = mssql.NewConnectorConfig(dsnConfig, auth)
++	connector, err := c.getConnector(ctx, sessionCtx, dsnConfig)
++	if err != nil {
++		return nil, nil, trace.Wrap(err)
+ 	}
+ 
+ 	conn, err := connector.Connect(ctx)
+@@ -138,3 +102,49 @@
+ 	// back to the client.
+ 	return mssqlConn.GetUnderlyingConn(), mssqlConn.GetLoginFlags(), nil
+ }
++
++// getConnector builds the mssql connector for the target SQL Server, choosing
++// the appropriate authentication method based on the session configuration.
++func (c *connector) getConnector(ctx context.Context, sessionCtx *common.Session, dsnConfig msdsn.Config) (*mssql.Connector, error) {
++	if sessionCtx.Database.IsAzure() && sessionCtx.Database.GetAD().Domain == "" {
++		// If the client is connecting to Azure SQL, and no AD configuration is
++		// provided, authenticate using the Azure AD Integrated authentication
++		// method.
++		managedIdentityID, err := c.DBAuth.GetAzureIdentityResourceID(ctx, sessionCtx.DatabaseUser)
++		if err != nil {
++			return nil, trace.Wrap(err)
++		}
++
++		connector, err := azuread.NewConnectorFromConfig(dsnConfig, map[string]string{
++			"fedauth":     azuread.ActiveDirectoryManagedIdentity,
++			"resource id": managedIdentityID,
++		})
++		if err != nil {
++			return nil, trace.Wrap(err)
++		}
++		return connector, nil
++	}
++
++	var kt *client.Client
++	var err error
++	if sessionCtx.Database.GetAD().KeytabFile != "" {
++		kt, err = keytabClient(sessionCtx)
++		if err != nil {
++			return nil, trace.Wrap(err)
++		}
++	} else if sessionCtx.Database.GetAD().KDCHostName != "" && sessionCtx.Database.GetAD().LDAPCert != "" {
++		kt, err = kinitClient(ctx, sessionCtx, c.AuthClient, c.DataDir)
++		if err != nil {
++			return nil, trace.Wrap(err)
++		}
++	} else {
++		return nil, trace.Wrap(fmt.Errorf("configuration must have either keytab or kdc_host_name and ldap_cert"))
++	}
++
++	auth, err := c.getAuth(sessionCtx, kt)
++	if err != nil {
++		return nil, trace.Wrap(err)
++	}
++
++	return mssql.NewConnectorConfig(dsnConfig, auth), nil
++}

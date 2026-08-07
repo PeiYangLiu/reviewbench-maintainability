@@ -1,0 +1,101 @@
+--- a/testbench/common.py
++++ b/testbench/common.py
+@@ -645,8 +645,17 @@
+     return dict()
+ 
+ 
++def __get_request_socket(request):
++    if platform.system().lower() == "windows":
++        channel = request.environ.get("waitress.channel", None)
++        if channel is not None:
++            return channel.socket
++        return None
++    return request.environ.get("gunicorn.socket", None)
++
++
+ def __get_streamer_response_fn(
+-    database, method, conn_or_channel, test_id, limit=4, chunk_size=4
++    database, method, connection_socket, test_id, limit=4, chunk_size=4
+ ):
+     def response_handler(data):
+         def streamer():
+@@ -660,8 +669,8 @@
+                     yield d[r:chunk_end]
+                 if bytes_yield >= limit:
+                     database.dequeue_next_instruction(test_id, method)
+-                    if conn_or_channel is not None:
+-                        conn_or_channel.close()
++                    if connection_socket is not None:
++                        connection_socket.close()
+                     # This exception is raised to abort the flow control. The
+                     # connection has already been closed, causing the client to
+                     # receive a "broken stream" or "connection reset by peer" error.
+@@ -699,9 +708,6 @@
+ def handle_retry_test_instruction(database, request, method):
+     upload_id = request.args.get("upload_id", None)
+     test_id = request.headers.get("x-retry-test-id", None)
+-    running_on_windows = False  # Default flag value.
+-    if platform.system().lower() == "windows":
+-        running_on_windows = True
+     if not test_id or not database.has_instructions_retry_test(test_id, method):
+         return __get_default_response_fn
+     next_instruction = database.peek_next_instruction(test_id, method)
+@@ -725,22 +731,12 @@
+         items = list(retry_connection_matches.groups())
+         if items[0] == "reset-connection":
+             database.dequeue_next_instruction(test_id, method)
+-            fd = None
+-            channel = None
+-            if running_on_windows:
+-                channel = request.environ.get("waitress.channel", None)
+-                if channel is not None:
+-                    channel.socket.setsockopt(
+-                        socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+-                    )
+-                    channel.close()
+-            else:
+-                fd = request.environ.get("gunicorn.socket", None)
+-                if fd is not None:
+-                    fd.setsockopt(
+-                        socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+-                    )
+-                    fd.close()
++            connection_socket = __get_request_socket(request)
++            if connection_socket is not None:
++                connection_socket.setsockopt(
++                    socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
++                )
++                connection_socket.close()
+             # This exception is raised to abort the flow control. The connection
+             # has already been closed, causing the client to receive a "connection
+             # reset by peer" (or a similar error). The exception is useful in
+@@ -750,12 +746,9 @@
+                 "Injected 'connection reset by peer' fault", 500
+             )
+         elif items[0] == "broken-stream":
+-            if running_on_windows:
+-                conn_or_channel = request.environ.get("waitress.channel", None)
+-            else:
+-                conn_or_channel = request.environ.get("gunicorn.socket", None)
++            connection_socket = __get_request_socket(request)
+             return __get_streamer_response_fn(
+-                database, method, conn_or_channel, test_id
++                database, method, connection_socket, test_id
+             )
+     broken_stream_after_bytes = (
+         testbench.common.retry_return_broken_stream_after_bytes.match(next_instruction)
+@@ -763,12 +756,9 @@
+     if broken_stream_after_bytes and method == "storage.objects.get":
+         items = list(broken_stream_after_bytes.groups())
+         after_bytes = int(items[0]) * 1024
+-        if running_on_windows:
+-            conn_or_channel = request.environ.get("waitress.channel", None)
+-        else:
+-            conn_or_channel = request.environ.get("gunicorn.socket", None)
++        connection_socket = __get_request_socket(request)
+         return __get_streamer_response_fn(
+-            database, method, conn_or_channel, test_id, limit=after_bytes
++            database, method, connection_socket, test_id, limit=after_bytes
+         )
+     error_after_bytes_matches = testbench.common.retry_return_error_after_bytes.match(
+         next_instruction

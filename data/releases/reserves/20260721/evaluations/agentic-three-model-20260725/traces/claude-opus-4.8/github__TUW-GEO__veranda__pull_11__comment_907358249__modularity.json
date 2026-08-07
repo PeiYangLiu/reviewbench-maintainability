@@ -1,0 +1,356 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 170,
+      "path": "src/veranda/raster/mosaic/geotiff.py",
+      "start_line": 1
+    },
+    "response_chars": 93,
+    "round": 1,
+    "tool_result": {
+      "content": "1: \"\"\" Raster data class managing I/O for multiple GeoTIFF files. \"\"\"\n2: \n3: import os\n4: import secrets\n5: import tempfile\n6: import xarray as xr\n7: import numpy as np\n8: import pandas as pd\n9: from osgeo import gdal\n10: from datetime import datetime\n11: from multiprocessing import Pool, RawArray\n12: \n13: from geospade.crs import SpatialRef\n14: from geospade.raster import Tile\n15: from geospade.raster import MosaicGeometry\n16: \n17: from veranda.utils import to_list\n18: from veranda.raster.native.geotiff import GeoTiffFile\n19: from veranda.raster.native.geotiff import create_vrt_file\n20: from veranda.raster.gdalport import GDAL_TO_NUMPY_DTYPE\n21: from veranda.raster.mosaic.base import RasterDataReader, RasterDataWriter, RasterAccess\n22: \n23: PROC_OBJS = {}\n24: \n25: \n26: def read_init(fr, am, sm, ad, dc, dk, fd):\n27:     \"\"\" Helper method for setting the entries of global variable `PROC_OBJS` to be available during multiprocessing. \"\"\"\n28:     PROC_OBJS['global_file_register'] = fr\n29:     PROC_OBJS['access_map'] = am\n30:     PROC_OBJS['shm_map'] = sm\n31:     PROC_OBJS['auto_decode'] = ad\n32:     PROC_OBJS['decoder'] = dc\n33:     PROC_OBJS['decoder_kwargs'] = dk\n34:     PROC_OBJS['stack_dimension'] = fd\n35: \n36: \n37: class GeoTiffAccess(RasterAccess):\n38:     \"\"\"\n39:     Helper class to build the link between indexes of the source array (access) and the target array (assignment).\n40:     The base class `RasterAccess` is extended with some properties needed for accessing GeoTIFF files.\n41: \n42:     \"\"\"\n43:     def __init__(self, src_raster_geom, dst_raster_geom, src_root_raster_geom=None):\n44:         \"\"\"\n45:         Constructor of `GeoTiffAccess`.\n46: \n47:         Parameters\n48:         ----------\n49:         src_raster_geom : geospade.raster.RasterGeometry\n50:             Raster geometry representing the extent and indices of the array to access.\n51:         dst_raster_geom : geospade.raster.RasterGeometry\n52:             Raster geometry representing the extent and indices of the array to assign.\n53:         src_root_raster_geom : geospade.raster.RasterGeometry, optional\n54:             Raster geometry representing the origin to which `src_raster_geom` should be referred to. Defaults to None,\n55:             i.e. the root parent of `src_raster_geom` is used.\n56: \n57:         \"\"\"\n58:         super().__init__(src_raster_geom, dst_raster_geom, src_root_raster_geom=src_root_raster_geom)\n59:         self.src_wkt = src_raster_geom.parent_root.sref.wkt\n60:         self.src_geotrans = src_raster_geom.parent_root.geotrans\n61:         self.src_shape = src_raster_geom.parent_root.shape\n62: \n63:     @property\n64:     def gdal_args(self):\n65:         \"\"\" 4-tuple : Prepares the needed positional arguments for GDAL's `ReadAsArray()` function. \"\"\"\n66:         min_row, min_col, max_row, max_col = self.src_window\n67:         n_cols, n_rows = max_col - min_col + 1, max_row - min_row + 1\n68:         return min_col, min_row, n_cols, n_rows\n69: \n70:     @property\n71:     def read_args(self):\n72:         \"\"\"\n73:         4-tuple : Prepares the needed positional arguments for the `read()` function of the internal GeoTIFF native.\n74:         \"\"\"\n75:         min_col, min_row, n_cols, n_rows = self.gdal_args\n76:         return min_row, min_col, n_rows, n_cols\n77: \n78: \n79: class GeoTiffReader(RasterDataReader):\n80:     \"\"\" Allows to read and manage a stack of GeoTIFF data. \"\"\"\n81:     def __init__(self, file_register, mosaic, stack_dimension='layer_id', stack_coords=None, space_dims=None):\n82:         \"\"\"\n83:         Constructor of `GeoTiffReader`.\n84: \n85:         Parameters\n86:         ----------\n87:         file_register : pd.Dataframe, optional\n88:             Data frame managing a stack/list of files containing the following columns:\n89:                 - 'filepath' : str\n90:                     Full file path to a geospatial file.\n91:                 - 'layer_id' : object\n92:                     Specifies an ID to which layer a file belongs to, e.g. a layer counter or a timestamp. Must\n93:                     correspond to `stack_dimension`.\n94:                 - 'tile_id' : str\n95:                     Tile name or ID to which tile a file belongs to.\n96:         mosaic : geospade.raster.MosaicGeometry\n97:             Mosaic representing the spatial allocation of the given files. The tiles of the mosaic have to match the\n98:             ID's/names of the 'tile_id' column.\n99:         stack_dimension : str, optional\n100:             Dimension/column name of the dimension, where to stack the files along (first axis), e.g. time, bands etc.\n101:             Defaults to 'layer_id', i.e. the layer ID's are used as the main coordinates to stack the files.\n102:         stack_coords : list, optional\n103:             Additional columns of `file_register` to use as coordinates. Defaults to None, i.e. only coordinates along\n104:             `stack_dimension` are used.\n105:         space_dims : list, optional\n106:             Dictionary containing the spatial dimension names. By default it is set to ['y', 'x'].\n107: \n108:         \"\"\"\n109:         super().__init__(file_register, mosaic, stack_dimension=stack_dimension, stack_coords=stack_coords)\n110: \n111:         ref_filepath = self._file_register['filepath'].iloc[0]\n112:         with GeoTiffFile(ref_filepath, 'r') as gt_file:\n113:             self._ref_dtypes = gt_file.dtypes\n114:             self._ref_nodatavals = gt_file.nodatavals\n115: \n116:         self._ref_space_dims = space_dims or ['y', 'x']\n117: \n118:     @classmethod\n119:     def from_filepaths(cls, filepaths, mosaic_class=MosaicGeometry, mosaic_kwargs=None, tile_kwargs=None,\n120:                        stack_dimension='layer_id', **kwargs):\n121:         \"\"\"\n122:         Creates a `GeoTiffDataReader` instance as one stack of GeoTIFF files.\n123: \n124:         Parameters\n125:         ----------\n126:         filepaths : list of str\n127:             List of full system paths to a GeoTIFF file.\n128:         mosaic_class : geospade.raster.MosaicGeometry, optional\n129:             Mosaic class used to manage the spatial properties of the file stack. If None, the most generic mosaic will\n130:             be used by default. The initialised mosaic will only contain one tile.\n131:         mosaic_kwargs : dict, optional\n132:             Additional arguments for initialising `mosaic_class`.\n133:         tile_kwargs : dict, optional\n134:             Additional arguments for initialising a tile class associated with `mosaic_class`.\n135:         stack_dimension : str, optional\n136:             Dimension/column name of the dimension, where to stack the files along (first axis), e.g. time, bands etc.\n137:             Defaults to 'layer_id', i.e. the layer ID's are used as the main coordinates to stack the files.\n138:         kwargs : dict, optional\n139:             Key-word arguments for the `GeoTiffReader` constructor.\n140: \n141:         Returns\n142:         -------\n143:         GeoTiffReader\n144: \n145:         \"\"\"\n146:         mosaic_kwargs = mosaic_kwargs or dict()\n147:         tile_kwargs = tile_kwargs or dict()\n148: \n149:         n_filepaths = len(filepaths)\n150:         file_register_dict = dict()\n151:         file_register_dict['filepath'] = filepaths\n152:         file_register_dict['tile_id'] = ['0'] * n_filepaths\n153:         file_register_dict[stack_dimension] = list(range(1, n_filepaths + 1))\n154:         file_register = pd.DataFrame(file_register_dict)\n155: \n156:         ref_filepath = filepaths[0]\n157:         with GeoTiffFile(ref_filepath, 'r') as gt_file:\n158:             sref_wkt = gt_file.sref_wkt\n159:             geotrans = gt_file.geotrans\n160:             n_rows, n_cols = gt_file.shape\n161: \n162:         tile_class = mosaic_class.get_tile_class()\n163:         tile = tile_class(n_rows, n_cols, sref=SpatialRef(sref_wkt), geotrans=geotrans, name='0', **tile_kwargs)\n164:         mosaic_geom = mosaic_class.from_tile_list([tile], check_consistency=False, **mosaic_kwargs)\n165: \n166:         return cls(file_register, mosaic_geom, stack_dimension=stack_dimension, **kwargs)\n167: \n168:     @classmethod\n169:     def from_mosaic_filepaths(cls, filepaths, mosaic_class=MosaicGeometry, mosaic_kwargs=None,\n170:                               stack_dimension='layer_id', **kwargs):",
+      "end_line": 170,
+      "path_lines": 655,
+      "start_line": 1
+    },
+    "usage": {
+      "completion_tokens": 185,
+      "prompt_tokens": 12308,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 12493
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 240,
+      "path": "src/veranda/raster/mosaic/geotiff.py",
+      "start_line": 170
+    },
+    "response_chars": 116,
+    "round": 2,
+    "tool_result": {
+      "content": "170:                               stack_dimension='layer_id', **kwargs):\n171:         \"\"\"\n172:         Creates a `GeoTiffDataReader` instance as multiple stacks of GeoTIFF files.\n173: \n174:         Parameters\n175:         ----------\n176:         filepaths : list of str\n177:             List of full system paths to a GeoTIFF file.\n178:         mosaic_class : geospade.raster.MosaicGeometry, optional\n179:             Mosaic class used to manage the spatial properties of the file stacks. If None, the most generic mosaic will\n180:             be used by default.\n181:         mosaic_kwargs : dict, optional\n182:             Additional arguments for initialising `mosaic_class`.\n183:         stack_dimension : str, optional\n184:             Dimension/column name of the dimension, where to stack the files along (first axis), e.g. time, bands etc.\n185:             Defaults to 'layer_id', i.e. the layer ID's are used as the main coordinates to stack the files.\n186:         kwargs : dict, optional\n187:             Key-word arguments for the `GeoTiffReader` constructor.\n188: \n189:         Returns\n190:         -------\n191:         GeoTiffReader\n192: \n193:         \"\"\"\n194:         mosaic_kwargs = mosaic_kwargs or dict()\n195:         file_register_dict = dict()\n196:         file_register_dict['filepath'] = filepaths\n197: \n198:         tile_ids = []\n199:         layer_ids = []\n200:         tiles = []\n201:         tile_idx = 0\n202:         tile_class = mosaic_class.get_tile_class()\n203:         for filepath in filepaths:\n204:             with GeoTiffFile(filepath, 'r') as gt_file:\n205:                 sref_wkt = gt_file.sref_wkt\n206:                 geotrans = gt_file.geotrans\n207:                 n_rows, n_cols = gt_file.shape\n208:             curr_tile = tile_class(n_rows, n_cols, sref=SpatialRef(sref_wkt), geotrans=geotrans, name=str(tile_idx))\n209:             curr_tile_idx = None\n210:             for tile in tiles:\n211:                 if curr_tile == tile:\n212:                     curr_tile_idx = tile.name\n213:                     break\n214:             if curr_tile_idx is None:\n215:                 tiles.append(curr_tile)\n216:                 curr_tile_idx = tile_idx\n217:                 tile_idx += 1\n218: \n219:             tile_ids.append(curr_tile_idx)\n220:             layer_id = sum(np.array(tile_ids) == curr_tile_idx) + 1\n221:             layer_ids.append(layer_id)\n222: \n223:         file_register_dict['tile_id'] = tile_ids\n224:         file_register_dict[stack_dimension] = layer_ids\n225:         file_register = pd.DataFrame(file_register_dict)\n226: \n227:         mosaic_geom = mosaic_class.from_tile_list(tiles, check_consistency=False, **mosaic_kwargs)\n228: \n229:         return cls(file_register, mosaic_geom, stack_dimension=stack_dimension, **kwargs)\n230: \n231:     def read(self, bands=1, band_names=None, engine='vrt', n_cores=1,\n232:              auto_decode=False, decoder=None, decoder_kwargs=None):\n233:         \"\"\"\n234:         Reads data from disk.\n235: \n236:         Parameters\n237:         ----------\n238:         bands : tuple of int or int, optional\n239:             The GeoTIFF bands of interest. Defaults to the first band, i.e. 1.\n240:         band_names : tuple of str or str, optional",
+      "end_line": 240,
+      "path_lines": 655,
+      "start_line": 170
+    },
+    "usage": {
+      "completion_tokens": 99,
+      "prompt_tokens": 15980,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 16079
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 60,
+      "path": "src/veranda/raster/mosaic/base.py",
+      "start_line": 1
+    },
+    "response_chars": 89,
+    "round": 3,
+    "tool_result": {
+      "content": "1: \"\"\" Collection of base classes for managing multi-dimensional I/O of raster data. \"\"\"\n2: \n3: import os\n4: import copy\n5: import gc\n6: import abc\n7: import warnings\n8: import rioxarray  # this import is needed as an extension for xarray\n9: import xarray as xr\n10: import pandas as pd\n11: import numpy as np\n12: from affine import Affine\n13: \n14: from geospade.tools import any_geom2ogr_geom\n15: from geospade.tools import rel_extent\n16: from geospade.crs import SpatialRef\n17: from geospade.raster import RasterGeometry\n18: from geospade.raster import MosaicGeometry\n19: from geospade.raster import Tile\n20: \n21: \n22: class RasterAccess:\n23:     \"\"\"\n24:     Helper class to build the link between indexes of the source array (access) and the target array (assignment).\n25: \n26:     \"\"\"\n27:     def __init__(self, src_raster_geom, dst_raster_geom, src_root_raster_geom=None):\n28:         \"\"\"\n29:         Constructor of `RasterAccess`.\n30: \n31:         Parameters\n32:         ----------\n33:         src_raster_geom : geospade.raster.RasterGeometry\n34:             Raster geometry representing the extent and indices of the data to access.\n35:         dst_raster_geom : geospade.raster.RasterGeometry\n36:             Raster geometry representing the extent and indices of the data to assign.\n37:         src_root_raster_geom : geospade.raster.RasterGeometry, optional\n38:             Raster geometry representing the origin to which `src_raster_geom` should be referred to. Defaults to None,\n39:             i.e. the root parent of `src_raster_geom` is used.\n40: \n41:         \"\"\"\n42:         src_root_raster_geom = src_root_raster_geom or src_raster_geom.parent_root\n43:         origin = src_root_raster_geom.ul_x, src_root_raster_geom.ul_y\n44:         min_col, min_row, max_col, max_row = rel_extent(origin, src_raster_geom.coord_extent,\n45:                                                         src_raster_geom.x_pixel_size, src_raster_geom.y_pixel_size)\n46:         self.src_window = (min_row, min_col, max_row, max_col)\n47: \n48:         origin = dst_raster_geom.ul_x, dst_raster_geom.ul_y\n49:         min_col, min_row, max_col, max_row = rel_extent(origin, src_raster_geom.coord_extent, src_raster_geom.x_pixel_size,\n50:                                                         src_raster_geom.y_pixel_size)\n51:         self.dst_window = (min_row, min_col, max_row, max_col)\n52: \n53:     @property\n54:     def src_row_slice(self):\n55:         \"\"\" slice : Indices for the rows of the data to access. \"\"\"\n56:         return slice(self.src_window[0], self.src_window[2] + 1)\n57: \n58:     @property\n59:     def src_col_slice(self):\n60:         \"\"\" slice : Indices for the columns of the data to access. \"\"\"",
+      "end_line": 60,
+      "path_lines": 821,
+      "start_line": 1
+    },
+    "usage": {
+      "completion_tokens": 637,
+      "prompt_tokens": 17414,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 18051
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/veranda/raster/mosaic/base.py",
+      "query": "def from_mosaic_filepaths"
+    },
+    "response_chars": 96,
+    "round": 4,
+    "tool_result": {
+      "matches": [],
+      "query": "def from_mosaic_filepaths",
+      "truncated": false
+    },
+    "usage": {
+      "completion_tokens": 832,
+      "prompt_tokens": 18644,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 19476
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/veranda/raster/mosaic/base.py",
+      "query": "file_register_dict"
+    },
+    "response_chars": 150,
+    "round": 5,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 695,
+          "text": "            file_register_dict = dict()"
+        },
+        {
+          "line": 696,
+          "text": "            file_register_dict[stack_dimension] = layers"
+        },
+        {
+          "line": 697,
+          "text": "            file_register = pd.DataFrame(file_register_dict)"
+        }
+      ],
+      "query": "file_register_dict",
+      "truncated": false
+    },
+    "usage": {
+      "completion_tokens": 1213,
+      "prompt_tokens": 18739,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 19952
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 720,
+      "path": "src/veranda/raster/mosaic/base.py",
+      "start_line": 640
+    },
+    "response_chars": 98,
+    "round": 6,
+    "tool_result": {
+      "content": "640:         else:\n641:             self.read(*args, **kwargs)\n642: \n643: \n644: class RasterDataWriter(RasterData):\n645:     \"\"\" Allows to write and manage a stack of raster data. \"\"\"\n646:     def __init__(self, mosaic, file_register=None, data=None, stack_dimension='layer_id', stack_coords=None,\n647:                  dirpath=None, fn_pattern='{layer_id}.xyz', fn_formatter=None):\n648:         \"\"\"\n649:         Constructor of `RasterDataWriter`.\n650: \n651:         Parameters\n652:         ----------\n653: \n654:         mosaic : geospade.raster.MosaicGeometry\n655:             Mosaic representing the spatial allocation of the given files. The tiles of the mosaic have to match the\n656:             ID's/names of the 'tile_id' column.\n657:         file_register : pd.Dataframe, optional\n658:             Data frame managing a stack/list of files containing the following columns:\n659:                 - 'filepath' : str\n660:                     Full file path to a geospatial file.\n661:                 - 'layer_id' : object\n662:                     Specifies an ID to which layer a file belongs to, e.g. a layer counter or a timestamp. Must\n663:                     correspond to `stack_dimension`.\n664:                 - 'tile_id' : str\n665:                     Tile name or ID to which tile a file belongs to.\n666:             If it is None, then the constructor tries to create a file from other keyword arguments, i.e. `data`,\n667:             `dirpath`, `fn_pattern`, and `fn_formatter`.\n668:         data : xr.Dataset, optional\n669:             Raster data stored in memory. It must match the spatial sampling and CRS of the mosaic, but not its spatial\n670:             extent or tiling. Moreover, the dimension of the data along the first dimension (stack dimension), must\n671:             match the entries/filepaths in `file_register`.\n672:         stack_dimension : str, optional\n673:             Dimension/column name of the dimension, where to stack the files along (first axis), e.g. time, bands etc.\n674:             Defaults to 'layer_id', i.e. the layer ID's are used as the main coordinates to stack the files.\n675:         stack_coords : list, optional\n676:             Additional columns of `file_register` to use as coordinates. Defaults to None, i.e. only coordinates along\n677:             `stack_dimension` are used.\n678:         dirpath : str, optional\n679:             Directory path to the folder where the GeoTIFF files should be written to. Defaults to None, i.e. the\n680:             current working directory is used.\n681:         fn_pattern : str, optional\n682:             Pattern for the filename of the new GeoTIFF files. To fill in specific parts of the new file name with\n683:             information from the file register, you can specify the respective file register column names in curly\n684:             brackets and add them to the pattern string as desired. Defaults to '{layer_id}.tif'.\n685:         fn_formatter : dict, optional\n686:             Dictionary mapping file register column names with functions allowing to encode their values as strings.\n687: \n688:         \"\"\"\n689:         fn_formatter = fn_formatter or dict()\n690:         if file_register is None and data is None:\n691:             err_msg = \"Either a file register ('file_register') or an xarray dataset ('data') has to be provided.\"\n692:             raise ValueError(err_msg)\n693:         elif file_register is None and data is not None:\n694:             layers = data[stack_dimension]\n695:             file_register_dict = dict()\n696:             file_register_dict[stack_dimension] = layers\n697:             file_register = pd.DataFrame(file_register_dict)\n698: \n699:         if 'tile_id' not in file_register.columns:\n700:             n_entries = len(file_register)\n701:             tile_names = mosaic.all_tile_names\n702:             n_tiles = len(tile_names)\n703:             file_register = pd.DataFrame(np.repeat(file_register.values, n_tiles, axis=0),\n704:                                          columns=file_register.columns)\n705:             file_register['tile_id'] = np.repeat([tile_names], n_entries, axis=0).flatten()\n706: \n707:         if stack_dimension not in file_register.columns:\n708:             n_entries = len(file_register)\n709:             if data is not None:\n710:                 layers = data[stack_dimension]\n711:                 n_layers = len(layers)\n712:                 file_register = pd.DataFrame(np.repeat(file_register.values, n_layers, axis=0),\n713:                                              columns=file_register.columns)\n714:                 file_register[stack_dimension] = np.repeat([layers], n_entries, axis=0).flatten()\n715:             else:\n716:                 layers = list(range(1, n_entries + 1))\n717:                 file_register[stack_dimension] = layers\n718: \n719:         if 'filepath' not in file_register.columns:\n720:             dirpath = dirpath or os.getcwd()",
+      "end_line": 720,
+      "path_lines": 821,
+      "start_line": 640
+    },
+    "usage": {
+      "completion_tokens": 528,
+      "prompt_tokens": 18913,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 19441
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "            self._ref_stack_dims = nc_file.stack_dims\n\n    @staticmethod\n    def _tile_from_filepath(filepath, tile_class, name, **tile_kwargs):\n        \"\"\"\n        Creates a tile representing the spatial properties of a NetCDF file.\n\n        Parameters\n        ----------\n        filepath : str\n            Full system path to a NetCDF file.\n        tile_class : type\n            Tile class used to instantiate the returned tile.\n        name : str\n            Name/ID assigned to the created tile.\n        tile_kwargs : dict, optional\n            Additional arguments for initialising `tile_class`.\n\n        Returns\n        -------\n        geospade.raster.Tile\n\n        \"\"\"\n        with NetCdf4File(filepath, 'r') as nc_file:\n            sref_wkt = nc_file.sref_wkt\n            geotrans = nc_file.geotrans\n            n_rows, n_cols = nc_file.raster_shape\n        return tile_class(n_rows, n_cols, sref=SpatialRef(sref_wkt), geotrans=geotrans, name=name, **tile_kwargs)",
+          "end_line": 58,
+          "start_line": 58
+        },
+        {
+          "content": "        tile_class = mosaic_class.get_tile_class()\n        tile = cls._tile_from_filepath(filepaths[0], tile_class, '0', **tile_kwargs)\n        mosaic_geom = mosaic_class.from_tile_list([tile], check_consistency=False, **mosaic_kwargs)",
+          "end_line": 105,
+          "start_line": 97
+        },
+        {
+          "content": "        for filepath in filepaths:\n            curr_tile = cls._tile_from_filepath(filepath, tile_class, str(tile_idx))",
+          "end_line": 149,
+          "start_line": 144
+        }
+      ]
+    },
+    "response_chars": 1604,
+    "round": 7,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 58,
+          "replacement_lines": 28,
+          "start_line": 58
+        },
+        {
+          "end_line": 105,
+          "replacement_lines": 3,
+          "start_line": 97
+        },
+        {
+          "end_line": 149,
+          "replacement_lines": 2,
+          "start_line": 144
+        }
+      ],
+      "current_file_lines": 612,
+      "updated_excerpt": {
+        "content": "48:         ref_filepath = self._file_register['filepath'].iloc[0]\n49:         with NetCdf4File(ref_filepath, 'r') as nc_file:\n50:             self._ref_data_variables = nc_file.data_variables\n51:             self._ref_nodatavals = nc_file.nodatavals\n52:             self._ref_scale_factors = nc_file.nodatavals\n53:             self._ref_offsets = nc_file.offsets\n54:             self._ref_dtypes = nc_file.dtypes\n55:             self._ref_metadata = nc_file.metadata\n56:             self._ref_space_dims = nc_file.space_dims\n57:             self._ref_stack_dims = nc_file.stack_dims\n58:             self._ref_stack_dims = nc_file.stack_dims\n59: \n60:     @staticmethod\n61:     def _tile_from_filepath(filepath, tile_class, name, **tile_kwargs):\n62:         \"\"\"\n63:         Creates a tile representing the spatial properties of a NetCDF file.\n64: \n65:         Parameters\n66:         ----------\n67:         filepath : str\n68:             Full system path to a NetCDF file.\n69:         tile_class : type\n70:             Tile class used to instantiate the returned tile.\n71:         name : str\n72:             Name/ID assigned to the created tile.\n73:         tile_kwargs : dict, optional\n74:             Additional arguments for initialising `tile_class`.\n75: \n76:         Returns\n77:         -------\n78:         geospade.raster.Tile\n79: \n80:         \"\"\"\n81:         with NetCdf4File(filepath, 'r') as nc_file:\n82:             sref_wkt = nc_file.sref_wkt\n83:             geotrans = nc_file.geotrans\n84:             n_rows, n_cols = nc_file.raster_shape\n85:         return tile_class(n_rows, n_cols, sref=SpatialRef(sref_wkt), geotrans=geotrans, name=name, **tile_kwargs)\n86:     @classmethod\n87:     def from_filepaths(cls, filepaths, mosaic_class=MosaicGeometry, mosaic_kwargs=None, tile_kwargs=None,\n88:                        stack_dimension='layer_id', **kwargs):",
+        "end_line": 88,
+        "path_lines": 612,
+        "start_line": 48
+      }
+    },
+    "usage": {
+      "completion_tokens": 1413,
+      "prompt_tokens": 20775,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 22188
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "            self._ref_stack_dims = nc_file.stack_dims",
+          "end_line": 58,
+          "start_line": 57
+        }
+      ]
+    },
+    "response_chars": 131,
+    "round": 8,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 58,
+          "replacement_lines": 1,
+          "start_line": 57
+        }
+      ],
+      "current_file_lines": 611,
+      "updated_excerpt": {
+        "content": "47: \n48:         ref_filepath = self._file_register['filepath'].iloc[0]\n49:         with NetCdf4File(ref_filepath, 'r') as nc_file:\n50:             self._ref_data_variables = nc_file.data_variables\n51:             self._ref_nodatavals = nc_file.nodatavals\n52:             self._ref_scale_factors = nc_file.nodatavals\n53:             self._ref_offsets = nc_file.offsets\n54:             self._ref_dtypes = nc_file.dtypes\n55:             self._ref_metadata = nc_file.metadata\n56:             self._ref_space_dims = nc_file.space_dims\n57:             self._ref_stack_dims = nc_file.stack_dims\n58: \n59:     @staticmethod\n60:     def _tile_from_filepath(filepath, tile_class, name, **tile_kwargs):\n61:         \"\"\"\n62:         Creates a tile representing the spatial properties of a NetCDF file.\n63: \n64:         Parameters\n65:         ----------\n66:         filepath : str\n67:             Full system path to a NetCDF file.\n68:         tile_class : type\n69:             Tile class used to instantiate the returned tile.\n70:         name : str\n71:             Name/ID assigned to the created tile.\n72:         tile_kwargs : dict, optional\n73:             Additional arguments for initialising `tile_class`.\n74: \n75:         Returns\n76:         -------\n77:         geospade.raster.Tile\n78: \n79:         \"\"\"\n80:         with NetCdf4File(filepath, 'r') as nc_file:\n81:             sref_wkt = nc_file.sref_wkt\n82:             geotrans = nc_file.geotrans\n83:             n_rows, n_cols = nc_file.raster_shape\n84:         return tile_class(n_rows, n_cols, sref=SpatialRef(sref_wkt), geotrans=geotrans, name=name, **tile_kwargs)\n85:     @classmethod\n86:     def from_filepaths(cls, filepaths, mosaic_class=MosaicGeometry, mosaic_kwargs=None, tile_kwargs=None,\n87:                        stack_dimension='layer_id', **kwargs):",
+        "end_line": 87,
+        "path_lines": 611,
+        "start_line": 47
+      }
+    },
+    "usage": {
+      "completion_tokens": 197,
+      "prompt_tokens": 22403,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 22600
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 135,
+      "path": "src/veranda/raster/mosaic/netcdf.py",
+      "start_line": 84
+    },
+    "response_chars": 99,
+    "round": 9,
+    "tool_result": {
+      "content": "84:         return tile_class(n_rows, n_cols, sref=SpatialRef(sref_wkt), geotrans=geotrans, name=name, **tile_kwargs)\n85:     @classmethod\n86:     def from_filepaths(cls, filepaths, mosaic_class=MosaicGeometry, mosaic_kwargs=None, tile_kwargs=None,\n87:                        stack_dimension='layer_id', **kwargs):\n88:         \"\"\"\n89:         Creates a `NetCdfReader` instance as one stack of NetCDF files.\n90: \n91:         Parameters\n92:         ----------\n93:         filepaths : list of str\n94:             List of full system paths to a NetCDF file.\n95:         mosaic_class : geospade.raster.MosaicGeometry, optional\n96:             Mosaic class used to manage the spatial properties of the file stack. If None, the most generic mosaic will\n97:             be used by default. The initialised mosaic will only contain one tile.\n98:         mosaic_kwargs : dict, optional\n99:             Additional arguments for initialising `mosaic_class`.\n100:         tile_kwargs : dict, optional\n101:             Additional arguments for initialising a tile class associated with `mosaic_class`.\n102:         stack_dimension : str, optional\n103:             Dimension/column name of the dimension, where to stack the files along (first axis), e.g. time, bands etc.\n104:             Defaults to 'layer_id', i.e. the layer ID's are used as the main coordinates to stack the files.\n105:         kwargs : dict, optional\n106:             Key-word arguments for the `NetCdfReader` constructor.\n107: \n108:         Returns\n109:         -------\n110:         NetCdfReader\n111: \n112:         \"\"\"\n113:         mosaic_kwargs = mosaic_kwargs or dict()\n114:         tile_kwargs = tile_kwargs or dict()\n115: \n116:         n_filepaths = len(filepaths)\n117:         file_register_dict = dict()\n118:         file_register_dict['filepath'] = filepaths\n119:         file_register_dict['tile_id'] = ['0'] * n_filepaths\n120:         file_register_dict[stack_dimension] = list(range(n_filepaths))\n121:         file_register = pd.DataFrame(file_register_dict)\n122: \n123:         tile_class = mosaic_class.get_tile_class()\n124:         tile = cls._tile_from_filepath(filepaths[0], tile_class, '0', **tile_kwargs)\n125:         mosaic_geom = mosaic_class.from_tile_list([tile], check_consistency=False, **mosaic_kwargs)\n126: \n127:         return cls(file_register, mosaic_geom, stack_dimension=stack_dimension, **kwargs)\n128: \n129:     @classmethod\n130:     def from_mosaic_filepaths(cls, filepaths, mosaic_class=MosaicGeometry, mosaic_kwargs=None,\n131:                               stack_dimension='layer_id', **kwargs):\n132:         \"\"\"\n133:         Creates a `NetCdfReader` instance as multiple stacks of NetCDF files.\n134: \n135:         Parameters",
+      "end_line": 135,
+      "path_lines": 611,
+      "start_line": 84
+    },
+    "usage": {
+      "completion_tokens": 181,
+      "prompt_tokens": 23358,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 23539
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "        return tile_class(n_rows, n_cols, sref=SpatialRef(sref_wkt), geotrans=geotrans, name=name, **tile_kwargs)\n\n    @classmethod",
+          "end_line": 85,
+          "start_line": 84
+        }
+      ]
+    },
+    "response_chars": 205,
+    "round": 10,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 85,
+          "replacement_lines": 3,
+          "start_line": 84
+        }
+      ],
+      "current_file_lines": 612,
+      "updated_excerpt": {
+        "content": "74: \n75:         Returns\n76:         -------\n77:         geospade.raster.Tile\n78: \n79:         \"\"\"\n80:         with NetCdf4File(filepath, 'r') as nc_file:\n81:             sref_wkt = nc_file.sref_wkt\n82:             geotrans = nc_file.geotrans\n83:             n_rows, n_cols = nc_file.raster_shape\n84:         return tile_class(n_rows, n_cols, sref=SpatialRef(sref_wkt), geotrans=geotrans, name=name, **tile_kwargs)\n85: \n86:     @classmethod\n87:     def from_filepaths(cls, filepaths, mosaic_class=MosaicGeometry, mosaic_kwargs=None, tile_kwargs=None,\n88:                        stack_dimension='layer_id', **kwargs):\n89:         \"\"\"\n90:         Creates a `NetCdfReader` instance as one stack of NetCDF files.\n91: \n92:         Parameters\n93:         ----------\n94:         filepaths : list of str\n95:             List of full system paths to a NetCDF file.\n96:         mosaic_class : geospade.raster.MosaicGeometry, optional\n97:             Mosaic class used to manage the spatial properties of the file stack. If None, the most generic mosaic will\n98:             be used by default. The initialised mosaic will only contain one tile.\n99:         mosaic_kwargs : dict, optional\n100:             Additional arguments for initialising `mosaic_class`.\n101:         tile_kwargs : dict, optional\n102:             Additional arguments for initialising a tile class associated with `mosaic_class`.\n103:         stack_dimension : str, optional\n104:             Dimension/column name of the dimension, where to stack the files along (first axis), e.g. time, bands etc.\n105:             Defaults to 'layer_id', i.e. the layer ID's are used as the main coordinates to stack the files.\n106:         kwargs : dict, optional\n107:             Key-word arguments for the `NetCdfReader` constructor.\n108: \n109:         Returns\n110:         -------\n111:         NetCdfReader\n112: \n113:         \"\"\"\n114:         mosaic_kwargs = mosaic_kwargs or dict()",
+        "end_line": 114,
+        "path_lines": 612,
+        "start_line": 74
+      }
+    },
+    "usage": {
+      "completion_tokens": 129,
+      "prompt_tokens": 24594,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 24723
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 190,
+      "path": "src/veranda/raster/mosaic/netcdf.py",
+      "start_line": 155
+    },
+    "response_chars": 94,
+    "round": 11,
+    "tool_result": {
+      "content": "155:         \"\"\"\n156:         mosaic_kwargs = mosaic_kwargs or dict()\n157:         file_register_dict = dict()\n158:         file_register_dict['filepath'] = filepaths\n159: \n160:         tile_ids = []\n161:         layer_ids = []\n162:         tiles = []\n163:         tile_idx = 0\n164:         tile_class = mosaic_class.get_tile_class()\n165:         for filepath in filepaths:\n166:             curr_tile = cls._tile_from_filepath(filepath, tile_class, str(tile_idx))\n167:             curr_tile_idx = None\n168:             for tile in tiles:\n169:                 if curr_tile == tile:\n170:                     curr_tile_idx = tile.name\n171:                     break\n172:             if curr_tile_idx is None:\n173:                 tiles.append(curr_tile)\n174:                 curr_tile_idx = tile_idx\n175:                 tile_idx += 1\n176: \n177:             tile_ids.append(curr_tile_idx)\n178:             layer_id = sum(np.array(tile_ids) == curr_tile_idx)\n179:             layer_ids.append(layer_id)\n180: \n181:         file_register_dict['tile_id'] = tile_ids\n182:         file_register_dict[stack_dimension] = layer_ids\n183:         file_register = pd.DataFrame(file_register_dict)\n184: \n185:         mosaic_geom = mosaic_class.from_tile_list(tiles, check_consistency=False, **mosaic_kwargs)\n186: \n187:         return cls(file_register, mosaic_geom, stack_dimension=stack_dimension, **kwargs)\n188: \n189:     def read(self, data_variables=None, engine='netcdf4', parallel=True, auto_decode=False,\n190:              decoder=None, decoder_kwargs=None):",
+      "end_line": 190,
+      "path_lines": 612,
+      "start_line": 155
+    },
+    "usage": {
+      "completion_tokens": 74,
+      "prompt_tokens": 25602,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 25676
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 12,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/claude-opus-4.8/patches/github__TUW-GEO__veranda__pull_11__comment_907358249__modularity.patch"
+    },
+    "usage": {
+      "completion_tokens": 77,
+      "prompt_tokens": 26361,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 26438
+    }
+  }
+]

@@ -1,0 +1,73 @@
+--- a/druidctl/cmd/listresources/listresources.go
++++ b/druidctl/cmd/listresources/listresources.go
+@@ -17,6 +17,7 @@
+ 
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
++	"k8s.io/apimachinery/pkg/runtime/schema"
+ )
+ 
+ // ResourceKey identifies a Kubernetes resource kind by group/version/resource/Kind.
+@@ -105,7 +106,7 @@
+ 		tokens = defaultResourceTokens()
+ 	}
+ 	resolver := newRESTMapperResolver(genClient.RESTMapper())
+-	metas, err := resolver.resolve(tokens)
++	metas, err := resolveResourceMetadata(genClient.RESTMapper(), tokens)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -220,6 +221,53 @@
+ 	return out
+ }
+ 
++type resolvedResourceMetadata struct {
++	GVR        schema.GroupVersionResource
++	Kind       string
++	Namespaced bool
++}
++
++func resolveResourceMetadata(mapper meta.RESTMapper, tokens []string) ([]resolvedResourceMetadata, error) {
++	resources := make([]resolvedResourceMetadata, 0, len(tokens))
++	seen := make(map[schema.GroupVersionResource]struct{}, len(tokens))
++	for _, token := range tokens {
++		gvr, err := resourceForToken(mapper, token)
++		if err != nil {
++			return nil, fmt.Errorf("failed to resolve resource %q: %w", token, err)
++		}
++
++		gvk, err := mapper.KindFor(gvr)
++		if err != nil {
++			return nil, fmt.Errorf("failed to resolve kind for resource %q: %w", token, err)
++		}
++
++		mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
++		if err != nil {
++			return nil, fmt.Errorf("failed to resolve REST mapping for resource %q: %w", token, err)
++		}
++		if _, ok := seen[mapping.Resource]; ok {
++			continue
++		}
++		seen[mapping.Resource] = struct{}{}
++
++		resources = append(resources, resolvedResourceMetadata{
++			GVR:        mapping.Resource,
++			Kind:       mapping.GroupVersionKind.Kind,
++			Namespaced: mapping.Scope.Name() == meta.RESTScopeNameNamespace,
++		})
++	}
++	return resources, nil
++}
++
++func resourceForToken(mapper meta.RESTMapper, token string) (schema.GroupVersionResource, error) {
++	if gvr, gr := schema.ParseResourceArg(token); gvr != nil {
++		return mapper.ResourceFor(*gvr)
++	} else if gr.Resource != "" {
++		return mapper.ResourceFor(schema.GroupVersionResource{Group: gr.Group, Resource: gr.Resource})
++	}
++	return mapper.ResourceFor(schema.GroupVersionResource{Resource: token})
++}
++
+ // defaultResourceTokens returns the curated default set for "all"
+ func defaultResourceTokens() []string {
+ 	return []string{"po", "sts", "svc", "cm", "secret", "pvc", "lease", "pdb", "role", "rolebinding", "sa"}

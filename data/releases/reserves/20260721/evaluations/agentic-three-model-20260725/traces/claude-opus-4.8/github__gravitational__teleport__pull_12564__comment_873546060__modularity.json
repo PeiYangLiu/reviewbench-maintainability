@@ -1,0 +1,97 @@
+[
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\tswitch req.URL.Path {\n\tcase loginRequestPath:\n\t\t// Return here - handleLoginResponse sends the response.\n\t\treturn trace.Wrap(e.handleLoginResponse(ctx, sessionCtx, resp))\n\tcase tokenRequestPath:\n\t\t// Return here - handleTokenResponse sends the response.\n\t\treturn trace.Wrap(e.handleTokenResponse(ctx, sessionCtx, resp))\n\t}",
+          "end_line": 277,
+          "start_line": 191
+        }
+      ]
+    },
+    "response_chars": 416,
+    "round": 1,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 277,
+          "replacement_lines": 8,
+          "start_line": 191
+        }
+      ],
+      "current_file_lines": 563,
+      "updated_excerpt": {
+        "content": "181: \n182: \te.setAuthorizationHeader(reqCopy, snowflakeToken)\n183: \n184: \t// Send the request to Snowflake API\n185: \tresp, err := e.HTTPClient.Do(reqCopy)\n186: \tif err != nil {\n187: \t\treturn trace.Wrap(err)\n188: \t}\n189: \tdefer resp.Body.Close()\n190: \n191: \tswitch req.URL.Path {\n192: \tcase loginRequestPath:\n193: \t\t// Return here - handleLoginResponse sends the response.\n194: \t\treturn trace.Wrap(e.handleLoginResponse(ctx, sessionCtx, resp))\n195: \tcase tokenRequestPath:\n196: \t\t// Return here - handleTokenResponse sends the response.\n197: \t\treturn trace.Wrap(e.handleTokenResponse(ctx, sessionCtx, resp))\n198: \t}\n199: \n200: \treturn trace.Wrap(e.sendResponse(resp))\n201: }\n202: \n203: // sendResponse sends the response back to the Snowflake client.\n204: func (e *Engine) sendResponse(resp *http.Response) error {\n205: \tdumpResp, err := httputil.DumpResponse(resp, false)\n206: \tif err != nil {\n207: \t\treturn trace.Wrap(err)\n208: \t}\n209: \n210: \t_, err = e.clientConn.Write(dumpResp)\n211: \tif err != nil {\n212: \t\treturn trace.Wrap(err)\n213: \t}\n214: \n215: \tif _, err := io.Copy(e.clientConn, resp.Body); err != nil {\n216: \t\treturn trace.Wrap(err)\n217: \t}\n218: \treturn nil\n219: }\n220: \n221: func (e *Engine) setAuthorizationHeader(reqCopy *http.Request, snowflakeToken string) {",
+        "end_line": 221,
+        "path_lines": 563,
+        "start_line": 181
+      }
+    },
+    "usage": {
+      "completion_tokens": 254,
+      "prompt_tokens": 10919,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 11173
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\n// handleLoginResponse processes the Snowflake login response, creating auth\n// server sessions for the returned session and master tokens, and sends the\n// modified response back to the client.\nfunc (e *Engine) handleLoginResponse(ctx context.Context, sessionCtx *common.Session, resp *http.Response) error {\n\treturn trace.Wrap(e.processResponse(resp, func(body []byte) ([]byte, error) {\n\t\tnewResp, err := e.processLoginResponse(body, func(tokens sessionTokens) (string, string, error) {\n\t\t\t// Create one session for connection token.\n\t\t\tsnowflakeSession, err := e.AuthClient.CreateSnowflakeSession(ctx, types.CreateSnowflakeSessionRequest{\n\t\t\t\tUsername:     sessionCtx.Identity.Username,\n\t\t\t\tSessionToken: tokens.session.token,\n\t\t\t\t// TokenTTL is the TTL of the token in auth server. Technically we could remove the token when\n\t\t\t\t// the Snowflake token expires too, but Snowflake API requires the old token to be added as a part\n\t\t\t\t// of the renewal request. Because of that adding extra 10 minutes should allow the client to\n\t\t\t\t// renew the token even if it's not in our \"tokens\" cache.\n\t\t\t\tTokenTTL: tokens.session.ttl + 600, // add 10 minutes\n\t\t\t})\n\t\t\tif err != nil {\n\t\t\t\treturn \"\", \"\", trace.Wrap(err)\n\t\t\t}\n\n\t\t\t// And another one for master/renew one.\n\t\t\tsnowflakeMasterSession, err := e.AuthClient.CreateSnowflakeSession(ctx, types.CreateSnowflakeSessionRequest{\n\t\t\t\tUsername:     sessionCtx.Identity.Username,\n\t\t\t\tSessionToken: tokens.master.token,\n\t\t\t\tTokenTTL:     tokens.master.ttl + 600, // add 10 minutes\n\t\t\t})\n\t\t\tif err != nil {\n\t\t\t\treturn \"\", \"\", trace.Wrap(err)\n\t\t\t}\n\n\t\t\treturn snowflakeSession.GetName(), snowflakeMasterSession.GetName(), nil\n\t\t})\n\t\tif err != nil {\n\t\t\treturn nil, trace.Wrap(err, \"failed to extract Snowflake session token\")\n\t\t}\n\n\t\treturn newResp, nil\n\t}))\n}\n\n// handleTokenResponse processes the Snowflake token renewal response, creating\n// auth server sessions for the renewed tokens, and sends the modified response\n// back to the client.\nfunc (e *Engine) handleTokenResponse(ctx context.Context, sessionCtx *common.Session, resp *http.Response) error {\n\treturn trace.Wrap(e.processResponse(resp, func(body []byte) ([]byte, error) {\n\t\trenewSessResp := &renewSessionResponse{}\n\t\tif err := json.Unmarshal(body, renewSessResp); err != nil {\n\t\t\treturn nil, trace.Wrap(err)\n\t\t}\n\n\t\tif renewSessResp.Data.SessionToken == \"\" {\n\t\t\treturn nil, trace.Errorf(\"Snowflake renew token response doesn't contain new session token\")\n\t\t}\n\n\t\tsnowflakeSession, err := e.AuthClient.CreateSnowflakeSession(ctx, types.CreateSnowflakeSessionRequest{\n\t\t\tUsername:     sessionCtx.Identity.Username,\n\t\t\tSessionToken: renewSessResp.Data.SessionToken,\n\t\t\tTokenTTL:     renewSessResp.Data.ValidityInSecondsST,\n\t\t})\n\t\tif err != nil {\n\t\t\treturn nil, trace.Wrap(err)\n\t\t}\n\n\t\te.tokens.setToken(snowflakeSession.GetName(), renewSessResp.Data.SessionToken)\n\t\trenewSessResp.Data.SessionToken = teleportAuthHeaderPrefix + snowflakeSession.GetName()\n\n\t\tif renewSessResp.Data.MasterToken != \"\" {\n\t\t\tmasterToken, err := e.AuthClient.CreateSnowflakeSession(ctx, types.CreateSnowflakeSessionRequest{\n\t\t\t\tUsername:     sessionCtx.Identity.Username,\n\t\t\t\tSessionToken: renewSessResp.Data.MasterToken,\n\t\t\t\tTokenTTL:     renewSessResp.Data.ValidityInSecondsMT,\n\t\t\t})\n\t\t\tif err != nil {\n\t\t\t\treturn nil, trace.Wrap(err)\n\t\t\t}\n\n\t\t\te.tokens.setToken(masterToken.GetName(), renewSessResp.Data.MasterToken)\n\t\t\trenewSessResp.Data.MasterToken = teleportAuthHeaderPrefix + masterToken.GetName()\n\t\t}\n\n\t\tnewBody, err := json.Marshal(renewSessResp)\n\t\tif err != nil {\n\t\t\treturn nil, trace.Wrap(err)\n\t\t}\n\n\t\treturn newBody, nil\n\t}))\n}\n",
+          "end_line": 201,
+          "start_line": 202
+        }
+      ]
+    },
+    "response_chars": 3979,
+    "round": 2,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 201,
+          "replacement_lines": 89,
+          "start_line": 202
+        }
+      ],
+      "current_file_lines": 652,
+      "updated_excerpt": {
+        "content": "192: \tcase loginRequestPath:\n193: \t\t// Return here - handleLoginResponse sends the response.\n194: \t\treturn trace.Wrap(e.handleLoginResponse(ctx, sessionCtx, resp))\n195: \tcase tokenRequestPath:\n196: \t\t// Return here - handleTokenResponse sends the response.\n197: \t\treturn trace.Wrap(e.handleTokenResponse(ctx, sessionCtx, resp))\n198: \t}\n199: \n200: \treturn trace.Wrap(e.sendResponse(resp))\n201: }\n202: \n203: // handleLoginResponse processes the Snowflake login response, creating auth\n204: // server sessions for the returned session and master tokens, and sends the\n205: // modified response back to the client.\n206: func (e *Engine) handleLoginResponse(ctx context.Context, sessionCtx *common.Session, resp *http.Response) error {\n207: \treturn trace.Wrap(e.processResponse(resp, func(body []byte) ([]byte, error) {\n208: \t\tnewResp, err := e.processLoginResponse(body, func(tokens sessionTokens) (string, string, error) {\n209: \t\t\t// Create one session for connection token.\n210: \t\t\tsnowflakeSession, err := e.AuthClient.CreateSnowflakeSession(ctx, types.CreateSnowflakeSessionRequest{\n211: \t\t\t\tUsername:     sessionCtx.Identity.Username,\n212: \t\t\t\tSessionToken: tokens.session.token,\n213: \t\t\t\t// TokenTTL is the TTL of the token in auth server. Technically we could remove the token when\n214: \t\t\t\t// the Snowflake token expires too, but Snowflake API requires the old token to be added as a part\n215: \t\t\t\t// of the renewal request. Because of that adding extra 10 minutes should allow the client to\n216: \t\t\t\t// renew the token even if it's not in our \"tokens\" cache.\n217: \t\t\t\tTokenTTL: tokens.session.ttl + 600, // add 10 minutes\n218: \t\t\t})\n219: \t\t\tif err != nil {\n220: \t\t\t\treturn \"\", \"\", trace.Wrap(err)\n221: \t\t\t}\n222: \n223: \t\t\t// And another one for master/renew one.\n224: \t\t\tsnowflakeMasterSession, err := e.AuthClient.CreateSnowflakeSession(ctx, types.CreateSnowflakeSessionRequest{\n225: \t\t\t\tUsername:     sessionCtx.Identity.Username,\n226: \t\t\t\tSessionToken: tokens.master.token,\n227: \t\t\t\tTokenTTL:     tokens.master.ttl + 600, // add 10 minutes\n228: \t\t\t})\n229: \t\t\tif err != nil {\n230: \t\t\t\treturn \"\", \"\", trace.Wrap(err)\n231: \t\t\t}\n232: ",
+        "end_line": 232,
+        "path_lines": 652,
+        "start_line": 192
+      }
+    },
+    "usage": {
+      "completion_tokens": 2086,
+      "prompt_tokens": 11952,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 14038
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 3,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/claude-opus-4.8/patches/github__gravitational__teleport__pull_12564__comment_873546060__modularity.patch"
+    },
+    "usage": {
+      "completion_tokens": 11,
+      "prompt_tokens": 15197,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 15208
+    }
+  }
+]

@@ -1,0 +1,81 @@
+--- a/src/veranda/raster/native/netcdf.py
++++ b/src/veranda/raster/native/netcdf.py
+@@ -146,16 +146,9 @@
+         self.dtypes = dict()
+ 
+         all_variables = self.data_variables + list(self.stack_dims.keys()) + list(self.space_dims.keys())
+-        for variable in all_variables:
+-            self._zlibs[variable] = zlibs.get(variable, True)
+-            self._complevels[variable] = complevels.get(variable, 2)
+-            self._chunksizes[variable] = chunksizes.get(variable, None)
+-            self._var_chunk_caches[variable] = var_chunk_caches.get(variable, None)
+-            if variable in self.data_variables:
+-                self.scale_factors[variable] = scale_factors.get(variable, 1)
+-                self.offsets[variable] = offsets.get(variable, 0)
+-                self.nodatavals[variable] = nodatavals.get(variable, 127)
+-                self.dtypes[variable] = dtypes.get(variable, 'int8')
++        self._set_variable_defaults(all_variables, zlibs=zlibs, complevels=complevels, chunksizes=chunksizes,
++                                    var_chunk_caches=var_chunk_caches, scale_factors=scale_factors, offsets=offsets,
++                                    nodatavals=nodatavals, dtypes=dtypes)
+ 
+         if self.mode == 'r':
+             self._open()
+@@ -167,6 +160,31 @@
+         """ 2-tuple: Tuple specifying the shape of the raster (defined by the spatial dimensions). """
+         space_dims = list(self.space_dims.keys())
+         return len(self.src_vars[space_dims[0]]), len(self.src_vars[space_dims[1]])
++
++    def _set_variable_defaults(self, variables, zlibs=None, complevels=None, chunksizes=None, var_chunk_caches=None,
++                               scale_factors=None, offsets=None, nodatavals=None, dtypes=None, data_variables=None):
++        """ Sets default encoding properties for NetCDF variables. """
++        zlibs = zlibs or dict()
++        complevels = complevels or dict()
++        chunksizes = chunksizes or dict()
++        var_chunk_caches = var_chunk_caches or dict()
++        scale_factors = scale_factors or dict()
++        offsets = offsets or dict()
++        nodatavals = nodatavals or dict()
++        dtypes = dtypes or dict()
++        data_variables = data_variables if data_variables is not None else self.data_variables
++
++        for variable in variables:
++            self._zlibs[variable] = zlibs.get(variable, self._zlibs.get(variable, True))
++            self._complevels[variable] = complevels.get(variable, self._complevels.get(variable, 2))
++            self._chunksizes[variable] = chunksizes.get(variable, self._chunksizes.get(variable, None))
++            self._var_chunk_caches[variable] = var_chunk_caches.get(variable,
++                                                                    self._var_chunk_caches.get(variable, None))
++            if variable in data_variables:
++                self.scale_factors[variable] = scale_factors.get(variable, self.scale_factors.get(variable, 1))
++                self.offsets[variable] = offsets.get(variable, self.offsets.get(variable, 0))
++                self.nodatavals[variable] = nodatavals.get(variable, self.nodatavals.get(variable, 127))
++                self.dtypes[variable] = dtypes.get(variable, self.dtypes.get(variable, 'int8'))
+ 
+     def _reset(self):
+         """ Resets internal class variables with properties from an existing NetCDF dataset. """
+@@ -212,18 +230,14 @@
+         for variable in all_variables:
+             dar = ds[variable]
+             src_var_md = dar.attrs
+-            self._zlibs[variable] = self._zlibs.get(variable, True)
+-            self._complevels[variable] = self._complevels.get(variable, 2)
+-            self._chunksizes[variable] = self._chunksizes.get(variable, dar.chunks)
+-            self._var_chunk_caches[variable] = self._var_chunk_caches.get(variable, None)
+-            if variable in ds.data_vars:
+-                def_scale_factor = self.scale_factors.get(variable, 1)
+-                self.scale_factors[variable] = src_var_md.get('scale_factor', def_scale_factor)
+-                def_offset = self.offsets.get(variable, 0)
+-                self.offsets[variable] = src_var_md.get('add_offset', def_offset)
+-                def_nodataval = self.nodatavals.get(variable, 127)
+-                self.nodatavals[variable] = src_var_md.get('_FillValue', def_nodataval)
+-                self.dtypes[variable] = self.dtypes.get(variable, dar.dtype.name)
++            self._set_variable_defaults(
++                [variable],
++                chunksizes={variable: self._chunksizes.get(variable, dar.chunks)},
++                scale_factors={variable: src_var_md.get('scale_factor', self.scale_factors.get(variable, 1))},
++                offsets={variable: src_var_md.get('add_offset', self.offsets.get(variable, 0))},
++                nodatavals={variable: src_var_md.get('_FillValue', self.nodatavals.get(variable, 127))},
++                dtypes={variable: self.dtypes.get(variable, dar.dtype.name)},
++                data_variables=ds.data_vars)
+ 
+     def _open(self):
+         """ Internal method for opening a NetCDF file. """

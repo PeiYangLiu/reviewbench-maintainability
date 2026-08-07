@@ -1,0 +1,158 @@
+diff --git a/src/openforms/prefill/contrib/haalcentraal/plugin.py b/src/openforms/prefill/contrib/haalcentraal/plugin.py
+index e0c6a26..3c23080 100644
+--- a/src/openforms/prefill/contrib/haalcentraal/plugin.py
++++ b/src/openforms/prefill/contrib/haalcentraal/plugin.py
+@@ -1,5 +1,5 @@
+ import logging
+-from typing import Any, Dict, Iterable, List, Optional, Tuple
++from typing import Any, Dict, Iterable, List, Optional, Tuple, Type
+ 
+ from django.urls import reverse
+ from django.utils.translation import gettext_lazy as _
+@@ -29,16 +29,83 @@ def get_config():
+     return config
+ 
+ 
++class HaalCentraalAPIClient:
++    attributes = Attributes
++
++    def __init__(self, config: HaalCentraalConfig, submission: Optional[Submission]):
++        self.client = config.service.build_client()
++        self.client.context = PreRequestClientContext(submission=submission)
++
++    def retrieve_person(self, bsn: str, attributes: Iterable[str]) -> Dict[str, Any]:
++        raise NotImplementedError
++
++    def get_attribute(self, data: Dict[str, Any], attr: str) -> Any:
++        return glom(data, attr)
++
++
++class HaalCentraal13APIClient(HaalCentraalAPIClient):
++    def retrieve_person(self, bsn: str, attributes: Iterable[str]) -> Dict[str, Any]:
++        headers = dict(headers={"Accept": "application/hal+json"})
++        return self.client.retrieve(
++            "ingeschrevenpersonen",
++            burgerservicenummer=bsn,
++            url=f"ingeschrevenpersonen/{bsn}",
++            request_kwargs=headers,
++        )
++
++
++class HaalCentraal20APIClient(HaalCentraalAPIClient):
++    attributes = AttributesV2
++
++    def retrieve_person(self, bsn: str, attributes: Iterable[str]) -> Dict[str, Any]:
++        headers = dict(headers={"Content-Type": "application/json; charset=utf-8"})
++        resource_body = {
++            "type": "RaadpleegMetBurgerservicenummer",
++            "burgerservicenummer": [bsn],
++            "fields": attributes,
++        }
++        return self.client.operation(
++            "Personen",
++            data=resource_body,
++            url="personen",
++            request_kwargs=headers,
++        )
++
++    def get_attribute(self, data: Dict[str, Any], attr: str) -> Any:
++        return glom(data["personen"][0], attr)
++
++
++HAAL_CENTRAAL_CLIENTS: Dict[
++    HaalCentraalVersion, Type[HaalCentraalAPIClient]
++] = {
++    HaalCentraalVersion.haalcentraal13: HaalCentraal13APIClient,
++    HaalCentraalVersion.haalcentraal20: HaalCentraal20APIClient,
++}
++
++
++def get_haalcentraal_client_class(config: HaalCentraalConfig) -> Type[HaalCentraalAPIClient]:
++    try:
++        return HAAL_CENTRAAL_CLIENTS[config.version]
++    except KeyError as exc:
++        raise InvalidPluginConfiguration(
++            _("Unsupported Haal Centraal version: {version}").format(
++                version=config.version
++            )
++        ) from exc
++
++
++def get_haalcentraal_client(
++    config: HaalCentraalConfig, submission: Optional[Submission]
++) -> HaalCentraalAPIClient:
++    return get_haalcentraal_client_class(config)(config, submission)
++
++
+ def get_correct_attributes():
+     config = get_config()
+     if not config:
+         return Attributes
+ 
+-    match config.version:
+-        case HaalCentraalVersion.haalcentraal13:
+-            return Attributes
+-        case HaalCentraalVersion.haalcentraal20:
+-            return AttributesV2
++    return get_haalcentraal_client_class(config).attributes
+ 
+ 
+ @register("haalcentraal")
+@@ -52,41 +119,17 @@ class HaalCentraalPrefill(BasePlugin):
+ 
+     @classmethod
+     def _get_values_for_bsn(
+-        cls, submission: Submission, bsn: str, attributes: Iterable[str]
++        cls, submission: Optional[Submission], bsn: str, attributes: Iterable[str]
+     ) -> Dict[str, Any]:
+         config = get_config()
+ 
+         if not config:
+             return {}
+ 
+-        client = config.service.build_client()
+-        client.context = PreRequestClientContext(submission=submission)
++        api_client = get_haalcentraal_client(config, submission)
+ 
+         try:
+-            match config.version:
+-                case HaalCentraalVersion.haalcentraal13:
+-                    headers = dict(headers={"Accept": "application/hal+json"})
+-                    data = client.retrieve(
+-                        "ingeschrevenpersonen",
+-                        burgerservicenummer=bsn,
+-                        url=f"ingeschrevenpersonen/{bsn}",
+-                        request_kwargs=headers,
+-                    )
+-                case HaalCentraalVersion.haalcentraal20:
+-                    headers = dict(
+-                        headers={"Content-Type": "application/json; charset=utf-8"}
+-                    )
+-                    recource_body = {
+-                        "type": "RaadpleegMetBurgerservicenummer",
+-                        "burgerservicenummer": [bsn],
+-                        "fields": attributes,
+-                    }
+-                    data = client.operation(
+-                        "Personen",
+-                        data=recource_body,
+-                        url="personen",
+-                        request_kwargs=headers,
+-                    )
++            data = api_client.retrieve_person(bsn, attributes)
+         except RequestException as e:
+             logger.exception("exception while making request", exc_info=e)
+             return {}
+@@ -97,11 +140,7 @@ class HaalCentraalPrefill(BasePlugin):
+         values = dict()
+         for attr in attributes:
+             try:
+-                match config.version:
+-                    case HaalCentraalVersion.haalcentraal13:
+-                        values[attr] = glom(data, attr)
+-                    case HaalCentraalVersion.haalcentraal20:
+-                        values[attr] = glom(data["personen"][0], attr)
++                values[attr] = api_client.get_attribute(data, attr)
+             except GlomError:
+                 logger.warning(
+                     f"missing expected attribute '{attr}' in backend response"

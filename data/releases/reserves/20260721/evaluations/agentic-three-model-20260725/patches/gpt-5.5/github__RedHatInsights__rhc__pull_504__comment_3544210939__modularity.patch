@@ -1,0 +1,115 @@
+diff --git a/scripts/its_select_tests.py b/scripts/its_select_tests.py
+index a17273f..85dda70 100644
+--- a/scripts/its_select_tests.py
++++ b/scripts/its_select_tests.py
+@@ -88,7 +88,7 @@ def write_github_outputs(path: str, selection: dict[str, Any]) -> None:
+             file.write(f"{key}={value}\n")
+ 
+ 
+-def main() -> int:
++def parse_args() -> argparse.Namespace:
+     parser = argparse.ArgumentParser(
+         description="Select test targets based on changed files."
+     )
+@@ -109,12 +109,39 @@ def main() -> int:
+         default="",
+         help="Optional path to GitHub output file ($GITHUB_OUTPUT).",
+     )
+-    args = parser.parse_args()
++    return parser.parse_args()
++
++
++def load_config(map_file: str) -> dict[str, Any]:
++    with open(map_file, "r", encoding="utf-8") as file:
++        return yaml.safe_load(file)
++
++
++def build_recommended_commands(
++    selected_go_packages: set[str],
++    selected_pytest_files: set[str],
++    run_full_integration: bool,
++) -> dict[str, str]:
++    return {
++        "go": (
++            f"go test {' '.join(sorted(selected_go_packages))}"
++            if selected_go_packages
++            else "go test ./..."
++        ),
++        "pytest": (
++            "pytest -v integration-tests"
++            if run_full_integration
++            else (
++                "pytest -v " + " ".join(sorted(selected_pytest_files))
++                if selected_pytest_files
++                else "pytest -v integration-tests/test_version.py"
++            )
++        ),
++    }
+ 
+-    with open(args.map_file, "r", encoding="utf-8") as file:
+-        config = yaml.safe_load(file)
+ 
+-    changed_files = git_changed_files(args.base, args.head)
++def select_tests(config: dict[str, Any], base: str, head: str) -> dict[str, Any]:
++    changed_files = git_changed_files(base, head)
+     ignore_patterns = compile_patterns(config.get("ignore_patterns", []))
+     docs_patterns = compile_patterns(config.get("docs_only_patterns", []))
+     fallback_patterns = compile_patterns(config.get("fallback_patterns", []))
+@@ -185,9 +212,9 @@ def main() -> int:
+     else:
+         risk_level = "medium"
+ 
+-    selection = {
+-        "base": args.base,
+-        "head": args.head,
++    return {
++        "base": base,
++        "head": head,
+         "changed_files": changed_files,
+         "considered_files": considered_files,
+         "docs_only_change": docs_only_change,
+@@ -197,28 +224,27 @@ def main() -> int:
+         "run_full_integration": run_full_integration,
+         "risk_level": risk_level,
+         "reasons": sorted(set(reasons)),
+-        "recommended_commands": {
+-            "go": (
+-                f"go test {' '.join(sorted(selected_go_packages))}"
+-                if selected_go_packages
+-                else "go test ./..."
+-            ),
+-            "pytest": (
+-                "pytest -v integration-tests"
+-                if run_full_integration
+-                else (
+-                    "pytest -v " + " ".join(sorted(selected_pytest_files))
+-                    if selected_pytest_files
+-                    else "pytest -v integration-tests/test_version.py"
+-                )
+-            ),
+-        },
++        "recommended_commands": build_recommended_commands(
++            selected_go_packages,
++            selected_pytest_files,
++            run_full_integration,
++        ),
+     }
+ 
+-    with open(args.output_json, "w", encoding="utf-8") as file:
++
++def write_selection_json(path: str, selection: dict[str, Any]) -> None:
++    with open(path, "w", encoding="utf-8") as file:
+         json.dump(selection, file, indent=2, sort_keys=True)
+         file.write("\n")
+ 
++
++def main() -> int:
++    args = parse_args()
++    config = load_config(args.map_file)
++    selection = select_tests(config, args.base, args.head)
++
++    write_selection_json(args.output_json, selection)
++
+     if args.github_output:
+         write_github_outputs(args.github_output, selection)
+ 

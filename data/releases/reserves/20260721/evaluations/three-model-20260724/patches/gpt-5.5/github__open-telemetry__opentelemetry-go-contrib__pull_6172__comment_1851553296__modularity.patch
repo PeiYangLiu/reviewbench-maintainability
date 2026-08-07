@@ -1,0 +1,58 @@
+--- a/instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo/mongo.go
++++ b/instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo/mongo.go
+@@ -35,24 +35,12 @@
+ func (m *monitor) Started(ctx context.Context, evt *event.CommandStartedEvent) {
+ 	hostname, port := peerInfo(evt)
+ 
+-	attrs := []attribute.KeyValue{semconv.DBSystemMongoDB}
+-
+-	attrs = appendOpNameAttrs(attrs, evt.CommandName)
+-	attrs = appendDBNamespace(attrs, evt.DatabaseName)
+-	attrs = appendNetworkPort(attrs, port)
+-	attrs = appendNetworkHost(attrs, hostname)
+-	attrs = appendNetworkAddress(attrs, net.JoinHostPort(hostname, strconv.Itoa(port)))
+-	attrs = appendNetworkTransport(attrs)
+-
+-	if !m.cfg.CommandAttributeDisabled {
+-		attrs = appendDBStatement(attrs, sanitizeCommand(evt.Command))
+-	}
++	collection, _ := extractCollection(evt)
++	attrs := commandStartedAttributes(evt, hostname, port, collection, !m.cfg.CommandAttributeDisabled)
+ 
+ 	var spanName string
+-	if collection, err := extractCollection(evt); err == nil && collection != "" {
++	if collection != "" {
+ 		spanName = collection + "."
+-
+-		attrs = appendCollection(attrs, collection)
+ 	}
+ 
+ 	spanName += evt.CommandName
+@@ -98,6 +86,27 @@
+ 	}
+ 
+ 	span.End()
++}
++
++func commandStartedAttributes(evt *event.CommandStartedEvent, hostname string, port int, collection string, includeStatement bool) []attribute.KeyValue {
++	attrs := []attribute.KeyValue{semconv.DBSystemMongoDB}
++
++	attrs = appendOpNameAttrs(attrs, evt.CommandName)
++	attrs = appendDBNamespace(attrs, evt.DatabaseName)
++	attrs = appendNetworkPort(attrs, port)
++	attrs = appendNetworkHost(attrs, hostname)
++	attrs = appendNetworkAddress(attrs, net.JoinHostPort(hostname, strconv.Itoa(port)))
++	attrs = appendNetworkTransport(attrs)
++
++	if includeStatement {
++		attrs = appendDBStatement(attrs, sanitizeCommand(evt.Command))
++	}
++
++	if collection != "" {
++		attrs = appendCollection(attrs, collection)
++	}
++
++	return attrs
+ }
+ 
+ // TODO sanitize values where possible, then re-enable `db.statement` span attributes default.

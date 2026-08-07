@@ -1,0 +1,97 @@
+--- a/pkg/cmd/drtprod/cli/commands/yamlprocessor.go
++++ b/pkg/cmd/drtprod/cli/commands/yamlprocessor.go
+@@ -190,49 +190,56 @@
+ 			// defer complete the wait group for the dependent targets to proceed
+ 			defer waitGroupTracker[t.TargetName].Done()
+ 			defer wg.Done()
+-			// currentTargetStatus maintains the status of the current target
+-			currentTargetStatus := targetResultSuccess
+-			for _, dt := range t.DependentTargets {
+-				if twg, ok := waitGroupTracker[dt]; ok {
+-					fmt.Printf("[%s] waiting on <%s>\n", t.TargetName, dt)
+-					// wait on the dependent targets
+-					// it would not matter if we wait sequentially as all dependent targets need to complete
+-					twg.Wait()
+-					//	if we reach here, the dependent target execution has finished. So, there will be an entry in the
+-					// status registry for the dependent target. The only reason why an entry could be missing is that the
+-					// dependent target is not selected by the user in -t option.
+-					sr.Lock()
+-					status, exists := sr.statusRegistry[dt]
+-					sr.Unlock()
+-					// We need to check if we need to ignore the dependent target failure
+-					if !t.IgnoreDependentFailure && exists && status == targetResultFailure {
+-						fmt.Printf("[%s] Not proceeding as the dependent target %s was not successful.", t.TargetName, dt)
+-						// if the dependent target has failed, the current target is marked as failure
+-						currentTargetStatus = targetResultFailure
+-						break
+-					}
+-				}
+-			}
+-			var err error
+-			// currentTargetStatus must be success for executing further commands
+-			if currentTargetStatus == targetResultSuccess {
+-				err = executeCommands(ctx, t.TargetName, t.commands)
+-			}
+-			// statusRegistry will get updated concurrently and so, we need to ensure we lock
+-			sr.Lock()
+-			defer sr.Unlock()
+-			// err can be nil if the commands were not executed as the dependent target has failed
+-			if err != nil || currentTargetStatus == targetResultFailure {
+-				fmt.Printf("[%s] Error executing commands: %v\n", t.TargetName, err)
+-				sr.statusRegistry[t.TargetName] = targetResultFailure
+-				return
+-			}
+-			sr.statusRegistry[t.TargetName] = targetResultSuccess
++			processTarget(ctx, t, waitGroupTracker, sr)
+ 		}(t)
+ 	}
+ 	// final wait for all targets to complete
+ 	wg.Wait()
+ 	return nil
++}
++
++// processTarget executes a target after waiting for its dependencies to complete.
++func processTarget(
++	ctx context.Context, t target, waitGroupTracker map[string]*sync.WaitGroup, sr *targetStatus,
++) {
++	// currentTargetStatus maintains the status of the current target
++	currentTargetStatus := targetResultSuccess
++	for _, dt := range t.DependentTargets {
++		if twg, ok := waitGroupTracker[dt]; ok {
++			fmt.Printf("[%s] waiting on <%s>\n", t.TargetName, dt)
++			// wait on the dependent targets
++			// it would not matter if we wait sequentially as all dependent targets need to complete
++			twg.Wait()
++			//	if we reach here, the dependent target execution has finished. So, there will be an entry in the
++			// status registry for the dependent target. The only reason why an entry could be missing is that the
++			// dependent target is not selected by the user in -t option.
++			sr.Lock()
++			status, exists := sr.statusRegistry[dt]
++			sr.Unlock()
++			// We need to check if we need to ignore the dependent target failure
++			if !t.IgnoreDependentFailure && exists && status == targetResultFailure {
++				fmt.Printf("[%s] Not proceeding as the dependent target %s was not successful.", t.TargetName, dt)
++				// if the dependent target has failed, the current target is marked as failure
++				currentTargetStatus = targetResultFailure
++				break
++			}
++		}
++	}
++	var err error
++	// currentTargetStatus must be success for executing further commands
++	if currentTargetStatus == targetResultSuccess {
++		err = executeCommands(ctx, t.TargetName, t.commands)
++	}
++	// statusRegistry will get updated concurrently and so, we need to ensure we lock
++	sr.Lock()
++	defer sr.Unlock()
++	// err can be nil if the commands were not executed as the dependent target has failed
++	if err != nil || currentTargetStatus == targetResultFailure {
++		fmt.Printf("[%s] Error executing commands: %v\n", t.TargetName, err)
++		sr.statusRegistry[t.TargetName] = targetResultFailure
++		return
++	}
++	sr.statusRegistry[t.TargetName] = targetResultSuccess
+ }
+ 
+ // shouldSkipTarget returns true if the target should be skipped

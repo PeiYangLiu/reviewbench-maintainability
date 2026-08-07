@@ -1,0 +1,250 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 80,
+      "path": "src/sparseml/pytorch/sparsification/quantization/modifier_quantization.py",
+      "start_line": 1
+    },
+    "response_chars": 129,
+    "round": 1,
+    "tool_result": {
+      "content": "1: # Copyright (c) 2021 - present / Neuralmagic, Inc. All Rights Reserved.\n2: #\n3: # Licensed under the Apache License, Version 2.0 (the \"License\");\n4: # you may not use this file except in compliance with the License.\n5: # You may obtain a copy of the License at\n6: #\n7: #    http://www.apache.org/licenses/LICENSE-2.0\n8: #\n9: # Unless required by applicable law or agreed to in writing,\n10: # software distributed under the License is distributed on an \"AS IS\" BASIS,\n11: # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n12: # See the License for the specific language governing permissions and\n13: # limitations under the License.\n14: \n15: \"\"\"\n16: Modifier for models through quantization aware training.\n17: \n18: PyTorch version must support quantization (>=1.2, ONNX export support introduced in 1.7)\n19: \"\"\"\n20: import logging\n21: import warnings\n22: from itertools import cycle\n23: from typing import (\n24:     Any,\n25:     Callable,\n26:     Dict,\n27:     Iterable,\n28:     List,\n29:     NamedTuple,\n30:     Optional,\n31:     Tuple,\n32:     Union,\n33: )\n34: \n35: import torch\n36: from torch.nn import Module\n37: from torch.optim.optimizer import Optimizer\n38: \n39: \n40: try:\n41:     from torch import quantization as torch_quantization\n42:     from torch.nn import intrinsic as torch_intrinsic\n43: except Exception:\n44:     torch_quantization = None\n45:     torch_intrinsic = None\n46: \n47: from sparseml.optim import BaseModifier, ModifierProp\n48: from sparseml.pytorch.optim.modifier import PyTorchModifierYAML, ScheduledModifier\n49: from sparseml.pytorch.sparsification.quantization.helpers import (\n50:     add_quant_dequant,\n51:     configure_module_bn_wrappers,\n52:     configure_module_default_qconfigs,\n53:     configure_module_qat_wrappers,\n54:     fix_observer_quant_range,\n55:     freeze_bn_stats,\n56:     fuse_module_conv_bn_relus,\n57:     get_qat_qconfig,\n58:     prepare_embeddings_qat,\n59:     remove_activation_qat_by_layer_name,\n60: )\n61: from sparseml.pytorch.utils import BaseLogger, tensors_module_forward, tensors_to_device\n62: from sparseml.sparsification import SparsificationTypes\n63: \n64: \n65: _LOGGER = logging.getLogger(__name__)\n66: \n67: __all__ = [\n68:     \"QuantizationModifier\",\n69: ]\n70: \n71: _ModuleToQuantize = NamedTuple(\n72:     \"_ModuleToQuantize\", [(\"name\", Optional[str]), (\"module\", Module)]\n73: )\n74: \n75: \n76: @PyTorchModifierYAML()\n77: class QuantizationModifier(ScheduledModifier):\n78:     \"\"\"\n79:     Enables quantization aware training (QAT) for a given module or its submodules\n80:     After the start epoch, the specified module(s)' forward pass will emulate",
+      "end_line": 80,
+      "path_lines": 771,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 8207,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 65,
+      "output_tokens_details": {
+        "reasoning_tokens": 24
+      },
+      "total_tokens": 8272
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 220,
+      "path": "src/sparseml/pytorch/sparsification/quantization/helpers.py",
+      "start_line": 1
+    },
+    "response_chars": 1332,
+    "round": 2,
+    "tool_result": {
+      "content": "1: # Copyright (c) 2021 - present / Neuralmagic, Inc. All Rights Reserved.\n2: #\n3: # Licensed under the Apache License, Version 2.0 (the \"License\");\n4: # you may not use this file except in compliance with the License.\n5: # You may obtain a copy of the License at\n6: #\n7: #    http://www.apache.org/licenses/LICENSE-2.0\n8: #\n9: # Unless required by applicable law or agreed to in writing,\n10: # software distributed under the License is distributed on an \"AS IS\" BASIS,\n11: # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n12: # See the License for the specific language governing permissions and\n13: # limitations under the License.\n14: \n15: \"\"\"\n16: Helper functions for performing quantization aware training with PyTorch\n17: \"\"\"\n18: \n19: from copy import deepcopy\n20: from typing import Any, Callable, Dict, List, Optional, Union\n21: \n22: import torch\n23: from torch.nn import BatchNorm2d, Conv2d, Embedding, Module, ReLU\n24: \n25: \n26: try:\n27:     import torch.nn.intrinsic as nni\n28:     from torch import quantization as torch_quantization\n29: except Exception:\n30:     nni = None\n31:     torch_quantization = None\n32: \n33: from sparseml.pytorch.nn import ReLU as ReLU_nm\n34: \n35: \n36: __all__ = [\n37:     \"QATWrapper\",\n38:     \"configure_module_bn_wrappers\",\n39:     \"configure_module_default_qconfigs\",\n40:     \"configure_module_qat_wrappers\",\n41:     \"add_quant_dequant\",\n42:     \"remove_activation_qat_by_layer_name\",\n43:     \"get_qat_qconfig\",\n44:     \"fix_observer_quant_range\",\n45:     \"freeze_bn_stats\",\n46:     \"fuse_module_conv_bn_relus\",\n47:     \"prepare_embeddings_qat\",\n48: ]\n49: \n50: _QUANTIZABLE_MODULE_TYPES = (\n51:     {\n52:         # Conv based layers\n53:         torch.nn.Conv1d,\n54:         torch.nn.Conv2d,\n55:         torch.nn.Conv3d,\n56:         nni.ConvBn1d,\n57:         nni.ConvBn2d,\n58:         nni.ConvBn3d,\n59:         nni.ConvReLU1d,\n60:         nni.ConvReLU2d,\n61:         nni.ConvReLU3d,\n62:         nni.ConvBnReLU1d,\n63:         nni.ConvBnReLU2d,\n64:         nni.ConvBnReLU3d,\n65:         # Linear Layers\n66:         torch.nn.Linear,\n67:         nni.LinearReLU,\n68:     }\n69:     if nni  # nni will always import if torch.quantization is available\n70:     else None\n71: )\n72: \n73: \n74: class BNWrapper(Module):\n75:     \"\"\"\n76:     Wraps BatchNormalization module to expose methods needed to enable\n77:     freezing/unfreezing of statistics\n78: \n79:     :param module: BatchNormalization module to be wrapped\n80:     \"\"\"\n81: \n82:     def __init__(self, module: Module):\n83:         super().__init__()\n84:         self.bn = module\n85:         self.freeze_bn = False\n86: \n87:     @property\n88:     def running_mean(self):\n89:         return self.bn.running_mean\n90: \n91:     @running_mean.setter\n92:     def running_mean(self, value):\n93:         self.bn.running_mean = value\n94: \n95:     @property\n96:     def running_var(self):\n97:         return self.bn.running_var\n98: \n99:     @running_var.setter\n100:     def running_var(self, value):\n101:         self.bn.running_var = value\n102: \n103:     @property\n104:     def weight(self):\n105:         return self.bn.weight\n106: \n107:     @weight.setter\n108:     def weight(self, value):\n109:         self.bn.weight = value\n110: \n111:     @property\n112:     def bias(self):\n113:         return self.bn.bias\n114: \n115:     @bias.setter\n116:     def bias(self, value):\n117:         self.bn.bias = value\n118: \n119:     @property\n120:     def gamma(self):\n121:         return self.bn.gamma\n122: \n123:     @gamma.setter\n124:     def gamma(self, value):\n125:         self.bn.gamma = value\n126: \n127:     @property\n128:     def beta(self):\n129:         return self.bn.beta\n130: \n131:     @beta.setter\n132:     def beta(self, value):\n133:         self.bn.beta = value\n134: \n135:     @property\n136:     def num_batches_tracked(self):\n137:         return self.bn.num_batches_tracked\n138: \n139:     @num_batches_tracked.setter\n140:     def num_batches_tracked(self, value):\n141:         self.bn.num_batches_tracked = value\n142: \n143:     @property\n144:     def eps(self):\n145:         return self.bn.eps\n146: \n147:     @eps.setter\n148:     def eps(self, value):\n149:         self.bn.eps = value\n150: \n151:     @property\n152:     def momentum(self):\n153:         return self.bn.momentum\n154: \n155:     @momentum.setter\n156:     def momentum(self, value):\n157:         self.bn.momentum = value\n158: \n159:     def forward(self, x):\n160:         return self.bn(x)\n161: \n162:     def freeze_bn_stats(self):\n163:         self.freeze_bn = True\n164:         self.bn.training = False\n165:         return self\n166: \n167:     def reset_running_stats(self):\n168:         self.bn.reset_running_stats()\n169: \n170:     def train(self, mode=True):\n171:         if not self.freeze_bn:\n172:             self.bn.train(mode)\n173:         return self\n174: \n175:     def update_bn_stats(self):\n176:         self.freeze_bn = False\n177:         self.bn.training = True\n178:         return self\n179: \n180: \n181: class QATWrapper(Module):\n182:     \"\"\"\n183:     Wraps inputs and outputs of a Module or function with QuantStubs for\n184:     Quantization-Aware-Training (QAT)\n185: \n186:     :param forward_fn: function to be wrapped, should generally accept and return\n187:         torch Tensor(s)\n188:     :param num_inputs: number of inputs of the forward function to add a QuantStub\n189:         to. Will wrap the first num_inputs ordered inputs of the function. Default\n190:         is 1\n191:     :param kwarg_input_names: list of names of key word arguments to the forward pass\n192:         that should be wrapped with a fake quantize operation. Defaults to empty\n193:     :param num_outputs: number of outputs of the forward function to add a QuantStub\n194:         to. Will wrap the first num_inputs ordered outputs of the function. Default\n195:         is 1. Will also add a DeQuantStub for FP32 conversion if\n196:         torch.quantization.convert is invoked\n197:     :param input_qconfigs: QConfig to use for calibrating the input QuantStubs. Can\n198:         be a single QConfig that will be copied to each QuantStub or a list of one\n199:         QConfig for each input. Instead of a QConfig objects, the string 'asymmetric'\n200:         or 'symmetric' may be used to use default UINT8 asymmetric and symmetric\n201:         quantization respectively\n202:     :param output_qconfigs: QConfig to use for calibrating the output QuantStubs. Can\n203:         be a single QConfig that will be copied to each QuantStub or a list of one\n204:         QConfig for each output. Instead of a QConfig objects, the string 'asymmetric'\n205:         or 'symmetric' may be used to use default UINT8 asymmetric and symmetric\n206:         quantization respectively\n207:     :param reduce_range: if True, the quantization range will be reduced by one bit.\n208:         This may prevent overflow issues with model execution on certain hardware\n209:         Default is False\n210:     :param activation_qconfig_kwargs: Additional kwargs for quantization of activations.\n211:         Default is {}\n212:     :param weight_qconfig_kwargs: Additional kwargs for quantization of weights.\n213:         Default is {}\n214:     \"\"\"\n215: \n216:     @staticmethod\n217:     def from_module(\n218:         module: Module,\n219:         symmetric_activations: Optional[bool] = None,\n220:         symmetric_weights: Optional[bool] = None,",
+      "end_line": 220,
+      "path_lines": 1010,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 9062,
+      "input_tokens_details": {
+        "cached_tokens": 7936
+      },
+      "output_tokens": 1618,
+      "output_tokens_details": {
+        "reasoning_tokens": 1280
+      },
+      "total_tokens": 10680
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 670,
+      "path": "src/sparseml/pytorch/sparsification/quantization/modifier_quantization.py",
+      "start_line": 586
+    },
+    "response_chars": 132,
+    "round": 3,
+    "tool_result": {
+      "content": "586:         # set qconfig.\n587:         # if tensorrt flag is used, set activation and weights to symmetric\n588:         # quantization.\n589:         # otherwise, use the default values set in get_qat_qconfig\n590:         if self.tensorrt:\n591:             _symmetric_activations = True\n592:             _activation_dtype = torch.qint8\n593:             _symmetric_weights = True\n594:             _weight_dtype = torch.qint8\n595:         else:\n596:             _symmetric_activations = None\n597:             _activation_dtype = None\n598:             _symmetric_weights = None\n599:             _weight_dtype = None\n600: \n601:         qconfig = get_qat_qconfig(\n602:             symmetric_activations=_symmetric_activations,\n603:             symmetric_weights=_symmetric_weights,\n604:             reduce_range=self._reduce_range,\n605:             activation_qconfig_kwargs=self.activation_qconfig_kwargs,\n606:             weight_qconfig_kwargs=self.weight_qconfig_kwargs,\n607:             activation_dtype=_activation_dtype,\n608:             weight_dtype=_weight_dtype,\n609:             activation_bits=self.activation_bits,\n610:             weight_bits=self.weight_bits,\n611:         )\n612: \n613:         # prepare each module / submodule for quantization\n614:         for name, quant_module in self._modules_to_quantize:\n615:             # wrap any modules with wrap_qat set to True as QATWrapper(s)\n616:             configure_module_qat_wrappers(\n617:                 quant_module,\n618:                 symmetric_activations=_symmetric_activations,\n619:                 symmetric_weights=_symmetric_weights,\n620:                 reduce_range=self._reduce_range,\n621:                 activation_qconfig_kwargs=self.activation_qconfig_kwargs,\n622:                 weight_qconfig_kwargs=self.weight_qconfig_kwargs,\n623:                 activation_dtype=_activation_dtype,\n624:                 weight_dtype=_weight_dtype,\n625:                 activation_bits=self.activation_bits,\n626:                 weight_bits=self.weight_bits,\n627:             )\n628: \n629:             # set quantization config (asymmetric activations, symmetric weights)\n630:             quant_module.qconfig = qconfig\n631: \n632:             # wrap all conv / linear blocks in with quantization observers\n633:             torch_quantization.propagate_qconfig_(quant_module)\n634:             configure_module_default_qconfigs(quant_module)\n635: \n636:             add_quant_dequant(quant_module, name, module)\n637: \n638:             # Remove output quantization from appropriate modules\n639:             if to_remove_layer_name:\n640:                 remove_activation_qat_by_layer_name(quant_module, to_remove_layer_name)\n641: \n642:         # remove qconfigs for module types in exclude_module_types\n643:         to_exclude = []\n644:         if self._exclude_module_types:\n645:             to_exclude.extend(self._exclude_module_types)\n646: \n647:         # if exclude_batchnorm flag is used, add batch norm layers to list of\n648:         # modules to exclude qconfig\n649:         if self._exclude_batchnorm:\n650:             to_exclude.extend([\"BatchNorm1d\", \"BatchNorm2d\", \"BatchNorm3d\"])\n651: \n652:         self._exclude_module_types = to_exclude\n653:         if self._exclude_module_types:\n654:             self._strip_excluded_module_qconfigs(module)\n655: \n656:         # set modules with proper qconfigs to QAT mode\n657:         torch_quantization.prepare_qat(module, inplace=True)\n658:         if self._quantize_embeddings:\n659:             prepare_embeddings_qat(\n660:                 module,\n661:                 symmetric_activations=_symmetric_activations,\n662:                 symmetric_weights=_symmetric_weights,\n663:                 reduce_range=self._reduce_range,\n664:                 activation_qconfig_kwargs=self.activation_qconfig_kwargs,\n665:                 weight_qconfig_kwargs=self.weight_qconfig_kwargs,\n666:                 activation_dtype=_activation_dtype,\n667:                 weight_dtype=_weight_dtype,\n668:                 activation_bits=self.activation_bits,\n669:                 weight_bits=self.weight_bits,\n670:             )",
+      "end_line": 670,
+      "path_lines": 771,
+      "start_line": 586
+    },
+    "usage": {
+      "input_tokens": 11294,
+      "input_tokens_details": {
+        "cached_tokens": 7936
+      },
+      "output_tokens": 154,
+      "output_tokens_details": {
+        "reasoning_tokens": 113
+      },
+      "total_tokens": 11448
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/sparseml/pytorch/sparsification/quantization/helpers.py",
+      "query": "def get_qat_qconfig"
+    },
+    "response_chars": 354,
+    "round": 4,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 710,
+          "text": "def get_qat_qconfig("
+        }
+      ],
+      "query": "def get_qat_qconfig",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 12326,
+      "input_tokens_details": {
+        "cached_tokens": 11008
+      },
+      "output_tokens": 586,
+      "output_tokens_details": {
+        "reasoning_tokens": 471
+      },
+      "total_tokens": 12912
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 830,
+      "path": "src/sparseml/pytorch/sparsification/quantization/helpers.py",
+      "start_line": 710
+    },
+    "response_chars": 237,
+    "round": 5,
+    "tool_result": {
+      "content": "710: def get_qat_qconfig(\n711:     symmetric_activations: Optional[bool] = None,\n712:     symmetric_weights: Optional[bool] = None,\n713:     reduce_range: bool = False,\n714:     activation_qconfig_kwargs: Optional[Dict[str, Any]] = None,\n715:     weight_qconfig_kwargs: Optional[Dict[str, Any]] = None,\n716:     activation_dtype: Optional[torch.dtype] = None,\n717:     weight_dtype: Optional[torch.dtype] = None,\n718:     activation_bits: Optional[int] = None,\n719:     weight_bits: Optional[int] = None,\n720: ) -> \"torch.quantization.QConfig\":\n721:     \"\"\"\n722:     :param symmetric_activations: if True, activations will have a symmetric\n723:         quantization range with a pre-specified zero point\n724:         (0 if activation_dtype=torch.qint8, 128 if activation_dtype=torch.quint8).\n725:         Default is False.\n726:     :param symmetric_weights: if True, weights will have a symmetric\n727:         quantization range with a pre-specified zero point\n728:         (0 if weight_dtype=torch.qint8, 128 if weight_dtype=torch.quint8).\n729:         Default is True.\n730:     :param reduce_range: if True, the quantization range will be reduced by one bit.\n731:         This may prevent overflow issues with model execution on certain hardware.\n732:         Default is False.\n733:     :param activation_qconfig_kwargs: Additional kwargs for quantization of\n734:         activations.\n735:     :param weight_qconfig_kwargs: Additional kwargs for quantization of\n736:         weights.\n737:     :param activation_dtype: quantized activation data type. Default is torch.quint8.\n738:     :param weight_dtype: quantized weights data type. Default is torch.qint8.\n739:     :param activation_bits: number of bits for activations. Default is 8.\n740:     :param weight_bits: number of bits for weights. Default is 8.\n741:     :return: A QAT fake quantization config for symmetric weight quantization and\n742:         asymmetric activation quantization.  The difference between this and\n743:         torch.quantization.default_qat_qconfig is that the activation observer\n744:         will not have reduce_range enabled.\n745:     \"\"\"\n746:     activation_observer = get_observer(\n747:         symmetric_activations,\n748:         activation_dtype,\n749:         activation_bits,\n750:         reduce_range,\n751:         activation_qconfig_kwargs,\n752:     )\n753:     if symmetric_weights is None:\n754:         _symmetric_weights = True\n755:     else:\n756:         _symmetric_weights = symmetric_weights\n757: \n758:     if weight_dtype is None:\n759:         _weight_dtype = torch.qint8\n760:     else:\n761:         _weight_dtype = weight_dtype\n762: \n763:     weight_observer = get_observer(\n764:         _symmetric_weights, _weight_dtype, weight_bits, False, weight_qconfig_kwargs\n765:     )\n766:     return torch_quantization.QConfig(\n767:         activation=activation_observer,\n768:         weight=weight_observer,\n769:     )\n770: \n771: \n772: def get_observer(\n773:     symmetric: Optional[bool],\n774:     dtype: Optional[torch.dtype],\n775:     bits: Optional[int],\n776:     reduce_range: bool,\n777:     qconfig_kwargs: Dict[str, Any],\n778: ):\n779:     qscheme = torch.per_tensor_symmetric if symmetric else torch.per_tensor_affine\n780:     quant_min, quant_max, dtype = compute_range(dtype, bits)\n781:     observer_kwargs = dict(\n782:         observer=torch_quantization.MovingAverageMinMaxObserver,\n783:         quant_min=quant_min,\n784:         quant_max=quant_max,\n785:         dtype=dtype,\n786:         qscheme=qscheme,\n787:         reduce_range=reduce_range,\n788:     )\n789:     observer_kwargs.update(qconfig_kwargs or {})\n790:     observer = torch_quantization.FakeQuantize.with_args(\n791:         **observer_kwargs,\n792:     )\n793: \n794:     return observer\n795: \n796: \n797: def fix_observer_quant_range(module: Module):\n798:     \"\"\"\n799:     As of torch 1.10.2 there is a bug in FakeQuantize initialization where\n800:     quant_min and quant_max of FakeQuantize are not propagated to its\n801:     activation_post_process observer. This function propagates FakeQuantize quant\n802:     ranges to their Observer objects\n803: \n804:     :param module: Module object to propagate FakeQuantize quant ranges of. Propagates\n805:         in place\n806:     \"\"\"\n807:     for submodule in module.modules():\n808:         if isinstance(submodule, torch_quantization.FakeQuantize):\n809:             fake_quantize = submodule\n810:         elif hasattr(submodule, \"activation_post_process\") and isinstance(\n811:             submodule.activation_post_process, torch_quantization.FakeQuantize\n812:         ):\n813:             fake_quantize = submodule.activation_post_process\n814:         else:\n815:             continue\n816: \n817:         # continue if fake_quantize quant range not set, or observer quant range is set\n818:         observer = fake_quantize.activation_post_process\n819:         if (\n820:             fake_quantize.quant_min is None\n821:             or fake_quantize.quant_max is None\n822:             or (observer.quant_min is not None or observer.quant_max is not None)\n823:         ):\n824:             continue\n825:         observer.quant_min = fake_quantize.quant_min\n826:         observer.quant_max = fake_quantize.quant_max\n827:         observer.has_customized_qrange = True\n828: \n829: \n830: def freeze_bn_stats(module: Module):",
+      "end_line": 830,
+      "path_lines": 1010,
+      "start_line": 710
+    },
+    "usage": {
+      "input_tokens": 12408,
+      "input_tokens_details": {
+        "cached_tokens": 12032
+      },
+      "output_tokens": 248,
+      "output_tokens_details": {
+        "reasoning_tokens": 171
+      },
+      "total_tokens": 12656
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "        qat_qconfig_args = dict(\n            symmetric_activations=_symmetric_activations,\n            symmetric_weights=_symmetric_weights,\n            reduce_range=self._reduce_range,\n            activation_qconfig_kwargs=self.activation_qconfig_kwargs,\n            weight_qconfig_kwargs=self.weight_qconfig_kwargs,\n            activation_dtype=_activation_dtype,\n            weight_dtype=_weight_dtype,\n            activation_bits=self.activation_bits,\n            weight_bits=self.weight_bits,\n        )\n\n        qconfig = get_qat_qconfig(**qat_qconfig_args)",
+          "end_line": 611,
+          "start_line": 601
+        },
+        {
+          "content": "            configure_module_qat_wrappers(quant_module, **qat_qconfig_args)",
+          "end_line": 627,
+          "start_line": 616
+        },
+        {
+          "content": "            prepare_embeddings_qat(module, **qat_qconfig_args)",
+          "end_line": 670,
+          "start_line": 659
+        }
+      ]
+    },
+    "response_chars": 879,
+    "round": 6,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 611,
+          "replacement_lines": 13,
+          "start_line": 601
+        },
+        {
+          "end_line": 627,
+          "replacement_lines": 1,
+          "start_line": 616
+        },
+        {
+          "end_line": 670,
+          "replacement_lines": 1,
+          "start_line": 659
+        }
+      ],
+      "current_file_lines": 751,
+      "updated_excerpt": {
+        "content": "591:             _symmetric_activations = True\n592:             _activation_dtype = torch.qint8\n593:             _symmetric_weights = True\n594:             _weight_dtype = torch.qint8\n595:         else:\n596:             _symmetric_activations = None\n597:             _activation_dtype = None\n598:             _symmetric_weights = None\n599:             _weight_dtype = None\n600: \n601:         qat_qconfig_args = dict(\n602:             symmetric_activations=_symmetric_activations,\n603:             symmetric_weights=_symmetric_weights,\n604:             reduce_range=self._reduce_range,\n605:             activation_qconfig_kwargs=self.activation_qconfig_kwargs,\n606:             weight_qconfig_kwargs=self.weight_qconfig_kwargs,\n607:             activation_dtype=_activation_dtype,\n608:             weight_dtype=_weight_dtype,\n609:             activation_bits=self.activation_bits,\n610:             weight_bits=self.weight_bits,\n611:         )\n612: \n613:         qconfig = get_qat_qconfig(**qat_qconfig_args)\n614: \n615:         # prepare each module / submodule for quantization\n616:         for name, quant_module in self._modules_to_quantize:\n617:             # wrap any modules with wrap_qat set to True as QATWrapper(s)\n618:             configure_module_qat_wrappers(quant_module, **qat_qconfig_args)\n619: \n620:             # set quantization config (asymmetric activations, symmetric weights)\n621:             quant_module.qconfig = qconfig\n622: \n623:             # wrap all conv / linear blocks in with quantization observers\n624:             torch_quantization.propagate_qconfig_(quant_module)\n625:             configure_module_default_qconfigs(quant_module)\n626: \n627:             add_quant_dequant(quant_module, name, module)\n628: \n629:             # Remove output quantization from appropriate modules\n630:             if to_remove_layer_name:\n631:                 remove_activation_qat_by_layer_name(quant_module, to_remove_layer_name)",
+        "end_line": 631,
+        "path_lines": 751,
+        "start_line": 591
+      }
+    },
+    "usage": {
+      "input_tokens": 13879,
+      "input_tokens_details": {
+        "cached_tokens": 12032
+      },
+      "output_tokens": 359,
+      "output_tokens_details": {
+        "reasoning_tokens": 151
+      },
+      "total_tokens": 14238
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 660,
+      "path": "src/sparseml/pytorch/sparsification/quantization/modifier_quantization.py",
+      "start_line": 586
+    },
+    "response_chars": 132,
+    "round": 7,
+    "tool_result": {
+      "content": "586:         # set qconfig.\n587:         # if tensorrt flag is used, set activation and weights to symmetric\n588:         # quantization.\n589:         # otherwise, use the default values set in get_qat_qconfig\n590:         if self.tensorrt:\n591:             _symmetric_activations = True\n592:             _activation_dtype = torch.qint8\n593:             _symmetric_weights = True\n594:             _weight_dtype = torch.qint8\n595:         else:\n596:             _symmetric_activations = None\n597:             _activation_dtype = None\n598:             _symmetric_weights = None\n599:             _weight_dtype = None\n600: \n601:         qat_qconfig_args = dict(\n602:             symmetric_activations=_symmetric_activations,\n603:             symmetric_weights=_symmetric_weights,\n604:             reduce_range=self._reduce_range,\n605:             activation_qconfig_kwargs=self.activation_qconfig_kwargs,\n606:             weight_qconfig_kwargs=self.weight_qconfig_kwargs,\n607:             activation_dtype=_activation_dtype,\n608:             weight_dtype=_weight_dtype,\n609:             activation_bits=self.activation_bits,\n610:             weight_bits=self.weight_bits,\n611:         )\n612: \n613:         qconfig = get_qat_qconfig(**qat_qconfig_args)\n614: \n615:         # prepare each module / submodule for quantization\n616:         for name, quant_module in self._modules_to_quantize:\n617:             # wrap any modules with wrap_qat set to True as QATWrapper(s)\n618:             configure_module_qat_wrappers(quant_module, **qat_qconfig_args)\n619: \n620:             # set quantization config (asymmetric activations, symmetric weights)\n621:             quant_module.qconfig = qconfig\n622: \n623:             # wrap all conv / linear blocks in with quantization observers\n624:             torch_quantization.propagate_qconfig_(quant_module)\n625:             configure_module_default_qconfigs(quant_module)\n626: \n627:             add_quant_dequant(quant_module, name, module)\n628: \n629:             # Remove output quantization from appropriate modules\n630:             if to_remove_layer_name:\n631:                 remove_activation_qat_by_layer_name(quant_module, to_remove_layer_name)\n632: \n633:         # remove qconfigs for module types in exclude_module_types\n634:         to_exclude = []\n635:         if self._exclude_module_types:\n636:             to_exclude.extend(self._exclude_module_types)\n637: \n638:         # if exclude_batchnorm flag is used, add batch norm layers to list of\n639:         # modules to exclude qconfig\n640:         if self._exclude_batchnorm:\n641:             to_exclude.extend([\"BatchNorm1d\", \"BatchNorm2d\", \"BatchNorm3d\"])\n642: \n643:         self._exclude_module_types = to_exclude\n644:         if self._exclude_module_types:\n645:             self._strip_excluded_module_qconfigs(module)\n646: \n647:         # set modules with proper qconfigs to QAT mode\n648:         torch_quantization.prepare_qat(module, inplace=True)\n649:         if self._quantize_embeddings:\n650:             prepare_embeddings_qat(module, **qat_qconfig_args)\n651: \n652:         # propagate custom quant min/max range from FakeQuantize to Observer objects\n653:         fix_observer_quant_range(module)\n654: \n655:         self._qat_enabled = True\n656:         self._calibrate_if_possible(module)\n657: \n658:     def _calibrate_if_possible(self, module):\n659:         if self.num_calibration_steps == 0 and self._calibration_dataloader:\n660:             warnings.warn(",
+      "end_line": 660,
+      "path_lines": 751,
+      "start_line": 586
+    },
+    "usage": {
+      "input_tokens": 14666,
+      "input_tokens_details": {
+        "cached_tokens": 13568
+      },
+      "output_tokens": 55,
+      "output_tokens_details": {
+        "reasoning_tokens": 14
+      },
+      "total_tokens": 14721
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 8,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__neuralmagic__sparseml__pull_663__comment_842059301__duplication.patch"
+    },
+    "usage": {
+      "input_tokens": 15605,
+      "input_tokens_details": {
+        "cached_tokens": 14080
+      },
+      "output_tokens": 9,
+      "output_tokens_details": {
+        "reasoning_tokens": 0
+      },
+      "total_tokens": 15614
+    }
+  }
+]

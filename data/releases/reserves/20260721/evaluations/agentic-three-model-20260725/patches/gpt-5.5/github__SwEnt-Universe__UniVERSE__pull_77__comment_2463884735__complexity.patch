@@ -1,0 +1,192 @@
+diff --git a/app/src/main/java/com/android/universe/ui/profileCreation/AddProfileViewModel.kt b/app/src/main/java/com/android/universe/ui/profileCreation/AddProfileViewModel.kt
+index 286eed6..4560b6f 100644
+--- a/app/src/main/java/com/android/universe/ui/profileCreation/AddProfileViewModel.kt
++++ b/app/src/main/java/com/android/universe/ui/profileCreation/AddProfileViewModel.kt
+@@ -6,6 +6,9 @@ import com.android.universe.model.CountryData.countryToIsoCode
+ import com.android.universe.model.user.UserProfile
+ import com.android.universe.model.user.UserRepository
+ import com.android.universe.model.user.UserRepositoryProvider
++import com.android.universe.ui.common.sanitize
++import com.android.universe.ui.common.validateDescription as validateProfileDescription
++import com.android.universe.ui.common.validateName as validateProfileName
+ import java.time.DateTimeException
+ import java.time.LocalDate
+ import java.time.Period
+@@ -115,8 +118,6 @@ class AddProfileViewModel(
+   /** Publicly exposed state of the Add Profile UI. */
+   val uiState: StateFlow<AddProfileUIState> = _uiState.asStateFlow()
+ 
+-  private val nameRegex = "^[\\p{L}\\p{M}' -]*$".toRegex()
+-
+   private val usernameRegex = "^[A-Za-z0-9._-]+$".toRegex()
+ 
+   private val oldestYear = 1900
+@@ -183,9 +184,9 @@ class AddProfileViewModel(
+    */
+   private suspend fun validateAllInputs(): Boolean {
+     val state = _uiState.value
+-    return validate(state.firstName, "First name", InputLimits.FIRST_NAME, nameRegex) &&
+-        validate(state.lastName, "Last name", InputLimits.LAST_NAME, nameRegex) &&
+-        validateDescription(state.description) &&
++    return validateNameForSubmission(state.firstName, "First name", InputLimits.FIRST_NAME) &&
++        validateNameForSubmission(state.lastName, "Last name", InputLimits.LAST_NAME) &&
++        validateDescriptionForSubmission(state.description) &&
+         validateDate(state.day, state.month, state.year) &&
+         validateCountry(state.country) &&
+         validateUsername(state.username)
+@@ -215,12 +216,40 @@ class AddProfileViewModel(
+   }
+ 
+   /**
+-   * Validates the description field.
++   * Validates a name field for final submission using the shared profile validation rules.
+    *
+    * @return `true` if valid, `false` otherwise, setting an error message on failure.
+    */
+-  private fun validateDescription(description: String?): Boolean {
+-    if (description != null && description.length > InputLimits.DESCRIPTION) {
++  private fun validateNameForSubmission(value: String, label: String, maxLength: Int): Boolean {
++    val error =
++        if (value.isNotBlank() && value.length > maxLength) {
++          "$label is too long"
++        } else {
++          validateProfileName(label, value, maxLength)?.let { profileNameError ->
++            when (profileNameError) {
++              "$label too long" -> "$label is too long"
++              else -> profileNameError
++            }
++          }
++        }
++
++    if (error != null) {
++      setErrorMsg(error)
++      return false
++    }
++    return true
++  }
++
++  /**
++   * Validates the description field using the shared profile validation rules.
++   *
++   * @return `true` if valid, `false` otherwise, setting an error message on failure.
++   */
++  private fun validateDescriptionForSubmission(description: String?): Boolean {
++    if (
++        description != null &&
++            validateProfileDescription(description, InputLimits.DESCRIPTION) != null
++    ) {
+       setErrorMsg("Description is too long")
+       return false
+     }
+@@ -256,6 +285,16 @@ class AddProfileViewModel(
+     }
+   }
+ 
++  /**
++   * Tests if a user is old enough to use the app.
++   *
++   * @param dateOfBirth The user's date of birth.
++   */
++  private fun userOldEnough(dateOfBirth: LocalDate): Boolean {
++    // Number of whole years between dob and today
++    return Period.between(dateOfBirth, currentDate).years.coerceAtLeast(0) >= minimumUserAge
++  }
++
+   /**
+    * Validates the country field.
+    *
+@@ -293,16 +332,6 @@ class AddProfileViewModel(
+     return true
+   }
+ 
+-  /**
+-   * Tests if a user is old enough to use the app.
+-   *
+-   * @param dateOfBirth The user's date of birth.
+-   */
+-  private fun userOldEnough(dateOfBirth: LocalDate): Boolean {
+-    // Number of whole years between dob and today
+-    return Period.between(dateOfBirth, currentDate).years.coerceAtLeast(0) >= minimumUserAge
+-  }
+-
+   /**
+    * Updates the username field and its associated error state if any. Also truncates the input to
+    * more than the specified limit to allow an error popup to be displayed
+@@ -327,7 +356,7 @@ class AddProfileViewModel(
+    */
+   fun setFirstName(firstName: String) {
+     val cleaned = trimAndCleanInput(firstName, InputLimits.FIRST_NAME + 1)
+-    val error = validateName(cleaned, "First name", InputLimits.FIRST_NAME)
++    val error = validateNameForUi(cleaned, "First name", InputLimits.FIRST_NAME)
+     _uiState.value = _uiState.value.copy(firstName = cleaned, firstNameError = error)
+   }
+ 
+@@ -337,7 +366,7 @@ class AddProfileViewModel(
+    */
+   fun setLastName(lastName: String) {
+     val cleaned = trimAndCleanInput(lastName, InputLimits.LAST_NAME + 1)
+-    val error = validateName(cleaned, "Last name", InputLimits.LAST_NAME)
++    val error = validateNameForUi(cleaned, "Last name", InputLimits.LAST_NAME)
+     _uiState.value = _uiState.value.copy(lastName = cleaned, lastNameError = error)
+   }
+ 
+@@ -349,9 +378,8 @@ class AddProfileViewModel(
+   fun setDescription(description: String) {
+     val cleaned = trimAndCleanInput(description, InputLimits.DESCRIPTION + 1)
+     val error =
+-        when {
+-          cleaned.length > InputLimits.DESCRIPTION -> "Description is too long"
+-          else -> null
++        validateProfileDescription(cleaned, InputLimits.DESCRIPTION)?.let {
++          "Description is too long"
+         }
+     _uiState.value = _uiState.value.copy(description = cleaned, descriptionError = error)
+   }
+@@ -425,21 +453,6 @@ class AddProfileViewModel(
+     return trimmed
+   }
+ 
+-  /**
+-   * Sanitizes a name string by:
+-   * - Replacing multiple spaces with a single one
+-   * - Trimming leading and trailing spaces Note this function should not be used in live user input
+-   *   handling as trimming user input prevents users from entering spaces.
+-   *
+-   * @param input The string to sanitize.
+-   * @return The sanitized string.
+-   */
+-  private fun sanitize(input: String): String {
+-    val singleSpaced = input.replace(Regex("\\s+"), " ")
+-    val trimmed = singleSpaced.trim()
+-    return trimmed
+-  }
+-
+   /**
+    * Validates a name for the UI by returning the possible error message.
+    *
+@@ -448,13 +461,18 @@ class AddProfileViewModel(
+    * @param limit The maximum length of the name.
+    * @return The error message if the name is invalid, null otherwise.
+    */
+-  private fun validateName(name: String, label: String, limit: Int): String? {
+-    return when {
+-      name.isBlank() -> "$label cannot be empty"
+-      name.length > limit -> "$label is too long"
+-      !nameRegex.matches(name) ->
+-          "Invalid name format, allowed characters are letters, apostrophes, hyphens, and spaces"
+-      else -> null
++  private fun validateNameForUi(name: String, label: String, limit: Int): String? {
++    if (name.isNotBlank() && name.length > limit) {
++      return "$label is too long"
++    }
++
++    return validateProfileName(label, name, limit)?.let { profileNameError ->
++      when (profileNameError) {
++        "$label too long" -> "$label is too long"
++        "Invalid $label format" ->
++            "Invalid name format, allowed characters are letters, apostrophes, hyphens, and spaces"
++        else -> profileNameError
++      }
+     }
+   }
+ }

@@ -1,0 +1,110 @@
+diff --git a/internal/pkg/values/scope.go b/internal/pkg/values/scope.go
+index dd880df..64062d0 100644
+--- a/internal/pkg/values/scope.go
++++ b/internal/pkg/values/scope.go
+@@ -213,6 +213,7 @@ func (s Scopes) GetDownscaleReplicas() (Replicas, error) {
+ 	return nil, newValueNotSetError("downscaleReplicas")
+ }
+ 
++
+ // GetScaleChildren gets the scale children of the first scope that implements scale children.
+ func (s Scopes) GetScaleChildren() bool {
+ 	for _, scope := range s {
+@@ -224,45 +225,80 @@ func (s Scopes) GetScaleChildren() bool {
+ 	return false
+ }
+ 
++// GetUpscaleOnExclusion gets the upscale on exclusion of the first scope that implements upscale on exclusion.
++func (s Scopes) GetUpscaleOnExclusion() bool {
++	for _, scope := range s {
++		if scope.UpscaleOnExclusion.isSet {
++			return scope.UpscaleOnExclusion.value
++		}
++	}
++
++	return false
++}
++
+ // GetExcluded checks if the scopes exclude scaling.
+-func (s Scopes) GetExcluded() (excluded, upscaleOnExclusion bool) { //nolint: nonamedreturns, cyclop // could be refactored in the future to simplify cyclop
+-	upscaleOnExclusion = false
++func (s Scopes) GetExcluded() (bool, bool) {
++	upscaleOnExclusion1 := s.getUpscaleOnExclusionForExclude()
++	if s.isExcludedByPeriod(upscaleOnExclusion1) {
++		return true, false
++	}
++
++	upscaleOnExclusion2 := s.getUpscaleOnExclusionForUntil()
++	if s.isExcludedByUntil(upscaleOnExclusion2) {
++		return true, false
++	}
++
++	return false, upscaleOnExclusion2
++}
++
++func (s Scopes) getUpscaleOnExclusionForExclude() bool {
++	for _, scope := range s {
++		if scope.UpscaleOnExclusion.isSet && scope.UpscaleOnExclusion.value {
++			return true
++		}
++		if scope.Exclude != nil {
++			break
++		}
++	}
++	return false
++}
+ 
++func (s Scopes) getUpscaleOnExclusionForUntil() bool {
+ 	for _, scope := range s {
+ 		if scope.UpscaleOnExclusion.isSet && scope.UpscaleOnExclusion.value {
+-			upscaleOnExclusion = true
++			return true
++		}
++		if scope.ExcludeUntil != nil {
++			break
+ 		}
++	}
++	return false
++}
+ 
++func (s Scopes) isExcludedByPeriod(upscaleOnExclusion bool) bool {
++	for _, scope := range s {
+ 		if scope.Exclude == nil {
+ 			continue
+ 		}
+-
+ 		if scope.Exclude.inTimeSpans() && !upscaleOnExclusion {
+-			return true, false
++			return true
+ 		}
+-
+ 		break
+ 	}
++	return false
++}
+ 
+-	upscaleOnExclusion = false
+-
++func (s Scopes) isExcludedByUntil(upscaleOnExclusion bool) bool {
+ 	for _, scope := range s {
+-		if scope.UpscaleOnExclusion.isSet && scope.UpscaleOnExclusion.value {
+-			upscaleOnExclusion = true
+-		}
+-
+ 		if scope.ExcludeUntil == nil {
+ 			continue
+ 		}
+-
+ 		if scope.ExcludeUntil.After(time.Now()) && !upscaleOnExclusion {
+-			return true, false
++			return true
+ 		}
+-
+ 		break
+ 	}
+-
+-	return false, upscaleOnExclusion
++	return false
+ }
+ 
+ // IsInGracePeriod gets the grace period of the uppermost scope that has it set.

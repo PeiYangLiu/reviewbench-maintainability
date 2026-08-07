@@ -1,0 +1,450 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 120,
+      "path": "bundle/direct/bundle_plan.go",
+      "start_line": 1
+    },
+    "response_chars": 2132,
+    "round": 1,
+    "tool_result": {
+      "content": "1: package direct\n2: \n3: import (\n4: \t\"context\"\n5: \t\"encoding/json\"\n6: \t\"errors\"\n7: \t\"fmt\"\n8: \t\"maps\"\n9: \t\"reflect\"\n10: \t\"slices\"\n11: \t\"strings\"\n12: \n13: \t\"github.com/databricks/cli/bundle/config\"\n14: \t\"github.com/databricks/cli/bundle/config/resources\"\n15: \t\"github.com/databricks/cli/bundle/deployplan\"\n16: \t\"github.com/databricks/cli/bundle/direct/dresources\"\n17: \t\"github.com/databricks/cli/bundle/direct/dstate\"\n18: \t\"github.com/databricks/cli/bundle/terraform_dabs_map\"\n19: \t\"github.com/databricks/cli/libs/dyn\"\n20: \t\"github.com/databricks/cli/libs/dyn/dynvar\"\n21: \t\"github.com/databricks/cli/libs/log\"\n22: \t\"github.com/databricks/cli/libs/logdiag\"\n23: \t\"github.com/databricks/cli/libs/structs/structaccess\"\n24: \t\"github.com/databricks/cli/libs/structs/structdiff\"\n25: \t\"github.com/databricks/cli/libs/structs/structpath\"\n26: \t\"github.com/databricks/cli/libs/structs/structvar\"\n27: \t\"github.com/databricks/databricks-sdk-go\"\n28: )\n29: \n30: var errDelayed = errors.New(\"must be resolved after apply\")\n31: \n32: func (b *DeploymentBundle) init(client *databricks.WorkspaceClient) error {\n33: \tif b.Adapters != nil {\n34: \t\treturn nil\n35: \t}\n36: \tvar err error\n37: \tb.Adapters, err = dresources.InitAll(client)\n38: \treturn err\n39: }\n40: \n41: // ValidatePlanAgainstState validates that a plan's lineage and serial match the given state.\n42: // If the plan has no lineage (first deployment), validation is skipped.\n43: func ValidatePlanAgainstState(stateDB *dstate.DeploymentState, plan *deployplan.Plan) error {\n44: \tif plan.Lineage == \"\" {\n45: \t\treturn nil\n46: \t}\n47: \n48: \tstateDB.AssertOpenedForReadOrWrite()\n49: \n50: \tif plan.Lineage != stateDB.Data.Lineage {\n51: \t\treturn fmt.Errorf(\"plan lineage %q does not match state lineage %q; the state may have been modified by another process\", plan.Lineage, stateDB.Data.Lineage)\n52: \t}\n53: \n54: \tif plan.Serial != stateDB.Data.Serial {\n55: \t\treturn fmt.Errorf(\"plan serial %d does not match state serial %d; the state has been modified since the plan was created. Please run 'bundle plan' again\", plan.Serial, stateDB.Data.Serial)\n56: \t}\n57: \n58: \treturn nil\n59: }\n60: \n61: // InitForApply initializes the DeploymentBundle for applying a pre-computed plan.\n62: // StateDB must already be open for write before calling this function.\n63: func (b *DeploymentBundle) InitForApply(ctx context.Context, client *databricks.WorkspaceClient, plan *deployplan.Plan) error {\n64: \tb.StateDB.AssertOpenedForWrite()\n65: \n66: \terr := b.init(client)\n67: \tif err != nil {\n68: \t\treturn err\n69: \t}\n70: \n71: \t// Eagerly parse all StructVarJSON entries to catch parsing errors early.\n72: \t// When the plan is read from JSON, Value contains raw JSON bytes.\n73: \t// We parse them into typed structs and cache them for later use.\n74: \tfor resourceKey, entry := range plan.Plan {\n75: \t\tif entry.NewState == nil || len(entry.NewState.Value) == 0 {\n76: \t\t\tcontinue\n77: \t\t}\n78: \n79: \t\tadapter, err := b.getAdapterForKey(resourceKey)\n80: \t\tif err != nil {\n81: \t\t\treturn fmt.Errorf(\"converting plan entry %s: %w\", resourceKey, err)\n82: \t\t}\n83: \n84: \t\tsv, err := entry.NewState.ToStructVar(adapter.StateType())\n85: \t\tif err != nil {\n86: \t\t\treturn fmt.Errorf(\"loading plan entry %s: %w\", resourceKey, err)\n87: \t\t}\n88: \n89: \t\tb.StateCache.Store(resourceKey, sv)\n90: \t}\n91: \n92: \tb.Plan = plan\n93: \treturn nil\n94: }\n95: \n96: // CalculatePlan computes the deployment plan by comparing local config against remote state.\n97: // StateDB must already be open for read before calling this function.\n98: func (b *DeploymentBundle) CalculatePlan(ctx context.Context, client *databricks.WorkspaceClient, configRoot *config.Root) (*deployplan.Plan, error) {\n99: \tb.StateDB.AssertOpenedForRead()\n100: \n101: \terr := b.init(client)\n102: \tif err != nil {\n103: \t\treturn nil, err\n104: \t}\n105: \n106: \tplan, err := b.makePlan(ctx, configRoot, &b.StateDB.Data)\n107: \tif err != nil {\n108: \t\treturn nil, fmt.Errorf(\"reading config: %w\", err)\n109: \t}\n110: \n111: \tb.Plan = plan\n112: \n113: \tg, err := makeGraph(plan)\n114: \tif err != nil {\n115: \t\treturn nil, err\n116: \t}\n117: \n118: \terr = g.DetectCycle()\n119: \tif err != nil {\n120: \t\treturn nil, err",
+      "end_line": 120,
+      "path_lines": 1105,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 10503,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 1904,
+      "output_tokens_details": {
+        "reasoning_tokens": 1314
+      },
+      "total_tokens": 12407
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\t\trefs, err := extractReferences(configRoot.Value(), node, adapter.StateType())",
+          "end_line": 936,
+          "start_line": 936
+        },
+        {
+          "content": "",
+          "end_line": 960,
+          "start_line": 943
+        },
+        {
+          "content": "func extractReferences(root dyn.Value, node string, stateType reflect.Type) (map[string]string, error) {",
+          "end_line": 1039,
+          "start_line": 1039
+        },
+        {
+          "content": "\t\t// Store the original string that contains references, not individual references.\n\t\t// Convert dyn.Path to structpath string because refs are later parsed by structpath.ParsePath.\n\t\t// dyn.Path.String() uses dot notation which is ambiguous for keys containing dots;\n\t\t// structpath uses bracket notation (['key.with.dots']) which round-trips correctly.\n\t\tfieldPath := dynPathToStructPath(p)\n\t\tif structaccess.ValidatePath(stateType, fieldPath) != nil {\n\t\t\treturn nil\n\t\t}\n\t\trefs[fieldPath.String()] = ref.Str",
+          "end_line": 1071,
+          "start_line": 1067
+        }
+      ]
+    },
+    "response_chars": 2059,
+    "round": 2,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 936,
+          "replacement_lines": 1,
+          "start_line": 936
+        },
+        {
+          "end_line": 960,
+          "replacement_lines": 0,
+          "start_line": 943
+        },
+        {
+          "end_line": 1039,
+          "replacement_lines": 1,
+          "start_line": 1039
+        },
+        {
+          "end_line": 1071,
+          "replacement_lines": 9,
+          "start_line": 1067
+        }
+      ],
+      "current_file_lines": 1091,
+      "updated_excerpt": {
+        "content": "926: \n927: \t\tnewStateConfig, err := adapter.PrepareState(inputConfig)\n928: \t\tif err != nil {\n929: \t\t\treturn nil, fmt.Errorf(\"%s: %w\", prefix, err)\n930: \t\t}\n931: \n932: \t\t// Note, we're extracting references in input config but resolving them in newState.Config which is PrepareState(inputConfig)\n933: \t\t// This means input and state must be compatible: input can have more fields, but existing fields should not be moved\n934: \t\t// This means one cannot refer to fields not present in state (e.g. ${resources.jobs.foo.permissions})\n935: \n936: \t\trefs, err := extractReferences(configRoot.Value(), node, adapter.StateType())\n937: \t\tif err != nil {\n938: \t\t\treturn nil, fmt.Errorf(\"failed to read references from config for %s: %w\", node, err)\n939: \t\t}\n940: \n941: \t\tmaps.Copy(refs, baseRefs)\n942: \n943: \n944: \t\tvar dependsOn []deployplan.DependsOnEntry\n945: \t\tfor _, reference := range refs {\n946: \t\t\tref, ok := dynvar.NewRef(dyn.V(reference))\n947: \t\t\tif !ok {\n948: \t\t\t\tcontinue\n949: \t\t\t}\n950: \n951: \t\t\tfor _, targetPath := range ref.References() {\n952: \t\t\t\ttargetPathParsed, err := dyn.NewPathFromString(targetPath)\n953: \t\t\t\tif err != nil {\n954: \t\t\t\t\treturn nil, fmt.Errorf(\"parsing %q: %w\", targetPath, err)\n955: \t\t\t\t}\n956: \n957: \t\t\t\ttargetNodeDP, _ := config.GetNodeAndType(targetPathParsed)\n958: \t\t\t\ttargetNode := targetNodeDP.String()\n959: \n960: \t\t\t\tfullRef := \"${\" + targetPath + \"}\"\n961: \n962: \t\t\t\tfound := false\n963: \t\t\t\tfor _, dep := range dependsOn {\n964: \t\t\t\t\tif dep.Node == targetNode && dep.Label == fullRef {\n965: \t\t\t\t\t\tfound = true\n966: \t\t\t\t\t\tbreak",
+        "end_line": 966,
+        "path_lines": 1091,
+        "start_line": 926
+      }
+    },
+    "usage": {
+      "input_tokens": 12029,
+      "input_tokens_details": {
+        "cached_tokens": 9984
+      },
+      "output_tokens": 1647,
+      "output_tokens_details": {
+        "reasoning_tokens": 1092
+      },
+      "total_tokens": 13676
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 1085,
+      "path": "bundle/direct/bundle_plan.go",
+      "start_line": 930
+    },
+    "response_chars": 355,
+    "round": 3,
+    "tool_result": {
+      "content": "930: \t\t}\n931: \n932: \t\t// Note, we're extracting references in input config but resolving them in newState.Config which is PrepareState(inputConfig)\n933: \t\t// This means input and state must be compatible: input can have more fields, but existing fields should not be moved\n934: \t\t// This means one cannot refer to fields not present in state (e.g. ${resources.jobs.foo.permissions})\n935: \n936: \t\trefs, err := extractReferences(configRoot.Value(), node, adapter.StateType())\n937: \t\tif err != nil {\n938: \t\t\treturn nil, fmt.Errorf(\"failed to read references from config for %s: %w\", node, err)\n939: \t\t}\n940: \n941: \t\tmaps.Copy(refs, baseRefs)\n942: \n943: \n944: \t\tvar dependsOn []deployplan.DependsOnEntry\n945: \t\tfor _, reference := range refs {\n946: \t\t\tref, ok := dynvar.NewRef(dyn.V(reference))\n947: \t\t\tif !ok {\n948: \t\t\t\tcontinue\n949: \t\t\t}\n950: \n951: \t\t\tfor _, targetPath := range ref.References() {\n952: \t\t\t\ttargetPathParsed, err := dyn.NewPathFromString(targetPath)\n953: \t\t\t\tif err != nil {\n954: \t\t\t\t\treturn nil, fmt.Errorf(\"parsing %q: %w\", targetPath, err)\n955: \t\t\t\t}\n956: \n957: \t\t\t\ttargetNodeDP, _ := config.GetNodeAndType(targetPathParsed)\n958: \t\t\t\ttargetNode := targetNodeDP.String()\n959: \n960: \t\t\t\tfullRef := \"${\" + targetPath + \"}\"\n961: \n962: \t\t\t\tfound := false\n963: \t\t\t\tfor _, dep := range dependsOn {\n964: \t\t\t\t\tif dep.Node == targetNode && dep.Label == fullRef {\n965: \t\t\t\t\t\tfound = true\n966: \t\t\t\t\t\tbreak\n967: \t\t\t\t\t}\n968: \t\t\t\t}\n969: \t\t\t\tif !found {\n970: \t\t\t\t\tdependsOn = append(dependsOn, deployplan.DependsOnEntry{\n971: \t\t\t\t\t\tNode:  targetNode,\n972: \t\t\t\t\t\tLabel: fullRef,\n973: \t\t\t\t\t})\n974: \t\t\t\t}\n975: \t\t\t}\n976: \t\t}\n977: \n978: \t\tslices.SortFunc(dependsOn, func(a, b deployplan.DependsOnEntry) int {\n979: \t\t\tif a.Node != b.Node {\n980: \t\t\t\treturn strings.Compare(a.Node, b.Node)\n981: \t\t\t}\n982: \t\t\treturn strings.Compare(a.Label, b.Label)\n983: \t\t})\n984: \n985: \t\tnewState := &structvar.StructVar{\n986: \t\t\tValue: newStateConfig,\n987: \t\t\tRefs:  refs,\n988: \t\t}\n989: \n990: \t\t// Store in cache for use during planning phase\n991: \t\tb.StateCache.Store(node, newState)\n992: \n993: \t\t// Convert to JSON for serialization in plan\n994: \t\tnewStateJSON, err := newState.ToJSON()\n995: \t\tif err != nil {\n996: \t\t\treturn nil, fmt.Errorf(\"%s: cannot serialize state: %w\", node, err)\n997: \t\t}\n998: \n999: \t\te := deployplan.PlanEntry{\n1000: \t\t\tDependsOn: dependsOn,\n1001: \t\t\tNewState:  newStateJSON,\n1002: \t\t}\n1003: \n1004: \t\tp.Plan[node] = &e\n1005: \t}\n1006: \n1007: \tfor n, entry := range existingKeys {\n1008: \t\tif p.Plan[n] != nil {\n1009: \t\t\tpanic(\"unexpected node \" + n)\n1010: \t\t}\n1011: \n1012: \t\tp.Plan[n] = &deployplan.PlanEntry{\n1013: \t\t\tAction:    deployplan.Delete,\n1014: \t\t\tDependsOn: entry.DependsOn,\n1015: \t\t}\n1016: \t}\n1017: \n1018: \treturn p, nil\n1019: }\n1020: \n1021: func extractReferences(root dyn.Value, node string, stateType reflect.Type) (map[string]string, error) {\n1022: \tnodeType := config.GetResourceTypeFromKey(node)\n1023: \trefs := make(map[string]string)\n1024: \n1025: \tpath, err := dyn.NewPathFromString(node)\n1026: \tif err != nil {\n1027: \t\treturn nil, fmt.Errorf(\"internal error: bad node key: %q: %w\", node, err)\n1028: \t}\n1029: \n1030: \tval, err := dyn.GetByPath(root, path)\n1031: \tif err != nil {\n1032: \t\treturn nil, err\n1033: \t}\n1034: \n1035: \terr = dyn.WalkReadOnly(val, func(p dyn.Path, v dyn.Value) error {\n1036: \t\tfullPath := append(path, p...)\n1037: \t\ttargetType := config.GetResourceTypeFromKey(fullPath.String())\n1038: \t\tif targetType != nodeType {\n1039: \t\t\t// Make sure these are associated with different nodes:\n1040: \t\t\t// resources.jobs.foo...\n1041: \t\t\t// resources.jobs.foo.permissions...\n1042: \t\t\t// resources.jobs.foo.grants...\n1043: \t\t\treturn nil\n1044: \t\t}\n1045: \t\tref, ok := dynvar.NewRef(v)\n1046: \t\tif !ok {\n1047: \t\t\treturn nil\n1048: \t\t}\n1049: \t\t// Store the original string that contains references, not individual references.\n1050: \t\t// Convert dyn.Path to structpath string because refs are later parsed by structpath.ParsePath.\n1051: \t\t// dyn.Path.String() uses dot notation which is ambiguous for keys containing dots;\n1052: \t\t// structpath uses bracket notation (['key.with.dots']) which round-trips correctly.\n1053: \t\tfieldPath := dynPathToStructPath(p)\n1054: \t\tif structaccess.ValidatePath(stateType, fieldPath) != nil {\n1055: \t\t\treturn nil\n1056: \t\t}\n1057: \t\trefs[fieldPath.String()] = ref.Str\n1058: \t\treturn nil\n1059: \t})\n1060: \tif err != nil {\n1061: \t\treturn nil, fmt.Errorf(\"parsing refs: %w\", err)\n1062: \t}\n1063: \treturn refs, nil\n1064: }\n1065: \n1066: // dynPathToStructPath converts a dyn.Path to a structpath.PathNode.\n1067: func dynPathToStructPath(p dyn.Path) *structpath.PathNode {\n1068: \tvar node *structpath.PathNode\n1069: \tfor _, c := range p {\n1070: \t\tif key := c.Key(); key != \"\" {\n1071: \t\t\tnode = structpath.NewStringKey(node, key)\n1072: \t\t} else {\n1073: \t\t\tnode = structpath.NewIndex(node, c.Index())\n1074: \t\t}\n1075: \t}\n1076: \treturn node\n1077: }\n1078: \n1079: func (b *DeploymentBundle) getAdapterForKey(resourceKey string) (*dresources.Adapter, error) {\n1080: \tgroup := config.GetResourceTypeFromKey(resourceKey)\n1081: \tif group == \"\" {\n1082: \t\treturn nil, fmt.Errorf(\"internal error: bad node: %s\", resourceKey)\n1083: \t}\n1084: \n1085: \tadapter, ok := b.Adapters[group]",
+      "end_line": 1085,
+      "path_lines": 1091,
+      "start_line": 930
+    },
+    "usage": {
+      "input_tokens": 13005,
+      "input_tokens_details": {
+        "cached_tokens": 11520
+      },
+      "output_tokens": 870,
+      "output_tokens_details": {
+        "reasoning_tokens": 743
+      },
+      "total_tokens": 13875
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "bundle/direct/bundle_plan.go",
+      "query": "extractReferences("
+    },
+    "response_chars": 1458,
+    "round": 4,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 936,
+          "text": "\t\trefs, err := extractReferences(configRoot.Value(), node, adapter.StateType())"
+        },
+        {
+          "line": 1021,
+          "text": "func extractReferences(root dyn.Value, node string, stateType reflect.Type) (map[string]string, error) {"
+        }
+      ],
+      "query": "extractReferences(",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 15109,
+      "input_tokens_details": {
+        "cached_tokens": 12544
+      },
+      "output_tokens": 2792,
+      "output_tokens_details": {
+        "reasoning_tokens": 2325
+      },
+      "total_tokens": 17901
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\t\tmaps.Copy(refs, baseRefs)\n",
+          "end_line": 943,
+          "start_line": 941
+        }
+      ]
+    },
+    "response_chars": 105,
+    "round": 5,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 943,
+          "replacement_lines": 1,
+          "start_line": 941
+        }
+      ],
+      "current_file_lines": 1089,
+      "updated_excerpt": {
+        "content": "931: \n932: \t\t// Note, we're extracting references in input config but resolving them in newState.Config which is PrepareState(inputConfig)\n933: \t\t// This means input and state must be compatible: input can have more fields, but existing fields should not be moved\n934: \t\t// This means one cannot refer to fields not present in state (e.g. ${resources.jobs.foo.permissions})\n935: \n936: \t\trefs, err := extractReferences(configRoot.Value(), node, adapter.StateType())\n937: \t\tif err != nil {\n938: \t\t\treturn nil, fmt.Errorf(\"failed to read references from config for %s: %w\", node, err)\n939: \t\t}\n940: \n941: \t\tmaps.Copy(refs, baseRefs)\n942: \t\tvar dependsOn []deployplan.DependsOnEntry\n943: \t\tfor _, reference := range refs {\n944: \t\t\tref, ok := dynvar.NewRef(dyn.V(reference))\n945: \t\t\tif !ok {\n946: \t\t\t\tcontinue\n947: \t\t\t}\n948: \n949: \t\t\tfor _, targetPath := range ref.References() {\n950: \t\t\t\ttargetPathParsed, err := dyn.NewPathFromString(targetPath)\n951: \t\t\t\tif err != nil {\n952: \t\t\t\t\treturn nil, fmt.Errorf(\"parsing %q: %w\", targetPath, err)\n953: \t\t\t\t}\n954: \n955: \t\t\t\ttargetNodeDP, _ := config.GetNodeAndType(targetPathParsed)\n956: \t\t\t\ttargetNode := targetNodeDP.String()\n957: \n958: \t\t\t\tfullRef := \"${\" + targetPath + \"}\"\n959: \n960: \t\t\t\tfound := false\n961: \t\t\t\tfor _, dep := range dependsOn {\n962: \t\t\t\t\tif dep.Node == targetNode && dep.Label == fullRef {\n963: \t\t\t\t\t\tfound = true\n964: \t\t\t\t\t\tbreak\n965: \t\t\t\t\t}\n966: \t\t\t\t}\n967: \t\t\t\tif !found {\n968: \t\t\t\t\tdependsOn = append(dependsOn, deployplan.DependsOnEntry{\n969: \t\t\t\t\t\tNode:  targetNode,\n970: \t\t\t\t\t\tLabel: fullRef,\n971: \t\t\t\t\t})",
+        "end_line": 971,
+        "path_lines": 1089,
+        "start_line": 931
+      }
+    },
+    "usage": {
+      "input_tokens": 15222,
+      "input_tokens_details": {
+        "cached_tokens": 14592
+      },
+      "output_tokens": 557,
+      "output_tokens_details": {
+        "reasoning_tokens": 516
+      },
+      "total_tokens": 15779
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "bundle/direct/dresources",
+      "query": "PreparePermissionsInputConfig"
+    },
+    "response_chars": 111,
+    "round": 6,
+    "tool_result": {
+      "matches": [],
+      "query": "PreparePermissionsInputConfig",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 15936,
+      "input_tokens_details": {
+        "cached_tokens": 15104
+      },
+      "output_tokens": 790,
+      "output_tokens_details": {
+        "reasoning_tokens": 753
+      },
+      "total_tokens": 16726
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\t\trefs, err := extractReferences(configRoot.Value(), node, adapter.StateType(), baseRefs)",
+          "end_line": 936,
+          "start_line": 936
+        },
+        {
+          "content": "",
+          "end_line": 941,
+          "start_line": 941
+        },
+        {
+          "content": "func extractReferences(root dyn.Value, node string, stateType reflect.Type, baseRefs map[string]string) (map[string]string, error) {",
+          "end_line": 1020,
+          "start_line": 1020
+        },
+        {
+          "content": "\t\t// Store the original string that contains references, not individual references.\n\t\t// Convert dyn.Path to structpath string because refs are later parsed by structpath.ParsePath.\n\t\t// dyn.Path.String() uses dot notation which is ambiguous for keys containing dots;\n\t\t// structpath uses bracket notation (['key.with.dots']) which round-trips correctly.\n\t\tfieldPath := dynPathToStructPath(p)\n\t\taddReference(refs, stateType, fieldPath, ref.Str)",
+          "end_line": 1056,
+          "start_line": 1048
+        },
+        {
+          "content": "\n\tfor fieldPathString, refString := range baseRefs {\n\t\tfieldPath, err := structpath.ParsePath(fieldPathString)\n\t\tif err != nil {\n\t\t\treturn nil, fmt.Errorf(\"parsing reference path %q: %w\", fieldPathString, err)\n\t\t}\n\t\taddReference(refs, stateType, fieldPath, refString)\n\t}",
+          "end_line": 1061,
+          "start_line": 1062
+        }
+      ]
+    },
+    "response_chars": 1333,
+    "round": 7,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 936,
+          "replacement_lines": 1,
+          "start_line": 936
+        },
+        {
+          "end_line": 941,
+          "replacement_lines": 0,
+          "start_line": 941
+        },
+        {
+          "end_line": 1020,
+          "replacement_lines": 1,
+          "start_line": 1020
+        },
+        {
+          "end_line": 1056,
+          "replacement_lines": 6,
+          "start_line": 1048
+        },
+        {
+          "end_line": 1061,
+          "replacement_lines": 8,
+          "start_line": 1062
+        }
+      ],
+      "current_file_lines": 1093,
+      "updated_excerpt": {
+        "content": "926: \n927: \t\tnewStateConfig, err := adapter.PrepareState(inputConfig)\n928: \t\tif err != nil {\n929: \t\t\treturn nil, fmt.Errorf(\"%s: %w\", prefix, err)\n930: \t\t}\n931: \n932: \t\t// Note, we're extracting references in input config but resolving them in newState.Config which is PrepareState(inputConfig)\n933: \t\t// This means input and state must be compatible: input can have more fields, but existing fields should not be moved\n934: \t\t// This means one cannot refer to fields not present in state (e.g. ${resources.jobs.foo.permissions})\n935: \n936: \t\trefs, err := extractReferences(configRoot.Value(), node, adapter.StateType(), baseRefs)\n937: \t\tif err != nil {\n938: \t\t\treturn nil, fmt.Errorf(\"failed to read references from config for %s: %w\", node, err)\n939: \t\t}\n940: \n941: \t\tvar dependsOn []deployplan.DependsOnEntry\n942: \t\tfor _, reference := range refs {\n943: \t\t\tref, ok := dynvar.NewRef(dyn.V(reference))\n944: \t\t\tif !ok {\n945: \t\t\t\tcontinue\n946: \t\t\t}\n947: \n948: \t\t\tfor _, targetPath := range ref.References() {\n949: \t\t\t\ttargetPathParsed, err := dyn.NewPathFromString(targetPath)\n950: \t\t\t\tif err != nil {\n951: \t\t\t\t\treturn nil, fmt.Errorf(\"parsing %q: %w\", targetPath, err)\n952: \t\t\t\t}\n953: \n954: \t\t\t\ttargetNodeDP, _ := config.GetNodeAndType(targetPathParsed)\n955: \t\t\t\ttargetNode := targetNodeDP.String()\n956: \n957: \t\t\t\tfullRef := \"${\" + targetPath + \"}\"\n958: \n959: \t\t\t\tfound := false\n960: \t\t\t\tfor _, dep := range dependsOn {\n961: \t\t\t\t\tif dep.Node == targetNode && dep.Label == fullRef {\n962: \t\t\t\t\t\tfound = true\n963: \t\t\t\t\t\tbreak\n964: \t\t\t\t\t}\n965: \t\t\t\t}\n966: \t\t\t\tif !found {",
+        "end_line": 966,
+        "path_lines": 1093,
+        "start_line": 926
+      }
+    },
+    "usage": {
+      "input_tokens": 15987,
+      "input_tokens_details": {
+        "cached_tokens": 15616
+      },
+      "output_tokens": 2407,
+      "output_tokens_details": {
+        "reasoning_tokens": 2038
+      },
+      "total_tokens": 18394
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 1080,
+      "path": "bundle/direct/bundle_plan.go",
+      "start_line": 1018
+    },
+    "response_chars": 89,
+    "round": 8,
+    "tool_result": {
+      "content": "1018: func extractReferences(root dyn.Value, node string, stateType reflect.Type) (map[string]string, error) {\n1019: func extractReferences(root dyn.Value, node string, stateType reflect.Type, baseRefs map[string]string) (map[string]string, error) {\n1020: \trefs := make(map[string]string)\n1021: \n1022: \tpath, err := dyn.NewPathFromString(node)\n1023: \tif err != nil {\n1024: \t\treturn nil, fmt.Errorf(\"internal error: bad node key: %q: %w\", node, err)\n1025: \t}\n1026: \n1027: \tval, err := dyn.GetByPath(root, path)\n1028: \tif err != nil {\n1029: \t\treturn nil, err\n1030: \t}\n1031: \n1032: \terr = dyn.WalkReadOnly(val, func(p dyn.Path, v dyn.Value) error {\n1033: \t\tfullPath := append(path, p...)\n1034: \t\ttargetType := config.GetResourceTypeFromKey(fullPath.String())\n1035: \t\tif targetType != nodeType {\n1036: \t\t\t// Make sure these are associated with different nodes:\n1037: \t\t\t// resources.jobs.foo...\n1038: \t\t\t// resources.jobs.foo.permissions...\n1039: \t\t\t// resources.jobs.foo.grants...\n1040: \t\t\treturn nil\n1041: \t\t}\n1042: \t\tref, ok := dynvar.NewRef(v)\n1043: \t\tif !ok {\n1044: \t\t\treturn nil\n1045: \t\t}\n1046: \t\t// Store the original string that contains references, not individual references.\n1047: \t\t// Store the original string that contains references, not individual references.\n1048: \t\t// Convert dyn.Path to structpath string because refs are later parsed by structpath.ParsePath.\n1049: \t\t// dyn.Path.String() uses dot notation which is ambiguous for keys containing dots;\n1050: \t\t// structpath uses bracket notation (['key.with.dots']) which round-trips correctly.\n1051: \t\tfieldPath := dynPathToStructPath(p)\n1052: \t\taddReference(refs, stateType, fieldPath, ref.Str)\n1053: \t})\n1054: \tif err != nil {\n1055: \t\treturn nil, fmt.Errorf(\"parsing refs: %w\", err)\n1056: \t}\n1057: \treturn refs, nil\n1058: \n1059: \tfor fieldPathString, refString := range baseRefs {\n1060: \t\tfieldPath, err := structpath.ParsePath(fieldPathString)\n1061: \t\tif err != nil {\n1062: \t\t\treturn nil, fmt.Errorf(\"parsing reference path %q: %w\", fieldPathString, err)\n1063: \t\t}\n1064: \t\taddReference(refs, stateType, fieldPath, refString)\n1065: \t}\n1066: }\n1067: \n1068: // dynPathToStructPath converts a dyn.Path to a structpath.PathNode.\n1069: func dynPathToStructPath(p dyn.Path) *structpath.PathNode {\n1070: \tvar node *structpath.PathNode\n1071: \tfor _, c := range p {\n1072: \t\tif key := c.Key(); key != \"\" {\n1073: \t\t\tnode = structpath.NewStringKey(node, key)\n1074: \t\t} else {\n1075: \t\t\tnode = structpath.NewIndex(node, c.Index())\n1076: \t\t}\n1077: \t}\n1078: \treturn node\n1079: }\n1080: ",
+      "end_line": 1080,
+      "path_lines": 1093,
+      "start_line": 1018
+    },
+    "usage": {
+      "input_tokens": 17091,
+      "input_tokens_details": {
+        "cached_tokens": 15616
+      },
+      "output_tokens": 55,
+      "output_tokens_details": {
+        "reasoning_tokens": 23
+      },
+      "total_tokens": 17146
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "func extractReferences(root dyn.Value, node string, stateType reflect.Type, baseRefs map[string]string) (map[string]string, error) {\n\tnodeType := config.GetResourceTypeFromKey(node)\n\trefs := make(map[string]string)\n\n\tpath, err := dyn.NewPathFromString(node)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"internal error: bad node key: %q: %w\", node, err)\n\t}\n\n\tval, err := dyn.GetByPath(root, path)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\n\terr = dyn.WalkReadOnly(val, func(p dyn.Path, v dyn.Value) error {\n\t\tfullPath := append(path, p...)\n\t\ttargetType := config.GetResourceTypeFromKey(fullPath.String())\n\t\tif targetType != nodeType {\n\t\t\t// Make sure these are associated with different nodes:\n\t\t\t// resources.jobs.foo...\n\t\t\t// resources.jobs.foo.permissions...\n\t\t\t// resources.jobs.foo.grants...\n\t\t\treturn nil\n\t\t}\n\t\tref, ok := dynvar.NewRef(v)\n\t\tif !ok {\n\t\t\treturn nil\n\t\t}\n\t\t// Store the original string that contains references, not individual references.\n\t\t// Convert dyn.Path to structpath string because refs are later parsed by structpath.ParsePath.\n\t\t// dyn.Path.String() uses dot notation which is ambiguous for keys containing dots;\n\t\t// structpath uses bracket notation (['key.with.dots']) which round-trips correctly.\n\t\taddReference(refs, stateType, dynPathToStructPath(p), ref.Str)\n\t\treturn nil\n\t})\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"parsing refs: %w\", err)\n\t}\n\n\tfor fieldPathString, refString := range baseRefs {\n\t\tfieldPath, err := structpath.ParsePath(fieldPathString)\n\t\tif err != nil {\n\t\t\treturn nil, fmt.Errorf(\"parsing reference path %q: %w\", fieldPathString, err)\n\t\t}\n\t\taddReference(refs, stateType, fieldPath, refString)\n\t}\n\n\treturn refs, nil\n}\n\nfunc addReference(refs map[string]string, stateType reflect.Type, fieldPath *structpath.PathNode, refString string) {\n\tif structaccess.ValidatePath(stateType, fieldPath) != nil {\n\t\treturn\n\t}\n\trefs[fieldPath.String()] = refString\n}",
+          "end_line": 1066,
+          "start_line": 1018
+        }
+      ]
+    },
+    "response_chars": 2382,
+    "round": 9,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 1066,
+          "replacement_lines": 56,
+          "start_line": 1018
+        }
+      ],
+      "current_file_lines": 1100,
+      "updated_excerpt": {
+        "content": "1008: \n1009: \t\tp.Plan[n] = &deployplan.PlanEntry{\n1010: \t\t\tAction:    deployplan.Delete,\n1011: \t\t\tDependsOn: entry.DependsOn,\n1012: \t\t}\n1013: \t}\n1014: \n1015: \treturn p, nil\n1016: }\n1017: \n1018: func extractReferences(root dyn.Value, node string, stateType reflect.Type, baseRefs map[string]string) (map[string]string, error) {\n1019: \tnodeType := config.GetResourceTypeFromKey(node)\n1020: \trefs := make(map[string]string)\n1021: \n1022: \tpath, err := dyn.NewPathFromString(node)\n1023: \tif err != nil {\n1024: \t\treturn nil, fmt.Errorf(\"internal error: bad node key: %q: %w\", node, err)\n1025: \t}\n1026: \n1027: \tval, err := dyn.GetByPath(root, path)\n1028: \tif err != nil {\n1029: \t\treturn nil, err\n1030: \t}\n1031: \n1032: \terr = dyn.WalkReadOnly(val, func(p dyn.Path, v dyn.Value) error {\n1033: \t\tfullPath := append(path, p...)\n1034: \t\ttargetType := config.GetResourceTypeFromKey(fullPath.String())\n1035: \t\tif targetType != nodeType {\n1036: \t\t\t// Make sure these are associated with different nodes:\n1037: \t\t\t// resources.jobs.foo...\n1038: \t\t\t// resources.jobs.foo.permissions...\n1039: \t\t\t// resources.jobs.foo.grants...\n1040: \t\t\treturn nil\n1041: \t\t}\n1042: \t\tref, ok := dynvar.NewRef(v)\n1043: \t\tif !ok {\n1044: \t\t\treturn nil\n1045: \t\t}\n1046: \t\t// Store the original string that contains references, not individual references.\n1047: \t\t// Convert dyn.Path to structpath string because refs are later parsed by structpath.ParsePath.\n1048: \t\t// dyn.Path.String() uses dot notation which is ambiguous for keys containing dots;",
+        "end_line": 1048,
+        "path_lines": 1100,
+        "start_line": 1008
+      }
+    },
+    "usage": {
+      "input_tokens": 18071,
+      "input_tokens_details": {
+        "cached_tokens": 16640
+      },
+      "output_tokens": 1316,
+      "output_tokens_details": {
+        "reasoning_tokens": 609
+      },
+      "total_tokens": 19387
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 1105,
+      "path": "bundle/direct/bundle_plan.go",
+      "start_line": 1046
+    },
+    "response_chars": 179,
+    "round": 10,
+    "tool_result": {
+      "content": "1046: \t\t// Store the original string that contains references, not individual references.\n1047: \t\t// Convert dyn.Path to structpath string because refs are later parsed by structpath.ParsePath.\n1048: \t\t// dyn.Path.String() uses dot notation which is ambiguous for keys containing dots;\n1049: \t\t// structpath uses bracket notation (['key.with.dots']) which round-trips correctly.\n1050: \t\taddReference(refs, stateType, dynPathToStructPath(p), ref.Str)\n1051: \t\treturn nil\n1052: \t})\n1053: \tif err != nil {\n1054: \t\treturn nil, fmt.Errorf(\"parsing refs: %w\", err)\n1055: \t}\n1056: \n1057: \tfor fieldPathString, refString := range baseRefs {\n1058: \t\tfieldPath, err := structpath.ParsePath(fieldPathString)\n1059: \t\tif err != nil {\n1060: \t\t\treturn nil, fmt.Errorf(\"parsing reference path %q: %w\", fieldPathString, err)\n1061: \t\t}\n1062: \t\taddReference(refs, stateType, fieldPath, refString)\n1063: \t}\n1064: \n1065: \treturn refs, nil\n1066: }\n1067: \n1068: func addReference(refs map[string]string, stateType reflect.Type, fieldPath *structpath.PathNode, refString string) {\n1069: \tif structaccess.ValidatePath(stateType, fieldPath) != nil {\n1070: \t\treturn\n1071: \t}\n1072: \trefs[fieldPath.String()] = refString\n1073: }\n1074: \n1075: // dynPathToStructPath converts a dyn.Path to a structpath.PathNode.\n1076: func dynPathToStructPath(p dyn.Path) *structpath.PathNode {\n1077: \tvar node *structpath.PathNode\n1078: \tfor _, c := range p {\n1079: \t\tif key := c.Key(); key != \"\" {\n1080: \t\t\tnode = structpath.NewStringKey(node, key)\n1081: \t\t} else {\n1082: \t\t\tnode = structpath.NewIndex(node, c.Index())\n1083: \t\t}\n1084: \t}\n1085: \treturn node\n1086: }\n1087: \n1088: func (b *DeploymentBundle) getAdapterForKey(resourceKey string) (*dresources.Adapter, error) {\n1089: \tgroup := config.GetResourceTypeFromKey(resourceKey)\n1090: \tif group == \"\" {\n1091: \t\treturn nil, fmt.Errorf(\"internal error: bad node: %s\", resourceKey)\n1092: \t}\n1093: \n1094: \tadapter, ok := b.Adapters[group]\n1095: \tif !ok {\n1096: \t\treturn nil, fmt.Errorf(\"resource type %q not supported, available: %s\", group, strings.Join(slices.Sorted(maps.Keys(b.Adapters)), \", \"))\n1097: \t}\n1098: \n1099: \treturn adapter, nil\n1100: }",
+      "end_line": 1100,
+      "path_lines": 1100,
+      "start_line": 1046
+    },
+    "usage": {
+      "input_tokens": 19312,
+      "input_tokens_details": {
+        "cached_tokens": 17664
+      },
+      "output_tokens": 2000,
+      "output_tokens_details": {
+        "reasoning_tokens": 1935
+      },
+      "total_tokens": 21312
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "bundle/direct/bundle_plan.go",
+      "query": "maps.Copy(refs, baseRefs)"
+    },
+    "response_chars": 201,
+    "round": 11,
+    "tool_result": {
+      "matches": [],
+      "query": "maps.Copy(refs, baseRefs)",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 20153,
+      "input_tokens_details": {
+        "cached_tokens": 19200
+      },
+      "output_tokens": 1318,
+      "output_tokens_details": {
+        "reasoning_tokens": 1242
+      },
+      "total_tokens": 21471
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 12,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__databricks__cli__pull_5550__comment_3467764308__modularity.patch"
+    },
+    "usage": {
+      "input_tokens": 20213,
+      "input_tokens_details": {
+        "cached_tokens": 19712
+      },
+      "output_tokens": 527,
+      "output_tokens_details": {
+        "reasoning_tokens": 516
+      },
+      "total_tokens": 20740
+    }
+  }
+]

@@ -1,0 +1,72 @@
+--- a/redis/cluster.py
++++ b/redis/cluster.py
+@@ -6,11 +6,10 @@
+ from collections import OrderedDict
+ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+ 
+-from cachetools import Cache
+ from redis._parsers import CommandsParser, Encoder
+ from redis._parsers.helpers import parse_scan
+ from redis.backoff import default_backoff
+-from redis.cache import EvictionPolicy
++from redis.cache import CacheConfiguration, EvictionPolicy
+ from redis.client import CaseInsensitiveDict, PubSub, Redis
+ from redis.commands import READ_COMMANDS, RedisClusterCommands
+ from redis.commands.helpers import list_or_args
+@@ -170,6 +169,7 @@
+     "unix_socket_path",
+     "username",
+     "use_cache",
++    "cache_config",
+ )
+ KWARGS_DISABLED_KEYS = ("host", "port")
+ 
+@@ -503,8 +503,9 @@
+         dynamic_startup_nodes: bool = True,
+         url: Optional[str] = None,
+         address_remap: Optional[Callable[[Tuple[str, int]], Tuple[str, int]]] = None,
++        cache_config: Optional[CacheConfiguration] = None,
+         use_cache: bool = False,
+-        cache: Optional[Cache] = None,
++        cache: Optional[Any] = None,
+         cache_eviction: Optional[EvictionPolicy] = None,
+         cache_size: int = 128,
+         cache_ttl: int = 300,
+@@ -631,8 +632,23 @@
+             kwargs.get("encoding_errors", "strict"),
+             kwargs.get("decode_responses", False),
+         )
++
++        if cache_config is None and (
++            use_cache
++            or cache is not None
++            or cache_eviction is not None
++            or cache_size != 128
++            or cache_ttl != 300
++        ):
++            cache_config = CacheConfiguration(
++                cache=cache,
++                cache_eviction=cache_eviction,
++                cache_size=cache_size,
++                cache_ttl=cache_ttl,
++            )
++
+         protocol = kwargs.get("protocol", None)
+-        if use_cache and protocol not in [3, "3"]:
++        if cache_config is not None and protocol not in [3, "3"]:
+             raise RedisError("Client caching is only supported with RESP version 3")
+ 
+         self.cluster_error_retry_attempts = cluster_error_retry_attempts
+@@ -647,11 +663,7 @@
+             require_full_coverage=require_full_coverage,
+             dynamic_startup_nodes=dynamic_startup_nodes,
+             address_remap=address_remap,
+-            use_cache=use_cache,
+-            cache=cache,
+-            cache_eviction=cache_eviction,
+-            cache_size=cache_size,
+-            cache_ttl=cache_ttl,
++            cache_config=cache_config,
+             **kwargs,
+         )
+ 

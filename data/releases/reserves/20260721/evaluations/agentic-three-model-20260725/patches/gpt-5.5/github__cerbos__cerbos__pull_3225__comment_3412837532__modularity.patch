@@ -1,0 +1,57 @@
+diff --git a/internal/auxdata/jwt.go b/internal/auxdata/jwt.go
+index b3ee984..5655ac5 100644
+--- a/internal/auxdata/jwt.go
++++ b/internal/auxdata/jwt.go
+@@ -96,6 +96,31 @@ func (j jwkErrSink) Put(_ context.Context, err error) {
+ 	j.log.Warn("Error refreshing keyset", zap.Error(err))
+ }
+ 
++type jwtValidationError struct {
++	friendly error
++	actual   error
++}
++
++func newJWTValidationError(message string, actual error) error {
++	return &jwtValidationError{friendly: errors.New(message), actual: actual}
++}
++
++func (e *jwtValidationError) Error() string {
++	return e.friendly.Error()
++}
++
++func (e *jwtValidationError) Unwrap() error {
++	return e.actual
++}
++
++func (e *jwtValidationError) Friendly() error {
++	return e.friendly
++}
++
++func (e *jwtValidationError) Actual() error {
++	return e.actual
++}
++
+ func (j *jwtHelper) extract(ctx context.Context, auxJWT *requestv1.AuxData_JWT) (map[string]*structpb.Value, error) {
+ 	if auxJWT == nil || auxJWT.Token == "" {
+ 		return nil, nil
+@@ -152,15 +177,15 @@ func (j *jwtHelper) doExtract(ctx context.Context, auxJWT *requestv1.AuxData_JWT
+ 	if err != nil {
+ 		switch {
+ 		case errors.Is(err, jwt.InvalidAudienceError()):
+-			return nil, fmt.Errorf("invalid audience ('aud')")
++			return nil, newJWTValidationError("invalid audience ('aud')", err)
+ 		case errors.Is(err, jwt.InvalidIssuedAtError()):
+-			return nil, fmt.Errorf("issued at time is in the future ('iat')")
++			return nil, newJWTValidationError("issued at time is in the future ('iat')", err)
+ 		case errors.Is(err, jwt.InvalidIssuerError()):
+-			return nil, fmt.Errorf("invalid issuer ('iss')")
++			return nil, newJWTValidationError("invalid issuer ('iss')", err)
+ 		case errors.Is(err, jwt.TokenExpiredError()):
+-			return nil, fmt.Errorf("token has expired ('exp')")
++			return nil, newJWTValidationError("token has expired ('exp')", err)
+ 		case errors.Is(err, jwt.TokenNotYetValidError()):
+-			return nil, fmt.Errorf("token is not yet valid ('nbf')")
++			return nil, newJWTValidationError("token is not yet valid ('nbf')", err)
+ 		default:
+ 			return nil, fmt.Errorf("failed to parse: %w", err)
+ 		}

@@ -1,0 +1,134 @@
+--- a/ca/ca.go
++++ b/ca/ca.go
+@@ -254,17 +254,6 @@
+ 		return nil, berrors.InternalServerError("Incomplete issue certificate request")
+ 	}
+ 
+-	// The CA must check if it is capable of issuing for the given
+-	// certificate profile name. The name is checked here instead of the
+-	// hash because the RA is unaware of what certificate profiles exist.
+-	if issueReq.CertProfileName == "" {
+-		issueReq.CertProfileName = DefaultCertProfileName
+-	}
+-	profileHashBytes, ok := ca.certProfiles.hashByName[issueReq.CertProfileName]
+-	if !ok {
+-		return nil, fmt.Errorf("the CA is not capable of using a profile named %s", issueReq.CertProfileName)
+-	}
+-
+ 	serialBigInt, validity, err := ca.generateSerialNumberAndValidity()
+ 	if err != nil {
+ 		return nil, err
+@@ -282,7 +271,7 @@
+ 		return nil, err
+ 	}
+ 
+-	precertDER, _, err := ca.issuePrecertificateInner(ctx, issueReq, serialBigInt, validity)
++	precertDER, profileHash, err := ca.issuePrecertificateInner(ctx, issueReq, serialBigInt, validity)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -294,7 +283,7 @@
+ 
+ 	return &capb.IssuePrecertificateResponse{
+ 		DER:             precertDER,
+-		CertProfileHash: profileHashBytes[:],
++		CertProfileHash: profileHash[:],
+ 	}, nil
+ }
+ 
+@@ -475,7 +464,7 @@
+ 	return skid[0:20:20], nil
+ }
+ 
+-func (ca *certificateAuthorityImpl) issuePrecertificateInner(ctx context.Context, issueReq *capb.IssueCertificateRequest, serialBigInt *big.Int, validity validity) ([]byte, *issuance.Issuer, error) {
++func (ca *certificateAuthorityImpl) issuePrecertificateInner(ctx context.Context, issueReq *capb.IssueCertificateRequest, serialBigInt *big.Int, validity validity) ([]byte, [32]byte, error) {
+ 	// The CA must check if it is capable of issuing for the given
+ 	// certificate profile name. The name is checked here instead of the
+ 	// hash because the RA is unaware of what certificate profiles exist.
+@@ -484,12 +473,12 @@
+ 	}
+ 	profileHashBytes, ok := ca.certProfiles.hashByName[issueReq.CertProfileName]
+ 	if !ok {
+-		return nil, nil, fmt.Errorf("the CA is not capable of using a profile named %s", issueReq.CertProfileName)
++		return nil, [32]byte{}, fmt.Errorf("the CA is not capable of using a profile named %s", issueReq.CertProfileName)
+ 	}
+ 
+ 	csr, err := x509.ParseCertificateRequest(issueReq.Csr)
+ 	if err != nil {
+-		return nil, nil, err
++		return nil, [32]byte{}, err
+ 	}
+ 
+ 	err = csrlib.VerifyCSR(ctx, csr, ca.maxNames, &ca.keyPolicy, ca.pa)
+@@ -497,7 +486,7 @@
+ 		ca.log.AuditErr(err.Error())
+ 		// VerifyCSR returns berror instances that can be passed through as-is
+ 		// without wrapping.
+-		return nil, nil, err
++		return nil, [32]byte{}, err
+ 	}
+ 
+ 	var issuer *issuance.Issuer
+@@ -511,24 +500,24 @@
+ 		}
+ 		issuer, ok = ca.issuers.byAlg[alg]
+ 		if !ok {
+-			return nil, nil, berrors.InternalServerError("no issuer found for public key algorithm %s", csr.PublicKeyAlgorithm)
++			return nil, [32]byte{}, berrors.InternalServerError("no issuer found for public key algorithm %s", csr.PublicKeyAlgorithm)
+ 		}
+ 	} else {
+ 		issuer, ok = ca.issuers.byNameID[issuance.NameID(issueReq.IssuerNameID)]
+ 		if !ok {
+-			return nil, nil, berrors.InternalServerError("no issuer found for IssuerNameID %d", issueReq.IssuerNameID)
++			return nil, [32]byte{}, berrors.InternalServerError("no issuer found for IssuerNameID %d", issueReq.IssuerNameID)
+ 		}
+ 	}
+ 
+ 	if issuer.Cert.NotAfter.Before(validity.NotAfter) {
+ 		err = berrors.InternalServerError("cannot issue a certificate that expires after the issuer certificate")
+ 		ca.log.AuditErr(err.Error())
+-		return nil, nil, err
++		return nil, [32]byte{}, err
+ 	}
+ 
+ 	subjectKeyId, err := generateSKID(csr.PublicKey)
+ 	if err != nil {
+-		return nil, nil, fmt.Errorf("computing subject key ID: %w", err)
++		return nil, [32]byte{}, fmt.Errorf("computing subject key ID: %w", err)
+ 	}
+ 
+ 	serialHex := core.SerialToString(serialBigInt)
+@@ -561,7 +550,7 @@
+ 		if errors.Is(err, linter.ErrLinting) {
+ 			ca.lintErrorCount.Inc()
+ 		}
+-		return nil, nil, berrors.InternalServerError("failed to prepare precertificate signing: %s", err)
++		return nil, [32]byte{}, berrors.InternalServerError("failed to prepare precertificate signing: %s", err)
+ 	}
+ 
+ 	_, err = ca.sa.AddPrecertificate(context.Background(), &sapb.AddCertificateRequest{
+@@ -572,7 +561,7 @@
+ 		OcspNotReady: true,
+ 	})
+ 	if err != nil {
+-		return nil, nil, err
++		return nil, [32]byte{}, err
+ 	}
+ 
+ 	certDER, err := issuer.Issue(issuanceToken)
+@@ -580,12 +569,12 @@
+ 		ca.noteSignError(err)
+ 		ca.log.AuditErrf("Signing precert failed: serial=[%s] regID=[%d] names=[%s] certProfileName=[%s] certProfileHash=[%s] err=[%v]",
+ 			serialHex, issueReq.RegistrationID, strings.Join(csr.DNSNames, ", "), issueReq.CertProfileName, hex.EncodeToString(profileHashBytes[:]), err)
+-		return nil, nil, berrors.InternalServerError("failed to sign precertificate: %s", err)
++		return nil, [32]byte{}, berrors.InternalServerError("failed to sign precertificate: %s", err)
+ 	}
+ 
+ 	ca.signatureCount.With(prometheus.Labels{"purpose": string(precertType), "issuer": issuer.Name()}).Inc()
+ 	ca.log.AuditInfof("Signing precert success: serial=[%s] regID=[%d] names=[%s] precertificate=[%s] certProfileName=[%s] certProfileHash=[%s]",
+ 		serialHex, issueReq.RegistrationID, strings.Join(csr.DNSNames, ", "), hex.EncodeToString(certDER), issueReq.CertProfileName, hex.EncodeToString(profileHashBytes[:]))
+ 
+-	return certDER, issuer, nil
+-}
++	return certDER, profileHashBytes, nil
++}

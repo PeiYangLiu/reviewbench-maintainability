@@ -1,0 +1,121 @@
+[
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\tif req.Duration != nil && *req.Duration != 0 {\n\t\treturn r.getTopErrorGroupsByDuration(ctx, req, where)\n\t}",
+          "end_line": 567,
+          "start_line": 482
+        }
+      ]
+    },
+    "response_chars": 281,
+    "round": 1,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 567,
+          "replacement_lines": 3,
+          "start_line": 482
+        }
+      ],
+      "current_file_lines": 1076,
+      "updated_excerpt": {
+        "content": "472: \tfor col, val := range r.queryFilters() {\n473: \t\twhere[col] = val\n474: \t}\n475: \tif req.Env != nil && *req.Env != \"\" {\n476: \t\twhere[\"env\"] = *req.Env\n477: \t}\n478: \tif req.Source != nil && *req.Source != \"\" {\n479: \t\twhere[\"source\"] = *req.Source\n480: \t}\n481: \n482: \tif req.Duration != nil && *req.Duration != 0 {\n483: \t\treturn r.getTopErrorGroupsByDuration(ctx, req, where)\n484: \t}\n485: \n486: \tsubQ := sq.\n487: \t\tSelect(\"_group_hash\").\n488: \t\tFrom(\"error_groups_brief\").\n489: \t\tWhere(where).\n490: \t\tGroupBy(\"_group_hash\").\n491: \t\tOrderBy(orderBy(types.OrderFrequent, true)).\n492: \t\tLimit(uint64(req.Limit)).\n493: \t\tOffset(uint64(req.Offset))\n494: \n495: \tin := \"IN\"\n496: \tif r.sharded {\n497: \t\tsubQ = subQ.Distinct()\n498: \t\tin = \"GLOBAL IN\"\n499: \t}\n500: \n501: \tsubQuery, subArgs := subQ.MustSql()\n502: \n503: \tq := sq.\n504: \t\tSelect(\n505: \t\t\t\"_group_hash\",\n506: \t\t\t\"source\",\n507: \t\t\t\"any(message) as message\",\n508: \t\t\t\"countMerge(seen_total) as seen_total\",\n509: \t\t).\n510: \t\tFrom(\"error_groups\").\n511: \t\tWhere(where).\n512: \t\tWhere(fmt.Sprintf(\"_group_hash %s (%s)\", in, subQuery), subArgs...).",
+        "end_line": 512,
+        "path_lines": 1076,
+        "start_line": 472
+      }
+    },
+    "usage": {
+      "completion_tokens": 251,
+      "prompt_tokens": 17769,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 18020
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 545,
+      "path": "internal/pkg/repository_ch/error_groups.go",
+      "start_line": 512
+    },
+    "response_chars": 101,
+    "round": 2,
+    "tool_result": {
+      "content": "512: \t\tWhere(fmt.Sprintf(\"_group_hash %s (%s)\", in, subQuery), subArgs...).\n513: \t\tGroupBy(\"_group_hash\", \"source\").\n514: \t\tOrderBy(orderBy(types.OrderFrequent, false))\n515: \n516: \tquery, args := q.MustSql()\n517: \tmetricLabels := []string{\"error_groups\", \"SELECT\"}\n518: \trows, err := r.conn.Query(ctx, metricLabels, query, args...)\n519: \tif err != nil {\n520: \t\tincErrorMetric(err, metricLabels)\n521: \t\treturn nil, fmt.Errorf(\"failed to get error groups: %w\", err)\n522: \t}\n523: \n524: \tvar groups []types.TopErrorGroup\n525: \tfor rows.Next() {\n526: \t\tvar group types.TopErrorGroup\n527: \t\tif err = rows.Scan(\n528: \t\t\t&group.Hash,\n529: \t\t\t&group.Source,\n530: \t\t\t&group.Message,\n531: \t\t\t&group.Count,\n532: \t\t); err != nil {\n533: \t\t\treturn nil, fmt.Errorf(\"failed to scan row: %w\", err)\n534: \t\t}\n535: \n536: \t\tgroups = append(groups, group)\n537: \t}\n538: \n539: \treturn groups, nil\n540: }\n541: \n542: func (r *repository) GetTopErrorGroupsTotal(\n543: \tctx context.Context,\n544: \treq types.GetTopErrorGroupsRequest,\n545: ) (uint64, error) {",
+      "end_line": 545,
+      "path_lines": 1076,
+      "start_line": 512
+    },
+    "usage": {
+      "completion_tokens": 179,
+      "prompt_tokens": 18706,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 18885
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\nfunc (r *repository) getTopErrorGroupsByDuration(\n\tctx context.Context,\n\treq types.GetTopErrorGroupsRequest,\n\twhere sq.Eq,\n) ([]types.TopErrorGroup, error) {\n\taggTable, startDate := getHistData(req.Duration)\n\n\tcountQ := sq.\n\t\tSelect(\n\t\t\t\"_group_hash\",\n\t\t\t\"countMerge(counts) as count\",\n\t\t).\n\t\tFrom(aggTable).\n\t\tWhere(where).\n\t\tWhere(sq.GtOrEq{startDate: r.nowFn().Add(-req.Duration.Abs())}).\n\t\tGroupBy(\"_group_hash\").\n\t\tOrderBy(\"count DESC\").\n\t\tLimit(uint64(req.Limit)).\n\t\tOffset(uint64(req.Offset))\n\n\tcountQuery, countArgs := countQ.MustSql()\n\tmetricLabels := []string{aggTable, \"SELECT\"}\n\tcountRows, err := r.conn.Query(ctx, metricLabels, countQuery, countArgs...)\n\tif err != nil {\n\t\tincErrorMetric(err, metricLabels)\n\t\treturn nil, fmt.Errorf(\"failed to get error groups count: %w\", err)\n\t}\n\n\tvar (\n\t\tgroups    []types.TopErrorGroup\n\t\tidxByHash = map[uint64]int{}\n\t\thashes    []uint64\n\t)\n\tfor countRows.Next() {\n\t\tvar group types.TopErrorGroup\n\t\tif err = countRows.Scan(\n\t\t\t&group.Hash,\n\t\t\t&group.Count,\n\t\t); err != nil {\n\t\t\treturn nil, fmt.Errorf(\"failed to scan row: %w\", err)\n\t\t}\n\n\t\tgroups = append(groups, group)\n\t\thashes = append(hashes, group.Hash)\n\t\tidxByHash[group.Hash] = len(groups) - 1\n\t}\n\n\tif len(groups) == 0 {\n\t\treturn nil, nil\n\t}\n\n\twhere[\"_group_hash\"] = hashes\n\tq := sq.\n\t\tSelect(\n\t\t\t\"_group_hash\",\n\t\t\t\"source\",\n\t\t\t\"any(message) as message\",\n\t\t).\n\t\tFrom(\"error_groups\").\n\t\tWhere(where).\n\t\tGroupBy(\"_group_hash\", \"source\")\n\n\tquery, args := q.MustSql()\n\tmetricLabels = []string{\"error_groups\", \"SELECT\"}\n\trows, err := r.conn.Query(ctx, metricLabels, query, args...)\n\tif err != nil {\n\t\tincErrorMetric(err, metricLabels)\n\t\treturn nil, fmt.Errorf(\"failed to get error groups: %w\", err)\n\t}\n\n\tvar (\n\t\thash            uint64\n\t\tmessage, source string\n\t)\n\tfor rows.Next() {\n\t\tif err = rows.Scan(\n\t\t\t&hash,\n\t\t\t&source,\n\t\t\t&message,\n\t\t); err != nil {\n\t\t\treturn nil, fmt.Errorf(\"failed to scan row: %w\", err)\n\t\t}\n\n\t\tidx := idxByHash[hash]\n\t\tgroups[idx].Message = message\n\t\tgroups[idx].Source = source\n\t}\n\n\treturn groups, nil\n}\n",
+          "end_line": 540,
+          "start_line": 541
+        }
+      ]
+    },
+    "response_chars": 2458,
+    "round": 3,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 540,
+          "replacement_lines": 91,
+          "start_line": 541
+        }
+      ],
+      "current_file_lines": 1167,
+      "updated_excerpt": {
+        "content": "531: \t\t\t&group.Count,\n532: \t\t); err != nil {\n533: \t\t\treturn nil, fmt.Errorf(\"failed to scan row: %w\", err)\n534: \t\t}\n535: \n536: \t\tgroups = append(groups, group)\n537: \t}\n538: \n539: \treturn groups, nil\n540: }\n541: \n542: func (r *repository) getTopErrorGroupsByDuration(\n543: \tctx context.Context,\n544: \treq types.GetTopErrorGroupsRequest,\n545: \twhere sq.Eq,\n546: ) ([]types.TopErrorGroup, error) {\n547: \taggTable, startDate := getHistData(req.Duration)\n548: \n549: \tcountQ := sq.\n550: \t\tSelect(\n551: \t\t\t\"_group_hash\",\n552: \t\t\t\"countMerge(counts) as count\",\n553: \t\t).\n554: \t\tFrom(aggTable).\n555: \t\tWhere(where).\n556: \t\tWhere(sq.GtOrEq{startDate: r.nowFn().Add(-req.Duration.Abs())}).\n557: \t\tGroupBy(\"_group_hash\").\n558: \t\tOrderBy(\"count DESC\").\n559: \t\tLimit(uint64(req.Limit)).\n560: \t\tOffset(uint64(req.Offset))\n561: \n562: \tcountQuery, countArgs := countQ.MustSql()\n563: \tmetricLabels := []string{aggTable, \"SELECT\"}\n564: \tcountRows, err := r.conn.Query(ctx, metricLabels, countQuery, countArgs...)\n565: \tif err != nil {\n566: \t\tincErrorMetric(err, metricLabels)\n567: \t\treturn nil, fmt.Errorf(\"failed to get error groups count: %w\", err)\n568: \t}\n569: \n570: \tvar (\n571: \t\tgroups    []types.TopErrorGroup",
+        "end_line": 571,
+        "path_lines": 1167,
+        "start_line": 531
+      }
+    },
+    "usage": {
+      "completion_tokens": 1471,
+      "prompt_tokens": 19417,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 20888
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 4,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/claude-opus-4.8/patches/github__ozontech__seq-ui__pull_44__comment_3235793469__complexity.patch"
+    },
+    "usage": {
+      "completion_tokens": 25,
+      "prompt_tokens": 21649,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 21674
+    }
+  }
+]

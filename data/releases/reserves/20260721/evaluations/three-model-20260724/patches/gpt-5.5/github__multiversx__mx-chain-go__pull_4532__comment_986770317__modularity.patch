@@ -1,0 +1,110 @@
+--- a/process/smartContract/processorV2/processV2.go
++++ b/process/smartContract/processorV2/processV2.go
+@@ -85,6 +85,13 @@
+ 	isGenesisProcessing bool
+ 
+ 	enableEpochsHandler common.EnableEpochsHandler
++}
++
++type sameShardSCExecutionAfterBuiltInFuncResult struct {
++	isSCCallSelfShard  bool
++	callType           vmData.CallType
++	parsedTransfer     *vmcommon.ParsedESDTTransfers
++	scExecuteOutTransfer *vmcommon.OutputTransfer
+ }
+ 
+ // NewSmartContractProcessorV2 creates a smart contract processor that creates and interprets VM data
+@@ -863,7 +870,7 @@
+ 		return 0, err
+ 	}
+ 
+-	isSCCallSelfShard, callType, parsedTransfer, scExecuteOutTransfer, err := sc.isSameShardSCExecutionAfterBuiltInFunc(tx, vmInput, vmOutput)
++	sameShardExecution, err := sc.isSameShardSCExecutionAfterBuiltInFunc(tx, vmInput, vmOutput)
+ 	if err != nil {
+ 		return 0, sc.ProcessIfError(acntSnd, vmInput.CurrentTxHash, tx, err.Error(), []byte(""), snapshot, vmInput.GasLocked)
+ 	}
+@@ -872,9 +879,9 @@
+ 	newVMOutput := vmOutput
+ 
+ 	var errReturnCode vmcommon.ReturnCode
+-	if isSCCallSelfShard {
++	if sameShardExecution.isSCCallSelfShard {
+ 		var newDestSC state.UserAccountHandler
+-		newVMInput, newDestSC, err = sc.prepareExecutionAfterBuiltInFunc(callType, vmInput, vmOutput, parsedTransfer, scExecuteOutTransfer, tx, acntSnd, snapshot)
++		newVMInput, newDestSC, err = sc.prepareExecutionAfterBuiltInFunc(sameShardExecution.callType, vmInput, vmOutput, sameShardExecution.parsedTransfer, sameShardExecution.scExecuteOutTransfer, tx, acntSnd, snapshot)
+ 		if err != nil {
+ 			return 0, err
+ 		}
+@@ -892,7 +899,7 @@
+ 		createdAsyncCallback, scrResults = mergeOutputResultsWithBuiltinResults(tmpCreatedAsyncCallback, createdAsyncCallback, newSCRTxs, scrResults, newVMOutput, vmOutput)
+ 	}
+ 
+-	isSCCallCrossShard := !isSCCallSelfShard && txTypeOnDst == process.SCInvoking
++	isSCCallCrossShard := !sameShardExecution.isSCCallSelfShard && txTypeOnDst == process.SCInvoking
+ 	if !isSCCallCrossShard /* isSCCallSelfShard || txTypeOnDst != process.SCInvoking */ {
+ 		scrResults, errReturnCode, err = sc.completeOutputProcessingAndCreateCallback(&vmInput.VMInput, newVMOutput, txHash, tx, scrResults, acntSnd, snapshot, createdAsyncCallback)
+ 		if errReturnCode != vmcommon.Ok || err != nil {
+@@ -1037,42 +1044,53 @@
+ 	tx data.TransactionHandler,
+ 	vmInput *vmcommon.ContractCallInput,
+ 	vmOutput *vmcommon.VMOutput,
+-) (bool, vmData.CallType, *vmcommon.ParsedESDTTransfers, *vmcommon.OutputTransfer, error) {
++) (sameShardSCExecutionAfterBuiltInFuncResult, error) {
++	result := sameShardSCExecutionAfterBuiltInFuncResult{}
++
+ 	if vmOutput.ReturnCode != vmcommon.Ok {
+-		return false, 0, nil, nil, nil
++		return result, nil
+ 	}
+ 
+ 	parsedTransfer, err := sc.esdtTransferParser.ParseESDTTransfers(vmInput.CallerAddr, vmInput.RecipientAddr, vmInput.Function, vmInput.Arguments)
+ 	if err != nil {
+-		return false, 0, nil, nil, nil
++		return result, nil
+ 	}
+ 	if !core.IsSmartContractAddress(parsedTransfer.RcvAddr) {
+-		return false, 0, nil, nil, nil
++		return result, nil
+ 	}
+ 
+ 	if sc.shardCoordinator.ComputeId(parsedTransfer.RcvAddr) != sc.shardCoordinator.SelfId() {
+-		return false, 0, nil, nil, nil
++		return result, nil
+ 	}
+ 
+ 	callType := determineCallType(tx)
+ 	if callType == vmData.AsynchronousCallBack {
+-		return true, callType, parsedTransfer, nil, nil
++		result.isSCCallSelfShard = true
++		result.callType = callType
++		result.parsedTransfer = parsedTransfer
++
++		return result, nil
+ 	}
+ 
+ 	if len(parsedTransfer.CallFunction) == 0 {
+-		return false, 0, nil, nil, nil
++		return result, nil
+ 	}
+ 
+ 	outAcc, ok := vmOutput.OutputAccounts[string(parsedTransfer.RcvAddr)]
+ 	if !ok {
+-		return false, 0, nil, nil, nil
++		return result, nil
+ 	}
+ 	if len(outAcc.OutputTransfers) != 1 {
+-		return false, 0, nil, nil, nil
++		return result, nil
+ 	}
+ 
+ 	scExecuteOutTransfer := outAcc.OutputTransfers[0]
+-	return true, callType, parsedTransfer, &scExecuteOutTransfer, nil
++	result.isSCCallSelfShard = true
++	result.callType = callType
++	result.parsedTransfer = parsedTransfer
++	result.scExecuteOutTransfer = &scExecuteOutTransfer
++
++	return result, nil
+ }
+ 
+ func (sc *scProcessor) prepareExecutionAfterBuiltInFunc(

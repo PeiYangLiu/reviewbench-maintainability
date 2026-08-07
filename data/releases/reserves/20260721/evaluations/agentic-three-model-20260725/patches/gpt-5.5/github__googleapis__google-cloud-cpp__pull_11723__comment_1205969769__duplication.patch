@@ -1,0 +1,160 @@
+diff --git a/generator/internal/logging_decorator_rest_generator.cc b/generator/internal/logging_decorator_rest_generator.cc
+index 4624788..dd21e3f 100644
+--- a/generator/internal/logging_decorator_rest_generator.cc
++++ b/generator/internal/logging_decorator_rest_generator.cc
+@@ -19,11 +19,37 @@
+ #include "generator/internal/predicate_utils.h"
+ #include "generator/internal/printer.h"
+ #include "absl/strings/str_split.h"
++#include <string>
+ #include <google/protobuf/descriptor.h>
+ 
+ namespace google {
+ namespace cloud {
+ namespace generator_internal {
++namespace {
++
++void ReplaceAll(std::string& text, std::string const& from,
++                std::string const& to) {
++  for (std::string::size_type pos = 0;
++       (pos = text.find(from, pos)) != std::string::npos; pos += to.size()) {
++    text.replace(pos, from.size(), to);
++  }
++}
++
++std::string LroOperationSupport(std::string text, bool grpc_operation) {
++  ReplaceAll(text, "$lro_operation_response_type$",
++             grpc_operation ? "google::longrunning::Operation"
++                            : "$longrunning_response_type$");
++  ReplaceAll(text, "$lro_get_operation_request_type$",
++             grpc_operation ? "google::longrunning::GetOperationRequest"
++                            : "$longrunning_get_operation_request_type$");
++  ReplaceAll(text, "$lro_cancel_operation_request_type$",
++             grpc_operation ? "google::longrunning::CancelOperationRequest"
++                            : "$longrunning_cancel_operation_request_type$");
++  return text;
++}
++
++}  // namespace
++
+ 
+ LoggingDecoratorRestGenerator::LoggingDecoratorRestGenerator(
+     google::protobuf::ServiceDescriptor const* service_descriptor,
+@@ -119,33 +145,19 @@ class $logging_rest_class_name$ : public $stub_rest_class_name$ {
+ 
+   if (HasLongrunningMethod()) {
+     // long running operation support methods
+-    if (HasGRPCLongrunningOperation()) {
+-      HeaderPrint(
+-          R"""(
+-  future<StatusOr<google::longrunning::Operation>> AsyncGetOperation(
+-      google::cloud::CompletionQueue& cq,
+-      std::unique_ptr<google::cloud::rest_internal::RestContext> rest_context,
+-      google::longrunning::GetOperationRequest const& request) override;
+-
+-  future<Status> AsyncCancelOperation(
++    HeaderPrint(LroOperationSupport(
++        R"""(
++  future<StatusOr<$lro_operation_response_type$>> AsyncGetOperation(
+       google::cloud::CompletionQueue& cq,
+       std::unique_ptr<google::cloud::rest_internal::RestContext> rest_context,
+-      google::longrunning::CancelOperationRequest const& request) override;
+-)""");
+-    } else {
+-      HeaderPrint(
+-          R"""(
+-  future<StatusOr<$longrunning_response_type$>> AsyncGetOperation(
+-      google::cloud::CompletionQueue& cq,
+-      std::unique_ptr<google::cloud::rest_internal::RestContext> rest_context,
+-      $longrunning_get_operation_request_type$ const& request) override;
++      $lro_get_operation_request_type$ const& request) override;
+ 
+   future<Status> AsyncCancelOperation(
+       google::cloud::CompletionQueue& cq,
+       std::unique_ptr<google::cloud::rest_internal::RestContext> rest_context,
+-      $longrunning_cancel_operation_request_type$ const& request) override;
+-)""");
+-    }
++      $lro_cancel_operation_request_type$ const& request) override;
++)""",
++        HasGRPCLongrunningOperation()));
+   }
+ 
+   HeaderPrint(R"""(
+@@ -282,18 +294,17 @@ $logging_rest_class_name$::Async$method_name$(
+ 
+   if (HasLongrunningMethod()) {
+     // long running operation support methods
+-    if (HasGRPCLongrunningOperation()) {
+-      CcPrint(
+-          R"""(
+-future<StatusOr<google::longrunning::Operation>>
++    CcPrint(LroOperationSupport(
++        R"""(
++future<StatusOr<$lro_operation_response_type$>>
+ $logging_rest_class_name$::AsyncGetOperation(
+     google::cloud::CompletionQueue& cq,
+     std::unique_ptr<rest_internal::RestContext> rest_context,
+-    google::longrunning::GetOperationRequest const& request) {
++    $lro_get_operation_request_type$ const& request) {
+   return google::cloud::internal::LogWrapper(
+       [this](CompletionQueue& cq,
+              std::unique_ptr<rest_internal::RestContext> rest_context,
+-             google::longrunning::GetOperationRequest const& request) {
++             $lro_get_operation_request_type$ const& request) {
+         return child_->AsyncGetOperation(cq, std::move(rest_context), request);
+       },
+       cq, std::move(rest_context), request, __func__, tracing_options_);
+@@ -303,48 +314,17 @@ future<Status>
+ $logging_rest_class_name$::AsyncCancelOperation(
+     google::cloud::CompletionQueue& cq,
+     std::unique_ptr<rest_internal::RestContext> rest_context,
+-    google::longrunning::CancelOperationRequest const& request) {
++    $lro_cancel_operation_request_type$ const& request) {
+   return google::cloud::internal::LogWrapper(
+       [this](CompletionQueue& cq,
+              std::unique_ptr<rest_internal::RestContext> rest_context,
+-             google::longrunning::CancelOperationRequest const& request) {
++             $lro_cancel_operation_request_type$ const& request) {
+         return child_->AsyncCancelOperation(cq, std::move(rest_context), request);
+       },
+       cq, std::move(rest_context), request, __func__, tracing_options_);
+ }
+-)""");
+-    } else {
+-      CcPrint(
+-          R"""(
+-future<StatusOr<$longrunning_response_type$>>
+-$logging_rest_class_name$::AsyncGetOperation(
+-    google::cloud::CompletionQueue& cq,
+-    std::unique_ptr<rest_internal::RestContext> rest_context,
+-    $longrunning_get_operation_request_type$ const& request) {
+-  return google::cloud::internal::LogWrapper(
+-      [this](CompletionQueue& cq,
+-             std::unique_ptr<rest_internal::RestContext> rest_context,
+-             $longrunning_get_operation_request_type$ const& request) {
+-        return child_->AsyncGetOperation(cq, std::move(rest_context), request);
+-      },
+-      cq, std::move(rest_context), request, __func__, tracing_options_);
+-}
+-
+-future<Status>
+-$logging_rest_class_name$::AsyncCancelOperation(
+-    google::cloud::CompletionQueue& cq,
+-    std::unique_ptr<rest_internal::RestContext> rest_context,
+-    $longrunning_cancel_operation_request_type$ const& request) {
+-  return google::cloud::internal::LogWrapper(
+-      [this](CompletionQueue& cq,
+-             std::unique_ptr<rest_internal::RestContext> rest_context,
+-             $longrunning_cancel_operation_request_type$ const& request) {
+-        return child_->AsyncCancelOperation(cq, std::move(rest_context), request);
+-      },
+-      cq, std::move(rest_context), request, __func__, tracing_options_);
+-}
+-)""");
+-    }
++)""",
++        HasGRPCLongrunningOperation()));
+   }
+ 
+   CcCloseNamespaces();

@@ -1,0 +1,262 @@
+--- a/app/src/main/java/com/android/universe/ui/profileCreation/AddProfileViewModel.kt
++++ b/app/src/main/java/com/android/universe/ui/profileCreation/AddProfileViewModel.kt
+@@ -6,9 +6,8 @@
+ import com.android.universe.model.user.UserProfile
+ import com.android.universe.model.user.UserRepository
+ import com.android.universe.model.user.UserRepositoryProvider
+-import java.time.DateTimeException
++import com.android.universe.ui.common.ProfileValidators
+ import java.time.LocalDate
+-import java.time.Period
+ import kotlinx.coroutines.CoroutineDispatcher
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.flow.MutableStateFlow
+@@ -115,15 +114,7 @@
+   /** Publicly exposed state of the Add Profile UI. */
+   val uiState: StateFlow<AddProfileUIState> = _uiState.asStateFlow()
+ 
+-  private val nameRegex = "^[\\p{L}\\p{M}' -]*$".toRegex()
+-
+-  private val usernameRegex = "^[A-Za-z0-9._-]+$".toRegex()
+-
+-  private val oldestYear = 1900
+-
+   private val currentDate = LocalDate.now()
+-
+-  private val minimumUserAge = 13
+ 
+   /** Clears the current error message from the UI state. */
+   fun clearErrorMsg() {
+@@ -183,77 +174,28 @@
+    */
+   private suspend fun validateAllInputs(): Boolean {
+     val state = _uiState.value
+-    return validate(state.firstName, "First name", InputLimits.FIRST_NAME, nameRegex) &&
+-        validate(state.lastName, "Last name", InputLimits.LAST_NAME, nameRegex) &&
+-        validateDescription(state.description) &&
+-        validateDate(state.day, state.month, state.year) &&
++    return validateField(
++            ProfileValidators.validateName(state.firstName, "First name", InputLimits.FIRST_NAME)) &&
++        validateField(
++            ProfileValidators.validateName(state.lastName, "Last name", InputLimits.LAST_NAME)) &&
++        validateField(
++            ProfileValidators.validateDescription(state.description, InputLimits.DESCRIPTION)) &&
++        validateField(ProfileValidators.validateDate(state.day, state.month, state.year, currentDate)) &&
+         validateCountry(state.country) &&
+         validateUsername(state.username)
+   }
+ 
+   /**
+-   * Generic validation function for text fields.
+-   *
+-   * @return `true` if valid, `false` otherwise, setting an error message on failure.
+-   */
+-  private fun validate(value: String, fieldName: String, maxLength: Int, regex: Regex): Boolean {
+-    return when {
+-      value.isBlank() -> {
+-        setErrorMsg("$fieldName cannot be empty")
+-        false
+-      }
+-      value.length > maxLength -> {
+-        setErrorMsg("$fieldName is too long")
+-        false
+-      }
+-      !regex.matches(value) -> {
+-        setErrorMsg("Invalid $fieldName format")
+-        false
+-      }
+-      else -> true
+-    }
+-  }
+-
+-  /**
+-   * Validates the description field.
+-   *
+-   * @return `true` if valid, `false` otherwise, setting an error message on failure.
+-   */
+-  private fun validateDescription(description: String?): Boolean {
+-    if (description != null && description.length > InputLimits.DESCRIPTION) {
+-      setErrorMsg("Description is too long")
++   * Applies a validation error message to the UI state.
++   *
++   * @return `true` if the validation result is valid, `false` otherwise.
++   */
++  private fun validateField(error: String?): Boolean {
++    if (error != null) {
++      setErrorMsg(error)
+       return false
+     }
+     return true
+-  }
+-
+-  /**
+-   * Validates the date fields and the user's age.
+-   *
+-   * @return `true` if valid, `false` otherwise, setting an error message on failure.
+-   */
+-  private fun validateDate(dayStr: String, monthStr: String, yearStr: String): Boolean {
+-    val day = dayStr.toIntOrNull()
+-    val month = monthStr.toIntOrNull()
+-    val year = yearStr.toIntOrNull()
+-
+-    if (day == null || month == null || year == null) {
+-      setErrorMsg("Date fields must be numbers")
+-      return false
+-    }
+-
+-    return try {
+-      val dateOfBirth = LocalDate.of(year, month, day)
+-      if (!userOldEnough(dateOfBirth)) {
+-        setErrorMsg("You must be at least 13 years old")
+-        false
+-      } else {
+-        true
+-      }
+-    } catch (_: DateTimeException) {
+-      setErrorMsg("Invalid date")
+-      false
+-    }
+   }
+ 
+   /**
+@@ -281,7 +223,8 @@
+    * @return `true` if valid, `false` otherwise, setting an error message on failure.
+    */
+   private suspend fun validateUsername(username: String): Boolean {
+-    if (!validate(username, "Username", InputLimits.USERNAME, usernameRegex)) {
++    ProfileValidators.validateUsername(username, InputLimits.USERNAME)?.let {
++      setErrorMsg(it)
+       return false
+     }
+ 
+@@ -293,16 +236,19 @@
+     return true
+   }
+ 
+-  /**
+-   * Tests if a user is old enough to use the app.
+-   *
+-   * @param dateOfBirth The user's date of birth.
+-   */
+-  private fun userOldEnough(dateOfBirth: LocalDate): Boolean {
+-    // Number of whole years between dob and today
+-    return Period.between(dateOfBirth, currentDate).years.coerceAtLeast(0) >= minimumUserAge
+-  }
+-
++>>>>>>> REPLACE
++
++<<<<<<< SEARCH
++    val error =
++        when {
++          trimmed.isBlank() -> "Username cannot be empty"
++          trimmed.length > InputLimits.USERNAME -> "Username is too long"
++          !usernameRegex.matches(trimmed) ->
++              "Invalid username format, allowed characters are letters, numbers, dots, underscores, or dashes"
++          else -> null
++        }
++=======
++    val error = ProfileValidators.validateUsername(trimmed, InputLimits.USERNAME)
+   /**
+    * Updates the username field and its associated error state if any. Also truncates the input to
+    * more than the specified limit to allow an error popup to be displayed
+@@ -348,11 +294,7 @@
+    */
+   fun setDescription(description: String) {
+     val cleaned = trimAndCleanInput(description, InputLimits.DESCRIPTION + 1)
+-    val error =
+-        when {
+-          cleaned.length > InputLimits.DESCRIPTION -> "Description is too long"
+-          else -> null
+-        }
++    val error = ProfileValidators.validateDescription(cleaned, InputLimits.DESCRIPTION)
+     _uiState.value = _uiState.value.copy(description = cleaned, descriptionError = error)
+   }
+ 
+@@ -365,13 +307,7 @@
+   fun setDay(day: String) {
+     val number = day.filter { it.isDigit() }
+     val trimmed = number.take(InputLimits.DAY)
+-    val error =
+-        when {
+-          trimmed.isBlank() -> "Day cannot be empty"
+-          trimmed.toInt() < 1 -> "Day needs to be after 1"
+-          trimmed.toInt() > 31 -> "Day needs to be before 31"
+-          else -> null
+-        }
++    val error = ProfileValidators.validateDay(trimmed)
+     _uiState.value = _uiState.value.copy(day = trimmed, dayError = error)
+   }
+ 
+@@ -379,13 +315,7 @@
+   fun setMonth(month: String) {
+     val number = month.filter { it.isDigit() }
+     val trimmed = number.take(InputLimits.MONTH)
+-    val error =
+-        when {
+-          trimmed.isBlank() -> "Month cannot be empty"
+-          trimmed.toInt() < 1 -> "Month needs to be after 1"
+-          trimmed.toInt() > 12 -> "Month needs to be before 12"
+-          else -> null
+-        }
++    val error = ProfileValidators.validateMonth(trimmed)
+     _uiState.value = _uiState.value.copy(month = trimmed, monthError = error)
+   }
+ 
+@@ -393,13 +323,7 @@
+   fun setYear(year: String) {
+     val number = year.filter { it.isDigit() }
+     val trimmed = number.take(InputLimits.YEAR)
+-    val error =
+-        when {
+-          trimmed.isBlank() -> "Year cannot be empty"
+-          trimmed.toInt() < oldestYear -> "Year needs to be after $oldestYear"
+-          trimmed.toInt() > currentDate.year -> "Year needs to be before ${currentDate.year}"
+-          else -> null
+-        }
++    val error = ProfileValidators.validateYear(trimmed, currentDate.year)
+     _uiState.value = _uiState.value.copy(year = trimmed, yearError = error)
+   }
+ 
+@@ -419,11 +343,8 @@
+    * @param input The input string.
+    * @param limit The maximum length of the output string.
+    */
+-  private fun trimAndCleanInput(input: String, limit: Int): String {
+-    val singleSpaced = input.replace(Regex("\\s+"), " ")
+-    val trimmed = singleSpaced.take(limit)
+-    return trimmed
+-  }
++  private fun trimAndCleanInput(input: String, limit: Int): String =
++      ProfileValidators.trimAndCleanInput(input, limit)
+ 
+   /**
+    * Sanitizes a name string by:
+@@ -434,11 +355,7 @@
+    * @param input The string to sanitize.
+    * @return The sanitized string.
+    */
+-  private fun sanitize(input: String): String {
+-    val singleSpaced = input.replace(Regex("\\s+"), " ")
+-    val trimmed = singleSpaced.trim()
+-    return trimmed
+-  }
++  private fun sanitize(input: String): String = ProfileValidators.sanitize(input)
+ 
+   /**
+    * Validates a name for the UI by returning the possible error message.
+@@ -448,13 +365,6 @@
+    * @param limit The maximum length of the name.
+    * @return The error message if the name is invalid, null otherwise.
+    */
+-  private fun validateName(name: String, label: String, limit: Int): String? {
+-    return when {
+-      name.isBlank() -> "$label cannot be empty"
+-      name.length > limit -> "$label is too long"
+-      !nameRegex.matches(name) ->
+-          "Invalid name format, allowed characters are letters, apostrophes, hyphens, and spaces"
+-      else -> null
+-    }
+-  }
++  private fun validateName(name: String, label: String, limit: Int): String? =
++      ProfileValidators.validateName(name, label, limit)
+ }

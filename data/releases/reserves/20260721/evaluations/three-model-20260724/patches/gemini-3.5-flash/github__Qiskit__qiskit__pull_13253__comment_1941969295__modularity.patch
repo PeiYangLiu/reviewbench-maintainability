@@ -1,0 +1,153 @@
+--- a/qiskit/visualization/dag/dagstyle.py
++++ b/qiskit/visualization/dag/dagstyle.py
+@@ -127,6 +127,77 @@
+         self.style = StyleDict(**default_style)
+ 
+ 
++def _load_style(
++    style: dict | str,
++    style_dict_cls: type,
++    styles_dir: Path,
++    default_style_name: str,
++    default_factory: Any,
++) -> Any:
++    """Helper function to load style from json files, reusable by other style modules."""
++    if isinstance(style, dict):
++        style_name = style.get("name", default_style_name)
++    elif isinstance(style, str):
++        if style.endswith(".json"):
++            style_name = style[:-5]
++        else:
++            style_name = style
++    else:
++        raise exceptions.VisualizationError(f"Invalid style {style}")
++
++    if style_name == default_style_name:
++        current_style = default_factory()
++    else:
++        # Search for file in 'styles' dir, and then the current directory
++        style_name = style_name + ".json"
++        style_paths = []
++
++        default_path = styles_dir / style_name
++        style_paths.append(default_path)
++
++        # check current directory
++        cwd_path = Path("") / style_name
++        style_paths.append(cwd_path)
++
++        for path in style_paths:
++            # expand ~ to the user directory and check if the file exists
++            exp_user = path.expanduser()
++            if os.path.isfile(exp_user):
++                try:
++                    with open(exp_user) as infile:
++                        json_style = json.load(infile)
++
++                    current_style = style_dict_cls(json_style)
++                    break
++                except json.JSONDecodeError as err:
++                    warn(
++                        f"Could not decode JSON in file '{path}': {str(err)}. "
++                        "Will use default style.",
++                        UserWarning,
++                        2,
++                    )
++                    current_style = default_factory()
++                    break
++                except (OSError, FileNotFoundError):
++                    warn(
++                        f"Error loading JSON file '{path}'. Will use default style.",
++                        UserWarning,
++                        2,
++                    )
++                    current_style = default_factory()
++                    break
++        else:
++            raise exceptions.VisualizationError(f"Invalid style {style}")
++
++    # if the style is a dictionary, update the defaults with the new values
++    # this _needs_ to happen after loading by name to cover cases like
++    #   style = {"name": "bw", "edgecolor": "#FF0000"}
++    if isinstance(style, dict):
++        current_style.update(style)
++
++    return current_style
++
++
+ def load_style(style: dict | str = "color") -> StyleDict:
+     """Utility function to load style from json files.
+ 
+@@ -147,65 +218,10 @@
+     Returns:
+         A tuple containing the style as dictionary and the default font ratio.
+     """
+-
+-    # determine the style name which could also be inside a dictionary, like
+-    # style={"name": "clifford", <other settings...>}
+-    if isinstance(style, dict):
+-        style_name = style.get("name", "color")
+-    elif isinstance(style, str):
+-        if style.endswith(".json"):
+-            style_name = style[:-5]
+-        else:
+-            style_name = style
+-    else:
+-        raise exceptions.VisualizationError(f"Invalid style {style}")
+-
+-    if style_name == "color":
+-        current_style = DefaultStyle().style
+-    else:
+-        # Search for file in 'styles' dir, and then the current directory
+-        style_name = style_name + ".json"
+-        style_paths = []
+-
+-        default_path = Path(__file__).parent / "styles" / style_name
+-        style_paths.append(default_path)
+-
+-        # check current directory
+-        cwd_path = Path("") / style_name
+-        style_paths.append(cwd_path)
+-
+-        for path in style_paths:
+-            # expand ~ to the user directory and check if the file exists
+-            exp_user = path.expanduser()
+-            if os.path.isfile(exp_user):
+-                try:
+-                    with open(exp_user) as infile:
+-                        json_style = json.load(infile)
+-
+-                    current_style = StyleDict(json_style)
+-                    break
+-                except json.JSONDecodeError as err:
+-                    warn(
+-                        f"Could not decode JSON in file '{path}': {str(err)}. "
+-                        "Will use default style.",
+-                        UserWarning,
+-                        2,
+-                    )
+-                    break
+-                except (OSError, FileNotFoundError):
+-                    warn(
+-                        f"Error loading JSON file '{path}'. Will use default style.",
+-                        UserWarning,
+-                        2,
+-                    )
+-                    break
+-        else:
+-            raise exceptions.VisualizationError(f"Invalid style {style}")
+-
+-    # if the style is a dictionary, update the defaults with the new values
+-    # this _needs_ to happen after loading by name to cover cases like
+-    #   style = {"name": "bw", "edgecolor": "#FF0000"}
+-    if isinstance(style, dict):
+-        current_style.update(style)
+-
+-    return current_style
++    return _load_style(
++        style=style,
++        style_dict_cls=StyleDict,
++        styles_dir=Path(__file__).parent / "styles",
++        default_style_name="color",
++        default_factory=lambda: DefaultStyle().style,
++    )

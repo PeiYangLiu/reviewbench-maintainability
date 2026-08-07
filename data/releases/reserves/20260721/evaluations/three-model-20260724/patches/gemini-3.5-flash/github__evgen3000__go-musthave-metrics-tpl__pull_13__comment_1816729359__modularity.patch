@@ -1,0 +1,104 @@
+--- a/cmd/server/storage/storage.go
++++ b/cmd/server/storage/storage.go
+@@ -20,7 +20,15 @@
+ 	Restore         bool
+ }
+ 
+-func (m *MemStorage) SaveData(filePath string) error {
++type FileStorage struct {
++	filePath string
++}
++
++func NewFileStorage(filePath string) *FileStorage {
++	return &FileStorage{filePath: filePath}
++}
++
++func (fs *FileStorage) Save(m *MemStorage) error {
+ 	data := map[string]interface{}{
+ 		"gauges":   m.Gauges,
+ 		"counters": m.Counters,
+@@ -31,42 +39,52 @@
+ 		return err
+ 	}
+ 
+-	return os.WriteFile(filePath, fileData, 0644)
++	return os.WriteFile(fs.filePath, fileData, 0644)
++}
++
++func (fs *FileStorage) Load() *MemStorage {
++	file, err := os.OpenFile(fs.filePath, os.O_RDONLY|os.O_CREATE, 0666)
++	defer func() {
++		err := file.Close()
++		if err != nil {
++			logger.GetLogger().Fatal("Failed to close file", zap.Error(err))
++		}
++	}()
++
++	if err != nil {
++		logger.GetLogger().Fatal("Can't open file.", zap.Error(err))
++	}
++
++	fileData, err := io.ReadAll(file)
++	if err != nil {
++		logger.GetLogger().Fatal("Can't read file.", zap.Error(err))
++	}
++	if len(fileData) == 0 {
++		logger.GetLogger().Info("Storage file is empty, nothing to load.", zap.String("file", fs.filePath))
++		return &MemStorage{
++			Gauges:   make(map[string]float64),
++			Counters: make(map[string]int64),
++		}
++	}
++
++	var storage MemStorage
++
++	err = json.Unmarshal(fileData, &storage)
++	if err != nil {
++		logger.GetLogger().Fatal("Can't read json.", zap.Error(err))
++	}
++	return &storage
++}
++
++func (m *MemStorage) SaveData(filePath string) error {
++	fs := NewFileStorage(filePath)
++	return fs.Save(m)
+ }
+ 
+ func NewMemStorage(config MemStorageConfig) *MemStorage {
+ 	if config.Restore {
+-		file, err := os.OpenFile(config.FileStoragePath, os.O_RDONLY|os.O_CREATE, 0666)
+-		defer func() {
+-			err := file.Close()
+-			if err != nil {
+-				logger.GetLogger().Fatal("Failed to close file", zap.Error(err))
+-			}
+-		}()
+-
+-		if err != nil {
+-			logger.GetLogger().Fatal("Can't open file.", zap.Error(err))
+-		}
+-
+-		fileData, err := io.ReadAll(file)
+-		if err != nil {
+-			logger.GetLogger().Fatal("Can't read file.", zap.Error(err))
+-		}
+-		if len(fileData) == 0 {
+-			logger.GetLogger().Info("Storage file is empty, nothing to load.", zap.String("file", config.FileStoragePath))
+-			return &MemStorage{
+-				Gauges:   make(map[string]float64),
+-				Counters: make(map[string]int64),
+-			}
+-		}
+-
+-		var storage MemStorage
+-
+-		err = json.Unmarshal(fileData, &storage)
+-		if err != nil {
+-			logger.GetLogger().Fatal("Can't read json.", zap.Error(err))
+-		}
+-		return &storage
++		fs := NewFileStorage(config.FileStoragePath)
++		return fs.Load()
+ 	}
+ 
+ 	return &MemStorage{

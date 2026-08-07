@@ -1,0 +1,119 @@
+--- a/controllers/componentversion_controller.go
++++ b/controllers/componentversion_controller.go
+@@ -264,7 +264,7 @@
+ func (r *ComponentVersionReconciler) parseReferences(ctx context.Context, parent *v1alpha1.ComponentVersion, references ocmdesc.References) ([]v1alpha1.Reference, error) {
+ 	result := make([]v1alpha1.Reference, 0)
+ 	for _, ref := range references {
+-		reference, err := r.parseReferencesLoopBody(ctx, parent, ref)
++		reference, err := r.parseReference(ctx, parent, ref)
+ 		if err != nil {
+ 			return nil, fmt.Errorf("failed to parse reference: %w", err)
+ 		}
+@@ -273,49 +273,20 @@
+ 	return result, nil
+ }
+ 
+-func (r *ComponentVersionReconciler) parseReferencesLoopBody(ctx context.Context, parent *v1alpha1.ComponentVersion, ref ocmdesc.ComponentReference) (*v1alpha1.Reference, error) {
+-	log := log.FromContext(ctx)
++// parseReference resolves a single component reference into a v1alpha1.Reference,
++// ensuring its component descriptor resource exists and recursively resolving nested references.
++func (r *ComponentVersionReconciler) parseReference(ctx context.Context, parent *v1alpha1.ComponentVersion, ref ocmdesc.ComponentReference) (*v1alpha1.Reference, error) {
+ 	// get component version
+ 	rcv, err := r.OCMClient.GetComponentVersion(ctx, parent, ref.ComponentName, ref.Version)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed to get component version: %w", err)
+ 	}
+ 	defer rcv.Close()
+-	// convert ComponentDescriptor to v3alpha1
+-	dv := &compdesc.DescriptorVersion{}
+-	cd, err := dv.ConvertFrom(rcv.GetDescriptor())
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to convert component descriptor: %w", err)
+-	}
+-	// setup the component descriptor kubernetes resource
+-	componentName, err := r.constructComponentName(ref.ComponentName, ref.Version, ref.GetMeta().ExtraIdentity)
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to generate name: %w", err)
+-	}
+-	descriptor := &v1alpha1.ComponentDescriptor{
+-		ObjectMeta: metav1.ObjectMeta{
+-			Namespace: parent.GetNamespace(),
+-			Name:      componentName,
+-		},
+-		Spec: v1alpha1.ComponentDescriptorSpec{
+-			ComponentVersionSpec: cd.(*compdesc.ComponentDescriptor).Spec,
+-			Version:              ref.Version,
+-		},
+-	}
+-
+-	if err := controllerutil.SetOwnerReference(parent, descriptor, r.Scheme); err != nil {
+-		return nil, fmt.Errorf("failed to set owner reference: %w", err)
+-	}
+-
+-	// create or update the component descriptor kubernetes resource
+-	// we don't need to update it
+-	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, descriptor, func() error {
+-		return nil
+-	})
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to create/update component descriptor: %w", err)
+-	}
+-	log.V(4).Info(fmt.Sprintf("%s(ed) descriptor", op), "descriptor", klog.KObj(descriptor))
++
++	descriptor, err := r.reconcileComponentDescriptor(ctx, parent, rcv.GetDescriptor(), ref)
++	if err != nil {
++		return nil, err
++	}
+ 
+ 	reference := v1alpha1.Reference{
+ 		Name:    ref.Name,
+@@ -336,6 +307,49 @@
+ 	}
+ 
+ 	return &reference, nil
++}
++
++// reconcileComponentDescriptor creates or updates the kubernetes ComponentDescriptor
++// resource that corresponds to the given referenced component descriptor.
++func (r *ComponentVersionReconciler) reconcileComponentDescriptor(ctx context.Context, parent *v1alpha1.ComponentVersion, cdesc *ocmdesc.ComponentDescriptor, ref ocmdesc.ComponentReference) (*v1alpha1.ComponentDescriptor, error) {
++	log := log.FromContext(ctx)
++	// convert ComponentDescriptor to v3alpha1
++	dv := &compdesc.DescriptorVersion{}
++	cd, err := dv.ConvertFrom(cdesc)
++	if err != nil {
++		return nil, fmt.Errorf("failed to convert component descriptor: %w", err)
++	}
++	// setup the component descriptor kubernetes resource
++	componentName, err := r.constructComponentName(ref.ComponentName, ref.Version, ref.GetMeta().ExtraIdentity)
++	if err != nil {
++		return nil, fmt.Errorf("failed to generate name: %w", err)
++	}
++	descriptor := &v1alpha1.ComponentDescriptor{
++		ObjectMeta: metav1.ObjectMeta{
++			Namespace: parent.GetNamespace(),
++			Name:      componentName,
++		},
++		Spec: v1alpha1.ComponentDescriptorSpec{
++			ComponentVersionSpec: cd.(*compdesc.ComponentDescriptor).Spec,
++			Version:              ref.Version,
++		},
++	}
++
++	if err := controllerutil.SetOwnerReference(parent, descriptor, r.Scheme); err != nil {
++		return nil, fmt.Errorf("failed to set owner reference: %w", err)
++	}
++
++	// create or update the component descriptor kubernetes resource
++	// we don't need to update it
++	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, descriptor, func() error {
++		return nil
++	})
++	if err != nil {
++		return nil, fmt.Errorf("failed to create/update component descriptor: %w", err)
++	}
++	log.V(4).Info(fmt.Sprintf("%s(ed) descriptor", op), "descriptor", klog.KObj(descriptor))
++
++	return descriptor, nil
+ }
+ 
+ // constructComponentName constructs a unique name from a component name and version.

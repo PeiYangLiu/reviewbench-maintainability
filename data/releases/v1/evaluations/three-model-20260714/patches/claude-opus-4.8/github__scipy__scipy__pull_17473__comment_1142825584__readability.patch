@@ -1,0 +1,30 @@
+--- a/scipy/stats/_stats_py.py
++++ b/scipy/stats/_stats_py.py
+@@ -9866,13 +9866,21 @@
+     elif np.any(np.isinf(u_values)) and np.any(np.isinf(v_values)):
+         return np.nan
+ 
+-    # creat constraints
+-    _row_func = np.vectorize(lambda x: np.floor(x/n) if x < m*n else m + x % n)
+-    row = _row_func(np.arange(m * n * 2))
+-    col = np.append(np.arange(m * n), np.arange(m * n))
+-    value = np.ones(m * n * 2, dtype=float)
++    # Construct the constraint matrix as two vertically stacked blocks.
++    # The upper block (m rows) enforces the marginal constraints on `u`: each
++    # of its rows sums the `n` transport-plan entries associated with one value
++    # of `u`. The lower block (n rows) enforces the marginal constraints on
++    # `v`: each of its rows sums the `m` entries associated with one value of
++    # `v`.
++    from scipy.sparse import coo_array, vstack
++    ones = np.ones(m * n, dtype=float)
++    cols = np.arange(m * n)
++    A_upper = coo_array((ones, (np.repeat(np.arange(m), n), cols)),
++                        shape=(m, m * n))
++    A_lower = coo_array((ones, (np.tile(np.arange(n), m), cols)),
++                        shape=(n, m * n))
+     # sparse constraint matrix of size (m + n)*(m * n)
+-    A = coo_matrix((value, (row, col)), shape=(n + m, m * n))
++    A = vstack((A_upper, A_lower))
+ 
+     # get cost matrix
+     D = distance_matrix(u_values, v_values, p=2)

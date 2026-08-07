@@ -1,0 +1,156 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 120,
+      "path": "src/veranda/raster/mosaic/base.py",
+      "start_line": 1
+    },
+    "response_chars": 90,
+    "round": 1,
+    "tool_result": {
+      "content": "1: \"\"\" Collection of base classes for managing multi-dimensional I/O of raster data. \"\"\"\n2: \n3: import os\n4: import copy\n5: import gc\n6: import abc\n7: import warnings\n8: import rioxarray  # this import is needed as an extension for xarray\n9: import xarray as xr\n10: import pandas as pd\n11: import numpy as np\n12: from affine import Affine\n13: \n14: from geospade.tools import any_geom2ogr_geom\n15: from geospade.tools import rel_extent\n16: from geospade.crs import SpatialRef\n17: from geospade.raster import RasterGeometry\n18: from geospade.raster import MosaicGeometry\n19: from geospade.raster import Tile\n20: \n21: \n22: class RasterAccess:\n23:     \"\"\"\n24:     Helper class to build the link between indexes of the source array (access) and the target array (assignment).\n25: \n26:     \"\"\"\n27:     def __init__(self, src_raster_geom, dst_raster_geom, src_root_raster_geom=None):\n28:         \"\"\"\n29:         Constructor of `RasterAccess`.\n30: \n31:         Parameters\n32:         ----------\n33:         src_raster_geom : geospade.raster.RasterGeometry\n34:             Raster geometry representing the extent and indices of the data to access.\n35:         dst_raster_geom : geospade.raster.RasterGeometry\n36:             Raster geometry representing the extent and indices of the data to assign.\n37:         src_root_raster_geom : geospade.raster.RasterGeometry, optional\n38:             Raster geometry representing the origin to which `src_raster_geom` should be referred to. Defaults to None,\n39:             i.e. the root parent of `src_raster_geom` is used.\n40: \n41:         \"\"\"\n42:         src_root_raster_geom = src_root_raster_geom or src_raster_geom.parent_root\n43:         origin = src_root_raster_geom.ul_x, src_root_raster_geom.ul_y\n44:         min_col, min_row, max_col, max_row = rel_extent(origin, src_raster_geom.coord_extent,\n45:                                                         src_raster_geom.x_pixel_size, src_raster_geom.y_pixel_size)\n46:         self.src_window = (min_row, min_col, max_row, max_col)\n47: \n48:         origin = dst_raster_geom.ul_x, dst_raster_geom.ul_y\n49:         min_col, min_row, max_col, max_row = rel_extent(origin, src_raster_geom.coord_extent, src_raster_geom.x_pixel_size,\n50:                                                         src_raster_geom.y_pixel_size)\n51:         self.dst_window = (min_row, min_col, max_row, max_col)\n52: \n53:     @property\n54:     def src_row_slice(self):\n55:         \"\"\" slice : Indices for the rows of the data to access. \"\"\"\n56:         return slice(self.src_window[0], self.src_window[2] + 1)\n57: \n58:     @property\n59:     def src_col_slice(self):\n60:         \"\"\" slice : Indices for the columns of the data to access. \"\"\"\n61:         return slice(self.src_window[1], self.src_window[3] + 1)\n62: \n63:     @property\n64:     def dst_row_slice(self):\n65:         \"\"\" slice : Indices for the rows of the data to assign. \"\"\"\n66:         return slice(self.dst_window[0], self.dst_window[2] + 1)\n67: \n68:     @property\n69:     def dst_col_slice(self):\n70:         \"\"\" slice : Indices for the cols of the data to assign. \"\"\"\n71:         return slice(self.dst_window[1], self.dst_window[3] + 1)\n72: \n73: \n74: class RasterData(metaclass=abc.ABCMeta):\n75:     \"\"\"\n76:     Combines spatial information represented as a mosaic with raster mosaic given as 3D array data in memory or as\n77:     geospatial files on disk.\n78: \n79:     \"\"\"\n80:     def __init__(self, file_register, mosaic, data=None, stack_dimension='layer_id', stack_coords=None, **kwargs):\n81:         \"\"\"\n82:         Constructor of `RasterData`.\n83: \n84:         Parameters\n85:         ----------\n86:         file_register : pd.Dataframe\n87:             Data frame managing a stack/list of files containing the following columns:\n88:                 - 'filepath' : str\n89:                     Full file path to a geospatial file.\n90:                 - 'layer_id' : object\n91:                     Specifies an ID to which layer a file belongs to, e.g. a layer counter or a timestamp. Must\n92:                     correspond to `stack_dimension`.\n93:                 - 'tile_id' : str\n94:                     Tile name or ID to which tile a file belongs to.\n95:         mosaic : geospade.raster.MosaicGeometry\n96:             Mosaic representing the spatial allocation of the given files. The tiles of the mosaic have to match the\n97:             ID's/names of the 'tile_id' column.\n98:         data : xr.Dataset, optional\n99:             Raster data stored in memory. It must match the spatial sampling and CRS of the mosaic, but not its spatial\n100:             extent or tiling. Moreover, the dimension of the mosaic along the first dimension (stack dimension), must\n101:             match the entries/filepaths in `file_register`.\n102:         stack_dimension : str, optional\n103:             Dimension/column name of the dimension, where to stack files or data over the same spatial region along\n104:             (first axis), e.g. time, bands etc. Defaults to 'layer_id', i.e. the layer ID's are used as the main\n105:             coordinates to stack the files.\n106:         stack_coords : list, optional\n107:             Additional columns of `file_register` to use as coordinates. Defaults to None, i.e. only coordinates along\n108:             `stack_dimension` are used.\n109: \n110:         \"\"\"\n111:         self._file_register = file_register\n112:         self._files = dict()\n113:         self._mosaic = mosaic\n114:         self._data = data\n115:         self._data_geom = None if data is None else self.raster_geom_from_data(data, sref=mosaic.sref, name='0')\n116:         self._file_dim = stack_dimension\n117:         self._file_coords = [self._file_dim] if stack_coords is None else stack_coords\n118: \n119:         if 'file_id' not in self._file_register.columns:\n120:             self._file_register['file_id'] = [None] * len(self._file_register)",
+      "end_line": 120,
+      "path_lines": 821,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 8303,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 103,
+      "output_tokens_details": {
+        "reasoning_tokens": 70
+      },
+      "total_tokens": 8406
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 706,
+      "path": "src/veranda/raster/mosaic/base.py",
+      "start_line": 644
+    },
+    "response_chars": 774,
+    "round": 2,
+    "tool_result": {
+      "content": "644: class RasterDataWriter(RasterData):\n645:     \"\"\" Allows to write and manage a stack of raster data. \"\"\"\n646:     def __init__(self, mosaic, file_register=None, data=None, stack_dimension='layer_id', stack_coords=None,\n647:                  dirpath=None, fn_pattern='{layer_id}.xyz', fn_formatter=None):\n648:         \"\"\"\n649:         Constructor of `RasterDataWriter`.\n650: \n651:         Parameters\n652:         ----------\n653: \n654:         mosaic : geospade.raster.MosaicGeometry\n655:             Mosaic representing the spatial allocation of the given files. The tiles of the mosaic have to match the\n656:             ID's/names of the 'tile_id' column.\n657:         file_register : pd.Dataframe, optional\n658:             Data frame managing a stack/list of files containing the following columns:\n659:                 - 'filepath' : str\n660:                     Full file path to a geospatial file.\n661:                 - 'layer_id' : object\n662:                     Specifies an ID to which layer a file belongs to, e.g. a layer counter or a timestamp. Must\n663:                     correspond to `stack_dimension`.\n664:                 - 'tile_id' : str\n665:                     Tile name or ID to which tile a file belongs to.\n666:             If it is None, then the constructor tries to create a file from other keyword arguments, i.e. `data`,\n667:             `dirpath`, `fn_pattern`, and `fn_formatter`.\n668:         data : xr.Dataset, optional\n669:             Raster data stored in memory. It must match the spatial sampling and CRS of the mosaic, but not its spatial\n670:             extent or tiling. Moreover, the dimension of the data along the first dimension (stack dimension), must\n671:             match the entries/filepaths in `file_register`.\n672:         stack_dimension : str, optional\n673:             Dimension/column name of the dimension, where to stack the files along (first axis), e.g. time, bands etc.\n674:             Defaults to 'layer_id', i.e. the layer ID's are used as the main coordinates to stack the files.\n675:         stack_coords : list, optional\n676:             Additional columns of `file_register` to use as coordinates. Defaults to None, i.e. only coordinates along\n677:             `stack_dimension` are used.\n678:         dirpath : str, optional\n679:             Directory path to the folder where the GeoTIFF files should be written to. Defaults to None, i.e. the\n680:             current working directory is used.\n681:         fn_pattern : str, optional\n682:             Pattern for the filename of the new GeoTIFF files. To fill in specific parts of the new file name with\n683:             information from the file register, you can specify the respective file register column names in curly\n684:             brackets and add them to the pattern string as desired. Defaults to '{layer_id}.tif'.\n685:         fn_formatter : dict, optional\n686:             Dictionary mapping file register column names with functions allowing to encode their values as strings.\n687: \n688:         \"\"\"\n689:         fn_formatter = fn_formatter or dict()\n690:         if file_register is None and data is None:\n691:             err_msg = \"Either a file register ('file_register') or an xarray dataset ('data') has to be provided.\"\n692:             raise ValueError(err_msg)\n693:         elif file_register is None and data is not None:\n694:             layers = data[stack_dimension]\n695:             file_register_dict = dict()\n696:             file_register_dict[stack_dimension] = layers\n697:             file_register = pd.DataFrame(file_register_dict)\n698: \n699:         if 'tile_id' not in file_register.columns:\n700:             n_entries = len(file_register)\n701:             tile_names = mosaic.all_tile_names\n702:             n_tiles = len(tile_names)\n703:             file_register = pd.DataFrame(np.repeat(file_register.values, n_tiles, axis=0),\n704:                                          columns=file_register.columns)\n705:             file_register['tile_id'] = np.repeat([tile_names], n_entries, axis=0).flatten()\n706: ",
+      "end_line": 706,
+      "path_lines": 821,
+      "start_line": 644
+    },
+    "usage": {
+      "input_tokens": 9968,
+      "input_tokens_details": {
+        "cached_tokens": 7936
+      },
+      "output_tokens": 823,
+      "output_tokens_details": {
+        "reasoning_tokens": 610
+      },
+      "total_tokens": 10791
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "    @staticmethod\n    def _fileregister_from_xarray(data, stack_dimension):\n        \"\"\"Creates a file register from an xarray dataset's stack dimension.\"\"\"\n        layers = data[stack_dimension]\n        file_register_dict = dict()\n        file_register_dict[stack_dimension] = layers\n        return pd.DataFrame(file_register_dict)\n\n",
+          "end_line": 645,
+          "start_line": 646
+        },
+        {
+          "content": "        elif file_register is None and data is not None:\n            file_register = self._fileregister_from_xarray(data, stack_dimension)",
+          "end_line": 697,
+          "start_line": 693
+        }
+      ]
+    },
+    "response_chars": 1308,
+    "round": 3,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 645,
+          "replacement_lines": 8,
+          "start_line": 646
+        },
+        {
+          "end_line": 697,
+          "replacement_lines": 2,
+          "start_line": 693
+        }
+      ],
+      "current_file_lines": 826,
+      "updated_excerpt": {
+        "content": "636:         \"\"\"\n637:         if self._data is not None and self._data_geom is not None:\n638:             self._data = self.data\n639:             self._data_geom.parent = None\n640:         else:\n641:             self.read(*args, **kwargs)\n642: \n643: \n644: class RasterDataWriter(RasterData):\n645:     \"\"\" Allows to write and manage a stack of raster data. \"\"\"\n646:     @staticmethod\n647:     def _fileregister_from_xarray(data, stack_dimension):\n648:         \"\"\"Creates a file register from an xarray dataset's stack dimension.\"\"\"\n649:         layers = data[stack_dimension]\n650:         file_register_dict = dict()\n651:         file_register_dict[stack_dimension] = layers\n652:         return pd.DataFrame(file_register_dict)\n653: \n654:     def __init__(self, mosaic, file_register=None, data=None, stack_dimension='layer_id', stack_coords=None,\n655:                  dirpath=None, fn_pattern='{layer_id}.xyz', fn_formatter=None):\n656:         \"\"\"\n657:         Constructor of `RasterDataWriter`.\n658: \n659:         Parameters\n660:         ----------\n661: \n662:         mosaic : geospade.raster.MosaicGeometry\n663:             Mosaic representing the spatial allocation of the given files. The tiles of the mosaic have to match the\n664:             ID's/names of the 'tile_id' column.\n665:         file_register : pd.Dataframe, optional\n666:             Data frame managing a stack/list of files containing the following columns:\n667:                 - 'filepath' : str\n668:                     Full file path to a geospatial file.\n669:                 - 'layer_id' : object\n670:                     Specifies an ID to which layer a file belongs to, e.g. a layer counter or a timestamp. Must\n671:                     correspond to `stack_dimension`.\n672:                 - 'tile_id' : str\n673:                     Tile name or ID to which tile a file belongs to.\n674:             If it is None, then the constructor tries to create a file from other keyword arguments, i.e. `data`,\n675:             `dirpath`, `fn_pattern`, and `fn_formatter`.\n676:         data : xr.Dataset, optional",
+        "end_line": 676,
+        "path_lines": 826,
+        "start_line": 636
+      }
+    },
+    "usage": {
+      "input_tokens": 10989,
+      "input_tokens_details": {
+        "cached_tokens": 9472
+      },
+      "output_tokens": 1198,
+      "output_tokens_details": {
+        "reasoning_tokens": 865
+      },
+      "total_tokens": 12187
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 710,
+      "path": "src/veranda/raster/mosaic/base.py",
+      "start_line": 684
+    },
+    "response_chars": 92,
+    "round": 4,
+    "tool_result": {
+      "content": "684:             Additional columns of `file_register` to use as coordinates. Defaults to None, i.e. only coordinates along\n685:             `stack_dimension` are used.\n686:         dirpath : str, optional\n687:             Directory path to the folder where the GeoTIFF files should be written to. Defaults to None, i.e. the\n688:             current working directory is used.\n689:         fn_pattern : str, optional\n690:             Pattern for the filename of the new GeoTIFF files. To fill in specific parts of the new file name with\n691:             information from the file register, you can specify the respective file register column names in curly\n692:             brackets and add them to the pattern string as desired. Defaults to '{layer_id}.tif'.\n693:         fn_formatter : dict, optional\n694:             Dictionary mapping file register column names with functions allowing to encode their values as strings.\n695: \n696:         \"\"\"\n697:         fn_formatter = fn_formatter or dict()\n698:         if file_register is None and data is None:\n699:             err_msg = \"Either a file register ('file_register') or an xarray dataset ('data') has to be provided.\"\n700:             raise ValueError(err_msg)\n701:         elif file_register is None and data is not None:\n702:             file_register = self._fileregister_from_xarray(data, stack_dimension)\n703: \n704:         if 'tile_id' not in file_register.columns:\n705:             n_entries = len(file_register)\n706:             tile_names = mosaic.all_tile_names\n707:             n_tiles = len(tile_names)\n708:             file_register = pd.DataFrame(np.repeat(file_register.values, n_tiles, axis=0),\n709:                                          columns=file_register.columns)\n710:             file_register['tile_id'] = np.repeat([tile_names], n_entries, axis=0).flatten()",
+      "end_line": 710,
+      "path_lines": 826,
+      "start_line": 684
+    },
+    "usage": {
+      "input_tokens": 11763,
+      "input_tokens_details": {
+        "cached_tokens": 10496
+      },
+      "output_tokens": 49,
+      "output_tokens_details": {
+        "reasoning_tokens": 16
+      },
+      "total_tokens": 11812
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 5,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__TUW-GEO__veranda__pull_11__comment_907319564__modularity.patch"
+    },
+    "usage": {
+      "input_tokens": 12249,
+      "input_tokens_details": {
+        "cached_tokens": 11520
+      },
+      "output_tokens": 241,
+      "output_tokens_details": {
+        "reasoning_tokens": 230
+      },
+      "total_tokens": 12490
+    }
+  }
+]

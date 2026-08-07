@@ -1,0 +1,213 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 260,
+      "path": "src/time.rs",
+      "start_line": 1
+    },
+    "response_chars": 68,
+    "round": 1,
+    "tool_result": {
+      "content": "1: use std::cmp::Ordering;\n2: use std::fmt;\n3: \n4: use crate::{get_digit, get_digit_unchecked, ParseError};\n5: \n6: /// A Time\n7: ///\n8: /// Allowed formats:\n9: /// * `HH:MM:SS`\n10: /// * `HH:MM:SS.FFFFFF` 1 to 6 digits are allowed\n11: /// * `HH:MM`\n12: /// * `HH:MM:SSZ`\n13: /// * `HH:MM:SS.FFFFFFZ`\n14: ///\n15: /// Fractions of a second are to microsecond precision, if the value contains greater\n16: /// precision, an error is raised.\n17: ///\n18: /// # Comparison\n19: ///\n20: /// `Time` supports equality (`==`) and inequality (`>`, `<`, `>=`, `<=`) comparisons.\n21: ///\n22: /// See [Time::partial_cmp] for how this works.\n23: #[derive(Debug, PartialEq, Eq, Clone)]\n24: pub struct Time {\n25:     /// Hour: 0 to 23\n26:     pub hour: u8,\n27:     /// Minute: 0 to 59\n28:     pub minute: u8,\n29:     /// Second: 0 to 59\n30:     pub second: u8,\n31:     /// microseconds: 0 to 999999\n32:     pub microsecond: u32,\n33:     /// timezone offset in seconds if provided, must be >-24h and <24h\n34:     // This range is to match python,\n35:     // Note: [Stack Overflow suggests](https://stackoverflow.com/a/8131056/949890) larger offsets can happen\n36:     pub tz_offset: Option<i32>,\n37: }\n38: \n39: impl fmt::Display for Time {\n40:     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {\n41:         if self.microsecond != 0 {\n42:             let mut buf: [u8; 15] = *b\"00:00:00.000000\";\n43:             crate::display_num_buf(2, 0, self.hour as u32, &mut buf);\n44:             crate::display_num_buf(2, 3, self.minute as u32, &mut buf);\n45:             crate::display_num_buf(2, 6, self.second as u32, &mut buf);\n46:             crate::display_num_buf(6, 9, self.microsecond, &mut buf);\n47:             f.write_str(std::str::from_utf8(&buf[..]).unwrap().trim_end_matches('0'))?\n48:         } else {\n49:             let mut buf: [u8; 8] = *b\"00:00:00\";\n50:             crate::display_num_buf(2, 0, self.hour as u32, &mut buf);\n51:             crate::display_num_buf(2, 3, self.minute as u32, &mut buf);\n52:             crate::display_num_buf(2, 6, self.second as u32, &mut buf);\n53:             f.write_str(std::str::from_utf8(&buf[..]).unwrap())?\n54:         }\n55:         if let Some(tz_offset) = self.tz_offset {\n56:             if tz_offset == 0 {\n57:                 write!(f, \"Z\")?;\n58:             } else {\n59:                 let mins = tz_offset / 60;\n60:                 let mut min = mins / 60;\n61:                 let sec = (mins % 60).abs();\n62:                 let mut buf: [u8; 6] = *b\"+00:00\";\n63:                 if min < 0 {\n64:                     buf[0] = b'-';\n65:                     min = min.abs();\n66:                 }\n67:                 crate::display_num_buf(2, 1, min as u32, &mut buf);\n68:                 crate::display_num_buf(2, 4, sec as u32, &mut buf);\n69:                 f.write_str(std::str::from_utf8(&buf[..]).unwrap())?;\n70:             }\n71:         }\n72:         Ok(())\n73:     }\n74: }\n75: \n76: impl PartialOrd for Time {\n77:     /// Compare two times by inequality.\n78:     ///\n79:     /// `Time` supports equality (`==`, `!=`) and inequality comparisons (`>`, `<`, `>=` & `<=`).\n80:     ///\n81:     /// # Examples\n82:     ///\n83:     /// ```\n84:     /// use speedate::Time;\n85:     ///\n86:     /// let t1 = Time::parse_str(\"04:05:06.07\").unwrap();\n87:     /// let t2 = Time::parse_str(\"04:05:06.08\").unwrap();\n88:     ///\n89:     /// assert!(t1 < t2);\n90:     /// ```\n91:     ///\n92:     ///  # Comparison with Timezones\n93:     ///\n94:     /// When comparing two times, we want \"less than\" or \"greater than\" refer to \"earlier\" or \"later\"\n95:     /// in the absolute course of time. We therefore need to be careful when comparing times with different\n96:     /// timezones. (If it wasn't for timezones, we could omit all this extra logic and thinking and just compare\n97:     /// struct members directly as we do with [crate::Date] and [crate::Duration]).\n98:     ///\n99:     /// See [crate::DateTime::partial_cmp] for more information about comparisons with timezones.\n100:     ///\n101:     /// ## Timezone Examples\n102:     ///\n103:     /// ```\n104:     /// use speedate::Time;\n105:     ///\n106:     /// let t1 = Time::parse_str(\"15:00:00Z\").unwrap();\n107:     /// let t2 = Time::parse_str(\"15:00:00+01:00\").unwrap();\n108:     ///\n109:     /// assert!(t1 > t2);\n110:     ///\n111:     /// let t3 = Time::parse_str(\"15:00:00-01:00\").unwrap();\n112:     /// let t4 = Time::parse_str(\"15:00:00+01:00\").unwrap();\n113:     ///\n114:     /// assert!(t3 > t4);\n115:     /// ```\n116:     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {\n117:         match (self.tz_offset, other.tz_offset) {\n118:             (Some(tz_offset), Some(other_tz_offset)) => match (self.total_seconds() as i64 - tz_offset as i64)\n119:                 .partial_cmp(&(other.total_seconds() as i64 - other_tz_offset as i64))\n120:             {\n121:                 Some(Ordering::Equal) => self.microsecond.partial_cmp(&other.microsecond),\n122:                 otherwise => otherwise,\n123:             },\n124:             _ => match self.total_seconds().partial_cmp(&other.total_seconds()) {\n125:                 Some(Ordering::Equal) => self.microsecond.partial_cmp(&other.microsecond),\n126:                 otherwise => otherwise,\n127:             },\n128:         }\n129:     }\n130: }\n131: \n132: impl Time {\n133:     /// Parse a time from a string\n134:     ///\n135:     /// # Arguments\n136:     ///\n137:     /// * `str` - The string to parse\n138:     ///\n139:     /// # Examples\n140:     ///\n141:     /// ```\n142:     /// use speedate::Time;\n143:     ///\n144:     /// let d = Time::parse_str(\"12:13:14.123456\").unwrap();\n145:     /// assert_eq!(\n146:     ///     d,\n147:     ///     Time {\n148:     ///         hour: 12,\n149:     ///         minute: 13,\n150:     ///         second: 14,\n151:     ///         microsecond: 123456,\n152:     ///         tz_offset: None,\n153:     ///     }\n154:     /// );\n155:     /// assert_eq!(d.to_string(), \"12:13:14.123456\");\n156:     /// ```\n157:     #[inline]\n158:     pub fn parse_str(str: &str) -> Result<Self, ParseError> {\n159:         Self::parse_bytes(str.as_bytes())\n160:     }\n161: \n162:     /// Parse a time from bytes\n163:     ///\n164:     /// # Arguments\n165:     ///\n166:     /// * `bytes` - The bytes to parse\n167:     ///\n168:     /// # Examples\n169:     ///\n170:     /// ```\n171:     /// use speedate::Time;\n172:     ///\n173:     /// let d = Time::parse_bytes(b\"12:13:14.123456\").unwrap();\n174:     /// assert_eq!(\n175:     ///     d,\n176:     ///     Time {\n177:     ///         hour: 12,\n178:     ///         minute: 13,\n179:     ///         second: 14,\n180:     ///         microsecond: 123456,\n181:     ///         tz_offset: None,\n182:     ///     }\n183:     /// );\n184:     /// assert_eq!(d.to_string(), \"12:13:14.123456\");\n185:     /// ```\n186:     #[inline]\n187:     pub fn parse_bytes(bytes: &[u8]) -> Result<Self, ParseError> {\n188:         Self::parse_bytes_offset(bytes, 0)\n189:     }\n190: \n191:     /// Create a time from seconds and microseconds.\n192:     ///\n193:     /// # Arguments\n194:     ///\n195:     /// * `timestamp_second` - timestamp in seconds\n196:     /// * `timestamp_microsecond` - microseconds fraction of a second timestamp\n197:     ///\n198:     /// If `seconds + timestamp_microsecond` exceeds 86400, an error is returned.\n199:     ///\n200:     /// # Examples\n201:     ///\n202:     /// ```\n203:     /// use speedate::Time;\n204:     ///\n205:     /// let d = Time::from_timestamp(3740, 123).unwrap();\n206:     /// assert_eq!(d.to_string(), \"01:02:20.000123\");\n207:     /// ```\n208:     pub fn from_timestamp(timestamp_second: u32, timestamp_microsecond: u32) -> Result<Self, ParseError> {\n209:         let mut second = timestamp_second;\n210:         let mut microsecond = timestamp_microsecond;\n211:         if microsecond >= 1_000_000 {\n212:             second = second\n213:                 .checked_add(microsecond / 1_000_000)\n214:                 .ok_or(ParseError::TimeTooLarge)?;\n215:             microsecond %= 1_000_000;\n216:         }\n217:         if second >= 86_400 {\n218:             return Err(ParseError::TimeTooLarge);\n219:         }\n220:         Ok(Self {\n221:             hour: (second / 3600) as u8,\n222:             minute: ((second % 3600) / 60) as u8,\n223:             second: (second % 60) as u8,\n224:             microsecond,\n225:             tz_offset: None,\n226:         })\n227:     }\n228: \n229:     /// Parse a time from bytes with a starting index, extra characters at the end of the string result in an error\n230:     pub(crate) fn parse_bytes_offset(bytes: &[u8], offset: usize) -> Result<Self, ParseError> {\n231:         if bytes.len() - offset < 5 {\n232:             return Err(ParseError::TooShort);\n233:         }\n234:         let hour: u8;\n235:         let minute: u8;\n236:         unsafe {\n237:             let h1 = get_digit_unchecked!(bytes, offset, InvalidCharHour);\n238:             let h2 = get_digit_unchecked!(bytes, offset + 1, InvalidCharHour);\n239:             hour = h1 * 10 + h2;\n240: \n241:             match bytes.get_unchecked(offset + 2) {\n242:                 b':' => (),\n243:                 _ => return Err(ParseError::InvalidCharTimeSep),\n244:             }\n245:             let m1 = get_digit_unchecked!(bytes, offset + 3, InvalidCharMinute);\n246:             let m2 = get_digit_unchecked!(bytes, offset + 4, InvalidCharMinute);\n247:             minute = m1 * 10 + m2;\n248:         }\n249: \n250:         if hour > 23 {\n251:             return Err(ParseError::OutOfRangeHour);\n252:         }\n253: \n254:         if minute > 59 {\n255:             return Err(ParseError::OutOfRangeMinute);\n256:         }\n257:         let mut length: usize = 5;\n258: \n259:         let (second, microsecond) = match bytes.get(offset + 5) {\n260:             Some(b':') => {",
+      "end_line": 260,
+      "path_lines": 458,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 6174,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 78,
+      "output_tokens_details": {
+        "reasoning_tokens": 51
+      },
+      "total_tokens": 6252
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 380,
+      "path": "src/time.rs",
+      "start_line": 229
+    },
+    "response_chars": 70,
+    "round": 2,
+    "tool_result": {
+      "content": "229:     /// Parse a time from bytes with a starting index, extra characters at the end of the string result in an error\n230:     pub(crate) fn parse_bytes_offset(bytes: &[u8], offset: usize) -> Result<Self, ParseError> {\n231:         if bytes.len() - offset < 5 {\n232:             return Err(ParseError::TooShort);\n233:         }\n234:         let hour: u8;\n235:         let minute: u8;\n236:         unsafe {\n237:             let h1 = get_digit_unchecked!(bytes, offset, InvalidCharHour);\n238:             let h2 = get_digit_unchecked!(bytes, offset + 1, InvalidCharHour);\n239:             hour = h1 * 10 + h2;\n240: \n241:             match bytes.get_unchecked(offset + 2) {\n242:                 b':' => (),\n243:                 _ => return Err(ParseError::InvalidCharTimeSep),\n244:             }\n245:             let m1 = get_digit_unchecked!(bytes, offset + 3, InvalidCharMinute);\n246:             let m2 = get_digit_unchecked!(bytes, offset + 4, InvalidCharMinute);\n247:             minute = m1 * 10 + m2;\n248:         }\n249: \n250:         if hour > 23 {\n251:             return Err(ParseError::OutOfRangeHour);\n252:         }\n253: \n254:         if minute > 59 {\n255:             return Err(ParseError::OutOfRangeMinute);\n256:         }\n257:         let mut length: usize = 5;\n258: \n259:         let (second, microsecond) = match bytes.get(offset + 5) {\n260:             Some(b':') => {\n261:                 let s1 = get_digit!(bytes, offset + 6, InvalidCharSecond);\n262:                 let s2 = get_digit!(bytes, offset + 7, InvalidCharSecond);\n263:                 let second = s1 * 10 + s2;\n264:                 if second > 59 {\n265:                     return Err(ParseError::OutOfRangeSecond);\n266:                 }\n267:                 length = 8;\n268: \n269:                 let mut microsecond = 0;\n270:                 let frac_sep = bytes.get(offset + 8).copied();\n271:                 if frac_sep == Some(b'.') || frac_sep == Some(b',') {\n272:                     length = 9;\n273:                     let mut i: usize = 0;\n274:                     loop {\n275:                         match bytes.get(offset + length + i) {\n276:                             Some(c) if c.is_ascii_digit() => {\n277:                                 microsecond *= 10;\n278:                                 microsecond += (c - b'0') as u32;\n279:                             }\n280:                             _ => {\n281:                                 break;\n282:                             }\n283:                         }\n284:                         i += 1;\n285:                         if i > 6 {\n286:                             return Err(ParseError::SecondFractionTooLong);\n287:                         }\n288:                     }\n289:                     if i == 0 {\n290:                         return Err(ParseError::SecondFractionMissing);\n291:                     }\n292:                     if i < 6 {\n293:                         microsecond *= 10_u32.pow(6 - i as u32);\n294:                     }\n295:                     length += i;\n296:                 }\n297:                 (second, microsecond)\n298:             }\n299:             _ => (0, 0),\n300:         };\n301: \n302:         // Parse the offset\n303:         let mut tz_offset: Option<i32> = None;\n304:         let mut position = offset + length;\n305: \n306:         if let Some(next_char) = bytes.get(position).copied() {\n307:             position += 1;\n308:             if next_char == b'Z' || next_char == b'z' {\n309:                 tz_offset = Some(0);\n310:             } else {\n311:                 let sign = match next_char {\n312:                     b'+' => 1,\n313:                     b'-' => -1,\n314:                     226 => {\n315:                         // U+2212 MINUS \"−\" is allowed under ISO 8601 for negative timezones\n316:                         // > python -c 'print([c for c in \"−\".encode()])'\n317:                         // its raw byte values are [226, 136, 146]\n318:                         if bytes.get(position).copied() != Some(136) {\n319:                             return Err(ParseError::InvalidCharTzSign);\n320:                         }\n321:                         if bytes.get(position + 1).copied() != Some(146) {\n322:                             return Err(ParseError::InvalidCharTzSign);\n323:                         }\n324:                         position += 2;\n325:                         -1\n326:                     }\n327:                     _ => return Err(ParseError::InvalidCharTzSign),\n328:                 };\n329: \n330:                 let h1 = get_digit!(bytes, position, InvalidCharTzHour) as i32;\n331:                 let h2 = get_digit!(bytes, position + 1, InvalidCharTzHour) as i32;\n332: \n333:                 let m1 = match bytes.get(position + 2) {\n334:                     Some(b':') => {\n335:                         position += 3;\n336:                         get_digit!(bytes, position, InvalidCharTzMinute) as i32\n337:                     }\n338:                     Some(c) if c.is_ascii_digit() => {\n339:                         position += 2;\n340:                         (c - b'0') as i32\n341:                     }\n342:                     _ => return Err(ParseError::InvalidCharTzMinute),\n343:                 };\n344:                 let m2 = get_digit!(bytes, position + 1, InvalidCharTzMinute) as i32;\n345: \n346:                 let minute_seconds = m1 * 600 + m2 * 60;\n347:                 if minute_seconds >= 3600 {\n348:                     return Err(ParseError::OutOfRangeTzMinute);\n349:                 }\n350: \n351:                 let offset_val = sign * (h1 * 36000 + h2 * 3600 + minute_seconds);\n352:                 // TZ must be less than 24 hours to match python\n353:                 if offset_val.abs() >= 24 * 3600 {\n354:                     return Err(ParseError::OutOfRangeTz);\n355:                 }\n356:                 tz_offset = Some(offset_val);\n357:                 position += 2;\n358:             }\n359:         }\n360: \n361:         if bytes.len() > position {\n362:             return Err(ParseError::ExtraCharacters);\n363:         }\n364: \n365:         Ok(Self {\n366:             hour,\n367:             minute,\n368:             second,\n369:             microsecond,\n370:             tz_offset,\n371:         })\n372:     }\n373: \n374:     /// Get the total seconds of the time\n375:     ///\n376:     /// E.g. hours + minutes + seconds\n377:     ///\n378:     /// # Examples\n379:     ///\n380:     /// ```",
+      "end_line": 380,
+      "path_lines": 458,
+      "start_line": 229
+    },
+    "usage": {
+      "input_tokens": 9447,
+      "input_tokens_details": {
+        "cached_tokens": 5888
+      },
+      "output_tokens": 37,
+      "output_tokens_details": {
+        "reasoning_tokens": 10
+      },
+      "total_tokens": 9484
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/lib.rs",
+      "query": "enum ParseError"
+    },
+    "response_chars": 195,
+    "round": 3,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 66,
+          "text": "pub enum ParseError {"
+        }
+      ],
+      "query": "enum ParseError",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 11210,
+      "input_tokens_details": {
+        "cached_tokens": 8960
+      },
+      "output_tokens": 1065,
+      "output_tokens_details": {
+        "reasoning_tokens": 990
+      },
+      "total_tokens": 12275
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 140,
+      "path": "src/lib.rs",
+      "start_line": 66
+    },
+    "response_chars": 206,
+    "round": 4,
+    "tool_result": {
+      "content": "66: pub enum ParseError {\n67:     /// input is too short\n68:     TooShort,\n69:     /// unexpected extra characters at the end of the input\n70:     ExtraCharacters,\n71:     /// invalid datetime separator, expected `T`, `t`, `_` or space\n72:     InvalidCharDateTimeSep,\n73:     /// invalid date separator, expected `-`\n74:     InvalidCharDateSep,\n75:     /// Timestamp is not an exact date\n76:     DateNotExact,\n77:     /// invalid character in year\n78:     InvalidCharYear,\n79:     /// invalid character in month\n80:     InvalidCharMonth,\n81:     /// invalid character in day\n82:     InvalidCharDay,\n83:     /// invalid time separator, expected `:`\n84:     InvalidCharTimeSep,\n85:     /// invalid character in hour\n86:     InvalidCharHour,\n87:     /// invalid character in minute\n88:     InvalidCharMinute,\n89:     /// invalid character in second\n90:     InvalidCharSecond,\n91:     /// invalid character in second fraction\n92:     InvalidCharSecondFraction,\n93:     /// invalid timezone sign\n94:     InvalidCharTzSign,\n95:     /// invalid timezone hour\n96:     InvalidCharTzHour,\n97:     /// invalid timezone minute\n98:     InvalidCharTzMinute,\n99:     /// timezone minute value is outside expected range of 0-59\n100:     OutOfRangeTzMinute,\n101:     /// timezone offset must be less than 24 hours\n102:     OutOfRangeTz,\n103:     /// timezone is required to adjust to a new timezone\n104:     TzRequired,\n105:     /// Error getting system time\n106:     SystemTimeError,\n107:     /// month value is outside expected range of 1-12\n108:     OutOfRangeMonth,\n109:     /// day value is outside expected range\n110:     OutOfRangeDay,\n111:     /// hour value is outside expected range of 0-23\n112:     OutOfRangeHour,\n113:     /// minute value is outside expected range of 0-59\n114:     OutOfRangeMinute,\n115:     /// second value is outside expected range of 0-59\n116:     OutOfRangeSecond,\n117:     /// second fraction value is more than 6 digits long\n118:     SecondFractionTooLong,\n119:     /// second fraction digits missing after `.`\n120:     SecondFractionMissing,\n121:     /// invalid digit in duration\n122:     DurationInvalidNumber,\n123:     /// `t` character repeated in duration\n124:     DurationTRepeated,\n125:     /// quantity fraction invalid in duration\n126:     DurationInvalidFraction,\n127:     /// quantity invalid in time part of duration\n128:     DurationInvalidTimeUnit,\n129:     /// quantity invalid in date part of duration\n130:     DurationInvalidDateUnit,\n131:     /// \"day\" identifier in duration not correctly formatted\n132:     DurationInvalidDays,\n133:     /// a numeric value in the duration is too large\n134:     DurationValueTooLarge,\n135:     /// durations may not exceed 999,999,999 days\n136:     DurationDaysTooLarge,\n137:     /// dates before 1600 are not supported as unix timestamps\n138:     DateTooSmall,\n139:     /// dates after 9999 are not supported as unix timestamps\n140:     DateTooLarge,",
+      "end_line": 140,
+      "path_lines": 156,
+      "start_line": 66
+    },
+    "usage": {
+      "input_tokens": 11273,
+      "input_tokens_details": {
+        "cached_tokens": 11008
+      },
+      "output_tokens": 673,
+      "output_tokens_details": {
+        "reasoning_tokens": 590
+      },
+      "total_tokens": 11946
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "use crate::{ParseError, Time};",
+          "end_line": 4,
+          "start_line": 4
+        },
+        {
+          "content": "    fn parse_time(bytes: &[u8], offset: usize) -> Result<Self, ParseError> {\n        match Time::parse_bytes_offset(bytes, offset) {\n            Ok(t) => {\n                if t.tz_offset.is_some() {\n                    return Err(ParseError::ExtraCharacters);\n                }\n                Ok(Self {\n                    positive: false, // is set above\n                    day: 0,\n                    second: t.hour as u32 * 3_600 + t.minute as u32 * 60 + t.second as u32,\n                    microsecond: t.microsecond,\n                })\n            }\n            Err(\n                ParseError::InvalidCharTzSign\n                | ParseError::InvalidCharTzHour\n                | ParseError::InvalidCharTzMinute\n                | ParseError::OutOfRangeTzMinute\n                | ParseError::OutOfRangeTz,\n            ) => Err(ParseError::ExtraCharacters),\n            Err(e) => Err(e),\n        }\n    }",
+          "end_line": 520,
+          "start_line": 438
+        }
+      ]
+    },
+    "response_chars": 2302,
+    "round": 5,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 4,
+          "replacement_lines": 1,
+          "start_line": 4
+        },
+        {
+          "end_line": 520,
+          "replacement_lines": 23,
+          "start_line": 438
+        }
+      ],
+      "current_file_lines": 502,
+      "updated_excerpt": {
+        "content": "1: use std::cmp::Ordering;\n2: use std::fmt;\n3: \n4: use crate::{ParseError, Time};\n5: \n6: /// A Duration\n7: ///\n8: /// Allowed values:\n9: /// * `PnYnMnDTnHnMnS` - ISO 8601 duration format,\n10: ///   see [wikipedia](https://en.wikipedia.org/wiki/ISO_8601#Durations) for more details,\n11: ///   `W` for weeks is also allowed before the `T` separator - **Note**: `W` is allowed combined\n12: ///   with other quantities which is a slight deviation from the ISO 8601 standard.\n13: /// * `HH:MM:SS` - any of the above time formats are allowed to represent a duration\n14: /// * `D days, HH:MM:SS` - time prefixed by `X days`, case-insensitive,\n15: ///   spaces `s` and `,` are all optional\n16: /// * `D d, HH:MM:SS` - time prefixed by `X d`, case-insensitive, spaces and `,` are optional\n17: ///\n18: /// All duration formats can be prefixed with `+` or `-` to indicate\n19: /// positive and negative durations respectively.\n20: ///\n21: /// `Duration` stores durations in days, seconds and microseconds (all ints), therefore\n22: /// durations like years need be scaled when creating a `Duration`. The following scaling\n23: /// factors are used:\n24: /// * `Y` - 365 days\n25: /// * `M` - 30 days\n26: /// * `W` - 7 days\n27: /// * `D` - 1 day\n28: /// * `H` - 3600 seconds\n29: /// * `M` - 60 seconds\n30: /// * `S` - 1 second\n31: ///\n32: /// Fractions of quantities are permitted by ISO 8601 in the final quantity included, e.g.\n33: /// `P1.5Y` or `P1Y1.5M`. Wen fractions of quantities are found `day`, `second` and `microsecond`\n34: /// are calculated to most accurately represent the fraction. For example `P1.123W` is represented",
+        "end_line": 34,
+        "path_lines": 502,
+        "start_line": 1
+      }
+    },
+    "usage": {
+      "input_tokens": 12117,
+      "input_tokens_details": {
+        "cached_tokens": 11008
+      },
+      "output_tokens": 2747,
+      "output_tokens_details": {
+        "reasoning_tokens": 2144
+      },
+      "total_tokens": 14864
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 485,
+      "path": "src/duration.rs",
+      "start_line": 410
+    },
+    "response_chars": 279,
+    "round": 6,
+    "tool_result": {
+      "content": "410:         position += match bytes.get(position).copied() {\n411:             Some(b',') => 1,\n412:             None => return days_only!(day),\n413:             _ => 0,\n414:         };\n415: \n416:         // optionally consume a space \" \"\n417:         position += match bytes.get(position).copied() {\n418:             Some(b' ') => 1,\n419:             None => return days_only!(day),\n420:             _ => 0,\n421:         };\n422: \n423:         match bytes.get(position).copied() {\n424:             Some(_) => {\n425:                 let t = Time::parse_bytes_offset(bytes, position)?;\n426: \n427:                 Ok(Self {\n428:                     positive: false, // is set above\n429:                     day,\n430:                     second: t.hour as u32 * 3_600 + t.minute as u32 * 60 + t.second as u32,\n431:                     microsecond: t.microsecond,\n432:                 })\n433:             }\n434:             None => days_only!(day),\n435:         }\n436:     }\n437: \n438:     fn parse_time(bytes: &[u8], offset: usize) -> Result<Self, ParseError> {\n439:         match Time::parse_bytes_offset(bytes, offset) {\n440:             Ok(t) => {\n441:                 if t.tz_offset.is_some() {\n442:                     return Err(ParseError::ExtraCharacters);\n443:                 }\n444:                 Ok(Self {\n445:                     positive: false, // is set above\n446:                     day: 0,\n447:                     second: t.hour as u32 * 3_600 + t.minute as u32 * 60 + t.second as u32,\n448:                     microsecond: t.microsecond,\n449:                 })\n450:             }\n451:             Err(\n452:                 ParseError::InvalidCharTzSign\n453:                 | ParseError::InvalidCharTzHour\n454:                 | ParseError::InvalidCharTzMinute\n455:                 | ParseError::OutOfRangeTzMinute\n456:                 | ParseError::OutOfRangeTz,\n457:             ) => Err(ParseError::ExtraCharacters),\n458:             Err(e) => Err(e),\n459:         }\n460:     }\n461: \n462:     fn parse_number(bytes: &[u8], d1: u8, offset: usize) -> Result<(u32, usize), ParseError> {\n463:         let mut value = match d1 {\n464:             c if d1.is_ascii_digit() => (c - b'0') as u32,\n465:             _ => return Err(ParseError::DurationInvalidNumber),\n466:         };\n467:         let mut position = offset + 1;\n468:         loop {\n469:             match bytes.get(position) {\n470:                 Some(c) if c.is_ascii_digit() => {\n471:                     value = checked!(value * 10);\n472:                     value = checked!(value + (c - b'0') as u32);\n473:                     position += 1;\n474:                 }\n475:                 _ => return Ok((value, position)),\n476:             }\n477:         }\n478:     }\n479: \n480:     fn parse_number_frac(bytes: &[u8], d1: u8, offset: usize) -> Result<(u32, Option<f64>, usize), ParseError> {\n481:         let (value, offset) = Self::parse_number(bytes, d1, offset)?;\n482:         let mut position = offset;\n483:         let next_char = bytes.get(position).copied();\n484:         if next_char == Some(b'.') || next_char == Some(b',') {\n485:             let mut decimal = 0_f64;",
+      "end_line": 485,
+      "path_lines": 502,
+      "start_line": 410
+    },
+    "usage": {
+      "input_tokens": 13017,
+      "input_tokens_details": {
+        "cached_tokens": 11520
+      },
+      "output_tokens": 933,
+      "output_tokens_details": {
+        "reasoning_tokens": 823
+      },
+      "total_tokens": 13950
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 7,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__pydantic__speedate__pull_35__comment_1227766656__duplication.patch"
+    },
+    "usage": {
+      "input_tokens": 13969,
+      "input_tokens_details": {
+        "cached_tokens": 12544
+      },
+      "output_tokens": 3609,
+      "output_tokens_details": {
+        "reasoning_tokens": 3598
+      },
+      "total_tokens": 17578
+    }
+  }
+]

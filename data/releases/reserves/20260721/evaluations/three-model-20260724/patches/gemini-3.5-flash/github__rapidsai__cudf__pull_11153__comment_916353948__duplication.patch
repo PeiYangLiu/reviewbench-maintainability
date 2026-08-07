@@ -1,0 +1,42 @@
+--- a/cpp/src/binaryop/compiled/struct_binary_ops.cuh
++++ b/cpp/src/binaryop/compiled/struct_binary_ops.cuh
+@@ -55,10 +55,7 @@
+   auto optional_iter =
+     cudf::detail::make_optional_iterator<bool>(*outd, nullate::DYNAMIC{out.has_nulls()});
+ 
+-  if (is_any_v<BinaryOperator, ops::LessEqual, ops::GreaterEqual>) {
+-    auto device_comparator = table_comparator.less_equivalent(
+-      nullate::DYNAMIC{nullate::DYNAMIC{has_nested_nulls(tlhs) || has_nested_nulls(trhs)}},
+-      comparator);
++  auto run = [&](auto device_comparator) {
+     thrust::tabulate(
+       rmm::exec_policy(stream),
+       out.begin<bool>(),
+@@ -68,20 +65,16 @@
+                device_comparator(cudf::experimental::row::lhs_index_type{is_lhs_scalar ? 0 : i},
+                                  cudf::experimental::row::rhs_index_type{is_rhs_scalar ? 0 : i});
+       });
++  };
+ 
++  if (is_any_v<BinaryOperator, ops::LessEqual, ops::GreaterEqual>) {
++    run(table_comparator.less_equivalent(
++      nullate::DYNAMIC{nullate::DYNAMIC{has_nested_nulls(tlhs) || has_nested_nulls(trhs)}},
++      comparator));
+   } else {
+-    auto device_comparator = table_comparator.less(
++    run(table_comparator.less(
+       nullate::DYNAMIC{nullate::DYNAMIC{has_nested_nulls(tlhs) || has_nested_nulls(trhs)}},
+-      comparator);
+-    thrust::tabulate(
+-      rmm::exec_policy(stream),
+-      out.begin<bool>(),
+-      out.end<bool>(),
+-      [optional_iter, is_lhs_scalar, is_rhs_scalar, device_comparator] __device__(size_type i) {
+-        return optional_iter[i].has_value() &&
+-               device_comparator(cudf::experimental::row::lhs_index_type{is_lhs_scalar ? 0 : i},
+-                                 cudf::experimental::row::rhs_index_type{is_rhs_scalar ? 0 : i});
+-      });
++      comparator));
+   }
+   return;
+ }

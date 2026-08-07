@@ -1,0 +1,171 @@
+diff --git a/internal/app/database/orders.go b/internal/app/database/orders.go
+index 6c16868..853a8e0 100644
+--- a/internal/app/database/orders.go
++++ b/internal/app/database/orders.go
+@@ -84,41 +84,50 @@ func (db *DataBase) AddOrder(cookie string, order int) error {
+ 		return db.Err.Duplicate
+ 	}
+ 
+-	db.getOrderInfo(strconv.Itoa(order))
++	db.scheduleOrderAccrualUpdate(strconv.Itoa(order))
+ 
+ 	return nil
+ }
+ 
+ const workersCount = 1
+ 
+-var workers = 0
++var orderInfoService = &accrualOrderInfoService{
++	input: make(chan orderStr),
++}
+ 
+-var inputCh = make(chan orderStr)
++type accrualOrderInfoService struct {
++	workers int
++	input   chan orderStr
++}
+ 
+ type orderStr struct {
+ 	number string
+ 	status string
+ }
+ 
+-func (db *DataBase) getOrderInfo(number string) {
++func (db *DataBase) scheduleOrderAccrualUpdate(number string) {
++	orderInfoService.enqueue(number, db.ASA, db.updateOrder)
++}
++
++func (s *accrualOrderInfoService) enqueue(number, accrualSystemAddress string, updateOrder func(Order) error) {
+ 	go func(number string) {
+-		inputCh <- orderStr{number: number, status: "NEW"}
++		s.input <- orderStr{number: number, status: "NEW"}
+ 	}(number)
+ 
+-	if workers < workersCount {
+-		for i := workers; i < workersCount; i++ {
+-			workers++
+-			db.newWorker(inputCh)
++	if s.workers < workersCount {
++		for i := s.workers; i < workersCount; i++ {
++			s.workers++
++			s.newWorker(s.input, accrualSystemAddress, updateOrder)
+ 		}
+ 	}
+ }
+ 
+-func (db *DataBase) newWorker(input chan orderStr) {
++func (s *accrualOrderInfoService) newWorker(input chan orderStr, accrualSystemAddress string, updateOrder func(Order) error) {
+ 	go func() {
+ 		log.Print("starting goroutine")
+ 
+ 		defer func() {
+-			db.newWorker(input)
++			s.newWorker(input, accrualSystemAddress, updateOrder)
+ 			if x := recover(); x != nil {
+ 				log.Print("run time panic: ", x)
+ 			}
+@@ -126,10 +135,10 @@ func (db *DataBase) newWorker(input chan orderStr) {
+ 
+ 		for {
+ 			for o := range input {
+-				resp, err := http.Get(db.ASA + "/api/orders/" + o.number)
++				resp, err := http.Get(accrualSystemAddress + "/api/orders/" + o.number)
+ 				if err != nil {
+ 					go func(o orderStr) {
+-						inputCh <- o
++						input <- o
+ 					}(o)
+ 					log.Printf("go number: %s, err: %s", o.number, err.Error())
+ 					resp.Body.Close()
+@@ -139,7 +148,7 @@ func (db *DataBase) newWorker(input chan orderStr) {
+ 				b, err := io.ReadAll(resp.Body)
+ 				if err != nil {
+ 					go func(o orderStr) {
+-						inputCh <- o
++						input <- o
+ 					}(o)
+ 					log.Printf("go number: %s, err: %s", o.number, err.Error())
+ 					resp.Body.Close()
+@@ -165,7 +174,7 @@ func (db *DataBase) newWorker(input chan orderStr) {
+ 					err = json.Unmarshal(b, &order)
+ 					if err != nil {
+ 						go func(o orderStr) {
+-							inputCh <- o
++							input <- o
+ 						}(o)
+ 						log.Printf("go number: %s, err: %s", o.number, err.Error())
+ 						return
+@@ -178,23 +187,23 @@ func (db *DataBase) newWorker(input chan orderStr) {
+ 						log.Printf("go number: %s, status: %s", o.number, order.Status)
+ 						go func(o orderStr, order Order) {
+ 							if o.status != order.Status {
+-								err := db.updateOrder(order)
++								err := updateOrder(order)
+ 								if err != nil {
+ 									log.Printf("go number: %s, err: %s", o.number, err.Error())
+ 									return
+ 								}
+ 								o.status = "PROCESSING"
+ 							}
+-							inputCh <- o
++							input <- o
+ 						}(o, order)
+ 					case "INVALID", "PROCESSED":
+ 						log.Printf("go number: %s, status: %s, accrual: %g", o.number, order.Status, order.Accrual)
+ 						go func(o orderStr, order Order) {
+ 							if o.status != order.Status {
+-								err := db.updateOrder(order)
++								err := updateOrder(order)
+ 								if err != nil {
+ 									o.status = order.Status
+-									inputCh <- o
++									input <- o
+ 									log.Printf("go number: %s, err: %s", o.number, err.Error())
+ 									return
+ 								}
+@@ -203,13 +212,13 @@ func (db *DataBase) newWorker(input chan orderStr) {
+ 					default:
+ 						log.Printf("go number: %s, status: %s", o.number, order.Status)
+ 						go func(o orderStr) {
+-							inputCh <- o
++							input <- o
+ 						}(o)
+ 					}
+ 				case http.StatusTooManyRequests:
+ 					log.Printf("go number: %s, status: %s", o.number, resp.Status)
+ 					go func(o orderStr) {
+-						inputCh <- o
++						input <- o
+ 					}(o)
+ 					atoi, err := strconv.Atoi(resp.Header.Get("Retry-After"))
+ 					if err != nil {
+@@ -221,25 +230,25 @@ func (db *DataBase) newWorker(input chan orderStr) {
+ 				case http.StatusInternalServerError:
+ 					log.Printf("go number: %s, status: %s", o.number, resp.Status)
+ 					go func(o orderStr) {
+-						inputCh <- o
++						input <- o
+ 					}(o)
+ 				case http.StatusNoContent:
+ 					log.Printf("go number: %s, status: %s", o.number, resp.Status)
+ 					go func(o orderStr) {
+ 						if o.status != "PROCESSING" {
+-							err := db.updateOrder(Order{Status: "PROCESSING", Number: o.number})
++							err := updateOrder(Order{Status: "PROCESSING", Number: o.number})
+ 							if err != nil {
+ 								log.Printf("go number: %s, err: %s", o.number, err.Error())
+ 								return
+ 							}
+ 							o.status = "PROCESSING"
+ 						}
+-						inputCh <- o
++						input <- o
+ 					}(o)
+ 				default:
+ 					log.Printf("go number: %s, status: %s", o.number, resp.Status)
+ 					go func(o orderStr) {
+-						inputCh <- o
++						input <- o
+ 					}(o)
+ 				}
+ 			}

@@ -1,0 +1,55 @@
+diff --git a/pkg/download/consistent_hashing.go b/pkg/download/consistent_hashing.go
+index 2341f13..a580bf2 100644
+--- a/pkg/download/consistent_hashing.go
++++ b/pkg/download/consistent_hashing.go
+@@ -303,14 +303,9 @@ func (m *ConsistentHashingMode) consistentHashIfNeeded(req *http.Request, start
+ 			slice := start / m.SliceSize
+ 
+ 			key := CacheKey{URL: req.URL, Slice: slice}
+-			// we set IgnoreZeroValue so that we can add fields to the hash key
+-			// later without breaking things.
+-			// note that it's not safe to share a HashOptions so we create a fresh one each time.
+-			hashopts := &hashstructure.HashOptions{IgnoreZeroValue: true}
+-			var hash uint64
+-			hash, err = hashstructure.Hash(key, hashstructure.FormatV2, hashopts)
+-			if err != nil {
+-				err = fmt.Errorf("error calculating hash of key: %w", err)
++			hash, hashErr := hashCacheKey(key)
++			if hashErr != nil {
++				err = hashErr
+ 				return
+ 			}
+ 
+@@ -345,13 +340,9 @@ func (m *ConsistentHashingMode) retryConsistentHash(req *http.Request, start int
+ 			slice := start / m.SliceSize
+ 
+ 			key := CacheKey{URL: req.URL, Slice: slice, Retry: true}
+-			// we set IgnoreZeroValue so that we can add fields to the hash key
+-			// later without breaking things.
+-			// note that it's not safe to share a HashOptions so we create a fresh one each time.
+-			hashopts := &hashstructure.HashOptions{IgnoreZeroValue: true}
+-			hash, err := hashstructure.Hash(key, hashstructure.FormatV2, hashopts)
++			hash, err := hashCacheKey(key)
+ 			if err != nil {
+-				return fmt.Errorf("error calculating hash of key: %w", err)
++				return err
+ 			}
+ 
+ 			logger.Debug().Uint64("hash_sum", hash).Int("len_cache_hosts", len(m.CacheHosts)).Msg("consistent hashing")
+@@ -374,3 +365,16 @@ func (m *ConsistentHashingMode) retryConsistentHash(req *http.Request, start int
+ 	}
+ 	return nil
+ }
++
++// hashCacheKey computes the consistent-hash value for a CacheKey.
++func hashCacheKey(key CacheKey) (uint64, error) {
++	// we set IgnoreZeroValue so that we can add fields to the hash key
++	// later without breaking things.
++	// note that it's not safe to share a HashOptions so we create a fresh one each time.
++	hashopts := &hashstructure.HashOptions{IgnoreZeroValue: true}
++	hash, err := hashstructure.Hash(key, hashstructure.FormatV2, hashopts)
++	if err != nil {
++		return 0, fmt.Errorf("error calculating hash of key: %w", err)
++	}
++	return hash, nil
++}

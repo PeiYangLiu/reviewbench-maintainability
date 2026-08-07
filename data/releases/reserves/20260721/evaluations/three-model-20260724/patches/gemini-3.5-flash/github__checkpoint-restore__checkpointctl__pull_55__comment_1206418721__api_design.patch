@@ -1,0 +1,83 @@
+--- a/container.go
++++ b/container.go
+@@ -128,18 +128,18 @@
+ 		row = append(row, ci.MAC)
+ 	}
+ 
+-	checkpointSize, rootFsDiffTarSize, err := getCheckpointAndDiffSizes(input)
++	archiveSizes, err := getArchiveSizes(input)
+ 	if err != nil {
+ 		return err
+ 	}
+ 
+ 	header = append(header, "CHKPT Size")
+-	row = append(row, metadata.ByteToString(checkpointSize))
++	row = append(row, metadata.ByteToString(archiveSizes.checkpointSize))
+ 
+ 	// Display root fs diff size if available
+-	if rootFsDiffTarSize != 0 {
++	if archiveSizes.rootFsDiffTarSize != 0 {
+ 		header = append(header, "Root Fs Diff Size")
+-		row = append(row, metadata.ByteToString(rootFsDiffTarSize))
++		row = append(row, metadata.ByteToString(archiveSizes.rootFsDiffTarSize))
+ 	}
+ 
+ 	table.SetAutoMergeCells(true)
+@@ -209,24 +209,31 @@
+ 	return nil
+ }
+ 
+-// getCheckpointAndDiffSizes retrieves the size of the checkpoint directory and
++type archiveSizes struct {
++	checkpointSize    int64
++	rootFsDiffTarSize int64
++}
++
++// getArchiveSizes retrieves the size of the checkpoint directory and
+ // the size of the rootfs-diff.tar file from an archive file without unpacking the files.
+-func getCheckpointAndDiffSizes(input string) (checkpointSize int64, rootFsDiffTarSize int64, err error) {
++func getArchiveSizes(input string) (*archiveSizes, error) {
+ 	archiveFile, err := os.Open(input)
+ 	if err != nil {
+-		return
++		return nil, err
+ 	}
+ 	defer archiveFile.Close()
+ 
+ 	// Decompress the archive
+ 	decompressedStream, err := archive.DecompressStream(archiveFile)
+ 	if err != nil {
+-		return
++		return nil, err
+ 	}
+ 	defer decompressedStream.Close()
+ 
+ 	// Create a tar reader to read the files from the decompressed archive
+ 	tarReader := tar.NewReader(decompressedStream)
++
++	sizes := &archiveSizes{}
+ 
+ 	// Iterate through each file in the archive
+ 	for {
+@@ -242,15 +249,15 @@
+ 		// Check if it's a regular file
+ 		if !hdr.FileInfo().IsDir() && strings.HasPrefix(hdr.Name, metadata.CheckpointDirectory) {
+ 			// Add the file size to the total checkpoint size
+-			checkpointSize += hdr.Size
++			sizes.checkpointSize += hdr.Size
+ 		}
+ 
+ 		if hdr.Name == metadata.RootFsDiffTar {
+-			rootFsDiffTarSize = hdr.Size
+-		}
+-	}
+-
+-	return
++			sizes.rootFsDiffTarSize = hdr.Size
++		}
++	}
++
++	return sizes, nil
+ }
+ 
+ func shortenPath(path string) string {

@@ -1,0 +1,193 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 80,
+      "path": "components/collector/src/source_collectors/azure_devops/lead_time_for_changes.py",
+      "start_line": 1
+    },
+    "response_chars": 136,
+    "round": 1,
+    "tool_result": {
+      "content": "1: \"\"\"Azure DevOps Server lead time for changes collector.\"\"\"\n2: \n3: from statistics import mean\n4: from typing import cast\n5: \n6: from dateutil.parser import parse\n7: \n8: from collector_utilities.functions import days_ago\n9: from collector_utilities.type import Value\n10: from model import Entity, Entities, SourceResponses\n11: \n12: from .issues import AzureDevopsIssues\n13: \n14: \n15: class AzureDevopsLeadTimeForChanges(AzureDevopsIssues):\n16:     \"\"\"Collector to calculate lead time for changes from Azure Devops Server.\"\"\"\n17: \n18:     def _item_select_fields(self) -> list[str]:\n19:         \"\"\"Also request date fields to calculate lead time.\"\"\"\n20:         base_fields = super()._item_select_fields()\n21:         return base_fields + [\"System.CreatedDate\", \"System.ChangedDate\"]\n22: \n23:     def _include_issue(self, issue: dict) -> bool:\n24:         \"\"\"Return whether this issue should be counted.\"\"\"\n25:         if not issue[\"fields\"][\"System.State\"] in [\"Closed\", \"Done\"]:\n26:             return False\n27: \n28:         finished_date = issue[\"fields\"].get(\"System.ChangedDate\")  # TODO - how to find out System.State update ?\n29:         if not finished_date:\n30:             return False\n31: \n32:         return days_ago(parse(finished_date)) <= int(cast(str, self._parameter(\"lookback_days\")))\n33: \n34:     async def _parse_value(self, responses: SourceResponses) -> Value:\n35:         work_items = (await self._work_items(responses))\n36:         if not work_items:\n37:             return None\n38: \n39:         lead_times = [self.__lead_time(item) for item in work_items]\n40:         return str(round(mean(lead_times)))\n41: \n42:     async def _parse_entities(self, responses: SourceResponses) -> Entities:\n43:         \"\"\"Override to add the story points to the entities.\"\"\"\n44:         return Entities(\n45:             Entity(\n46:                 key=work_item[\"id\"],\n47:                 project=work_item[\"fields\"][\"System.TeamProject\"],\n48:                 title=work_item[\"fields\"][\"System.Title\"],\n49:                 work_item_type=work_item[\"fields\"][\"System.WorkItemType\"],\n50:                 state=work_item[\"fields\"][\"System.State\"],\n51:                 url=work_item[\"_links\"][\"html\"][\"href\"],\n52:                 lead_time=self.__lead_time(work_item),\n53:             )\n54:             for work_item in await self._work_items(responses)\n55:         )\n56: \n57:     @staticmethod\n58:     def __lead_time(work_item: dict[str, dict[str, str]]) -> int:\n59:         \"\"\"Return the lead time of a completed work item.\"\"\"\n60:         changed_date = parse(work_item[\"fields\"][\"System.ChangedDate\"])\n61:         created_date = parse(work_item[\"fields\"][\"System.CreatedDate\"])\n62:         return (changed_date - created_date).days",
+      "end_line": 62,
+      "path_lines": 62,
+      "start_line": 1
+    },
+    "usage": {
+      "completion_tokens": 81,
+      "prompt_tokens": 1393,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 1474
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 80,
+      "path": "components/collector/src/source_collectors/azure_devops/issues.py",
+      "start_line": 1
+    },
+    "response_chars": 121,
+    "round": 2,
+    "tool_result": {
+      "content": "1: \"\"\"Azure DevOps Server issues collector.\"\"\"\n2: \n3: from typing import Final\n4: \n5: import aiohttp\n6: \n7: from base_collectors import SourceCollector\n8: from collector_utilities.functions import iterable_to_batches\n9: from collector_utilities.type import URL, Value, Responses\n10: from model import Entities, Entity, SourceMeasurement, SourceResponses\n11: \n12: \n13: class AzureDevopsIssues(SourceCollector):\n14:     \"\"\"Collector to get issues from Azure Devops Server.\"\"\"\n15: \n16:     MAX_IDS_PER_WORK_ITEMS_API_CALL: Final[int] = 200  # See\n17:     # https://docs.microsoft.com/en-us/rest/api/azure/devops/wit/work%20items/list?view=azure-devops-rest-5.1\n18: \n19:     _issue_ids_to_fetch: list[int]\n20: \n21:     async def _api_url(self) -> URL:\n22:         \"\"\"Extend to add the WIQL or WorkItems API path.\"\"\"\n23:         return URL(f\"{await super()._api_url()}/_apis/wit/wiql?api-version=6.0\")\n24: \n25:     def _api_list_query(self) -> dict[str, str]:\n26:         \"\"\"Combine API select and where fields to correct WIQL query.\"\"\"\n27:         wiql_query_segments = [f\"Select [System.Id] From WorkItems\"]\n28:         wiql_parameter = self._parameter(\"wiql\")\n29:         if wiql_parameter:\n30:             if not wiql_parameter.startswith(\"WHERE\"):\n31:                 wiql_query_segments.append(\"WHERE\")\n32:             wiql_query_segments.append(wiql_parameter)\n33:         return dict(query=\" \".join(wiql_query_segments))\n34: \n35:     def _item_select_fields(self) -> list[str]:\n36:         \"\"\"Return the API fields to select for individual issues.\"\"\"\n37:         return [\"System.TeamProject\", \"System.Title\", \"System.WorkItemType\", \"System.State\"]\n38: \n39:     async def _get_work_item_responses(self, auth: aiohttp.BasicAuth) -> SourceResponses:\n40:         \"\"\"Separately get each work item from the API.\"\"\"\n41:         api_url = URL((await self._api_url()).replace('wit/wiql', 'wit/workitemsbatch'))\n42:         batch_size = min(self.MAX_IDS_PER_WORK_ITEMS_API_CALL, SourceMeasurement.MAX_ENTITIES)\n43:         id_iter = iterable_to_batches(self._issue_ids_to_fetch, batch_size)\n44:         responses = [\n45:             await self._session.post(api_url, auth=auth,\n46:                                      json={\"ids\": id_batch, \"fields\": self._item_select_fields(), \"$expand\": \"links\"})\n47:             for id_batch in id_iter\n48:         ]\n49:         return SourceResponses(responses=responses, api_url=api_url)\n50: \n51:     async def _get_source_responses(self, *urls: URL, **kwargs) -> SourceResponses:\n52:         \"\"\"Override because we need to do a post request and need to separately get the entities.\"\"\"\n53:         api_url = urls[0]\n54:         auth = aiohttp.BasicAuth(str(self._parameter(\"private_token\")))\n55:         response = await self._session.post(api_url, auth=auth, json=self._api_list_query())\n56:         self._issue_ids_to_fetch = [work_item[\"id\"] for work_item in (await response.json()).get(\"workItems\", [])]\n57:         if not self._issue_ids_to_fetch:\n58:             return SourceResponses(responses=[response], api_url=api_url)\n59:         work_items = await self._get_work_item_responses(auth)\n60:         work_items.insert(0, response)\n61:         return work_items\n62: \n63:     async def _parse_entities(self, responses: SourceResponses) -> Entities:\n64:         \"\"\"Override to parse the work items from the WIQL query response.\"\"\"\n65:         return Entities(\n66:             Entity(\n67:                 key=work_item[\"id\"],\n68:                 project=work_item[\"fields\"][\"System.TeamProject\"],\n69:                 title=work_item[\"fields\"][\"System.Title\"],\n70:                 work_item_type=work_item[\"fields\"][\"System.WorkItemType\"],\n71:                 state=work_item[\"fields\"][\"System.State\"],\n72:                 url=work_item[\"_links\"][\"html\"][\"href\"],\n73:             )\n74:             for work_item in await self._work_items(responses)\n75:         )\n76: \n77:     async def _parse_value(self, responses: SourceResponses) -> Value:\n78:         \"\"\"Override to parse the value from the responses.\n79: \n80:         We can't just count the entities because due to pagination the response may not contain all work items.",
+      "end_line": 80,
+      "path_lines": 98,
+      "start_line": 1
+    },
+    "usage": {
+      "completion_tokens": 278,
+      "prompt_tokens": 2701,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 2979
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 98,
+      "path": "components/collector/src/source_collectors/azure_devops/issues.py",
+      "start_line": 80
+    },
+    "response_chars": 257,
+    "round": 3,
+    "tool_result": {
+      "content": "80:         We can't just count the entities because due to pagination the response may not contain all work items.\n81:         \"\"\"\n82:         return str(len(self._issue_ids_to_fetch))\n83: \n84:     def _include_issue(self, issue: dict) -> bool:  # pylint: disable=unused-argument # skipcq: PYL-R0201\n85:         \"\"\"Return whether this issue should be counted.\"\"\"\n86:         return True\n87: \n88:     async def _work_items(self, responses: SourceResponses) -> list[dict]:\n89:         \"\"\"Return the work items, if any.\"\"\"\n90:         if len(responses) <= 1:  # the first call is to workItems, which only returns ids\n91:             return []\n92:         all_work_items = []\n93:         for response in responses[1:]:\n94:             response_json = (await response.json())\n95:             if not response_json:\n96:                 continue\n97:             all_work_items.extend(response_json.get(\"value\"))\n98:         return [work_item for work_item in all_work_items if self._include_issue(work_item)]",
+      "end_line": 98,
+      "path_lines": 98,
+      "start_line": 80
+    },
+    "usage": {
+      "completion_tokens": 368,
+      "prompt_tokens": 4642,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 5010
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "    async def _parse_entities(self, responses: SourceResponses) -> Entities:\n        \"\"\"Extend to add the story points to the entities.\"\"\"\n        entities = await super()._parse_entities(responses)\n        for entity, work_item in zip(entities, await self._work_items(responses)):\n            entity[\"story_points\"] = self.__story_points(work_item)\n        return entities",
+          "end_line": 31,
+          "start_line": 18
+        }
+      ]
+    },
+    "response_chars": 639,
+    "round": 4,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 31,
+          "replacement_lines": 6,
+          "start_line": 18
+        }
+      ],
+      "current_file_lines": 35,
+      "updated_excerpt": {
+        "content": "8: \n9: \n10: class AzureDevopsUserStoryPoints(AzureDevopsIssues):\n11:     \"\"\"Collector to get user story points from Azure Devops Server.\"\"\"\n12: \n13:     def _item_select_fields(self) -> list[str]:\n14:         \"\"\"Also request date fields to calculate lead time.\"\"\"\n15:         base_fields = super()._item_select_fields()\n16:         return base_fields + [\"Microsoft.VSTS.Scheduling.StoryPoints\", \"Microsoft.VSTS.Scheduling.Effort\"]\n17: \n18:     async def _parse_entities(self, responses: SourceResponses) -> Entities:\n19:         \"\"\"Extend to add the story points to the entities.\"\"\"\n20:         entities = await super()._parse_entities(responses)\n21:         for entity, work_item in zip(entities, await self._work_items(responses)):\n22:             entity[\"story_points\"] = self.__story_points(work_item)\n23:         return entities\n24: \n25:     async def _parse_value(self, responses: SourceResponses) -> Value:\n26:         \"\"\"Override to parse the sum of the user story points from the responses.\"\"\"\n27:         calculated_value = sum(self.__story_points(work_item) for work_item in await self._work_items(responses))\n28:         return str(decimal_round_half_up(calculated_value))  # follow frontend behaviour\n29: \n30:     @staticmethod\n31:     def __story_points(work_item: dict[str, dict[str, None | float]]) -> float:\n32:         \"\"\"Return the number of story points from the work item.\"\"\"\n33:         story_points = work_item[\"fields\"].get(\"Microsoft.VSTS.Scheduling.StoryPoints\")\n34:         effort = work_item[\"fields\"].get(\"Microsoft.VSTS.Scheduling.Effort\")\n35:         return story_points or effort or 0.0",
+        "end_line": 35,
+        "path_lines": 35,
+        "start_line": 8
+      }
+    },
+    "usage": {
+      "completion_tokens": 529,
+      "prompt_tokens": 5117,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 5646
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 7,
+      "path": "components/collector/src/source_collectors/azure_devops/user_story_points.py",
+      "start_line": 1
+    },
+    "response_chars": 131,
+    "round": 5,
+    "tool_result": {
+      "content": "1: \"\"\"Azure DevOps Server user story points collector.\"\"\"\n2: \n3: from collector_utilities.functions import decimal_round_half_up\n4: from collector_utilities.type import Value\n5: from model import Entity, Entities, SourceResponses\n6: \n7: from .issues import AzureDevopsIssues",
+      "end_line": 7,
+      "path_lines": 35,
+      "start_line": 1
+    },
+    "usage": {
+      "completion_tokens": 74,
+      "prompt_tokens": 6095,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 6169
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "from model import Entities, SourceResponses",
+          "end_line": 5,
+          "start_line": 5
+        }
+      ]
+    },
+    "response_chars": 113,
+    "round": 6,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 5,
+          "replacement_lines": 1,
+          "start_line": 5
+        }
+      ],
+      "current_file_lines": 35,
+      "updated_excerpt": {
+        "content": "1: \"\"\"Azure DevOps Server user story points collector.\"\"\"\n2: \n3: from collector_utilities.functions import decimal_round_half_up\n4: from collector_utilities.type import Value\n5: from model import Entities, SourceResponses\n6: \n7: from .issues import AzureDevopsIssues\n8: \n9: \n10: class AzureDevopsUserStoryPoints(AzureDevopsIssues):\n11:     \"\"\"Collector to get user story points from Azure Devops Server.\"\"\"\n12: \n13:     def _item_select_fields(self) -> list[str]:\n14:         \"\"\"Also request date fields to calculate lead time.\"\"\"\n15:         base_fields = super()._item_select_fields()\n16:         return base_fields + [\"Microsoft.VSTS.Scheduling.StoryPoints\", \"Microsoft.VSTS.Scheduling.Effort\"]\n17: \n18:     async def _parse_entities(self, responses: SourceResponses) -> Entities:\n19:         \"\"\"Extend to add the story points to the entities.\"\"\"\n20:         entities = await super()._parse_entities(responses)\n21:         for entity, work_item in zip(entities, await self._work_items(responses)):\n22:             entity[\"story_points\"] = self.__story_points(work_item)\n23:         return entities\n24: \n25:     async def _parse_value(self, responses: SourceResponses) -> Value:\n26:         \"\"\"Override to parse the sum of the user story points from the responses.\"\"\"\n27:         calculated_value = sum(self.__story_points(work_item) for work_item in await self._work_items(responses))\n28:         return str(decimal_round_half_up(calculated_value))  # follow frontend behaviour\n29: \n30:     @staticmethod\n31:     def __story_points(work_item: dict[str, dict[str, None | float]]) -> float:\n32:         \"\"\"Return the number of story points from the work item.\"\"\"\n33:         story_points = work_item[\"fields\"].get(\"Microsoft.VSTS.Scheduling.StoryPoints\")\n34:         effort = work_item[\"fields\"].get(\"Microsoft.VSTS.Scheduling.Effort\")\n35:         return story_points or effort or 0.0",
+        "end_line": 35,
+        "path_lines": 35,
+        "start_line": 1
+      }
+    },
+    "usage": {
+      "completion_tokens": 69,
+      "prompt_tokens": 6314,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 6383
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 7,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/claude-opus-4.8/patches/github__ICTU__quality-time__pull_4746__comment_1000589866__duplication.patch"
+    },
+    "usage": {
+      "completion_tokens": 11,
+      "prompt_tokens": 7285,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 7296
+    }
+  }
+]

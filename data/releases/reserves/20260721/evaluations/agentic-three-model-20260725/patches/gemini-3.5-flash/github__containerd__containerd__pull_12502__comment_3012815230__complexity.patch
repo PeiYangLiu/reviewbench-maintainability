@@ -1,0 +1,143 @@
+diff --git a/plugins/mount/erofs/plugin_linux.go b/plugins/mount/erofs/plugin_linux.go
+index 9897de5..926cdd0 100644
+--- a/plugins/mount/erofs/plugin_linux.go
++++ b/plugins/mount/erofs/plugin_linux.go
+@@ -71,61 +71,15 @@ func (h *erofsMountHandler) Mount(ctx context.Context, m mount.Mount, mp string,
+ 		}
+ 	}
+ 
+-	// Check if this layer has dm-verity metadata
+-	metadata, err := dmverity.ReadMetadata(m.Source)
+-	if err == nil && dmverityMode != "off" {
+-		log.G(ctx).WithField("source", m.Source).Debug("detected dm-verity metadata, setting up dm-verity device")
+-
+-		supported, err := dmverity.IsSupported()
+-		if err != nil || !supported {
+-			return mount.ActiveMount{}, fmt.Errorf("layer requires dm-verity but system doesn't support it (dm_verity module not loaded): %w", err)
+-		}
+-
+-		// Extract snapshot ID from source path
+-		// Path format: {root}/snapshots/{id}/layer.erofs
+-		snapshotID := filepath.Base(filepath.Dir(m.Source))
+-		deviceName := fmt.Sprintf("containerd-erofs-%s", snapshotID)
+-		devicePath := dmverity.DevicePath(deviceName)
+-
+-		// Try to create dm-verity device first (avoids TOCTOU race)
+-		log.G(ctx).WithFields(log.Fields{
+-			"source":      m.Source,
+-			"device-name": deviceName,
+-			"hash-offset": metadata.HashOffset,
+-		}).Debug("opening dm-verity device")
+-
+-		_, err = dmverity.Open(m.Source, deviceName, m.Source, metadata.RootHash, metadata.HashOffset, nil)
+-		if err != nil {
+-			if _, statErr := os.Stat(devicePath); statErr == nil {
+-				if verifyErr := dmverity.VerifyDevice(deviceName, metadata.RootHash); verifyErr != nil {
+-					return mount.ActiveMount{}, fmt.Errorf("existing dm-verity device %q verification failed: %w", deviceName, verifyErr)
+-				}
+-				log.G(ctx).WithField("device", devicePath).Debug("dm-verity device already exists and verified, reusing")
+-			} else {
+-				return mount.ActiveMount{}, fmt.Errorf("failed to open dm-verity device: %w", err)
+-			}
+-		} else {
+-			// Open succeeded, ensure cleanup on any subsequent error
+-			dmverityDevice = deviceName
+-
+-			// Wait for device to appear
+-			for range 100 {
+-				if _, err := os.Stat(devicePath); err == nil {
+-					break
+-				}
+-				time.Sleep(10 * time.Millisecond)
+-			}
+-
+-			// Verify device exists
+-			if _, err := os.Stat(devicePath); err != nil {
+-				return mount.ActiveMount{}, fmt.Errorf("dm-verity device %q not found after creation: %w", devicePath, err)
+-			}
+-
+-			log.G(ctx).WithField("device", devicePath).Info("dm-verity device created successfully")
+-		}
+-		m.Source = devicePath
++	// Check if this layer has dm-verity metadata and set up dm-verity device
++	devName, devPath, err := setupDMVerity(ctx, m.Source, dmverityMode)
++	if err != nil {
++		return mount.ActiveMount{}, err
++	}
++	if devPath != "" {
++		dmverityDevice = devName
++		m.Source = devPath
+ 	}
+-	// else: no metadata file, proceed with regular EROFS mount
+ 
+ 	filteredOptions := make([]string, 0, len(m.Options))
+ 	for _, v := range m.Options {
+@@ -195,6 +149,68 @@ func (h *erofsMountHandler) Mount(ctx context.Context, m mount.Mount, mp string,
+ 	}, nil
+ }
+ 
++func setupDMVerity(ctx context.Context, source, dmverityMode string) (string, string, error) {
++	if dmverityMode == "off" {
++		return "", "", nil
++	}
++
++	metadata, err := dmverity.ReadMetadata(source)
++	if err != nil {
++		// no metadata file, proceed with regular EROFS mount
++		return "", "", nil
++	}
++
++	log.G(ctx).WithField("source", source).Debug("detected dm-verity metadata, setting up dm-verity device")
++
++	supported, err := dmverity.IsSupported()
++	if err != nil || !supported {
++		return "", "", fmt.Errorf("layer requires dm-verity but system doesn't support it (dm_verity module not loaded): %w", err)
++	}
++
++	// Extract snapshot ID from source path
++	// Path format: {root}/snapshots/{id}/layer.erofs
++	snapshotID := filepath.Base(filepath.Dir(source))
++	deviceName := fmt.Sprintf("containerd-erofs-%s", snapshotID)
++	devicePath := dmverity.DevicePath(deviceName)
++
++	// Try to create dm-verity device first (avoids TOCTOU race)
++	log.G(ctx).WithFields(log.Fields{
++		"source":      source,
++		"device-name": deviceName,
++		"hash-offset": metadata.HashOffset,
++	}).Debug("opening dm-verity device")
++
++	_, err = dmverity.Open(source, deviceName, source, metadata.RootHash, metadata.HashOffset, nil)
++	if err != nil {
++		if _, statErr := os.Stat(devicePath); statErr != nil {
++			return "", "", fmt.Errorf("failed to open dm-verity device: %w", err)
++		}
++		if verifyErr := dmverity.VerifyDevice(deviceName, metadata.RootHash); verifyErr != nil {
++			return "", "", fmt.Errorf("existing dm-verity device %q verification failed: %w", deviceName, verifyErr)
++		}
++		log.G(ctx).WithField("device", devicePath).Debug("dm-verity device already exists and verified, reusing")
++		return "", devicePath, nil
++	}
++
++	// Open succeeded, ensure cleanup on any subsequent error
++	// Wait for device to appear
++	for range 100 {
++		if _, err := os.Stat(devicePath); err == nil {
++			break
++		}
++		time.Sleep(10 * time.Millisecond)
++	}
++
++	// Verify device exists
++	if _, err := os.Stat(devicePath); err != nil {
++		dmverity.Close(deviceName)
++		return "", "", fmt.Errorf("dm-verity device %q not found after creation: %w", devicePath, err)
++	}
++
++	log.G(ctx).WithField("device", devicePath).Info("dm-verity device created successfully")
++	return deviceName, devicePath, nil
++}
++
+ func doMount(m mount.Mount, target string) error {
+ 	if err := fsmount.Fsmount(m, target); err != nil {
+ 		// Fall back to traditional mount() if fsmount syscall not available (Linux < 5.2)

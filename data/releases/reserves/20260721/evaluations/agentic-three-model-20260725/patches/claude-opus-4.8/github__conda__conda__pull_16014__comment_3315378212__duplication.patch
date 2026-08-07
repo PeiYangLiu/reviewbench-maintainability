@@ -1,0 +1,78 @@
+diff --git a/conda/cli/conda_argparse.py b/conda/cli/conda_argparse.py
+index 6860c26..6eaf7d3 100644
+--- a/conda/cli/conda_argparse.py
++++ b/conda/cli/conda_argparse.py
+@@ -300,19 +300,17 @@ def configure_parser_plugins(sub_parsers) -> None:
+     """
+     plugin_subcommands = context.plugin_manager.get_subcommands()
+     for name, plugin_subcommand in plugin_subcommands.items():
+-        # if the name of the plugin-based subcommand overlaps a built-in
+-        # subcommand, we print an error
+-        if name in BUILTIN_COMMANDS:
+-            if (
+-                is_preview_subcommand(plugin_subcommand)
+-                and name in BUILTIN_COMMAND_PARSERS
+-            ):
+-                parser = BUILTIN_COMMAND_PARSERS[name](sub_parsers)
+-                if plugin_subcommand.configure_parser:
+-                    plugin_subcommand.configure_parser(parser)
+-                parser.set_defaults(_plugin_subcommand=plugin_subcommand)
+-                continue
++        # bundled previews may intentionally override a built-in command by
++        # extending its parser rather than replacing it
++        is_preview_builtin = (
++            name in BUILTIN_COMMANDS
++            and is_preview_subcommand(plugin_subcommand)
++            and name in BUILTIN_COMMAND_PARSERS
++        )
+ 
++        # if the name of the plugin-based subcommand overlaps a built-in
++        # subcommand (and isn't a bundled preview), we print an error
++        if name in BUILTIN_COMMANDS and not is_preview_builtin:
+             log.error(
+                 dals(
+                     f"""
+@@ -325,25 +323,31 @@ def configure_parser_plugins(sub_parsers) -> None:
+             )
+             continue
+ 
+-        parser = sub_parsers.add_parser(
+-            name,
+-            description=plugin_subcommand.summary,
+-            help=plugin_subcommand.summary,
+-            add_help=False,  # defer to subcommand's help processing
+-        )
++        if is_preview_builtin:
++            # start from the built-in parser, then let the preview extend it
++            parser = BUILTIN_COMMAND_PARSERS[name](sub_parsers)
++        else:
++            parser = sub_parsers.add_parser(
++                name,
++                description=plugin_subcommand.summary,
++                help=plugin_subcommand.summary,
++                add_help=False,  # defer to subcommand's help processing
++            )
+ 
+         # case 1: plugin extends the parser
+         if plugin_subcommand.configure_parser:
+             plugin_subcommand.configure_parser(parser)
+ 
+-            # attempt to add standard help processing, will fail if plugin defines their own
+-            try:
+-                add_parser_help(parser)
+-            except argparse.ArgumentError:
+-                pass
++            # attempt to add standard help processing, will fail if plugin defines
++            # their own; built-in parsers already handle help themselves
++            if not is_preview_builtin:
++                try:
++                    add_parser_help(parser)
++                except argparse.ArgumentError:
++                    pass
+ 
+         # case 2: plugin has their own parser, see _GreedySubParsersAction
+-        else:
++        elif not is_preview_builtin:
+             parser.greedy = True
+ 
+         # underscore prefixed indicating this is not a normal argparse argument

@@ -1,0 +1,69 @@
+--- a/pkg/reconciler/builder/builder.go
++++ b/pkg/reconciler/builder/builder.go
+@@ -5,7 +5,6 @@
+ 
+ 	"github.com/pivotal/kpack/pkg/cosign"
+ 	corev1 "k8s.io/api/core/v1"
+-	k8sclient "k8s.io/client-go/kubernetes"
+ 
+ 	"go.uber.org/zap"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+@@ -43,7 +42,7 @@
+ func NewController(
+ 	ctx context.Context,
+ 	opt reconciler.Options,
+-	k8sClient k8sclient.Interface,
++	secretFetcher SecretFetcher,
+ 	builderInformer buildinformers.BuilderInformer,
+ 	builderCreator BuilderCreator,
+ 	keychainFactory registry.KeychainFactory,
+@@ -61,7 +60,7 @@
+ 		BuildpackLister:        buildpackInformer.Lister(),
+ 		ClusterBuildpackLister: clusterBuildpackInformer.Lister(),
+ 		ClusterStackLister:     clusterStackInformer.Lister(),
+-		K8sClient:              k8sClient,
++		SecretFetcher:          secretFetcher,
+ 	}
+ 
+ 	logger := opt.Logger.With(
+@@ -102,6 +101,10 @@
+ 	return impl, func() {
+ 		impl.GlobalResync(builderInformer.Informer())
+ 	}
++}
++
++type SecretFetcher interface {
++	ReferencingServiceAccount(serviceAccount string, namespace string) ([]*corev1.Secret, error)
+ }
+ 
+ type Reconciler struct {
+@@ -114,7 +117,7 @@
+ 	BuildpackLister        buildlisters.BuildpackLister
+ 	ClusterBuildpackLister buildlisters.ClusterBuildpackLister
+ 	ClusterStackLister     buildlisters.ClusterStackLister
+-	K8sClient              k8sclient.Interface
++	SecretFetcher          SecretFetcher
+ }
+ 
+ func (c *Reconciler) Reconcile(ctx context.Context, key string) error {
+@@ -231,14 +234,12 @@
+ 
+ 	fetcher := cnb.NewRemoteBuildpackFetcher(c.KeychainFactory, clusterStore, buildpacks, clusterBuildpacks)
+ 
+-	signerSecrets, err := cosign.FetchBuilderSigningSecrets(
+-		ctx,
+-		c.K8sClient,
+-		builder.Namespace,
+-		builder.Spec.ServiceAccount())
+-	if err != nil {
+-		return buildapi.BuilderRecord{}, err
+-	}
++	secrets, err := c.SecretFetcher.ReferencingServiceAccount(builder.Spec.ServiceAccount(), builder.Namespace)
++	if err != nil {
++		return buildapi.BuilderRecord{}, err
++	}
++
++	signerSecrets := cosign.FilterSigningSecrets(secrets)
+ 
+ 	buildRecord, err := c.BuilderCreator.CreateBuilder(ctx, builderKeychain, stackKeychain, fetcher, clusterStack, builder.Spec.BuilderSpec, signerSecrets)
+ 	if err != nil {

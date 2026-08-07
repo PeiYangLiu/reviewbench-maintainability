@@ -1,0 +1,41 @@
+diff --git a/workflow/controller/exec_control.go b/workflow/controller/exec_control.go
+index c22a518..8cc6411 100644
+--- a/workflow/controller/exec_control.go
++++ b/workflow/controller/exec_control.go
+@@ -82,6 +82,20 @@ func (woc *wfOperationCtx) handleExecutionControlError(nodeID string, wfNodesLoc
+ 	node := woc.wf.Status.Nodes[nodeID]
+ 	woc.markNodePhase(node.Name, wfv1.NodeFailed, errorMsg)
+ 
++	children := woc.getTransientChildren(node)
++
++	// if node is a pod created from ContainerSet template
++	// then need to fail child nodes so they will not hang in Pending after pod deletion
++	for _, child := range children {
++		if !child.IsExitNode() && !child.Fulfilled() {
++			woc.markNodePhase(child.Name, wfv1.NodeFailed, errorMsg)
++		}
++	}
++}
++
++
++// getTransientChildren returns node and all of its descendants.
++func (woc *wfOperationCtx) getTransientChildren(node wfv1.NodeStatus) []wfv1.NodeStatus {
+ 	children := []wfv1.NodeStatus{}
+ 	q := []wfv1.NodeStatus{node}
+ 	for {
+@@ -95,14 +109,7 @@ func (woc *wfOperationCtx) handleExecutionControlError(nodeID string, wfNodesLoc
+ 		}
+ 		children = append(children, childNode)
+ 	}
+-
+-	// if node is a pod created from ContainerSet template
+-	// then need to fail child nodes so they will not hang in Pending after pod deletion
+-	for _, child := range children {
+-		if !child.IsExitNode() && !child.Fulfilled() {
+-			woc.markNodePhase(child.Name, wfv1.NodeFailed, errorMsg)
+-		}
+-	}
++	return children
+ }
+ 
+ // killDaemonedChildren kill any daemoned pods of a steps or DAG template node.

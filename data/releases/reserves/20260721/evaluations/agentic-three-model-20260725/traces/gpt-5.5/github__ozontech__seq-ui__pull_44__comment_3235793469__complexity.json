@@ -1,0 +1,92 @@
+[
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "func (r *repository) GetTopErrorGroups(\n\tctx context.Context,\n\treq types.GetTopErrorGroupsRequest,\n) ([]types.TopErrorGroup, error) {\n\twhere := sq.Eq{}\n\tfor col, val := range r.queryFilters() {\n\t\twhere[col] = val\n\t}\n\tif req.Env != nil && *req.Env != \"\" {\n\t\twhere[\"env\"] = *req.Env\n\t}\n\tif req.Source != nil && *req.Source != \"\" {\n\t\twhere[\"source\"] = *req.Source\n\t}\n\n\tif req.Duration != nil && *req.Duration != 0 {\n\t\treturn r.getTopErrorGroupsByDuration(ctx, req, where)\n\t}\n\n\treturn r.getTopErrorGroupsAllTime(ctx, req, where)\n}\n\nfunc (r *repository) getTopErrorGroupsByDuration(\n\tctx context.Context,\n\treq types.GetTopErrorGroupsRequest,\n\twhere sq.Eq,\n) ([]types.TopErrorGroup, error) {\n\taggTable, startDate := getHistData(req.Duration)\n\n\tcountQ := sq.\n\t\tSelect(\n\t\t\t\"_group_hash\",\n\t\t\t\"countMerge(counts) as count\",\n\t\t).\n\t\tFrom(aggTable).\n\t\tWhere(where).\n\t\tWhere(sq.GtOrEq{startDate: r.nowFn().Add(-req.Duration.Abs())}).\n\t\tGroupBy(\"_group_hash\").\n\t\tOrderBy(\"count DESC\").\n\t\tLimit(uint64(req.Limit)).\n\t\tOffset(uint64(req.Offset))\n\n\tcountQuery, countArgs := countQ.MustSql()\n\tmetricLabels := []string{aggTable, \"SELECT\"}\n\tcountRows, err := r.conn.Query(ctx, metricLabels, countQuery, countArgs...)\n\tif err != nil {\n\t\tincErrorMetric(err, metricLabels)\n\t\treturn nil, fmt.Errorf(\"failed to get error groups count: %w\", err)\n\t}\n\n\tvar (\n\t\tgroups    []types.TopErrorGroup\n\t\tidxByHash = map[uint64]int{}\n\t\thashes    []uint64\n\t)\n\tfor countRows.Next() {\n\t\tvar group types.TopErrorGroup\n\t\tif err = countRows.Scan(\n\t\t\t&group.Hash,\n\t\t\t&group.Count,\n\t\t); err != nil {\n\t\t\treturn nil, fmt.Errorf(\"failed to scan row: %w\", err)\n\t\t}\n\n\t\tgroups = append(groups, group)\n\t\thashes = append(hashes, group.Hash)\n\t\tidxByHash[group.Hash] = len(groups) - 1\n\t}\n\n\tif len(groups) == 0 {\n\t\treturn nil, nil\n\t}\n\n\twhere[\"_group_hash\"] = hashes\n\tq := sq.\n\t\tSelect(\n\t\t\t\"_group_hash\",\n\t\t\t\"source\",\n\t\t\t\"any(message) as message\",\n\t\t).\n\t\tFrom(\"error_groups\").\n\t\tWhere(where).\n\t\tGroupBy(\"_group_hash\", \"source\")\n\n\tquery, args := q.MustSql()\n\tmetricLabels = []string{\"error_groups\", \"SELECT\"}\n\trows, err := r.conn.Query(ctx, metricLabels, query, args...)\n\tif err != nil {\n\t\tincErrorMetric(err, metricLabels)\n\t\treturn nil, fmt.Errorf(\"failed to get error groups: %w\", err)\n\t}\n\n\tvar (\n\t\thash            uint64\n\t\tmessage, source string\n\t)\n\tfor rows.Next() {\n\t\tif err = rows.Scan(\n\t\t\t&hash,\n\t\t\t&source,\n\t\t\t&message,\n\t\t); err != nil {\n\t\t\treturn nil, fmt.Errorf(\"failed to scan row: %w\", err)\n\t\t}\n\n\t\tidx := idxByHash[hash]\n\t\tgroups[idx].Message = message\n\t\tgroups[idx].Source = source\n\t}\n\n\treturn groups, nil\n}\n\nfunc (r *repository) getTopErrorGroupsAllTime(\n\tctx context.Context,\n\treq types.GetTopErrorGroupsRequest,\n\twhere sq.Eq,\n) ([]types.TopErrorGroup, error) {\n\tsubQ := sq.\n\t\tSelect(\"_group_hash\").\n\t\tFrom(\"error_groups_brief\").\n\t\tWhere(where).\n\t\tGroupBy(\"_group_hash\").\n\t\tOrderBy(orderBy(types.OrderFrequent, true)).\n\t\tLimit(uint64(req.Limit)).\n\t\tOffset(uint64(req.Offset))\n\n\tin := \"IN\"\n\tif r.sharded {\n\t\tsubQ = subQ.Distinct()\n\t\tin = \"GLOBAL IN\"\n\t}\n\n\tsubQuery, subArgs := subQ.MustSql()\n\n\tq := sq.\n\t\tSelect(\n\t\t\t\"_group_hash\",\n\t\t\t\"source\",\n\t\t\t\"any(message) as message\",\n\t\t\t\"countMerge(seen_total) as seen_total\",\n\t\t).\n\t\tFrom(\"error_groups\").\n\t\tWhere(where).\n\t\tWhere(fmt.Sprintf(\"_group_hash %s (%s)\", in, subQuery), subArgs...).\n\t\tGroupBy(\"_group_hash\", \"source\").\n\t\tOrderBy(orderBy(types.OrderFrequent, false))\n\n\tquery, args := q.MustSql()\n\tmetricLabels := []string{\"error_groups\", \"SELECT\"}\n\trows, err := r.conn.Query(ctx, metricLabels, query, args...)\n\tif err != nil {\n\t\tincErrorMetric(err, metricLabels)\n\t\treturn nil, fmt.Errorf(\"failed to get error groups: %w\", err)\n\t}\n\n\tvar groups []types.TopErrorGroup\n\tfor rows.Next() {\n\t\tvar group types.TopErrorGroup\n\t\tif err = rows.Scan(\n\t\t\t&group.Hash,\n\t\t\t&group.Source,\n\t\t\t&group.Message,\n\t\t\t&group.Count,\n\t\t); err != nil {\n\t\t\treturn nil, fmt.Errorf(\"failed to scan row: %w\", err)\n\t\t}\n\n\t\tgroups = append(groups, group)\n\t}\n\n\treturn groups, nil\n}",
+          "end_line": 623,
+          "start_line": 467
+        }
+      ]
+    },
+    "response_chars": 4744,
+    "round": 1,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 623,
+          "replacement_lines": 173,
+          "start_line": 467
+        }
+      ],
+      "current_file_lines": 1175,
+      "updated_excerpt": {
+        "content": "457: \t\tif errors.Is(err, sql.ErrNoRows) {\n458: \t\t\treturn 0, nil\n459: \t\t}\n460: \t\tincErrorMetric(err, metricLabels)\n461: \t\treturn 0, fmt.Errorf(\"failed to get new error groups count: %w\", err)\n462: \t}\n463: \n464: \treturn total, nil\n465: }\n466: \n467: func (r *repository) GetTopErrorGroups(\n468: \tctx context.Context,\n469: \treq types.GetTopErrorGroupsRequest,\n470: ) ([]types.TopErrorGroup, error) {\n471: \twhere := sq.Eq{}\n472: \tfor col, val := range r.queryFilters() {\n473: \t\twhere[col] = val\n474: \t}\n475: \tif req.Env != nil && *req.Env != \"\" {\n476: \t\twhere[\"env\"] = *req.Env\n477: \t}\n478: \tif req.Source != nil && *req.Source != \"\" {\n479: \t\twhere[\"source\"] = *req.Source\n480: \t}\n481: \n482: \tif req.Duration != nil && *req.Duration != 0 {\n483: \t\treturn r.getTopErrorGroupsByDuration(ctx, req, where)\n484: \t}\n485: \n486: \treturn r.getTopErrorGroupsAllTime(ctx, req, where)\n487: }\n488: \n489: func (r *repository) getTopErrorGroupsByDuration(\n490: \tctx context.Context,\n491: \treq types.GetTopErrorGroupsRequest,\n492: \twhere sq.Eq,\n493: ) ([]types.TopErrorGroup, error) {\n494: \taggTable, startDate := getHistData(req.Duration)\n495: \n496: \tcountQ := sq.\n497: \t\tSelect(",
+        "end_line": 497,
+        "path_lines": 1175,
+        "start_line": 457
+      }
+    },
+    "usage": {
+      "input_tokens": 11702,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 2454,
+      "output_tokens_details": {
+        "reasoning_tokens": 870
+      },
+      "total_tokens": 14156
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 650,
+      "path": "internal/pkg/repository_ch/error_groups.go",
+      "start_line": 467
+    },
+    "response_chars": 101,
+    "round": 2,
+    "tool_result": {
+      "content": "467: func (r *repository) GetTopErrorGroups(\n468: \tctx context.Context,\n469: \treq types.GetTopErrorGroupsRequest,\n470: ) ([]types.TopErrorGroup, error) {\n471: \twhere := sq.Eq{}\n472: \tfor col, val := range r.queryFilters() {\n473: \t\twhere[col] = val\n474: \t}\n475: \tif req.Env != nil && *req.Env != \"\" {\n476: \t\twhere[\"env\"] = *req.Env\n477: \t}\n478: \tif req.Source != nil && *req.Source != \"\" {\n479: \t\twhere[\"source\"] = *req.Source\n480: \t}\n481: \n482: \tif req.Duration != nil && *req.Duration != 0 {\n483: \t\treturn r.getTopErrorGroupsByDuration(ctx, req, where)\n484: \t}\n485: \n486: \treturn r.getTopErrorGroupsAllTime(ctx, req, where)\n487: }\n488: \n489: func (r *repository) getTopErrorGroupsByDuration(\n490: \tctx context.Context,\n491: \treq types.GetTopErrorGroupsRequest,\n492: \twhere sq.Eq,\n493: ) ([]types.TopErrorGroup, error) {\n494: \taggTable, startDate := getHistData(req.Duration)\n495: \n496: \tcountQ := sq.\n497: \t\tSelect(\n498: \t\t\t\"_group_hash\",\n499: \t\t\t\"countMerge(counts) as count\",\n500: \t\t).\n501: \t\tFrom(aggTable).\n502: \t\tWhere(where).\n503: \t\tWhere(sq.GtOrEq{startDate: r.nowFn().Add(-req.Duration.Abs())}).\n504: \t\tGroupBy(\"_group_hash\").\n505: \t\tOrderBy(\"count DESC\").\n506: \t\tLimit(uint64(req.Limit)).\n507: \t\tOffset(uint64(req.Offset))\n508: \n509: \tcountQuery, countArgs := countQ.MustSql()\n510: \tmetricLabels := []string{aggTable, \"SELECT\"}\n511: \tcountRows, err := r.conn.Query(ctx, metricLabels, countQuery, countArgs...)\n512: \tif err != nil {\n513: \t\tincErrorMetric(err, metricLabels)\n514: \t\treturn nil, fmt.Errorf(\"failed to get error groups count: %w\", err)\n515: \t}\n516: \n517: \tvar (\n518: \t\tgroups    []types.TopErrorGroup\n519: \t\tidxByHash = map[uint64]int{}\n520: \t\thashes    []uint64\n521: \t)\n522: \tfor countRows.Next() {\n523: \t\tvar group types.TopErrorGroup\n524: \t\tif err = countRows.Scan(\n525: \t\t\t&group.Hash,\n526: \t\t\t&group.Count,\n527: \t\t); err != nil {\n528: \t\t\treturn nil, fmt.Errorf(\"failed to scan row: %w\", err)\n529: \t\t}\n530: \n531: \t\tgroups = append(groups, group)\n532: \t\thashes = append(hashes, group.Hash)\n533: \t\tidxByHash[group.Hash] = len(groups) - 1\n534: \t}\n535: \n536: \tif len(groups) == 0 {\n537: \t\treturn nil, nil\n538: \t}\n539: \n540: \twhere[\"_group_hash\"] = hashes\n541: \tq := sq.\n542: \t\tSelect(\n543: \t\t\t\"_group_hash\",\n544: \t\t\t\"source\",\n545: \t\t\t\"any(message) as message\",\n546: \t\t).\n547: \t\tFrom(\"error_groups\").\n548: \t\tWhere(where).\n549: \t\tGroupBy(\"_group_hash\", \"source\")\n550: \n551: \tquery, args := q.MustSql()\n552: \tmetricLabels = []string{\"error_groups\", \"SELECT\"}\n553: \trows, err := r.conn.Query(ctx, metricLabels, query, args...)\n554: \tif err != nil {\n555: \t\tincErrorMetric(err, metricLabels)\n556: \t\treturn nil, fmt.Errorf(\"failed to get error groups: %w\", err)\n557: \t}\n558: \n559: \tvar (\n560: \t\thash            uint64\n561: \t\tmessage, source string\n562: \t)\n563: \tfor rows.Next() {\n564: \t\tif err = rows.Scan(\n565: \t\t\t&hash,\n566: \t\t\t&source,\n567: \t\t\t&message,\n568: \t\t); err != nil {\n569: \t\t\treturn nil, fmt.Errorf(\"failed to scan row: %w\", err)\n570: \t\t}\n571: \n572: \t\tidx := idxByHash[hash]\n573: \t\tgroups[idx].Message = message\n574: \t\tgroups[idx].Source = source\n575: \t}\n576: \n577: \treturn groups, nil\n578: }\n579: \n580: func (r *repository) getTopErrorGroupsAllTime(\n581: \tctx context.Context,\n582: \treq types.GetTopErrorGroupsRequest,\n583: \twhere sq.Eq,\n584: ) ([]types.TopErrorGroup, error) {\n585: \tsubQ := sq.\n586: \t\tSelect(\"_group_hash\").\n587: \t\tFrom(\"error_groups_brief\").\n588: \t\tWhere(where).\n589: \t\tGroupBy(\"_group_hash\").\n590: \t\tOrderBy(orderBy(types.OrderFrequent, true)).\n591: \t\tLimit(uint64(req.Limit)).\n592: \t\tOffset(uint64(req.Offset))\n593: \n594: \tin := \"IN\"\n595: \tif r.sharded {\n596: \t\tsubQ = subQ.Distinct()\n597: \t\tin = \"GLOBAL IN\"\n598: \t}\n599: \n600: \tsubQuery, subArgs := subQ.MustSql()\n601: \n602: \tq := sq.\n603: \t\tSelect(\n604: \t\t\t\"_group_hash\",\n605: \t\t\t\"source\",\n606: \t\t\t\"any(message) as message\",\n607: \t\t\t\"countMerge(seen_total) as seen_total\",\n608: \t\t).\n609: \t\tFrom(\"error_groups\").\n610: \t\tWhere(where).\n611: \t\tWhere(fmt.Sprintf(\"_group_hash %s (%s)\", in, subQuery), subArgs...).\n612: \t\tGroupBy(\"_group_hash\", \"source\").\n613: \t\tOrderBy(orderBy(types.OrderFrequent, false))\n614: \n615: \tquery, args := q.MustSql()\n616: \tmetricLabels := []string{\"error_groups\", \"SELECT\"}\n617: \trows, err := r.conn.Query(ctx, metricLabels, query, args...)\n618: \tif err != nil {\n619: \t\tincErrorMetric(err, metricLabels)\n620: \t\treturn nil, fmt.Errorf(\"failed to get error groups: %w\", err)\n621: \t}\n622: \n623: \tvar groups []types.TopErrorGroup\n624: \tfor rows.Next() {\n625: \t\tvar group types.TopErrorGroup\n626: \t\tif err = rows.Scan(\n627: \t\t\t&group.Hash,\n628: \t\t\t&group.Source,\n629: \t\t\t&group.Message,\n630: \t\t\t&group.Count,\n631: \t\t); err != nil {\n632: \t\t\treturn nil, fmt.Errorf(\"failed to scan row: %w\", err)\n633: \t\t}\n634: \n635: \t\tgroups = append(groups, group)\n636: \t}\n637: \n638: \treturn groups, nil\n639: }\n640: \n641: func (r *repository) GetTopErrorGroupsTotal(\n642: \tctx context.Context,\n643: \treq types.GetTopErrorGroupsRequest,\n644: ) (uint64, error) {\n645: \tq := sq.Select(\"uniq(_group_hash)\")\n646: \n647: \tfor col, val := range r.queryFilters() {\n648: \t\tq = q.Where(sq.Eq{col: val})\n649: \t}\n650: \tif req.Env != nil && *req.Env != \"\" {",
+      "end_line": 650,
+      "path_lines": 1175,
+      "start_line": 467
+    },
+    "usage": {
+      "input_tokens": 13738,
+      "input_tokens_details": {
+        "cached_tokens": 11520
+      },
+      "output_tokens": 55,
+      "output_tokens_details": {
+        "reasoning_tokens": 23
+      },
+      "total_tokens": 13793
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 3,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__ozontech__seq-ui__pull_44__comment_3235793469__complexity.patch"
+    },
+    "usage": {
+      "input_tokens": 15919,
+      "input_tokens_details": {
+        "cached_tokens": 13568
+      },
+      "output_tokens": 89,
+      "output_tokens_details": {
+        "reasoning_tokens": 78
+      },
+      "total_tokens": 16008
+    }
+  }
+]

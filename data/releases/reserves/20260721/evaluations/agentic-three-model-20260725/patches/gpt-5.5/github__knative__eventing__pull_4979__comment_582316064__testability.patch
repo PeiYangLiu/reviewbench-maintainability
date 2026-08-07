@@ -1,0 +1,40 @@
+diff --git a/pkg/reconciler/mtbroker/trigger/controller.go b/pkg/reconciler/mtbroker/trigger/controller.go
+index a7b8ed8..1dde830 100644
+--- a/pkg/reconciler/mtbroker/trigger/controller.go
++++ b/pkg/reconciler/mtbroker/trigger/controller.go
+@@ -75,15 +75,7 @@ func NewController(
+ 	triggerInformer.Informer().AddEventHandler(controller.HandleAll(impl.Enqueue))
+ 
+ 	// Filter Brokers and enqueue associated Triggers
+-	brokerFilter := pkgreconciler.AnnotationFilterFunc(brokerreconciler.ClassAnnotationKey, eventing.MTChannelBrokerClassValue, false /*allowUnset*/)
+-	brokerInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
+-		FilterFunc: brokerFilter,
+-		Handler: controller.HandleAll(func(obj interface{}) {
+-			for _, t := range getBrokerTriggers(logger, triggerLister, obj) {
+-				impl.Enqueue(t)
+-			}
+-		}),
+-	})
++	brokerInformer.Informer().AddEventHandler(newBrokerTriggerEventHandler(logger, triggerLister, impl.Enqueue))
+ 
+ 	// Reconcile Trigger when my Subscription changes
+ 	subscriptionInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
+@@ -94,6 +86,18 @@ func NewController(
+ 	return impl
+ }
+ 
++func newBrokerTriggerEventHandler(logger *zap.SugaredLogger, triggerLister v1.TriggerLister, enqueue func(interface{})) cache.ResourceEventHandler {
++	brokerFilter := pkgreconciler.AnnotationFilterFunc(brokerreconciler.ClassAnnotationKey, eventing.MTChannelBrokerClassValue, false /*allowUnset*/)
++	return cache.FilteringResourceEventHandler{
++		FilterFunc: brokerFilter,
++		Handler: controller.HandleAll(func(obj interface{}) {
++			for _, t := range getBrokerTriggers(logger, triggerLister, obj) {
++				enqueue(t)
++			}
++		}),
++	}
++}
++
+ // getBrokerTriggers makes sure the object passed in is a Broker, and gets all
+ // the Triggers belonging to it. As there is no way to return failures in the
+ // Informers EventHandler, errors are logged, and an empty array is returned in case

@@ -1,0 +1,176 @@
+--- a/spanner/client.go
++++ b/spanner/client.go
+@@ -99,6 +99,7 @@
+ 	qo                   QueryOptions
+ 	ro                   ReadOptions
+ 	ao                   []ApplyOption
++	bwo                  []BatchWriteOption
+ 	txo                  TransactionOptions
+ 	ct                   *commonTags
+ 	disableRouteToLeader bool
+@@ -137,6 +138,9 @@
+ 
+ 	// ApplyOptions is the configuration for applying
+ 	ApplyOptions []ApplyOption
++
++	// BatchWriteOptions is the configuration for BatchWrite.
++	BatchWriteOptions []BatchWriteOption
+ 
+ 	// TransactionOptions is the configuration for a transaction.
+ 	TransactionOptions TransactionOptions
+@@ -283,6 +287,7 @@
+ 		qo:                   getQueryOptions(config.QueryOptions),
+ 		ro:                   config.ReadOptions,
+ 		ao:                   config.ApplyOptions,
++		bwo:                  config.BatchWriteOptions,
+ 		txo:                  config.TransactionOptions,
+ 		ct:                   getCommonTags(sc),
+ 		disableRouteToLeader: config.DisableRouteToLeader,
+@@ -602,9 +607,15 @@
+ 
+ // applyOption controls the behavior of Client.Apply.
+ type applyOption struct {
++	batchWriteOption
++
+ 	// If atLeastOnce == true, Client.Apply will execute the mutations on Cloud
+ 	// Spanner at least once.
+ 	atLeastOnce bool
++}
++
++// batchWriteOption controls the behavior of Client.BatchWrite.
++type batchWriteOption struct {
+ 	// transactionTag will be included with the CommitRequest.
+ 	transactionTag string
+ 	// priority is the RPC priority that is used for the commit operation.
+@@ -612,7 +623,37 @@
+ }
+ 
+ // An ApplyOption is an optional argument to Apply.
+-type ApplyOption func(*applyOption)
++type ApplyOption interface {
++	apply(*applyOption)
++}
++
++// A BatchWriteOption is an optional argument to BatchWrite.
++type BatchWriteOption interface {
++	batchWrite(*batchWriteOption)
++}
++
++// An ApplyAndBatchWriteOption is an optional argument that can be used with
++// both Apply and BatchWrite.
++type ApplyAndBatchWriteOption interface {
++	ApplyOption
++	BatchWriteOption
++}
++
++type applyOptionFunc func(*applyOption)
++
++func (f applyOptionFunc) apply(ao *applyOption) {
++	f(ao)
++}
++
++type applyAndBatchWriteOptionFunc func(*batchWriteOption)
++
++func (f applyAndBatchWriteOptionFunc) apply(ao *applyOption) {
++	f(&ao.batchWriteOption)
++}
++
++func (f applyAndBatchWriteOptionFunc) batchWrite(bwo *batchWriteOption) {
++	f(bwo)
++}
+ 
+ // ApplyAtLeastOnce returns an ApplyOption that removes replay protection.
+ //
+@@ -626,25 +667,25 @@
+ // option may be appropriate for latency sensitive and/or high throughput blind
+ // writing.
+ func ApplyAtLeastOnce() ApplyOption {
+-	return func(ao *applyOption) {
++	return applyOptionFunc(func(ao *applyOption) {
+ 		ao.atLeastOnce = true
+-	}
+-}
+-
+-// TransactionTag returns an ApplyOption that will include the given tag as a
+-// transaction tag for a write-only transaction.
+-func TransactionTag(tag string) ApplyOption {
+-	return func(ao *applyOption) {
+-		ao.transactionTag = tag
+-	}
+-}
+-
+-// Priority returns an ApplyOptions that sets the RPC priority to use for the
+-// commit operation.
+-func Priority(priority sppb.RequestOptions_Priority) ApplyOption {
+-	return func(ao *applyOption) {
+-		ao.priority = priority
+-	}
++	})
++}
++
++// TransactionTag returns an ApplyAndBatchWriteOption that will include the given
++// tag as a transaction tag for a write-only transaction.
++func TransactionTag(tag string) ApplyAndBatchWriteOption {
++	return applyAndBatchWriteOptionFunc(func(bwo *batchWriteOption) {
++		bwo.transactionTag = tag
++	})
++}
++
++// Priority returns an ApplyAndBatchWriteOption that sets the RPC priority to use
++// for the commit operation.
++func Priority(priority sppb.RequestOptions_Priority) ApplyAndBatchWriteOption {
++	return applyAndBatchWriteOptionFunc(func(bwo *batchWriteOption) {
++		bwo.priority = priority
++	})
+ }
+ 
+ // Apply applies a list of mutations atomically to the database.
+@@ -652,11 +693,11 @@
+ 	ao := &applyOption{}
+ 
+ 	for _, opt := range c.ao {
+-		opt(ao)
++		opt.apply(ao)
+ 	}
+ 
+ 	for _, opt := range opts {
+-		opt(ao)
++		opt.apply(ao)
+ 	}
+ 
+ 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/spanner.Apply")
+@@ -786,7 +827,7 @@
+ // timestamp-based keys, it may result in additional rows being added to the
+ // mutation's table. We recommend structuring your mutation groups to be
+ // idempotent to avoid this issue.
+-func (c *Client) BatchWrite(ctx context.Context, mgs []*MutationGroup, opts ...ApplyOption) *BatchWriteResponseIterator {
++func (c *Client) BatchWrite(ctx context.Context, mgs []*MutationGroup, opts ...BatchWriteOption) *BatchWriteResponseIterator {
+ 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/spanner.BatchWrite")
+ 
+ 	var err error
+@@ -796,10 +837,14 @@
+ 
+ 	ao := &applyOption{}
+ 	for _, opt := range c.ao {
+-		opt(ao)
++		opt.apply(ao)
++	}
++	bo := &ao.batchWriteOption
++	for _, opt := range c.bwo {
++		opt.batchWrite(bo)
+ 	}
+ 	for _, opt := range opts {
+-		opt(ao)
++		opt.batchWrite(bo)
+ 	}
+ 
+ 	mgsPb, err := mutationGroupsProto(mgs)
+@@ -818,7 +863,7 @@
+ 		stream, rpcErr := sh.getClient().BatchWrite(contextWithOutgoingMetadata(ct, sh.getMetadata(), c.disableRouteToLeader), &sppb.BatchWriteRequest{
+ 			Session:        sh.getID(),
+ 			MutationGroups: mgsPb,
+-			RequestOptions: createRequestOptions(ao.priority, "", ao.transactionTag),
++			RequestOptions: createRequestOptions(bo.priority, "", bo.transactionTag),
+ 		}, gax.WithGRPCOptions(grpc.Header(&md)))
+ 
+ 		if getGFELatencyMetricsFlag() && md != nil && c.ct != nil {

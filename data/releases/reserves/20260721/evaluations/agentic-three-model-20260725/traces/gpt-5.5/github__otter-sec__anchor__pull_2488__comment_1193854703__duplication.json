@@ -1,0 +1,292 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 260,
+      "path": "client/src/lib.rs",
+      "start_line": 1
+    },
+    "response_chars": 74,
+    "round": 1,
+    "tool_result": {
+      "content": "1: //! `anchor_client` provides an RPC client to send transactions and fetch\n2: //! deserialized accounts from Solana programs written in `anchor_lang`.\n3: \n4: use anchor_lang::solana_program::hash::Hash;\n5: use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};\n6: use anchor_lang::solana_program::program_error::ProgramError;\n7: use anchor_lang::solana_program::pubkey::Pubkey;\n8: use anchor_lang::{InstructionData, ToAccountMetas};\n9: use regex::Regex;\n10: use solana_client::pubsub_client::PubsubClientSubscription;\n11: use solana_client::{\n12:     client_error::ClientError as SolanaClientError,\n13:     rpc_response::{Response as RpcResponse, RpcLogsResponse},\n14: };\n15: use solana_sdk::account::Account;\n16: use solana_sdk::commitment_config::CommitmentConfig;\n17: use solana_sdk::signature::{Signature, Signer};\n18: use solana_sdk::transaction::Transaction;\n19: use std::iter::Map;\n20: use std::ops::Deref;\n21: use std::vec::IntoIter;\n22: use thiserror::Error;\n23: \n24: pub use anchor_lang;\n25: pub use cluster::Cluster;\n26: pub use solana_client;\n27: pub use solana_sdk;\n28: \n29: mod cluster;\n30: \n31: #[cfg(not(feature = \"async\"))]\n32: mod blocking;\n33: #[cfg(feature = \"async\")]\n34: mod nonblocking;\n35: \n36: const PROGRAM_LOG: &str = \"Program log: \";\n37: const PROGRAM_DATA: &str = \"Program data: \";\n38: \n39: /// EventHandle unsubscribes from a program event stream on drop.\n40: pub type EventHandle = PubsubClientSubscription<RpcResponse<RpcLogsResponse>>;\n41: \n42: /// Client defines the base configuration for building RPC clients to\n43: /// communicate with Anchor programs running on a Solana cluster. It's\n44: /// primary use is to build a `Program` client via the `program` method.\n45: pub struct Client<C> {\n46:     cfg: Config<C>,\n47: }\n48: \n49: impl<C: Clone + Deref<Target = impl Signer>> Client<C> {\n50:     pub fn new(cluster: Cluster, payer: C) -> Self {\n51:         Self {\n52:             cfg: Config {\n53:                 cluster,\n54:                 payer,\n55:                 options: None,\n56:             },\n57:         }\n58:     }\n59: \n60:     pub fn new_with_options(cluster: Cluster, payer: C, options: CommitmentConfig) -> Self {\n61:         Self {\n62:             cfg: Config {\n63:                 cluster,\n64:                 payer,\n65:                 options: Some(options),\n66:             },\n67:         }\n68:     }\n69: \n70:     pub fn program(&self, program_id: Pubkey) -> Program<C> {\n71:         Program {\n72:             program_id,\n73:             cfg: Config {\n74:                 cluster: self.cfg.cluster.clone(),\n75:                 options: self.cfg.options,\n76:                 payer: self.cfg.payer.clone(),\n77:             },\n78:         }\n79:     }\n80: }\n81: \n82: // Internal configuration for a client.\n83: #[derive(Debug)]\n84: struct Config<C> {\n85:     cluster: Cluster,\n86:     payer: C,\n87:     options: Option<CommitmentConfig>,\n88: }\n89: \n90: /// Program is the primary client handle to be used to build and send requests.\n91: #[derive(Debug)]\n92: pub struct Program<C> {\n93:     program_id: Pubkey,\n94:     cfg: Config<C>,\n95: }\n96: \n97: impl<C: Deref<Target = impl Signer> + Clone> Program<C> {\n98:     pub fn payer(&self) -> Pubkey {\n99:         self.cfg.payer.pubkey()\n100:     }\n101: \n102:     /// Returns a request builder.\n103:     pub fn request(&self) -> RequestBuilder<C> {\n104:         RequestBuilder::from(\n105:             self.program_id,\n106:             self.cfg.cluster.url(),\n107:             self.cfg.payer.clone(),\n108:             self.cfg.options,\n109:         )\n110:     }\n111: \n112:     pub fn id(&self) -> Pubkey {\n113:         self.program_id\n114:     }\n115: }\n116: \n117: /// Iterator with items of type (Pubkey, T). Used to lazily deserialize account structs.\n118: /// Wrapper type hides the inner type from usages so the implementation can be changed.\n119: pub struct ProgramAccountsIterator<T> {\n120:     inner: Map<IntoIter<(Pubkey, Account)>, AccountConverterFunction<T>>,\n121: }\n122: \n123: /// Function type that accepts solana accounts and returns deserialized anchor accounts\n124: type AccountConverterFunction<T> = fn((Pubkey, Account)) -> Result<(Pubkey, T), ClientError>;\n125: \n126: impl<T> Iterator for ProgramAccountsIterator<T> {\n127:     type Item = Result<(Pubkey, T), ClientError>;\n128: \n129:     fn next(&mut self) -> Option<Self::Item> {\n130:         self.inner.next()\n131:     }\n132: }\n133: \n134: fn handle_program_log<T: anchor_lang::Event + anchor_lang::AnchorDeserialize>(\n135:     self_program_str: &str,\n136:     l: &str,\n137: ) -> Result<(Option<T>, Option<String>, bool), ClientError> {\n138:     // Log emitted from the current program.\n139:     if let Some(log) = l\n140:         .strip_prefix(PROGRAM_LOG)\n141:         .or_else(|| l.strip_prefix(PROGRAM_DATA))\n142:     {\n143:         let borsh_bytes = match anchor_lang::__private::base64::decode(log) {\n144:             Ok(borsh_bytes) => borsh_bytes,\n145:             _ => {\n146:                 #[cfg(feature = \"debug\")]\n147:                 println!(\"Could not base64 decode log: {}\", log);\n148:                 return Ok((None, None, false));\n149:             }\n150:         };\n151: \n152:         let mut slice: &[u8] = &borsh_bytes[..];\n153:         let disc: [u8; 8] = {\n154:             let mut disc = [0; 8];\n155:             disc.copy_from_slice(&borsh_bytes[..8]);\n156:             slice = &slice[8..];\n157:             disc\n158:         };\n159:         let mut event = None;\n160:         if disc == T::discriminator() {\n161:             let e: T = anchor_lang::AnchorDeserialize::deserialize(&mut slice)\n162:                 .map_err(|e| ClientError::LogParseError(e.to_string()))?;\n163:             event = Some(e);\n164:         }\n165:         Ok((event, None, false))\n166:     }\n167:     // System log.\n168:     else {\n169:         let (program, did_pop) = handle_system_log(self_program_str, l);\n170:         Ok((None, program, did_pop))\n171:     }\n172: }\n173: \n174: fn handle_system_log(this_program_str: &str, log: &str) -> (Option<String>, bool) {\n175:     if log.starts_with(&format!(\"Program {this_program_str} log:\")) {\n176:         (Some(this_program_str.to_string()), false)\n177:     } else if log.contains(\"invoke\") {\n178:         (Some(\"cpi\".to_string()), false) // Any string will do.\n179:     } else {\n180:         let re = Regex::new(r\"^Program (.*) success*$\").unwrap();\n181:         if re.is_match(log) {\n182:             (None, true)\n183:         } else {\n184:             (None, false)\n185:         }\n186:     }\n187: }\n188: \n189: struct Execution {\n190:     stack: Vec<String>,\n191: }\n192: \n193: impl Execution {\n194:     pub fn new(logs: &mut &[String]) -> Result<Self, ClientError> {\n195:         let l = &logs[0];\n196:         *logs = &logs[1..];\n197: \n198:         let re = Regex::new(r\"^Program (.*) invoke.*$\").unwrap();\n199:         let c = re\n200:             .captures(l)\n201:             .ok_or_else(|| ClientError::LogParseError(l.to_string()))?;\n202:         let program = c\n203:             .get(1)\n204:             .ok_or_else(|| ClientError::LogParseError(l.to_string()))?\n205:             .as_str()\n206:             .to_string();\n207:         Ok(Self {\n208:             stack: vec![program],\n209:         })\n210:     }\n211: \n212:     pub fn program(&self) -> String {\n213:         assert!(!self.stack.is_empty());\n214:         self.stack[self.stack.len() - 1].clone()\n215:     }\n216: \n217:     pub fn push(&mut self, new_program: String) {\n218:         self.stack.push(new_program);\n219:     }\n220: \n221:     pub fn pop(&mut self) {\n222:         assert!(!self.stack.is_empty());\n223:         self.stack.pop().unwrap();\n224:     }\n225: }\n226: \n227: #[derive(Debug)]\n228: pub struct EventContext {\n229:     pub signature: Signature,\n230:     pub slot: u64,\n231: }\n232: \n233: #[derive(Debug, Error)]\n234: pub enum ClientError {\n235:     #[error(\"Account not found\")]\n236:     AccountNotFound,\n237:     #[error(\"{0}\")]\n238:     AnchorError(#[from] anchor_lang::error::Error),\n239:     #[error(\"{0}\")]\n240:     ProgramError(#[from] ProgramError),\n241:     #[error(\"{0}\")]\n242:     SolanaClientError(#[from] SolanaClientError),\n243:     #[cfg(not(feature = \"async\"))]\n244:     #[error(\"{0}\")]\n245:     SolanaClientPubsubError(#[from] solana_client::pubsub_client::PubsubClientError),\n246:     #[cfg(feature = \"async\")]\n247:     #[error(\"{0}\")]\n248:     SolanaClientPubsubError(#[from] solana_client::nonblocking::pubsub_client::PubsubClientError),\n249:     #[error(\"Unable to parse log: {0}\")]\n250:     LogParseError(String),\n251:     #[cfg(feature = \"async\")]\n252:     #[error(\"No id was found for the event\")]\n253:     NoIdFound,\n254: }\n255: \n256: /// `RequestBuilder` provides a builder interface to create and send\n257: /// transactions to a cluster.\n258: pub struct RequestBuilder<'a, C> {\n259:     cluster: String,\n260:     program_id: Pubkey,",
+      "end_line": 260,
+      "path_lines": 405,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 2788,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 72,
+      "output_tokens_details": {
+        "reasoning_tokens": 44
+      },
+      "total_tokens": 2860
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 180,
+      "path": "client/src/blocking.rs",
+      "start_line": 1
+    },
+    "response_chars": 159,
+    "round": 2,
+    "tool_result": {
+      "content": "1: use anchor_lang::{prelude::Pubkey, AccountDeserialize, Discriminator};\n2: use solana_account_decoder::UiAccountEncoding;\n3: use solana_client::{\n4:     pubsub_client::PubsubClient,\n5:     rpc_client::RpcClient,\n6:     rpc_config::{\n7:         RpcAccountInfoConfig, RpcProgramAccountsConfig, RpcSendTransactionConfig,\n8:         RpcTransactionLogsConfig, RpcTransactionLogsFilter,\n9:     },\n10:     rpc_filter::{Memcmp, RpcFilterType},\n11: };\n12: use solana_sdk::{\n13:     commitment_config::CommitmentConfig, signature::Signature, signer::Signer,\n14:     transaction::Transaction,\n15: };\n16: use std::ops::Deref;\n17: \n18: use crate::{\n19:     handle_program_log, handle_system_log, ClientError, EventContext, EventHandle, Execution,\n20:     Program, ProgramAccountsIterator, RequestBuilder,\n21: };\n22: \n23: impl<C: Deref<Target = impl Signer> + Clone> Program<C> {\n24:     /// Returns the account at the given address.\n25:     pub fn account<T: AccountDeserialize>(&self, address: Pubkey) -> Result<T, ClientError> {\n26:         let rpc_client = RpcClient::new_with_commitment(\n27:             self.cfg.cluster.url().to_string(),\n28:             self.cfg.options.unwrap_or_default(),\n29:         );\n30:         let account = rpc_client\n31:             .get_account_with_commitment(&address, CommitmentConfig::processed())?\n32:             .value\n33:             .ok_or(ClientError::AccountNotFound)?;\n34:         let mut data: &[u8] = &account.data;\n35:         T::try_deserialize(&mut data).map_err(Into::into)\n36:     }\n37: \n38:     /// Returns all program accounts of the given type matching the given filters\n39:     pub fn accounts<T: AccountDeserialize + Discriminator>(\n40:         &self,\n41:         filters: Vec<RpcFilterType>,\n42:     ) -> Result<Vec<(Pubkey, T)>, ClientError> {\n43:         self.accounts_lazy(filters)?.collect()\n44:     }\n45: \n46:     /// Returns all program accounts of the given type matching the given filters as an iterator\n47:     /// Deserialization is executed lazily\n48:     pub fn accounts_lazy<T: AccountDeserialize + Discriminator>(\n49:         &self,\n50:         filters: Vec<RpcFilterType>,\n51:     ) -> Result<ProgramAccountsIterator<T>, ClientError> {\n52:         let account_type_filter =\n53:             RpcFilterType::Memcmp(Memcmp::new_base58_encoded(0, &T::discriminator()));\n54:         let config = RpcProgramAccountsConfig {\n55:             filters: Some([vec![account_type_filter], filters].concat()),\n56:             account_config: RpcAccountInfoConfig {\n57:                 encoding: Some(UiAccountEncoding::Base64),\n58:                 ..RpcAccountInfoConfig::default()\n59:             },\n60:             ..RpcProgramAccountsConfig::default()\n61:         };\n62:         Ok(ProgramAccountsIterator {\n63:             inner: self\n64:                 .rpc()\n65:                 .get_program_accounts_with_config(&self.id(), config)?\n66:                 .into_iter()\n67:                 .map(|(key, account)| {\n68:                     Ok((key, T::try_deserialize(&mut (&account.data as &[u8]))?))\n69:                 }),\n70:         })\n71:     }\n72: \n73:     pub fn rpc(&self) -> RpcClient {\n74:         RpcClient::new_with_commitment(\n75:             self.cfg.cluster.url().to_string(),\n76:             self.cfg.options.unwrap_or_default(),\n77:         )\n78:     }\n79: \n80:     pub fn on<T: anchor_lang::Event + anchor_lang::AnchorDeserialize>(\n81:         &self,\n82:         f: impl Fn(&EventContext, T) + Send + 'static,\n83:     ) -> Result<EventHandle, ClientError> {\n84:         let addresses = vec![self.program_id.to_string()];\n85:         let filter = RpcTransactionLogsFilter::Mentions(addresses);\n86:         let ws_url = self.cfg.cluster.ws_url().to_string();\n87:         let cfg = RpcTransactionLogsConfig {\n88:             commitment: self.cfg.options,\n89:         };\n90:         let self_program_str = self.program_id.to_string();\n91:         let (client, receiver) = PubsubClient::logs_subscribe(&ws_url, filter, cfg)?;\n92:         std::thread::spawn(move || {\n93:             loop {\n94:                 match receiver.recv() {\n95:                     Ok(logs) => {\n96:                         let ctx = EventContext {\n97:                             signature: logs.value.signature.parse().unwrap(),\n98:                             slot: logs.context.slot,\n99:                         };\n100:                         let mut logs = &logs.value.logs[..];\n101:                         if !logs.is_empty() {\n102:                             if let Ok(mut execution) = Execution::new(&mut logs) {\n103:                                 for l in logs {\n104:                                     // Parse the log.\n105:                                     let (event, new_program, did_pop) = {\n106:                                         if self_program_str == execution.program() {\n107:                                             handle_program_log(&self_program_str, l).unwrap_or_else(\n108:                                                 |e| {\n109:                                                     println!(\"Unable to parse log: {e}\");\n110:                                                     std::process::exit(1);\n111:                                                 },\n112:                                             )\n113:                                         } else {\n114:                                             let (program, did_pop) =\n115:                                                 handle_system_log(&self_program_str, l);\n116:                                             (None, program, did_pop)\n117:                                         }\n118:                                     };\n119:                                     // Emit the event.\n120:                                     if let Some(e) = event {\n121:                                         f(&ctx, e);\n122:                                     }\n123:                                     // Switch program context on CPI.\n124:                                     if let Some(new_program) = new_program {\n125:                                         execution.push(new_program);\n126:                                     }\n127:                                     // Program returned.\n128:                                     if did_pop {\n129:                                         execution.pop();\n130:                                     }\n131:                                 }\n132:                             }\n133:                         }\n134:                     }\n135:                     Err(_err) => {\n136:                         return;\n137:                     }\n138:                 }\n139:             }\n140:         });\n141:         Ok(client)\n142:     }\n143: }\n144: \n145: impl<'a, C: Deref<Target = impl Signer> + Clone> RequestBuilder<'a, C> {\n146:     pub fn signed_transaction(&self) -> Result<Transaction, ClientError> {\n147:         let latest_hash =\n148:             RpcClient::new_with_commitment(&self.cluster, self.options).get_latest_blockhash()?;\n149:         let tx = self.signed_transaction_with_blockhash(latest_hash)?;\n150: \n151:         Ok(tx)\n152:     }\n153: \n154:     pub fn send(self) -> Result<Signature, ClientError> {\n155:         let rpc_client = RpcClient::new_with_commitment(&self.cluster, self.options);\n156:         let latest_hash = rpc_client.get_latest_blockhash()?;\n157:         let tx = self.signed_transaction_with_blockhash(latest_hash)?;\n158: \n159:         rpc_client\n160:             .send_and_confirm_transaction(&tx)\n161:             .map_err(Into::into)\n162:     }\n163: \n164:     pub fn send_with_spinner_and_config(\n165:         self,\n166:         config: RpcSendTransactionConfig,\n167:     ) -> Result<Signature, ClientError> {\n168:         let rpc_client = RpcClient::new_with_commitment(&self.cluster, self.options);\n169:         let latest_hash = rpc_client.get_latest_blockhash()?;\n170:         let tx = self.signed_transaction_with_blockhash(latest_hash)?;\n171: \n172:         rpc_client\n173:             .send_and_confirm_transaction_with_spinner_and_config(\n174:                 &tx,\n175:                 rpc_client.commitment(),\n176:                 config,\n177:             )\n178:             .map_err(Into::into)\n179:     }\n180: }",
+      "end_line": 180,
+      "path_lines": 180,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 5608,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 142,
+      "output_tokens_details": {
+        "reasoning_tokens": 83
+      },
+      "total_tokens": 5750
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "client/src/lib.rs",
+      "query": "fn "
+    },
+    "response_chars": 4012,
+    "round": 3,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 50,
+          "text": "    pub fn new(cluster: Cluster, payer: C) -> Self {"
+        },
+        {
+          "line": 60,
+          "text": "    pub fn new_with_options(cluster: Cluster, payer: C, options: CommitmentConfig) -> Self {"
+        },
+        {
+          "line": 70,
+          "text": "    pub fn program(&self, program_id: Pubkey) -> Program<C> {"
+        },
+        {
+          "line": 98,
+          "text": "    pub fn payer(&self) -> Pubkey {"
+        },
+        {
+          "line": 103,
+          "text": "    pub fn request(&self) -> RequestBuilder<C> {"
+        },
+        {
+          "line": 112,
+          "text": "    pub fn id(&self) -> Pubkey {"
+        },
+        {
+          "line": 129,
+          "text": "    fn next(&mut self) -> Option<Self::Item> {"
+        },
+        {
+          "line": 134,
+          "text": "fn handle_program_log<T: anchor_lang::Event + anchor_lang::AnchorDeserialize>("
+        },
+        {
+          "line": 174,
+          "text": "fn handle_system_log(this_program_str: &str, log: &str) -> (Option<String>, bool) {"
+        },
+        {
+          "line": 194,
+          "text": "    pub fn new(logs: &mut &[String]) -> Result<Self, ClientError> {"
+        },
+        {
+          "line": 212,
+          "text": "    pub fn program(&self) -> String {"
+        },
+        {
+          "line": 217,
+          "text": "    pub fn push(&mut self, new_program: String) {"
+        },
+        {
+          "line": 221,
+          "text": "    pub fn pop(&mut self) {"
+        },
+        {
+          "line": 271,
+          "text": "    pub fn from("
+        },
+        {
+          "line": 290,
+          "text": "    pub fn payer(mut self, payer: C) -> Self {"
+        },
+        {
+          "line": 296,
+          "text": "    pub fn cluster(mut self, url: &str) -> Self {"
+        },
+        {
+          "line": 302,
+          "text": "    pub fn instruction(mut self, ix: Instruction) -> Self {"
+        },
+        {
+          "line": 308,
+          "text": "    pub fn program(mut self, program_id: Pubkey) -> Self {"
+        },
+        {
+          "line": 314,
+          "text": "    pub fn accounts(mut self, accounts: impl ToAccountMetas) -> Self {"
+        },
+        {
+          "line": 321,
+          "text": "    pub fn options(mut self, options: CommitmentConfig) -> Self {"
+        }
+      ],
+      "query": "fn ",
+      "truncated": true
+    },
+    "usage": {
+      "input_tokens": 7670,
+      "input_tokens_details": {
+        "cached_tokens": 5376
+      },
+      "output_tokens": 2411,
+      "output_tokens_details": {
+        "reasoning_tokens": 1480
+      },
+      "total_tokens": 10081
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "client/src/lib.rs",
+      "query": "EventContext"
+    },
+    "response_chars": 203,
+    "round": 4,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 228,
+          "text": "pub struct EventContext {"
+        }
+      ],
+      "query": "EventContext",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 8230,
+      "input_tokens_details": {
+        "cached_tokens": 7424
+      },
+      "output_tokens": 403,
+      "output_tokens_details": {
+        "reasoning_tokens": 332
+      },
+      "total_tokens": 8633
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "                while let Some(logs) = notifications.next().await {\n                    let ctx = EventContext {\n                        signature: logs.value.signature.parse().unwrap(),\n                        slot: logs.context.slot,\n                    };\n                    process_event_logs::<T, _>(&self_program_str, &ctx, &logs.value.logs, &f);\n                }",
+          "end_line": 115,
+          "start_line": 76
+        },
+        {
+          "content": "\nfn process_event_logs<T, F>(\n    self_program_str: &str,\n    ctx: &EventContext,\n    event_logs: &[String],\n    f: &F,\n) where\n    T: anchor_lang::Event + anchor_lang::AnchorDeserialize,\n    F: Fn(&EventContext, T),\n{\n    let mut logs = event_logs;\n    if !logs.is_empty() {\n        if let Ok(mut execution) = Execution::new(&mut logs) {\n            for l in logs {\n                // Parse the log.\n                let (event, new_program, did_pop) = {\n                    if self_program_str == execution.program() {\n                        handle_program_log(self_program_str, l).unwrap_or_else(|e| {\n                            println!(\"Unable to parse log: {e}\");\n                            std::process::exit(1);\n                        })\n                    } else {\n                        let (program, did_pop) = handle_system_log(self_program_str, l);\n                        (None, program, did_pop)\n                    }\n                };\n                // Emit the event.\n                if let Some(e) = event {\n                    f(ctx, e);\n                }\n                // Switch program context on CPI.\n                if let Some(new_program) = new_program {\n                    execution.push(new_program);\n                }\n                // Program returned.\n                if did_pop {\n                    execution.pop();\n                }\n            }\n        }\n    }\n}\n",
+          "end_line": 134,
+          "start_line": 135
+        }
+      ]
+    },
+    "response_chars": 3985,
+    "round": 5,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 115,
+          "replacement_lines": 7,
+          "start_line": 76
+        },
+        {
+          "end_line": 134,
+          "replacement_lines": 42,
+          "start_line": 135
+        }
+      ],
+      "current_file_lines": 262,
+      "updated_excerpt": {
+        "content": "66:             async move {\n67:                 let (mut notifications, unsubscribe) =\n68:                     client.logs_subscribe(filter, config).await?;\n69: \n70:                 unsubscribe_sender.send(unsubscribe).map_err(|e| {\n71:                     ClientError::SolanaClientPubsubError(PubsubClientError::UnexpectedMessageError(\n72:                         e.to_string(),\n73:                     ))\n74:                 })?;\n75: \n76:                 while let Some(logs) = notifications.next().await {\n77:                     let ctx = EventContext {\n78:                         signature: logs.value.signature.parse().unwrap(),\n79:                         slot: logs.context.slot,\n80:                     };\n81:                     process_event_logs::<T, _>(&self_program_str, &ctx, &logs.value.logs, &f);\n82:                 }\n83:                 Ok::<(), ClientError>(())\n84:             }\n85:         });\n86:         let id = find_id(&self.events)?;\n87:         self.events.insert(id, (handle, unsubscribe_receiver));\n88: \n89:         return Ok(id);\n90:     }\n91: \n92:     pub async fn unsubscribe(&mut self, id: u8) {\n93:         if let Some(mut event) = self.events.remove(&id) {\n94:             if let Some(unsubscribe) = event.1.recv().await {\n95:                 unsubscribe().await;\n96:             }\n97: \n98:             let _ = event.0.await;\n99:         }\n100:     }\n101: }\n102: \n103: fn process_event_logs<T, F>(\n104:     self_program_str: &str,\n105:     ctx: &EventContext,\n106:     event_logs: &[String],",
+        "end_line": 106,
+        "path_lines": 262,
+        "start_line": 66
+      }
+    },
+    "usage": {
+      "input_tokens": 8292,
+      "input_tokens_details": {
+        "cached_tokens": 7936
+      },
+      "output_tokens": 2468,
+      "output_tokens_details": {
+        "reasoning_tokens": 1549
+      },
+      "total_tokens": 10760
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 150,
+      "path": "client/src/nonblocking.rs",
+      "start_line": 1
+    },
+    "response_chars": 102,
+    "round": 6,
+    "tool_result": {
+      "content": "1: use crate::{\n2:     handle_program_log, handle_system_log, ClientError, EventContext, Execution, Program,\n3:     ProgramAccountsIterator, RequestBuilder,\n4: };\n5: use anchor_lang::{prelude::Pubkey, AccountDeserialize, Discriminator};\n6: use futures::stream::StreamExt;\n7: use futures::Future;\n8: use solana_account_decoder::UiAccountEncoding;\n9: use solana_client::{\n10:     nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcClient},\n11:     pubsub_client::PubsubClientError,\n12:     rpc_config::{\n13:         RpcAccountInfoConfig, RpcProgramAccountsConfig, RpcSendTransactionConfig,\n14:         RpcTransactionLogsConfig, RpcTransactionLogsFilter,\n15:     },\n16:     rpc_filter::{Memcmp, RpcFilterType},\n17: };\n18: use solana_sdk::{\n19:     commitment_config::CommitmentConfig, signature::Signature, signer::Signer,\n20:     transaction::Transaction,\n21: };\n22: use std::{collections::BTreeMap, ops::Deref, pin::Pin, sync::Arc};\n23: use tokio::{\n24:     spawn,\n25:     sync::mpsc::{unbounded_channel, UnboundedReceiver},\n26:     task::JoinHandle,\n27: };\n28: \n29: type UnsubscribeFunc = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;\n30: \n31: pub struct EventHandler {\n32:     client: Arc<PubsubClient>,\n33:     program_id: Pubkey,\n34:     config: RpcTransactionLogsConfig,\n35:     events: BTreeMap<\n36:         u8,\n37:         (\n38:             JoinHandle<Result<(), ClientError>>,\n39:             UnboundedReceiver<UnsubscribeFunc>,\n40:         ),\n41:     >,\n42: }\n43: \n44: impl EventHandler {\n45:     pub fn new(client: PubsubClient, program_id: Pubkey, config: RpcTransactionLogsConfig) -> Self {\n46:         Self {\n47:             client: Arc::new(client),\n48:             program_id,\n49:             config,\n50:             events: BTreeMap::new(),\n51:         }\n52:     }\n53:     pub fn subscribe<T: anchor_lang::Event + anchor_lang::AnchorDeserialize>(\n54:         &mut self,\n55:         f: impl Fn(&EventContext, T) + Send + 'static,\n56:     ) -> Result<u8, ClientError> {\n57:         let addresses = vec![self.program_id.to_string()];\n58:         let filter = RpcTransactionLogsFilter::Mentions(addresses);\n59:         let self_program_str = self.program_id.to_string();\n60:         let config = self.config.clone();\n61:         let (unsubscribe_sender, unsubscribe_receiver) = unbounded_channel::<_>();\n62: \n63:         let handle = spawn({\n64:             let client = Arc::clone(&self.client);\n65: \n66:             async move {\n67:                 let (mut notifications, unsubscribe) =\n68:                     client.logs_subscribe(filter, config).await?;\n69: \n70:                 unsubscribe_sender.send(unsubscribe).map_err(|e| {\n71:                     ClientError::SolanaClientPubsubError(PubsubClientError::UnexpectedMessageError(\n72:                         e.to_string(),\n73:                     ))\n74:                 })?;\n75: \n76:                 while let Some(logs) = notifications.next().await {\n77:                     let ctx = EventContext {\n78:                         signature: logs.value.signature.parse().unwrap(),\n79:                         slot: logs.context.slot,\n80:                     };\n81:                     process_event_logs::<T, _>(&self_program_str, &ctx, &logs.value.logs, &f);\n82:                 }\n83:                 Ok::<(), ClientError>(())\n84:             }\n85:         });\n86:         let id = find_id(&self.events)?;\n87:         self.events.insert(id, (handle, unsubscribe_receiver));\n88: \n89:         return Ok(id);\n90:     }\n91: \n92:     pub async fn unsubscribe(&mut self, id: u8) {\n93:         if let Some(mut event) = self.events.remove(&id) {\n94:             if let Some(unsubscribe) = event.1.recv().await {\n95:                 unsubscribe().await;\n96:             }\n97: \n98:             let _ = event.0.await;\n99:         }\n100:     }\n101: }\n102: \n103: fn process_event_logs<T, F>(\n104:     self_program_str: &str,\n105:     ctx: &EventContext,\n106:     event_logs: &[String],\n107:     f: &F,\n108: ) where\n109:     T: anchor_lang::Event + anchor_lang::AnchorDeserialize,\n110:     F: Fn(&EventContext, T),\n111: {\n112:     let mut logs = event_logs;\n113:     if !logs.is_empty() {\n114:         if let Ok(mut execution) = Execution::new(&mut logs) {\n115:             for l in logs {\n116:                 // Parse the log.\n117:                 let (event, new_program, did_pop) = {\n118:                     if self_program_str == execution.program() {\n119:                         handle_program_log(self_program_str, l).unwrap_or_else(|e| {\n120:                             println!(\"Unable to parse log: {e}\");\n121:                             std::process::exit(1);\n122:                         })\n123:                     } else {\n124:                         let (program, did_pop) = handle_system_log(self_program_str, l);\n125:                         (None, program, did_pop)\n126:                     }\n127:                 };\n128:                 // Emit the event.\n129:                 if let Some(e) = event {\n130:                     f(ctx, e);\n131:                 }\n132:                 // Switch program context on CPI.\n133:                 if let Some(new_program) = new_program {\n134:                     execution.push(new_program);\n135:                 }\n136:                 // Program returned.\n137:                 if did_pop {\n138:                     execution.pop();\n139:                 }\n140:             }\n141:         }\n142:     }\n143: }\n144: \n145: impl<C: Deref<Target = impl Signer> + Clone> Program<C> {\n146:     /// Returns the account at the given address.\n147:     pub async fn account<T: AccountDeserialize>(&self, address: Pubkey) -> Result<T, ClientError> {\n148:         let rpc_client = RpcClient::new_with_commitment(\n149:             self.cfg.cluster.url().to_string(),\n150:             self.cfg.options.unwrap_or_default(),",
+      "end_line": 150,
+      "path_lines": 262,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 9244,
+      "input_tokens_details": {
+        "cached_tokens": 7936
+      },
+      "output_tokens": 1013,
+      "output_tokens_details": {
+        "reasoning_tokens": 972
+      },
+      "total_tokens": 10257
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 7,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__otter-sec__anchor__pull_2488__comment_1193854703__duplication.patch"
+    },
+    "usage": {
+      "input_tokens": 10928,
+      "input_tokens_details": {
+        "cached_tokens": 8960
+      },
+      "output_tokens": 527,
+      "output_tokens_details": {
+        "reasoning_tokens": 516
+      },
+      "total_tokens": 11455
+    }
+  }
+]

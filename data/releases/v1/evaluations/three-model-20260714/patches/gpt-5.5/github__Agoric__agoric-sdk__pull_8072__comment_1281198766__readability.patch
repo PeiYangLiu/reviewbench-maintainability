@@ -1,0 +1,89 @@
+--- a/golang/cosmos/x/swingset/keeper/swing_store_exports_handler.go
++++ b/golang/cosmos/x/swingset/keeper/swing_store_exports_handler.go
+@@ -258,10 +258,23 @@
+ }
+ 
+ type swingStoreExportAction struct {
+-	Type        string            `json:"type"` // SWING_STORE_EXPORT
+-	BlockHeight uint64            `json:"blockHeight,omitempty"`
+-	Request     string            `json:"request"` // "initiate", "discard", "retrieve", or "restore"
+-	Args        []json.RawMessage `json:"args,omitempty"`
++	Type        string `json:"type"` // SWING_STORE_EXPORT
++	BlockHeight uint64 `json:"blockHeight,omitempty"`
++	Request     string `json:"request"` // "discard" or "retrieve"
++}
++
++type swingStoreExportInitiateAction struct {
++	Type        string                    `json:"type"` // SWING_STORE_EXPORT
++	BlockHeight uint64                    `json:"blockHeight,omitempty"`
++	Request     string                    `json:"request"` // "initiate"
++	Args        []SwingStoreExportOptions `json:"args,omitempty"`
++}
++
++type swingStoreExportRestoreAction struct {
++	Type        string                    `json:"type"` // SWING_STORE_EXPORT
++	BlockHeight uint64                    `json:"blockHeight,omitempty"`
++	Request     string                    `json:"request"` // "restore"
++	Args        []swingStoreImportOptions `json:"args,omitempty"`
+ }
+ 
+ // SwingStoreExportOptions are configurable options provided to the JS swing-store export
+@@ -330,11 +343,6 @@
+ 		return err
+ 	}
+ 
+-	encodedExportOptions, err := json.Marshal(exportOptions)
+-	if err != nil {
+-		return err
+-	}
+-
+ 	var logger log.Logger
+ 	if blockHeight != 0 {
+ 		logger = exportsHandler.logger.With("height", blockHeight)
+@@ -364,15 +372,15 @@
+ 			close(operationDetails.exportDone)
+ 		}()
+ 
+-		action := &swingStoreExportAction{
++		initiateAction := &swingStoreExportInitiateAction{
+ 			Type:        "SWING_STORE_EXPORT",
+ 			BlockHeight: blockHeight,
+ 			Request:     "initiate",
+-			Args:        []json.RawMessage{encodedExportOptions},
++			Args:        []SwingStoreExportOptions{exportOptions},
+ 		}
+ 
+ 		// blockingSend for SWING_STORE_EXPORT action is safe to call from a goroutine
+-		_, err = exportsHandler.blockingSend(action, false)
++		_, err = exportsHandler.blockingSend(initiateAction, false)
+ 
+ 		if err != nil {
+ 			// First indicate an export is no longer in progress if the call to
+@@ -419,7 +427,7 @@
+ 		// Discarding the export so invalidate retrieveExport
+ 		operationDetails.exportRetrieved = true
+ 
+-		action = &swingStoreExportAction{
++		action := &swingStoreExportAction{
+ 			Type:        "SWING_STORE_EXPORT",
+ 			BlockHeight: blockHeight,
+ 			Request:     "discard",
+@@ -673,16 +681,11 @@
+ 		IncludeHistorical: restoreOptions.IncludeHistorical,
+ 	}
+ 
+-	encodedImportOptions, err := json.Marshal(importOptions)
+-	if err != nil {
+-		return err
+-	}
+-
+-	action := &swingStoreExportAction{
++	action := &swingStoreExportRestoreAction{
+ 		Type:        "SWING_STORE_EXPORT",
+ 		BlockHeight: blockHeight,
+ 		Request:     "restore",
+-		Args:        []json.RawMessage{encodedImportOptions},
++		Args:        []swingStoreImportOptions{importOptions},
+ 	}
+ 
+ 	_, err = exportsHandler.blockingSend(action, true)

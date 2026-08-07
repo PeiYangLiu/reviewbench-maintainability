@@ -1,0 +1,76 @@
+diff --git a/internal/graph/check_fast_path.go b/internal/graph/check_fast_path.go
+index 70aeb51..52ef5f6 100644
+--- a/internal/graph/check_fast_path.go
++++ b/internal/graph/check_fast_path.go
+@@ -25,10 +25,10 @@ type iteratorMsg struct {
+ }
+ 
+ type iteratorProducer struct {
+-	idx      int
+-	iter     storage.TupleKeyIterator
+-	done     bool
+-	producer chan *iteratorMsg
++	idx          int
++	iter         storage.TupleKeyIterator
++	done         bool
++	iteratorChan chan *iteratorMsg
+ }
+ 
+ // NOTE: caller should consider running this in a goroutine to not block.
+@@ -37,7 +37,7 @@ func cleanupIteratorProducers(iterProducers []*iteratorProducer) {
+ 		if iterProducer.iter != nil {
+ 			iterProducer.iter.Stop()
+ 		}
+-		for msg := range iterProducer.producer {
++		for msg := range iterProducer.iteratorChan {
+ 			if msg.iter != nil {
+ 				msg.iter.Stop()
+ 			}
+@@ -46,10 +46,10 @@ func cleanupIteratorProducers(iterProducers []*iteratorProducer) {
+ }
+ 
+ // pollIteratorProducers will return a list of the remaining active producers.
+-// To be considered active your producer channel must still be open.
++// To be considered active, the producer's iterator channel must still be open.
+ func pollIteratorProducers(ctx context.Context, iterProducers []*iteratorProducer) ([]*iteratorProducer, error) {
+-	for _, producer := range iterProducers {
+-		if producer.iter != nil || producer.done {
++	for _, iterProducer := range iterProducers {
++		if iterProducer.iter != nil || iterProducer.done {
+ 			// no need to poll further
+ 			continue
+ 		}
+@@ -57,16 +57,16 @@ func pollIteratorProducers(ctx context.Context, iterProducers []*iteratorProduce
+ 		select {
+ 		case <-ctx.Done():
+ 			return nil, ctx.Err()
+-		case i, ok := <-producer.producer:
++		case i, ok := <-iterProducer.iteratorChan:
+ 			if !ok {
+-				producer.done = true
++				iterProducer.done = true
+ 				break
+ 			}
+ 			if i.err != nil {
+ 				// NOTE: how do we want to handle missing iterators? full error out?
+ 				return nil, i.err
+ 			}
+-			producer.iter = i.iter
++			iterProducer.iter = i.iter
+ 		}
+ 	}
+ 	// TODO: in go1.23 compare performance vs slices.Collect
+@@ -471,11 +471,11 @@ func fastPathDifference(ctx context.Context, iterProducers []*iteratorProducer,
+ func (c *LocalChecker) fastPathOperationSetup(ctx context.Context, req *ResolveCheckRequest, op setOperatorType, children ...*openfgav1.Userset) (chan *iteratorMsg, error) {
+ 	iterProducers := make([]*iteratorProducer, 0, len(children))
+ 	for idx, child := range children {
+-		producerChan, err := c.fastPathRewrite(ctx, req, child)
++		iteratorChan, err := c.fastPathRewrite(ctx, req, child)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+-		iterProducers = append(iterProducers, &iteratorProducer{idx: idx, producer: producerChan})
++		iterProducers = append(iterProducers, &iteratorProducer{idx: idx, iteratorChan: iteratorChan})
+ 	}
+ 	var resolver fastPathSetHandler
+ 	switch op {

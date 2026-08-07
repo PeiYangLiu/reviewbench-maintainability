@@ -1,0 +1,148 @@
+diff --git a/redis/cluster.py b/redis/cluster.py
+index 4ff28e0..e0f52ab 100644
+--- a/redis/cluster.py
++++ b/redis/cluster.py
+@@ -6,7 +6,6 @@ import time
+ from collections import OrderedDict
+ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+ 
+-from cachetools import Cache
+ from redis._parsers import CommandsParser, Encoder
+ from redis._parsers.helpers import parse_scan
+ from redis.backoff import default_backoff
+@@ -187,6 +186,32 @@ def cleanup_kwargs(**kwargs):
+     return connection_kwargs
+ 
+ 
++
++class _CacheOptions:
++    def __init__(
++        self,
++        use_cache: bool = False,
++        cache: Optional[Any] = None,
++        cache_eviction: Optional[EvictionPolicy] = None,
++        cache_size: int = 128,
++        cache_ttl: int = 300,
++    ):
++        self.use_cache = use_cache
++        self.cache = cache
++        self.cache_eviction = cache_eviction
++        self.cache_size = cache_size
++        self.cache_ttl = cache_ttl
++
++    def as_kwargs(self) -> Dict[str, Any]:
++        return {
++            "use_cache": self.use_cache,
++            "cache": self.cache,
++            "cache_eviction": self.cache_eviction,
++            "cache_size": self.cache_size,
++            "cache_ttl": self.cache_ttl,
++        }
++
++
+ class ClusterParser(DefaultParser):
+     EXCEPTION_CLASSES = dict_merge(
+         DefaultParser.EXCEPTION_CLASSES,
+@@ -504,7 +529,7 @@ class RedisCluster(AbstractRedisCluster, RedisClusterCommands):
+         url: Optional[str] = None,
+         address_remap: Optional[Callable[[Tuple[str, int]], Tuple[str, int]]] = None,
+         use_cache: bool = False,
+-        cache: Optional[Cache] = None,
++        cache: Optional[Any] = None,
+         cache_eviction: Optional[EvictionPolicy] = None,
+         cache_size: int = 128,
+         cache_ttl: int = 300,
+@@ -635,6 +660,14 @@ class RedisCluster(AbstractRedisCluster, RedisClusterCommands):
+         if use_cache and protocol not in [3, "3"]:
+             raise RedisError("Client caching is only supported with RESP version 3")
+ 
++        cache_config = _CacheOptions(
++            use_cache=use_cache,
++            cache=cache,
++            cache_eviction=cache_eviction,
++            cache_size=cache_size,
++            cache_ttl=cache_ttl,
++        )
++
+         self.cluster_error_retry_attempts = cluster_error_retry_attempts
+         self.command_flags = self.__class__.COMMAND_FLAGS.copy()
+         self.node_flags = self.__class__.NODE_FLAGS.copy()
+@@ -647,11 +680,7 @@ class RedisCluster(AbstractRedisCluster, RedisClusterCommands):
+             require_full_coverage=require_full_coverage,
+             dynamic_startup_nodes=dynamic_startup_nodes,
+             address_remap=address_remap,
+-            use_cache=use_cache,
+-            cache=cache,
+-            cache_eviction=cache_eviction,
+-            cache_size=cache_size,
+-            cache_ttl=cache_ttl,
++            cache_config=cache_config,
+             **kwargs,
+         )
+ 
+@@ -1332,10 +1361,11 @@ class NodesManager:
+         connection_pool_class=ConnectionPool,
+         address_remap: Optional[Callable[[Tuple[str, int]], Tuple[str, int]]] = None,
+         use_cache: bool = False,
+-        cache: Optional[Cache] = None,
++        cache: Optional[Any] = None,
+         cache_eviction: Optional[EvictionPolicy] = None,
+         cache_size: int = 128,
+         cache_ttl: int = 300,
++        cache_config: Optional[_CacheOptions] = None,
+         **kwargs,
+     ):
+         self.nodes_cache = {}
+@@ -1348,11 +1378,18 @@ class NodesManager:
+         self._dynamic_startup_nodes = dynamic_startup_nodes
+         self.connection_pool_class = connection_pool_class
+         self.address_remap = address_remap
+-        self.use_cache = use_cache
+-        self.cache = cache
+-        self.cache_eviction = cache_eviction
+-        self.cache_size = cache_size
+-        self.cache_ttl = cache_ttl
++        self.cache_config = cache_config or _CacheOptions(
++            use_cache=use_cache,
++            cache=cache,
++            cache_eviction=cache_eviction,
++            cache_size=cache_size,
++            cache_ttl=cache_ttl,
++        )
++        self.use_cache = self.cache_config.use_cache
++        self.cache = self.cache_config.cache
++        self.cache_eviction = self.cache_config.cache_eviction
++        self.cache_size = self.cache_config.cache_size
++        self.cache_ttl = self.cache_config.cache_ttl
+         self._moved_exception = None
+         self.connection_kwargs = kwargs
+         self.read_load_balancer = LoadBalancer()
+@@ -1492,25 +1529,18 @@ class NodesManager:
+                 )
+ 
+     def create_redis_node(self, host, port, **kwargs):
++        cache_kwargs = self.cache_config.as_kwargs()
+         if self.from_url:
+             # Create a redis node with a costumed connection pool
+             kwargs.update({"host": host})
+             kwargs.update({"port": port})
+-            kwargs.update({"use_cache": self.use_cache})
+-            kwargs.update({"cache": self.cache})
+-            kwargs.update({"cache_eviction": self.cache_eviction})
+-            kwargs.update({"cache_size": self.cache_size})
+-            kwargs.update({"cache_ttl": self.cache_ttl})
++            kwargs.update(cache_kwargs)
+             r = Redis(connection_pool=self.connection_pool_class(**kwargs))
+         else:
+             r = Redis(
+                 host=host,
+                 port=port,
+-                use_cache=self.use_cache,
+-                cache=self.cache,
+-                cache_eviction=self.cache_eviction,
+-                cache_size=self.cache_size,
+-                cache_ttl=self.cache_ttl,
++                **cache_kwargs,
+                 **kwargs,
+             )
+         return r

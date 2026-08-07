@@ -1,0 +1,59 @@
+--- a/spinta/backends/postgresql/commands/write.py
++++ b/spinta/backends/postgresql/commands/write.py
+@@ -1,4 +1,4 @@
+-from typing import AsyncIterator, cast
++from typing import AsyncIterator, cast, Tuple
+ 
+ import re
+ import psycopg2
+@@ -9,6 +9,18 @@
+ from spinta.components import Context, Model, DataItem, DataSubItem
+ from spinta.backends.postgresql.components import PostgreSQL
+ from spinta.backends.postgresql.sqlalchemy import utcnow
++
++
++def _get_error_property_and_ref_id(error: exc.IntegrityError) -> Tuple[str, str]:
++    error_message = error.orig.diag.message_detail
++    error_property_name = re.search('Key \((.*?)\)', error_message).group(1).split(".")[0]
++    error_ref_id = re.search('\)=\((.*?)\)', error_message).group(1)
++    return error_property_name, error_ref_id
++
++
++def _get_error_model(error: exc.IntegrityError) -> str:
++    error_message = error.orig.diag.message_detail
++    return re.search('\"([^"]*)\"', error_message).group(1)
+ 
+ 
+ @commands.insert.register(Context, Model, PostgreSQL)
+@@ -46,9 +58,7 @@
+             rollback_full = True
+             savepoint.rollback()
+             if type(error.orig) is psycopg2.errors.ForeignKeyViolation:
+-                error_message = error.orig.diag.message_detail
+-                error_property_name = re.search('Key \((.*?)\)', error_message).group(1).split(".")[0]
+-                error_ref_id = re.search('\)=\((.*?)\)', error_message).group(1)
++                error_property_name, error_ref_id = _get_error_property_and_ref_id(error)
+                 error_property = model.properties.get(error_property_name)
+                 exception = exceptions.ReferencedObjectNotFound(error_property, id=error_ref_id)
+                 error_list.append(exception)
+@@ -113,9 +123,7 @@
+             rollback_full = True
+             savepoint.rollback()
+             if type(error.orig) is psycopg2.errors.ForeignKeyViolation:
+-                error_message = error.orig.diag.message_detail
+-                error_property_name = re.search('Key \((.*?)\)', error_message).group(1).split(".")[0]
+-                error_ref_id = re.search('\)=\((.*?)\)', error_message).group(1)
++                error_property_name, error_ref_id = _get_error_property_and_ref_id(error)
+                 error_property = model.properties.get(error_property_name)
+                 exception = exceptions.ReferencedObjectNotFound(error_property, id=error_ref_id)
+                 error_list.append(exception)
+@@ -166,8 +174,7 @@
+             rollback_full = True
+             savepoint.rollback()
+             if type(error.orig) is psycopg2.errors.ForeignKeyViolation:
+-                error_message = error.orig.diag.message_detail
+-                error_model = re.search('\"([^"]*)\"', error_message).group(1)
++                error_model = _get_error_model(error)
+                 exception = exceptions.ReferringObjectFound(model.properties.get("_id"), model=error_model, id=data.saved.get("_id"))
+                 error_list.append(exception)
+                 data.error = exception

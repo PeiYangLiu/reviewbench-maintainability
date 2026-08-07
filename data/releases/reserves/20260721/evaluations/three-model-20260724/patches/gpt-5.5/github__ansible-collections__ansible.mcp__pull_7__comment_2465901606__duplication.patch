@@ -1,0 +1,107 @@
+--- a/plugins/plugin_utils/mcp.py
++++ b/plugins/plugin_utils/mcp.py
+@@ -58,6 +58,8 @@
+         transport: The transport layer for communication with the server
+         connected: Whether the client is currently connected
+     """
++
++    _JSONRPC_VERSION = "2.0"
+ 
+     def __init__(self, transport: Transport) -> None:
+         """Initialize the MCP client.
+@@ -80,6 +82,26 @@
+         self._request_id += 1
+         return self._request_id
+ 
++    def _build_request(
++        self, method: str, params: Optional[Dict[str, Any]] = None
++    ) -> Dict[str, Any]:
++        """Build a JSON-RPC request payload."""
++        request: Dict[str, Any] = {
++            "jsonrpc": self._JSONRPC_VERSION,
++            "id": self._get_next_id(),
++            "method": method,
++        }
++        if params is not None:
++            request["params"] = params
++        return request
++
++    def _build_notification(self, method: str) -> Dict[str, Any]:
++        """Build a JSON-RPC notification payload."""
++        return {
++            "jsonrpc": self._JSONRPC_VERSION,
++            "method": method,
++        }
++
+     def initialize(self) -> None:
+         """Initialize the connection to the MCP server.
+ 
+@@ -91,11 +113,9 @@
+             self.connected = True
+ 
+         # Send initialize request
+-        init_request = {
+-            "jsonrpc": "2.0",
+-            "id": self._get_next_id(),
+-            "method": "initialize",
+-            "params": {
++        init_request = self._build_request(
++            "initialize",
++            {
+                 "protocolVersion": "2025-03-26",
+                 "capabilities": {
+                     "roots": {"listChanged": True},
+@@ -106,7 +126,7 @@
+                     "version": "1.0.0",
+                 },
+             },
+-        }
++        )
+ 
+         response = self.transport.request(init_request)
+ 
+@@ -119,10 +139,7 @@
+             )
+ 
+         # Send initialized notification
+-        initialized_notification = {
+-            "jsonrpc": "2.0",
+-            "method": "notifications/initialized",
+-        }
++        initialized_notification = self._build_notification("notifications/initialized")
+         self.transport.notify(initialized_notification)
+ 
+     def list_tools(self) -> Dict[str, Any]:
+@@ -139,11 +156,7 @@
+             return self._tools_cache
+ 
+         # Make request to server
+-        request = {
+-            "jsonrpc": "2.0",
+-            "id": self._get_next_id(),
+-            "method": "tools/list",
+-        }
++        request = self._build_request("tools/list")
+ 
+         response = self.transport.request(request)
+ 
+@@ -189,15 +202,13 @@
+         Raises:
+             Exception: If the tool call fails
+         """
+-        request = {
+-            "jsonrpc": "2.0",
+-            "id": self._get_next_id(),
+-            "method": "tools/call",
+-            "params": {
++        request = self._build_request(
++            "tools/call",
++            {
+                 "name": tool,
+                 "arguments": kwargs,
+             },
+-        }
++        )
+ 
+         response = self.transport.request(request)
+ 

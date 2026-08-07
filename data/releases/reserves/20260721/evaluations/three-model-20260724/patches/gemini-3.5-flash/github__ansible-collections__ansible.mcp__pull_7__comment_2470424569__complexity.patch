@@ -1,0 +1,106 @@
+--- a/plugins/plugin_utils/mcp.py
++++ b/plugins/plugin_utils/mcp.py
+@@ -258,53 +258,43 @@
+             raise MCPError("Client not initialized. Call initialize() first.")
+         return self._server_info
+ 
+-    def validate(self, tool: str, **kwargs: Any) -> None:
+-        """Validate that a tool call arguments match the tool's schema.
+-
+-        Args:
+-            tool: Name of the tool to validate
+-            **kwargs: Arguments to validate against the tool schema
+-
+-        Raises:
+-            ValueError: If the tool is not found
+-            ValueError: If validation fails (missing required parameters, etc.)
+-        """
+-        # Get tool definition and schema
+-        tool_definition = self.get_tool(tool)
+-        schema = tool_definition.get("inputSchema", {})
+-
+-        # Extract schema components
+-        schema_type = schema.get("type")
+-        parameters_from_schema_properties = schema.get("properties", {})
+-        required_parameters = schema.get("required", [])
+-
+-        # Validate schema supports object type
++    def _validate_schema_type(self, tool: str, schema_type: Optional[str]) -> None:
++        """Validate that the schema type is supported."""
+         if schema_type and schema_type != "object":
+             raise ValueError(
+                 f"Tool '{tool}' has unsupported schema type '{schema_type}', expected 'object'"
+             )
+ 
+-        # Check for missing required parameters
++    def _validate_required_parameters(
++        self, tool: str, required_parameters: list, kwargs: Dict[str, Any]
++    ) -> None:
++        """Check for missing required parameters."""
+         missing_required = [param for param in required_parameters if param not in kwargs]
+         if missing_required:
+             raise ValueError(
+                 f"Tool '{tool}' missing required parameters: {', '.join(missing_required)}"
+             )
+ 
+-        # Check for unknown parameters
+-        if parameters_from_schema_properties:
++    def _validate_unknown_parameters(
++        self, tool: str, properties: Dict[str, Any], kwargs: Dict[str, Any]
++    ) -> None:
++        """Check for unknown parameters."""
++        if properties:
+             unknown_parameters = [
+-                param for param in kwargs if param not in parameters_from_schema_properties
++                param for param in kwargs if param not in properties
+             ]
+             if unknown_parameters:
+                 raise ValueError(
+                     f"Tool '{tool}' received unknown parameters: {', '.join(unknown_parameters)}"
+                 )
+ 
+-        # Validate parameter types
++    def _validate_parameter_types(
++        self, tool: str, properties: Dict[str, Any], kwargs: Dict[str, Any]
++    ) -> None:
++        """Validate that parameter values match their expected schema types."""
+         for parameter_name, parameter_value in kwargs.items():
+-            if parameter_name in parameters_from_schema_properties:
+-                parameter_schema = parameters_from_schema_properties[parameter_name]
++            if parameter_name in properties:
++                parameter_schema = properties[parameter_name]
+                 parameter_type_in_schema = parameter_schema.get("type")
+ 
+                 if parameter_type_in_schema:
+@@ -342,6 +332,31 @@
+                             )
+                         )
+ 
++    def validate(self, tool: str, **kwargs: Any) -> None:
++        """Validate that a tool call arguments match the tool's schema.
++
++        Args:
++            tool: Name of the tool to validate
++            **kwargs: Arguments to validate against the tool schema
++
++        Raises:
++            ValueError: If the tool is not found
++            ValueError: If validation fails (missing required parameters, etc.)
++        """
++        # Get tool definition and schema
++        tool_definition = self.get_tool(tool)
++        schema = tool_definition.get("inputSchema", {})
++
++        # Extract schema components
++        schema_type = schema.get("type")
++        properties = schema.get("properties", {})
++        required_parameters = schema.get("required", [])
++
++        self._validate_schema_type(tool, schema_type)
++        self._validate_required_parameters(tool, required_parameters, kwargs)
++        self._validate_unknown_parameters(tool, properties, kwargs)
++        self._validate_parameter_types(tool, properties, kwargs)
++
+     def close(self) -> None:
+         """Close the connection to the MCP server."""
+         self.transport.close()

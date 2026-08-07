@@ -1,0 +1,85 @@
+diff --git a/bec_server/bec_server/data_processing/lmfit1d_service.py b/bec_server/bec_server/data_processing/lmfit1d_service.py
+index 348aecc..b4b4eaa 100644
+--- a/bec_server/bec_server/data_processing/lmfit1d_service.py
++++ b/bec_server/bec_server/data_processing/lmfit1d_service.py
+@@ -61,28 +61,34 @@ class LmfitService1D(DAPServiceBase):
+ 
+     def _build_model(self, model: str | list[str] | tuple[str, ...]) -> lmfit.Model:
+         if isinstance(model, (list, tuple)):
+-            return self._build_composite_model(self._coerce_model_list(model))
++            return self._build_composite_model(list(model))
+         if isinstance(model, str):
+-            return self._build_single_model(model)
++            return self._get_model_cls(model)()
+         raise ValueError(f"Unknown model {model}")
+ 
+-    def _build_single_model(self, model_name: str) -> lmfit.Model:
+-        model_cls = self._get_model_cls(model_name)
+-        return model_cls()
+-
+     def _build_composite_model(self, model_list: Sequence[str]) -> lmfit.Model:
+         if not model_list:
+             raise ValueError("Composite model list cannot be empty.")
+-        self.model_components = {}
+-        self.model_prefixes = {}
+-        self.model_sequence = []
++
+         self.model_name_sequence = list(model_list)
++        # A unique component name and prefix per entry (e.g. "GaussianModel_0").
++        self.model_sequence = [f"{name}_{index}" for index, name in enumerate(model_list)]
++        self.model_prefixes = {name: f"{name}_" for name in self.model_sequence}
++        self.model_components = {
++            component_name: self._get_model_cls(model_name)(prefix=f"{component_name}_")
++            for model_name, component_name in zip(model_list, self.model_sequence)
++        }
++
+         composite_model: lmfit.model.Model | None = None
+-        for index, model_name in enumerate(model_list):
+-            component_name = self._component_name(model_name, index)
+-            component = self._create_component(model_name, component_name)
++        for component in self.model_components.values():
+             composite_model = component if composite_model is None else composite_model + component
+-        self._build_component_lookup()
++
++        # Allow lookups by model name only when the names are unambiguous.
++        if len(set(model_list)) == len(model_list):
++            self.model_name_to_component = dict(zip(model_list, self.model_sequence))
++        else:
++            self.model_name_to_component = None
++
+         logger.debug(
+             f"Initialized composite lmfit model with components={list(self.model_components.keys())} "
+             f"prefixes={self.model_prefixes}"
+@@ -96,32 +102,6 @@ class LmfitService1D(DAPServiceBase):
+             raise ValueError(f"Unknown model {model_name}")
+         return model_cls
+ 
+-    @staticmethod
+-    def _component_name(model_name: str, index: int) -> str:
+-        return f"{model_name}_{index}"
+-
+-    def _create_component(self, model_name: str, component_name: str):
+-        model_cls = self._get_model_cls(model_name)
+-        prefix = f"{component_name}_"
+-        self.model_sequence.append(component_name)
+-        self.model_prefixes[component_name] = prefix
+-        component = model_cls(prefix=prefix)
+-        self.model_components[component_name] = component
+-        return component
+-
+-    @staticmethod
+-    def _coerce_model_list(model_list: Iterable[str]) -> list[str]:
+-        return list(model_list)
+-
+-    def _build_component_lookup(self) -> None:
+-        unique_names = len(set(self.model_name_sequence)) == len(self.model_name_sequence)
+-        if unique_names:
+-            self.model_name_to_component = {
+-                name: self.model_sequence[idx] for idx, name in enumerate(self.model_name_sequence)
+-            }
+-        else:
+-            self.model_name_to_component = None
+-
+     def _expand_composite_parameters(self, parameters: dict | list | tuple) -> dict:
+         if self.model_components is None or self.model_prefixes is None:
+             return parameters

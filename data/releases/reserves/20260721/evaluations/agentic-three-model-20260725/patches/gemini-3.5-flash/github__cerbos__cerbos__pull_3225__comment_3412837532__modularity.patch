@@ -1,0 +1,45 @@
+diff --git a/internal/auxdata/jwt.go b/internal/auxdata/jwt.go
+index b3ee984..68a4c4c 100644
+--- a/internal/auxdata/jwt.go
++++ b/internal/auxdata/jwt.go
+@@ -31,6 +31,19 @@ var (
+ 	errNoKeySetToVerify = errors.New("cannot determine keyset to use for validating the JWT")
+ )
+ 
++type JWTValidationError struct {
++	Friendly   error
++	Underlying error
++}
++
++func (e *JWTValidationError) Error() string {
++	return e.Friendly.Error()
++}
++
++func (e *JWTValidationError) Unwrap() error {
++	return e.Friendly
++}
++
+ type jwtHelper struct {
+ 	keySets        map[string]keySet
+ 	verify         bool
+@@ -152,15 +165,15 @@ func (j *jwtHelper) doExtract(ctx context.Context, auxJWT *requestv1.AuxData_JWT
+ 	if err != nil {
+ 		switch {
+ 		case errors.Is(err, jwt.InvalidAudienceError()):
+-			return nil, fmt.Errorf("invalid audience ('aud')")
++			return nil, &JWTValidationError{Friendly: fmt.Errorf("invalid audience ('aud')"), Underlying: err}
+ 		case errors.Is(err, jwt.InvalidIssuedAtError()):
+-			return nil, fmt.Errorf("issued at time is in the future ('iat')")
++			return nil, &JWTValidationError{Friendly: fmt.Errorf("issued at time is in the future ('iat')"), Underlying: err}
+ 		case errors.Is(err, jwt.InvalidIssuerError()):
+-			return nil, fmt.Errorf("invalid issuer ('iss')")
++			return nil, &JWTValidationError{Friendly: fmt.Errorf("invalid issuer ('iss')"), Underlying: err}
+ 		case errors.Is(err, jwt.TokenExpiredError()):
+-			return nil, fmt.Errorf("token has expired ('exp')")
++			return nil, &JWTValidationError{Friendly: fmt.Errorf("token has expired ('exp')"), Underlying: err}
+ 		case errors.Is(err, jwt.TokenNotYetValidError()):
+-			return nil, fmt.Errorf("token is not yet valid ('nbf')")
++			return nil, &JWTValidationError{Friendly: fmt.Errorf("token is not yet valid ('nbf')"), Underlying: err}
+ 		default:
+ 			return nil, fmt.Errorf("failed to parse: %w", err)
+ 		}

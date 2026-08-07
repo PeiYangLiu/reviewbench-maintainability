@@ -1,0 +1,191 @@
+--- a/bec_server/bec_server/data_processing/lmfit1d_service.py
++++ b/bec_server/bec_server/data_processing/lmfit1d_service.py
+@@ -3,7 +3,7 @@
+ import inspect
+ import threading
+ import time
+-from collections.abc import Iterable, Sequence
++from collections.abc import Sequence
+ 
+ import lmfit
+ import numpy as np
+@@ -45,14 +45,11 @@
+         self.signal_y = None
+         self.parameters = None
+         self.override_params = None
+-        self.model_sequence: list[str] | None = None
+-        self.model_name_sequence: list[str] | None = None
+-        self.model_name_to_component: dict[str, str] | None = None
++        self.model_names: list[str] | None = None
+         self._parameter_override_names = []
+         self.current_scan_item = None
+         self.finished_id = None
+         self.model_components: dict[str, lmfit.Model] | None = None
+-        self.model_prefixes: dict[str, str] | None = None
+         self.model = self._build_model(model)
+         self.finish_event = None
+         self.data = None
+@@ -61,7 +58,7 @@
+ 
+     def _build_model(self, model: str | list[str] | tuple[str, ...]) -> lmfit.Model:
+         if isinstance(model, (list, tuple)):
+-            return self._build_composite_model(self._coerce_model_list(model))
++            return self._build_composite_model(list(model))
+         if isinstance(model, str):
+             return self._build_single_model(model)
+         raise ValueError(f"Unknown model {model}")
+@@ -73,19 +70,16 @@
+     def _build_composite_model(self, model_list: Sequence[str]) -> lmfit.Model:
+         if not model_list:
+             raise ValueError("Composite model list cannot be empty.")
++        self.model_names = list(model_list)
+         self.model_components = {}
+-        self.model_prefixes = {}
+-        self.model_sequence = []
+-        self.model_name_sequence = list(model_list)
+         composite_model: lmfit.model.Model | None = None
+         for index, model_name in enumerate(model_list):
+-            component_name = self._component_name(model_name, index)
+-            component = self._create_component(model_name, component_name)
++            component_name = f"{model_name}_{index}"
++            component = self._get_model_cls(model_name)(prefix=f"{component_name}_")
++            self.model_components[component_name] = component
+             composite_model = component if composite_model is None else composite_model + component
+-        self._build_component_lookup()
+         logger.debug(
+-            f"Initialized composite lmfit model with components={list(self.model_components.keys())} "
+-            f"prefixes={self.model_prefixes}"
++            f"Initialized composite lmfit model with components={list(self.model_components.keys())}"
+         )
+         return composite_model
+ 
+@@ -96,34 +90,14 @@
+             raise ValueError(f"Unknown model {model_name}")
+         return model_cls
+ 
+-    @staticmethod
+-    def _component_name(model_name: str, index: int) -> str:
+-        return f"{model_name}_{index}"
+-
+-    def _create_component(self, model_name: str, component_name: str):
+-        model_cls = self._get_model_cls(model_name)
+-        prefix = f"{component_name}_"
+-        self.model_sequence.append(component_name)
+-        self.model_prefixes[component_name] = prefix
+-        component = model_cls(prefix=prefix)
+-        self.model_components[component_name] = component
+-        return component
+-
+-    @staticmethod
+-    def _coerce_model_list(model_list: Iterable[str]) -> list[str]:
+-        return list(model_list)
+-
+-    def _build_component_lookup(self) -> None:
+-        unique_names = len(set(self.model_name_sequence)) == len(self.model_name_sequence)
+-        if unique_names:
+-            self.model_name_to_component = {
+-                name: self.model_sequence[idx] for idx, name in enumerate(self.model_name_sequence)
+-            }
+-        else:
+-            self.model_name_to_component = None
++    def _model_name_to_component(self) -> dict[str, str] | None:
++        """Map unique model names to their component names, or None if names repeat."""
++        if len(set(self.model_names)) != len(self.model_names):
++            return None
++        return {name: f"{name}_{index}" for index, name in enumerate(self.model_names)}
+ 
+     def _expand_composite_parameters(self, parameters: dict | list | tuple) -> dict:
+-        if self.model_components is None or self.model_prefixes is None:
++        if self.model_components is None:
+             return parameters
+         if isinstance(parameters, (list, tuple)):
+             return self._expand_composite_list(parameters)
+@@ -132,7 +106,8 @@
+         raise DAPError("Composite parameters must be a dict or list.")
+ 
+     def _expand_composite_list(self, parameters: list | tuple) -> dict:
+-        if self.model_sequence is None or len(parameters) != len(self.model_sequence):
++        component_names = list(self.model_components.keys())
++        if len(parameters) != len(component_names):
+             raise DAPError(
+                 "Composite parameters list must match the length of the composite model list."
+             )
+@@ -144,55 +119,40 @@
+                 raise DAPError(
+                     f"Composite parameters list item {index} must be a dict of parameter overrides."
+                 )
+-            component_name = self.model_sequence[index]
+-            expanded.update(self._expand_param_map(component_name, param_map))
++            expanded.update(self._expand_param_map(component_names[index], param_map))
+         return expanded
+ 
+     def _expand_composite_dict(self, parameters: dict) -> dict:
++        if set(parameters.keys()).issubset(self.model_components.keys()):
++            # keys already reference components directly (e.g. "GaussianModel_0")
++            component_map = {name: name for name in parameters}
++        else:
++            component_map = self._model_name_to_component()
++            if component_map is None:
++                raise DAPError(
++                    "Composite parameters are ambiguous with duplicate model names. "
++                    "Use a list aligned to the model list or keys like 'ModelName_0'."
++                )
++            invalid_models = set(parameters.keys()) - set(component_map.keys())
++            if invalid_models:
++                raise DAPError(
++                    f"Invalid parameter groups for composite model: {sorted(invalid_models)}"
++                )
++
+         expanded: dict = {}
+-        component_keys = set(self.model_components.keys())
+-        if set(parameters.keys()).issubset(component_keys):
+-            for component_name, param_map in parameters.items():
+-                if param_map is None:
+-                    continue
+-                if not isinstance(param_map, dict):
+-                    raise DAPError(
+-                        f"Composite parameters for '{component_name}' must be a dict of parameter overrides."
+-                    )
+-                expanded.update(self._expand_param_map(component_name, param_map))
+-            return expanded
+-
+-        component_map = self._resolve_model_name_map(parameters)
+-        for model_name, param_map in parameters.items():
++        for name, param_map in parameters.items():
+             if param_map is None:
+                 continue
+             if not isinstance(param_map, dict):
+                 raise DAPError(
+-                    f"Composite parameters for '{model_name}' must be a dict of parameter overrides."
+-                )
+-            component_name = component_map[model_name]
+-            expanded.update(self._expand_param_map(component_name, param_map))
++                    f"Composite parameters for '{name}' must be a dict of parameter overrides."
++                )
++            expanded.update(self._expand_param_map(component_map[name], param_map))
+         return expanded
+ 
+-    def _resolve_model_name_map(self, parameters: dict) -> dict[str, str]:
+-        if self.model_name_to_component is None:
+-            raise DAPError(
+-                "Composite parameters are ambiguous with duplicate model names. "
+-                "Use a list aligned to the model list or keys like 'ModelName_0'."
+-            )
+-        invalid_models = set(parameters.keys()) - set(self.model_name_to_component.keys())
+-        if invalid_models:
+-            raise DAPError(
+-                f"Invalid parameter groups for composite model: {sorted(invalid_models)}"
+-            )
+-        return self.model_name_to_component
+-
+     def _expand_param_map(self, component_name: str, param_map: dict) -> dict:
+-        prefix = self.model_prefixes[component_name]
+-        expanded = {}
+-        for param_name, spec in param_map.items():
+-            expanded[f"{prefix}{param_name}"] = spec
+-        return expanded
++        prefix = self.model_components[component_name].prefix
++        return {f"{prefix}{param_name}": spec for param_name, spec in param_map.items()}
+ 
+     def _guess_parameters(self, x: np.ndarray, y: np.ndarray) -> lmfit.Parameters:
+         guessed_params = self.model.make_params()

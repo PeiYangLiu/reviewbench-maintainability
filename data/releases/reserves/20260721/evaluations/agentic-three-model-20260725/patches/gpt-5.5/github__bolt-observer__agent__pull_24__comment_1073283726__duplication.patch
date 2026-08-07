@@ -1,0 +1,100 @@
+diff --git a/lightning/rest.go b/lightning/rest.go
+index 2f90db8..0406c11 100644
+--- a/lightning/rest.go
++++ b/lightning/rest.go
+@@ -233,29 +233,12 @@ func (h *HTTPAPI) HTTPGetChanInfo(ctx context.Context, req *http.Request, trans
+ func (h *HTTPAPI) HTTPForwardEvents(ctx context.Context, req *http.Request, trans *http.Transport, input *ForwardingHistoryRequestOverride) (*ForwardingHistoryResponseOverride, error) {
+ 	var data ForwardingHistoryResponseOverride
+ 
+-	req = req.WithContext(ctx)
+-
+-	req.Method = http.MethodPost
+-
+-	u, err := url.Parse(fmt.Sprintf("%s/v1/switch", req.URL))
+-	if err != nil {
+-		return nil, fmt.Errorf("invalid url %s", err)
+-	}
+-
+ 	s, _ := json.Marshal(input)
+ 	b := bytes.NewBuffer(s)
+ 
+-	req.URL = u
+-	req.Body = io.NopCloser(b)
+-
+-	resp, err := h.Do(req)
+-
++	resp, err := h.doHTTPRequest(ctx, req, http.MethodPost, fmt.Sprintf("%s/v1/switch", req.URL), b)
+ 	if err != nil {
+-		return nil, fmt.Errorf("http request failed %s", err)
+-	}
+-
+-	if resp.StatusCode != http.StatusOK {
+-		return nil, fmt.Errorf("http got error %d", resp.StatusCode)
++		return nil, err
+ 	}
+ 
+ 	defer resp.Body.Close()
+@@ -325,26 +308,10 @@ func (h *HTTPAPI) HTTPSubscribeHtlcEvents(ctx context.Context, req *http.Request
+ func (h *HTTPAPI) HTTPListInvoices(ctx context.Context, req *http.Request, trans *http.Transport, input *ListInvoiceRequestOverride) (*ListInvoiceResponseOverride, error) {
+ 	var data ListInvoiceResponseOverride
+ 
+-	req = req.WithContext(ctx)
+-
+-	req.Method = http.MethodGet
+-
+-	u, err := url.Parse(fmt.Sprintf("%s/v1/invoices?pending_only=%v&index_offset=%s&num_max_invoices=%s&reversed=%v", req.URL, input.PendingOnly, input.IndexOffset,
+-		input.NumMaxInvoices, input.Reversed))
+-	if err != nil {
+-		return nil, fmt.Errorf("invalid url %s", err)
+-	}
+-
+-	req.URL = u
+-
+-	resp, err := h.Do(req)
+-
++	resp, err := h.doHTTPRequest(ctx, req, http.MethodGet, fmt.Sprintf("%s/v1/invoices?pending_only=%v&index_offset=%s&num_max_invoices=%s&reversed=%v", req.URL, input.PendingOnly, input.IndexOffset,
++		input.NumMaxInvoices, input.Reversed), nil)
+ 	if err != nil {
+-		return nil, fmt.Errorf("http request failed %s", err)
+-	}
+-
+-	if resp.StatusCode != http.StatusOK {
+-		return nil, fmt.Errorf("http got error %d", resp.StatusCode)
++		return nil, err
+ 	}
+ 
+ 	defer resp.Body.Close()
+@@ -397,6 +364,33 @@ func (h *HTTPAPI) HTTPListPayments(ctx context.Context, req *http.Request, trans
+ 	return &data, nil
+ }
+ 
++func (h *HTTPAPI) doHTTPRequest(ctx context.Context, req *http.Request, method string, rawURL string, body io.Reader) (*http.Response, error) {
++	req = req.WithContext(ctx)
++
++	req.Method = method
++
++	u, err := url.Parse(rawURL)
++	if err != nil {
++		return nil, fmt.Errorf("invalid url %s", err)
++	}
++
++	req.URL = u
++	if body != nil {
++		req.Body = io.NopCloser(body)
++	}
++
++	resp, err := h.Do(req)
++	if err != nil {
++		return nil, fmt.Errorf("http request failed %s", err)
++	}
++
++	if resp.StatusCode != http.StatusOK {
++		return nil, fmt.Errorf("http got error %d", resp.StatusCode)
++	}
++
++	return resp, nil
++}
++
+ // GetHTTPRequest - generic method for doing HTTP requests
+ func (h *HTTPAPI) GetHTTPRequest(getData GetDataCall) (*http.Request, *http.Transport, error) {
+ 

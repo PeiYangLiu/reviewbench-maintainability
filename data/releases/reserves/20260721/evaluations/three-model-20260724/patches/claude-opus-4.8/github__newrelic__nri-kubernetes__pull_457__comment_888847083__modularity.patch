@@ -1,0 +1,60 @@
+--- a/internal/discovery/namespace_filter.go
++++ b/internal/discovery/namespace_filter.go
+@@ -48,19 +48,31 @@
+ 	}
+ }
+ 
+-// IsAllowed checks given any namespace, if it's allowed to be scraped by using the NamespaceLister
++// IsAllowed checks given any namespace, if it's allowed to be scraped by using the NamespaceLister.
++// It returns the cached result if present, otherwise it computes and caches the value.
+ func (nf *NamespaceFilter) IsAllowed(namespace string) bool {
+ 	// By default, we scrape every namespace.
+ 	if nf.c == nil {
+ 		return true
+ 	}
+ 
+-	// Check if the namespace is already in the cache.
++	// Return the cached result if the namespace is already known.
+ 	var allowed bool
+ 	if _, err := nf.storer.Get(namespace, &allowed); err == nil {
+ 		return allowed
+ 	}
+ 
++	allowed = nf.match(namespace)
++
++	// Save the namespace in the cache.
++	_ = nf.storer.Set(namespace, allowed)
++
++	return allowed
++}
++
++// match computes whether the given namespace is allowed to be scraped by
++// evaluating the configured matchLabels and matchExpressions selectors.
++func (nf *NamespaceFilter) match(namespace string) bool {
+ 	// Scrape namespaces by honoring the matchLabels values.
+ 	if nf.c.MatchLabels != nil {
+ 		namespaceList, err := nf.lister.List(labels.SelectorFromSet(nf.c.MatchLabels))
+@@ -69,12 +81,7 @@
+ 			return true
+ 		}
+ 
+-		allowed = containsNamespace(namespace, namespaceList)
+-
+-		// Save the namespace in the cache.
+-		_ = nf.storer.Set(namespace, allowed)
+-
+-		return allowed
++		return containsNamespace(namespace, namespaceList)
+ 	}
+ 
+ 	// Scrape namespaces by honoring the matchExpressions values.
+@@ -98,9 +105,6 @@
+ 			}
+ 		}
+ 	}
+-
+-	// Save the namespace in the cache.
+-	_ = nf.storer.Set(namespace, true)
+ 
+ 	return true
+ }

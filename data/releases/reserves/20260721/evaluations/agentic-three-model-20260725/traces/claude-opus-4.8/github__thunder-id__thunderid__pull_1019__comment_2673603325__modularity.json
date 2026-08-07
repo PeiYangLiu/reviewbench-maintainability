@@ -1,0 +1,59 @@
+[
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\tswitch kty {\n\tcase \"RSA\":\n\t\treturn rsaJWKToPublicKey(jwk)\n\tcase \"EC\":\n\t\treturn ecJWKToPublicKey(jwk)\n\tcase \"OKP\":\n\t\treturn okpJWKToPublicKey(jwk)\n\tdefault:\n\t\treturn nil, fmt.Errorf(\"unsupported JWK kty: %s\", kty)\n\t}\n}\n\n// rsaJWKToPublicKey converts an RSA JWK map to an *rsa.PublicKey.\nfunc rsaJWKToPublicKey(jwk map[string]interface{}) (crypto.PublicKey, error) {\n\tnStr, nOK := jwk[\"n\"].(string)\n\teStr, eOK := jwk[\"e\"].(string)\n\tif !nOK || !eOK {\n\t\treturn nil, errors.New(\"JWK missing RSA modulus or exponent\")\n\t}\n\n\tnBytes, err := base64.RawURLEncoding.DecodeString(nStr)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"failed to decode RSA modulus: %w\", err)\n\t}\n\teBytes, err := base64.RawURLEncoding.DecodeString(eStr)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"failed to decode RSA exponent: %w\", err)\n\t}\n\n\tn := new(big.Int).SetBytes(nBytes)\n\te := new(big.Int).SetBytes(eBytes).Int64()\n\tif e <= 0 {\n\t\treturn nil, errors.New(\"invalid RSA exponent\")\n\t}\n\n\treturn &rsa.PublicKey{N: n, E: int(e)}, nil\n}\n\n// ecJWKToPublicKey converts an EC JWK map to an *ecdsa.PublicKey.\nfunc ecJWKToPublicKey(jwk map[string]interface{}) (crypto.PublicKey, error) {\n\tcrv, crvOK := jwk[\"crv\"].(string)\n\txStr, xOK := jwk[\"x\"].(string)\n\tyStr, yOK := jwk[\"y\"].(string)\n\tif !crvOK || !xOK || !yOK {\n\t\treturn nil, errors.New(\"JWK missing EC parameters\")\n\t}\n\n\tvar curve elliptic.Curve\n\tvar expectedKeySize int\n\tswitch crv {\n\tcase P256:\n\t\tcurve = elliptic.P256()\n\t\texpectedKeySize = 32 // P-256 uses 256-bit (32-byte) coordinates\n\tcase P384:\n\t\tcurve = elliptic.P384()\n\t\texpectedKeySize = 48 // P-384 uses 384-bit (48-byte) coordinates\n\tcase P521:\n\t\tcurve = elliptic.P521()\n\t\texpectedKeySize = 66 // P-521 uses 521-bit (66-byte) coordinates\n\tdefault:\n\t\treturn nil, fmt.Errorf(\"unsupported EC curve: %s\", crv)\n\t}\n\n\txBytes, err := base64.RawURLEncoding.DecodeString(xStr)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"failed to decode EC x: %w\", err)\n\t}\n\tyBytes, err := base64.RawURLEncoding.DecodeString(yStr)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"failed to decode EC y: %w\", err)\n\t}\n\n\t// Validate coordinate byte lengths match the expected curve size\n\tif len(xBytes) != expectedKeySize || len(yBytes) != expectedKeySize {\n\t\treturn nil, errors.New(\"invalid EC coordinate length\")\n\t}\n\n\tx := new(big.Int).SetBytes(xBytes)\n\ty := new(big.Int).SetBytes(yBytes)\n\tif !curve.IsOnCurve(x, y) {\n\t\treturn nil, errors.New(\"EC point not on curve\")\n\t}\n\n\treturn &ecdsa.PublicKey{Curve: curve, X: x, Y: y}, nil\n}\n\n// okpJWKToPublicKey converts an OKP JWK map to an ed25519.PublicKey.\nfunc okpJWKToPublicKey(jwk map[string]interface{}) (crypto.PublicKey, error) {\n\tcrv, crvOK := jwk[\"crv\"].(string)\n\txStr, xOK := jwk[\"x\"].(string)\n\tif !crvOK || !xOK {\n\t\treturn nil, errors.New(\"JWK missing OKP parameters\")\n\t}\n\n\tswitch crv {\n\tcase \"Ed25519\":\n\t\txBytes, err := base64.RawURLEncoding.DecodeString(xStr)\n\t\tif err != nil {\n\t\t\treturn nil, fmt.Errorf(\"failed to decode Ed25519 x: %w\", err)\n\t\t}\n\t\tif l := len(xBytes); l != ed25519.PublicKeySize {\n\t\t\treturn nil, fmt.Errorf(\"invalid Ed25519 public key length: %d\", l)\n\t\t}\n\t\treturn ed25519.PublicKey(xBytes), nil\n\tdefault:\n\t\treturn nil, fmt.Errorf(\"unsupported OKP curve: %s\", crv)\n\t}\n}",
+          "end_line": 204,
+          "start_line": 110
+        }
+      ]
+    },
+    "response_chars": 3551,
+    "round": 1,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 204,
+          "replacement_lines": 108,
+          "start_line": 110
+        }
+      ],
+      "current_file_lines": 217,
+      "updated_excerpt": {
+        "content": "100: \treturn header, nil\n101: }\n102: \n103: // jwkToPublicKey converts a JWK map to a crypto.PublicKey supporting RSA, EC, and Ed25519.\n104: func jwkToPublicKey(jwk map[string]interface{}) (crypto.PublicKey, error) {\n105: \tkty, ok := jwk[\"kty\"].(string)\n106: \tif !ok {\n107: \t\treturn nil, errors.New(\"JWK missing kty\")\n108: \t}\n109: \n110: \tswitch kty {\n111: \tcase \"RSA\":\n112: \t\treturn rsaJWKToPublicKey(jwk)\n113: \tcase \"EC\":\n114: \t\treturn ecJWKToPublicKey(jwk)\n115: \tcase \"OKP\":\n116: \t\treturn okpJWKToPublicKey(jwk)\n117: \tdefault:\n118: \t\treturn nil, fmt.Errorf(\"unsupported JWK kty: %s\", kty)\n119: \t}\n120: }\n121: \n122: // rsaJWKToPublicKey converts an RSA JWK map to an *rsa.PublicKey.\n123: func rsaJWKToPublicKey(jwk map[string]interface{}) (crypto.PublicKey, error) {\n124: \tnStr, nOK := jwk[\"n\"].(string)\n125: \teStr, eOK := jwk[\"e\"].(string)\n126: \tif !nOK || !eOK {\n127: \t\treturn nil, errors.New(\"JWK missing RSA modulus or exponent\")\n128: \t}\n129: \n130: \tnBytes, err := base64.RawURLEncoding.DecodeString(nStr)\n131: \tif err != nil {\n132: \t\treturn nil, fmt.Errorf(\"failed to decode RSA modulus: %w\", err)\n133: \t}\n134: \teBytes, err := base64.RawURLEncoding.DecodeString(eStr)\n135: \tif err != nil {\n136: \t\treturn nil, fmt.Errorf(\"failed to decode RSA exponent: %w\", err)\n137: \t}\n138: \n139: \tn := new(big.Int).SetBytes(nBytes)\n140: \te := new(big.Int).SetBytes(eBytes).Int64()",
+        "end_line": 140,
+        "path_lines": 217,
+        "start_line": 100
+      }
+    },
+    "usage": {
+      "completion_tokens": 2131,
+      "prompt_tokens": 4049,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 6180
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 2,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/claude-opus-4.8/patches/github__thunder-id__thunderid__pull_1019__comment_2673603325__modularity.patch"
+    },
+    "usage": {
+      "completion_tokens": 11,
+      "prompt_tokens": 7111,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 7122
+    }
+  }
+]

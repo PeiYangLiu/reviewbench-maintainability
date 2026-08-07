@@ -1,0 +1,58 @@
+--- a/transports/p2p/connmgr/connmanager.go
++++ b/transports/p2p/connmgr/connmanager.go
+@@ -253,26 +253,35 @@
+ 			cm.Connect(c)
+ 		})
+ 	} else if cm.cfg.GetNewAddress != nil {
+-		if c.Addr != nil && c.Addr.String() != "" && cm.cfg.BanAddress != nil {
+-			cm.incAddrConnAttempt(c.Addr.String())
+-			if cm.getAddrConnAttempt(c.Addr.String()) >= maxFailedAttempts {
+-				cm.cfg.BanAddress(c.Addr.String())
+-				return
+-			}
+-		} else {
+-			cm.incGlobalFailedAttempts()
+-			if cm.getGlobalFailedAttempts() >= maxFailedAttempts {
+-				cm.log.Debug().Msgf("Max failed connection attempts reached: [%d] "+
+-					"-- retrying connection in: %v", maxFailedAttempts,
+-					cm.cfg.RetryDuration)
+-				time.AfterFunc(cm.cfg.RetryDuration, func() {
+-					cm.NewConnReq()
+-				})
+-				return
+-			}
+-		}
+-		go cm.NewConnReq()
+-	}
++		cm.registerFailedConnectionTo(c)
++	}
++}
++
++// registerFailedConnectionTo records a failed connection attempt for the given
++// connection request. Depending on whether the address is known, it either
++// tracks per-address attempts (banning the address once the limit is reached)
++// or global attempts (delaying new connections once the limit is reached).
++// If the failure limit has not been reached, a new connection request is made.
++func (cm *ConnManager) registerFailedConnectionTo(c *ConnReq) {
++	if c.Addr != nil && c.Addr.String() != "" && cm.cfg.BanAddress != nil {
++		cm.incAddrConnAttempt(c.Addr.String())
++		if cm.getAddrConnAttempt(c.Addr.String()) >= maxFailedAttempts {
++			cm.cfg.BanAddress(c.Addr.String())
++			return
++		}
++	} else {
++		cm.incGlobalFailedAttempts()
++		if cm.getGlobalFailedAttempts() >= maxFailedAttempts {
++			cm.log.Debug().Msgf("Max failed connection attempts reached: [%d] "+
++				"-- retrying connection in: %v", maxFailedAttempts,
++				cm.cfg.RetryDuration)
++			time.AfterFunc(cm.cfg.RetryDuration, func() {
++				cm.NewConnReq()
++			})
++			return
++		}
++	}
++	go cm.NewConnReq()
+ }
+ 
+ // connHandler handles all connection related requests.  It must be run as a

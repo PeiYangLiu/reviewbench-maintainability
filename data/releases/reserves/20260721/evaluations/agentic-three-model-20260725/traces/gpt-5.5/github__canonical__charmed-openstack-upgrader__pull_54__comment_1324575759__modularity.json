@@ -1,0 +1,361 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 240,
+      "path": "cou/steps/analyze.py",
+      "start_line": 1
+    },
+    "response_chars": 77,
+    "round": 1,
+    "tool_result": {
+      "content": "1: # Copyright 2023 Canonical Limited\n2: #\n3: # Licensed under the Apache License, Version 2.0 (the \"License\");\n4: # you may not use this file except in compliance with the License.\n5: # You may obtain a copy of the License at\n6: #\n7: #     http://www.apache.org/licenses/LICENSE-2.0\n8: #\n9: # Unless required by applicable law or agreed to in writing, software\n10: # distributed under the License is distributed on an \"AS IS\" BASIS,\n11: # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n12: # See the License for the specific language governing permissions and\n13: # limitations under the License.\n14: \n15: \"\"\"Functions for analyzing an OpenStack cloud before an upgrade.\"\"\"\n16: from __future__ import annotations\n17: \n18: import logging\n19: from collections.abc import Iterable\n20: from dataclasses import dataclass\n21: from itertools import chain\n22: from typing import Optional\n23: \n24: from cou.apps.app import AppFactory, OpenStackApplication\n25: from cou.utils import juju_utils\n26: from cou.utils.openstack import DATA_PLANE_CHARMS, UPGRADE_ORDER, OpenStackRelease\n27: \n28: logger = logging.getLogger(__name__)\n29: \n30: \n31: @dataclass\n32: class Analysis:\n33:     \"\"\"Analyze result.\n34: \n35:     :param apps_control_plane: Control plane applications in the model\n36:     :type apps_control_plane:  Iterable[OpenStackApplication]\n37:     :param apps_data_plane: Data plane applications in the model\n38:     :type apps_data_plane:  Iterable[OpenStackApplication]\n39:     \"\"\"\n40: \n41:     model_name: Optional[str]\n42:     apps_control_plane: Iterable[OpenStackApplication]\n43:     apps_data_plane: Iterable[OpenStackApplication]\n44: \n45:     @classmethod\n46:     async def create(cls, model_name: Optional[str] = None) -> Analysis:\n47:         \"\"\"Analyze the deployment before planning.\n48: \n49:         :param model_name: Name of model to query, if None the current model will be used\n50:         :type model_name: Optional[str]\n51:         :return: Analysis object populated with the model applications.\n52:         :rtype: Analysis\n53:         \"\"\"\n54:         logger.info(\"Analyzing the OpenStack deployment...\")\n55:         apps = await Analysis._populate(model_name)\n56: \n57:         control_plane, data_plane = await cls._split_control_plane_and_data_plane(apps)\n58: \n59:         return Analysis(\n60:             model_name=model_name, apps_data_plane=data_plane, apps_control_plane=control_plane\n61:         )\n62: \n63:     @classmethod\n64:     async def _split_control_plane_and_data_plane(\n65:         cls, apps: Iterable[OpenStackApplication]\n66:     ) -> tuple[list[OpenStackApplication], list[OpenStackApplication]]:\n67:         \"\"\"Split control plane and data plane apps.\n68: \n69:         :param apps: List of applications to split.\n70:         :type apps:  Iterable[OpenStackApplication]\n71:         :return: Control plane and data plane application lists.\n72:         :rtype: tuple[list[OpenStackApplication], list[OpenStackApplication]]\n73:         \"\"\"\n74:         data_plane = []\n75:         control_plane = []\n76:         for app in apps:\n77:             if app.charm in DATA_PLANE_CHARMS:\n78:                 data_plane.append(app)\n79:             else:\n80:                 control_plane.append(app)\n81:         return control_plane, data_plane\n82: \n83:     @classmethod\n84:     async def _populate(cls, model_name: Optional[str]) -> list[OpenStackApplication]:\n85:         \"\"\"Analyze the applications in the model.\n86: \n87:         Applications that must be upgraded in a specific order will be returned first, followed\n88:         by applications that can be upgraded in any order. Applications that are not supported\n89:         will be ignored.\n90: \n91:         :param model_name: Name of model to query\n92:         :type model_name: Optional[str]\n93:         :return: Application objects with their respective information.\n94:         :rtype: List[OpenStackApplication]\n95:         \"\"\"\n96:         juju_status = await juju_utils.get_status(model_name)\n97:         apps = {\n98:             AppFactory.create(\n99:                 name=app,\n100:                 status=app_status,\n101:                 config=await juju_utils.get_application_config(app, model_name),\n102:                 model_name=model_name,\n103:                 charm=await juju_utils.extract_charm_name(app, model_name),\n104:             )\n105:             for app, app_status in juju_status.applications.items()\n106:         }\n107:         # remove non-supported charms that return None on AppFactory.create\n108:         apps.discard(None)\n109:         # mypy complains that apps can have None, but we already removed.\n110:         apps_to_upgrade_in_order = {\n111:             app for app in apps if app.charm in UPGRADE_ORDER  # type: ignore\n112:         }\n113:         other_o7k_apps = apps - apps_to_upgrade_in_order\n114:         sorted_apps_to_upgrade_in_order = sorted(\n115:             apps_to_upgrade_in_order,\n116:             key=lambda app: UPGRADE_ORDER.index(app.charm),  # type: ignore\n117:         )\n118:         # order by charm name to have a predicable upgrade sequence of others o7k charms.\n119:         other_o7k_apps_sorted_by_name = sorted(\n120:             other_o7k_apps, key=lambda app: app.charm  # type: ignore\n121:         )\n122:         return sorted_apps_to_upgrade_in_order + other_o7k_apps_sorted_by_name  # type: ignore\n123: \n124:     def __str__(self) -> str:\n125:         \"\"\"Dump as string.\n126: \n127:         :return: String representation of Application objects.\n128:         :rtype: str\n129:         \"\"\"\n130:         return (\n131:             \"Control Plane:\\n\"\n132:             + \"\\n\".join([str(app) for app in self.apps_control_plane])\n133:             + \"Data Plane:\\n\"\n134:             + \"\\n\".join([str(app) for app in self.apps_data_plane])\n135:         )\n136: \n137:     @property\n138:     def current_cloud_os_release(self) -> Optional[OpenStackRelease]:\n139:         \"\"\"Shows the current OpenStack release codename.\n140: \n141:         This property just consider OpenStack charms as those that have\n142:         openstack-origin or source on the charm configuration (app.os_origin).\n143:         :return: OpenStack release codename\n144:         :rtype: OpenStackRelease\n145:         \"\"\"\n146:         control_plane = (app for app in self.apps_control_plane)\n147:         all_apps = chain(control_plane, self.apps_data_plane)\n148:         return min(\n149:             (app.current_os_release for app in all_apps),\n150:             default=None,\n151:         )",
+      "end_line": 151,
+      "path_lines": 151,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 1361,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 91,
+      "output_tokens_details": {
+        "reasoning_tokens": 61
+      },
+      "total_tokens": 1452
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "cou",
+      "query": "apps_data_plane"
+    },
+    "response_chars": 3753,
+    "round": 2,
+    "tool_result": {
+      "matches": [],
+      "query": "apps_data_plane",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 3168,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 2676,
+      "output_tokens_details": {
+        "reasoning_tokens": 1806
+      },
+      "total_tokens": 5844
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 120,
+      "path": "cou/steps/plan.py",
+      "start_line": 1
+    },
+    "response_chars": 1899,
+    "round": 3,
+    "tool_result": {
+      "content": "1: # Copyright 2023 Canonical Limited\n2: #\n3: # Licensed under the Apache License, Version 2.0 (the \"License\");\n4: # you may not use this file except in compliance with the License.\n5: # You may obtain a copy of the License at\n6: #\n7: #     http://www.apache.org/licenses/LICENSE-2.0\n8: #\n9: # Unless required by applicable law or agreed to in writing, software\n10: # distributed under the License is distributed on an \"AS IS\" BASIS,\n11: # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n12: # See the License for the specific language governing permissions and\n13: # limitations under the License.\n14: \n15: \"\"\"Upgrade planning utilities.\"\"\"\n16: \n17: import logging\n18: from typing import Callable\n19: \n20: from cou.apps.app import OpenStackApplication\n21: from cou.apps.subordinate import OpenStackSubordinateApplication\n22: from cou.exceptions import HaltUpgradePlanGeneration, NoTargetError\n23: from cou.steps import UpgradeStep\n24: from cou.steps.analyze import Analysis\n25: from cou.steps.backup import backup\n26: \n27: logger = logging.getLogger(__name__)\n28: \n29: \n30: async def generate_plan(analysis_result: Analysis) -> UpgradeStep:\n31:     \"\"\"Generate plan for upgrade.\n32: \n33:     :param analysis_result: Analysis result.\n34:     :type analysis_result: Analysis\n35:     :return: Plan with all upgrade steps necessary based on the Analysis.\n36:     :rtype: UpgradeStep\n37:     \"\"\"\n38:     target = getattr(analysis_result.current_cloud_os_release, \"next_release\", None)\n39:     if not target:\n40:         raise NoTargetError(\"Cannot find target to upgrade.\")\n41: \n42:     plan = UpgradeStep(description=\"Top level plan\", parallel=False, function=None)\n43:     plan.add_step(\n44:         UpgradeStep(description=\"backup mysql databases\", parallel=False, function=backup)\n45:     )\n46: \n47:     principal_upgrade_plan = await create_upgrade_group(\n48:         analysis_result=analysis_result,\n49:         description=\"Principal(s) upgrade plan\",\n50:         target=target,\n51:         filter_function=lambda app: not isinstance(app, OpenStackSubordinateApplication),\n52:     )\n53:     plan.add_step(principal_upgrade_plan)\n54: \n55:     subordinate_upgrade_plan = await create_upgrade_group(\n56:         analysis_result=analysis_result,\n57:         description=\"Subordinate(s) upgrade plan\",\n58:         target=target,\n59:         filter_function=lambda app: isinstance(app, OpenStackSubordinateApplication),\n60:     )\n61:     plan.add_step(subordinate_upgrade_plan)\n62: \n63:     return plan\n64: \n65: \n66: async def create_upgrade_group(\n67:     analysis_result: Analysis,\n68:     target: str,\n69:     description: str,\n70:     filter_function: Callable[[OpenStackApplication], bool],\n71: ) -> UpgradeStep:\n72:     \"\"\"Create upgrade group.\n73: \n74:     :param analysis_result: Result of the analysis.\n75:     :type analysis_result: Analysis\n76:     :param target: Target OpenStack version.\n77:     :type target: str\n78:     :param description: Description of the upgrade step.\n79:     :type description: str\n80:     :param filter_function: Function to filter applications.\n81:     :type filter_function: Callable[[OpenStackApplication], bool]\n82:     :return: Upgrade group.\n83:     :rtype: UpgradeStep\n84:     \"\"\"\n85:     group_upgrade_plan = UpgradeStep(description=description, parallel=False, function=None)\n86:     for app in filter(filter_function, analysis_result.apps_control_plane):\n87:         try:\n88:             app_upgrade_plan = app.generate_upgrade_plan(target)\n89:         except HaltUpgradePlanGeneration as exc:\n90:             # we do not care if applications halt the upgrade plan generation\n91:             # for some known reason.\n92:             logger.debug(\"'%s' halted the upgrade planning generation: %s\", app.name, exc)\n93:             app_upgrade_plan = None\n94:         except Exception as exc:  # pylint: disable=broad-exception-caught\n95:             logger.error(\"Cannot generate upgrade plan for '%s': %s\", app.name, exc)\n96:             raise\n97:         if app_upgrade_plan:\n98:             group_upgrade_plan.add_step(app_upgrade_plan)\n99: \n100:     return group_upgrade_plan",
+      "end_line": 100,
+      "path_lines": 100,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 3214,
+      "input_tokens_details": {
+        "cached_tokens": 2816
+      },
+      "output_tokens": 2803,
+      "output_tokens_details": {
+        "reasoning_tokens": 2307
+      },
+      "total_tokens": 6017
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "from itertools import chain\nfrom typing import Callable",
+          "end_line": 18,
+          "start_line": 18
+        },
+        {
+          "content": "    principal_control_plane_upgrade_plan = await create_upgrade_group(\n        analysis_result=analysis_result,\n        description=\"Principal(s) upgrade plan for control plane\",\n        target=target,\n        filter_function=lambda app: (\n            not isinstance(app, OpenStackSubordinateApplication)\n            and app in analysis_result.apps_control_plane\n        ),\n    )\n    plan.add_step(principal_control_plane_upgrade_plan)\n\n    principal_data_plane_upgrade_plan = await create_upgrade_group(\n        analysis_result=analysis_result,\n        description=\"Principal(s) upgrade plan for data plane\",\n        target=target,\n        filter_function=lambda app: (\n            not isinstance(app, OpenStackSubordinateApplication)\n            and app in analysis_result.apps_data_plane\n        ),\n    )\n    plan.add_step(principal_data_plane_upgrade_plan)\n\n    subordinate_upgrade_plan = await create_upgrade_group(\n        analysis_result=analysis_result,\n        description=\"Subordinate(s) upgrade plan\",\n        target=target,\n        filter_function=lambda app: isinstance(app, OpenStackSubordinateApplication),\n    )\n    plan.add_step(subordinate_upgrade_plan)",
+          "end_line": 61,
+          "start_line": 47
+        },
+        {
+          "content": "    apps = chain(analysis_result.apps_control_plane, analysis_result.apps_data_plane)\n    for app in filter(filter_function, apps):",
+          "end_line": 86,
+          "start_line": 86
+        }
+      ]
+    },
+    "response_chars": 3186,
+    "round": 4,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 18,
+          "replacement_lines": 2,
+          "start_line": 18
+        },
+        {
+          "end_line": 61,
+          "replacement_lines": 29,
+          "start_line": 47
+        },
+        {
+          "end_line": 86,
+          "replacement_lines": 2,
+          "start_line": 86
+        }
+      ],
+      "current_file_lines": 116,
+      "updated_excerpt": {
+        "content": "8: #\n9: # Unless required by applicable law or agreed to in writing, software\n10: # distributed under the License is distributed on an \"AS IS\" BASIS,\n11: # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n12: # See the License for the specific language governing permissions and\n13: # limitations under the License.\n14: \n15: \"\"\"Upgrade planning utilities.\"\"\"\n16: \n17: import logging\n18: from itertools import chain\n19: from typing import Callable\n20: \n21: from cou.apps.app import OpenStackApplication\n22: from cou.apps.subordinate import OpenStackSubordinateApplication\n23: from cou.exceptions import HaltUpgradePlanGeneration, NoTargetError\n24: from cou.steps import UpgradeStep\n25: from cou.steps.analyze import Analysis\n26: from cou.steps.backup import backup\n27: \n28: logger = logging.getLogger(__name__)\n29: \n30: \n31: async def generate_plan(analysis_result: Analysis) -> UpgradeStep:\n32:     \"\"\"Generate plan for upgrade.\n33: \n34:     :param analysis_result: Analysis result.\n35:     :type analysis_result: Analysis\n36:     :return: Plan with all upgrade steps necessary based on the Analysis.\n37:     :rtype: UpgradeStep\n38:     \"\"\"\n39:     target = getattr(analysis_result.current_cloud_os_release, \"next_release\", None)\n40:     if not target:\n41:         raise NoTargetError(\"Cannot find target to upgrade.\")\n42: \n43:     plan = UpgradeStep(description=\"Top level plan\", parallel=False, function=None)\n44:     plan.add_step(\n45:         UpgradeStep(description=\"backup mysql databases\", parallel=False, function=backup)\n46:     )\n47: \n48:     principal_control_plane_upgrade_plan = await create_upgrade_group(",
+        "end_line": 48,
+        "path_lines": 116,
+        "start_line": 8
+      }
+    },
+    "usage": {
+      "input_tokens": 4365,
+      "input_tokens_details": {
+        "cached_tokens": 2816
+      },
+      "output_tokens": 2087,
+      "output_tokens_details": {
+        "reasoning_tokens": 1375
+      },
+      "total_tokens": 6452
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 140,
+      "path": "cou/steps/plan.py",
+      "start_line": 1
+    },
+    "response_chars": 149,
+    "round": 5,
+    "tool_result": {
+      "content": "1: # Copyright 2023 Canonical Limited\n2: #\n3: # Licensed under the Apache License, Version 2.0 (the \"License\");\n4: # you may not use this file except in compliance with the License.\n5: # You may obtain a copy of the License at\n6: #\n7: #     http://www.apache.org/licenses/LICENSE-2.0\n8: #\n9: # Unless required by applicable law or agreed to in writing, software\n10: # distributed under the License is distributed on an \"AS IS\" BASIS,\n11: # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n12: # See the License for the specific language governing permissions and\n13: # limitations under the License.\n14: \n15: \"\"\"Upgrade planning utilities.\"\"\"\n16: \n17: import logging\n18: from itertools import chain\n19: from typing import Callable\n20: \n21: from cou.apps.app import OpenStackApplication\n22: from cou.apps.subordinate import OpenStackSubordinateApplication\n23: from cou.exceptions import HaltUpgradePlanGeneration, NoTargetError\n24: from cou.steps import UpgradeStep\n25: from cou.steps.analyze import Analysis\n26: from cou.steps.backup import backup\n27: \n28: logger = logging.getLogger(__name__)\n29: \n30: \n31: async def generate_plan(analysis_result: Analysis) -> UpgradeStep:\n32:     \"\"\"Generate plan for upgrade.\n33: \n34:     :param analysis_result: Analysis result.\n35:     :type analysis_result: Analysis\n36:     :return: Plan with all upgrade steps necessary based on the Analysis.\n37:     :rtype: UpgradeStep\n38:     \"\"\"\n39:     target = getattr(analysis_result.current_cloud_os_release, \"next_release\", None)\n40:     if not target:\n41:         raise NoTargetError(\"Cannot find target to upgrade.\")\n42: \n43:     plan = UpgradeStep(description=\"Top level plan\", parallel=False, function=None)\n44:     plan.add_step(\n45:         UpgradeStep(description=\"backup mysql databases\", parallel=False, function=backup)\n46:     )\n47: \n48:     principal_control_plane_upgrade_plan = await create_upgrade_group(\n49:         analysis_result=analysis_result,\n50:         description=\"Principal(s) upgrade plan for control plane\",\n51:         target=target,\n52:         filter_function=lambda app: (\n53:             not isinstance(app, OpenStackSubordinateApplication)\n54:             and app in analysis_result.apps_control_plane\n55:         ),\n56:     )\n57:     plan.add_step(principal_control_plane_upgrade_plan)\n58: \n59:     principal_data_plane_upgrade_plan = await create_upgrade_group(\n60:         analysis_result=analysis_result,\n61:         description=\"Principal(s) upgrade plan for data plane\",\n62:         target=target,\n63:         filter_function=lambda app: (\n64:             not isinstance(app, OpenStackSubordinateApplication)\n65:             and app in analysis_result.apps_data_plane\n66:         ),\n67:     )\n68:     plan.add_step(principal_data_plane_upgrade_plan)\n69: \n70:     subordinate_upgrade_plan = await create_upgrade_group(\n71:         analysis_result=analysis_result,\n72:         description=\"Subordinate(s) upgrade plan\",\n73:         target=target,\n74:         filter_function=lambda app: isinstance(app, OpenStackSubordinateApplication),\n75:     )\n76:     plan.add_step(subordinate_upgrade_plan)\n77: \n78:     return plan\n79: \n80: \n81: async def create_upgrade_group(\n82:     analysis_result: Analysis,\n83:     target: str,\n84:     description: str,\n85:     filter_function: Callable[[OpenStackApplication], bool],\n86: ) -> UpgradeStep:\n87:     \"\"\"Create upgrade group.\n88: \n89:     :param analysis_result: Result of the analysis.\n90:     :type analysis_result: Analysis\n91:     :param target: Target OpenStack version.\n92:     :type target: str\n93:     :param description: Description of the upgrade step.\n94:     :type description: str\n95:     :param filter_function: Function to filter applications.\n96:     :type filter_function: Callable[[OpenStackApplication], bool]\n97:     :return: Upgrade group.\n98:     :rtype: UpgradeStep\n99:     \"\"\"\n100:     group_upgrade_plan = UpgradeStep(description=description, parallel=False, function=None)\n101:     apps = chain(analysis_result.apps_control_plane, analysis_result.apps_data_plane)\n102:     for app in filter(filter_function, apps):\n103:         try:\n104:             app_upgrade_plan = app.generate_upgrade_plan(target)\n105:         except HaltUpgradePlanGeneration as exc:\n106:             # we do not care if applications halt the upgrade plan generation\n107:             # for some known reason.\n108:             logger.debug(\"'%s' halted the upgrade planning generation: %s\", app.name, exc)\n109:             app_upgrade_plan = None\n110:         except Exception as exc:  # pylint: disable=broad-exception-caught\n111:             logger.error(\"Cannot generate upgrade plan for '%s': %s\", app.name, exc)\n112:             raise\n113:         if app_upgrade_plan:\n114:             group_upgrade_plan.add_step(app_upgrade_plan)\n115: \n116:     return group_upgrade_plan",
+      "end_line": 116,
+      "path_lines": 116,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 5255,
+      "input_tokens_details": {
+        "cached_tokens": 3840
+      },
+      "output_tokens": 510,
+      "output_tokens_details": {
+        "reasoning_tokens": 449
+      },
+      "total_tokens": 5765
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "from collections.abc import Iterable\nfrom itertools import chain\nfrom typing import Callable",
+          "end_line": 19,
+          "start_line": 18
+        },
+        {
+          "content": "        filter_function=lambda analysis: (\n            app\n            for app in analysis.apps_control_plane\n            if not isinstance(app, OpenStackSubordinateApplication)\n        ),",
+          "end_line": 55,
+          "start_line": 52
+        },
+        {
+          "content": "        filter_function=lambda analysis: (\n            app\n            for app in analysis.apps_data_plane\n            if not isinstance(app, OpenStackSubordinateApplication)\n        ),",
+          "end_line": 66,
+          "start_line": 63
+        },
+        {
+          "content": "        filter_function=lambda analysis: (\n            app\n            for app in chain(analysis.apps_control_plane, analysis.apps_data_plane)\n            if isinstance(app, OpenStackSubordinateApplication)\n        ),",
+          "end_line": 74,
+          "start_line": 74
+        },
+        {
+          "content": "    filter_function: Callable[[Analysis], Iterable[OpenStackApplication]],",
+          "end_line": 85,
+          "start_line": 85
+        },
+        {
+          "content": "    :param filter_function: Function to filter applications.\n    :type filter_function: Callable[[Analysis], Iterable[OpenStackApplication]]",
+          "end_line": 96,
+          "start_line": 95
+        },
+        {
+          "content": "    for app in filter_function(analysis_result):",
+          "end_line": 102,
+          "start_line": 101
+        }
+      ]
+    },
+    "response_chars": 1303,
+    "round": 6,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 19,
+          "replacement_lines": 3,
+          "start_line": 18
+        },
+        {
+          "end_line": 55,
+          "replacement_lines": 5,
+          "start_line": 52
+        },
+        {
+          "end_line": 66,
+          "replacement_lines": 5,
+          "start_line": 63
+        },
+        {
+          "end_line": 74,
+          "replacement_lines": 5,
+          "start_line": 74
+        },
+        {
+          "end_line": 85,
+          "replacement_lines": 1,
+          "start_line": 85
+        },
+        {
+          "end_line": 96,
+          "replacement_lines": 2,
+          "start_line": 95
+        },
+        {
+          "end_line": 102,
+          "replacement_lines": 1,
+          "start_line": 101
+        }
+      ],
+      "current_file_lines": 122,
+      "updated_excerpt": {
+        "content": "8: #\n9: # Unless required by applicable law or agreed to in writing, software\n10: # distributed under the License is distributed on an \"AS IS\" BASIS,\n11: # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n12: # See the License for the specific language governing permissions and\n13: # limitations under the License.\n14: \n15: \"\"\"Upgrade planning utilities.\"\"\"\n16: \n17: import logging\n18: from collections.abc import Iterable\n19: from itertools import chain\n20: from typing import Callable\n21: \n22: from cou.apps.app import OpenStackApplication\n23: from cou.apps.subordinate import OpenStackSubordinateApplication\n24: from cou.exceptions import HaltUpgradePlanGeneration, NoTargetError\n25: from cou.steps import UpgradeStep\n26: from cou.steps.analyze import Analysis\n27: from cou.steps.backup import backup\n28: \n29: logger = logging.getLogger(__name__)\n30: \n31: \n32: async def generate_plan(analysis_result: Analysis) -> UpgradeStep:\n33:     \"\"\"Generate plan for upgrade.\n34: \n35:     :param analysis_result: Analysis result.\n36:     :type analysis_result: Analysis\n37:     :return: Plan with all upgrade steps necessary based on the Analysis.\n38:     :rtype: UpgradeStep\n39:     \"\"\"\n40:     target = getattr(analysis_result.current_cloud_os_release, \"next_release\", None)\n41:     if not target:\n42:         raise NoTargetError(\"Cannot find target to upgrade.\")\n43: \n44:     plan = UpgradeStep(description=\"Top level plan\", parallel=False, function=None)\n45:     plan.add_step(\n46:         UpgradeStep(description=\"backup mysql databases\", parallel=False, function=backup)\n47:     )\n48: ",
+        "end_line": 48,
+        "path_lines": 122,
+        "start_line": 8
+      }
+    },
+    "usage": {
+      "input_tokens": 6572,
+      "input_tokens_details": {
+        "cached_tokens": 4864
+      },
+      "output_tokens": 852,
+      "output_tokens_details": {
+        "reasoning_tokens": 558
+      },
+      "total_tokens": 7424
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 130,
+      "path": "cou/steps/plan.py",
+      "start_line": 45
+    },
+    "response_chars": 75,
+    "round": 7,
+    "tool_result": {
+      "content": "45:     plan.add_step(\n46:         UpgradeStep(description=\"backup mysql databases\", parallel=False, function=backup)\n47:     )\n48: \n49:     principal_control_plane_upgrade_plan = await create_upgrade_group(\n50:         analysis_result=analysis_result,\n51:         description=\"Principal(s) upgrade plan for control plane\",\n52:         target=target,\n53:         filter_function=lambda analysis: (\n54:             app\n55:             for app in analysis.apps_control_plane\n56:             if not isinstance(app, OpenStackSubordinateApplication)\n57:         ),\n58:     )\n59:     plan.add_step(principal_control_plane_upgrade_plan)\n60: \n61:     principal_data_plane_upgrade_plan = await create_upgrade_group(\n62:         analysis_result=analysis_result,\n63:         description=\"Principal(s) upgrade plan for data plane\",\n64:         target=target,\n65:         filter_function=lambda analysis: (\n66:             app\n67:             for app in analysis.apps_data_plane\n68:             if not isinstance(app, OpenStackSubordinateApplication)\n69:         ),\n70:     )\n71:     plan.add_step(principal_data_plane_upgrade_plan)\n72: \n73:     subordinate_upgrade_plan = await create_upgrade_group(\n74:         analysis_result=analysis_result,\n75:         description=\"Subordinate(s) upgrade plan\",\n76:         target=target,\n77:         filter_function=lambda analysis: (\n78:             app\n79:             for app in chain(analysis.apps_control_plane, analysis.apps_data_plane)\n80:             if isinstance(app, OpenStackSubordinateApplication)\n81:         ),\n82:     )\n83:     plan.add_step(subordinate_upgrade_plan)\n84: \n85:     return plan\n86: \n87: \n88: async def create_upgrade_group(\n89:     analysis_result: Analysis,\n90:     target: str,\n91:     description: str,\n92:     filter_function: Callable[[Analysis], Iterable[OpenStackApplication]],\n93: ) -> UpgradeStep:\n94:     \"\"\"Create upgrade group.\n95: \n96:     :param analysis_result: Result of the analysis.\n97:     :type analysis_result: Analysis\n98:     :param target: Target OpenStack version.\n99:     :type target: str\n100:     :param description: Description of the upgrade step.\n101:     :type description: str\n102:     :param filter_function: Function to filter applications.\n103:     :type filter_function: Callable[[Analysis], Iterable[OpenStackApplication]]\n104:     :return: Upgrade group.\n105:     :rtype: UpgradeStep\n106:     \"\"\"\n107:     group_upgrade_plan = UpgradeStep(description=description, parallel=False, function=None)\n108:     for app in filter_function(analysis_result):\n109:         try:\n110:             app_upgrade_plan = app.generate_upgrade_plan(target)\n111:         except HaltUpgradePlanGeneration as exc:\n112:             # we do not care if applications halt the upgrade plan generation\n113:             # for some known reason.\n114:             logger.debug(\"'%s' halted the upgrade planning generation: %s\", app.name, exc)\n115:             app_upgrade_plan = None\n116:         except Exception as exc:  # pylint: disable=broad-exception-caught\n117:             logger.error(\"Cannot generate upgrade plan for '%s': %s\", app.name, exc)\n118:             raise\n119:         if app_upgrade_plan:\n120:             group_upgrade_plan.add_step(app_upgrade_plan)\n121: \n122:     return group_upgrade_plan",
+      "end_line": 122,
+      "path_lines": 122,
+      "start_line": 45
+    },
+    "usage": {
+      "input_tokens": 7512,
+      "input_tokens_details": {
+        "cached_tokens": 6400
+      },
+      "output_tokens": 46,
+      "output_tokens_details": {
+        "reasoning_tokens": 16
+      },
+      "total_tokens": 7558
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "cou/steps/plan.py",
+      "query": "create_upgrade_group"
+    },
+    "response_chars": 211,
+    "round": 8,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 49,
+          "text": "    principal_control_plane_upgrade_plan = await create_upgrade_group("
+        },
+        {
+          "line": 61,
+          "text": "    principal_data_plane_upgrade_plan = await create_upgrade_group("
+        },
+        {
+          "line": 73,
+          "text": "    subordinate_upgrade_plan = await create_upgrade_group("
+        },
+        {
+          "line": 88,
+          "text": "async def create_upgrade_group("
+        }
+      ],
+      "query": "create_upgrade_group",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 8396,
+      "input_tokens_details": {
+        "cached_tokens": 6912
+      },
+      "output_tokens": 1022,
+      "output_tokens_details": {
+        "reasoning_tokens": 942
+      },
+      "total_tokens": 9418
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 9,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__canonical__charmed-openstack-upgrader__pull_54__comment_1324575759__modularity.patch"
+    },
+    "usage": {
+      "input_tokens": 8530,
+      "input_tokens_details": {
+        "cached_tokens": 7936
+      },
+      "output_tokens": 413,
+      "output_tokens_details": {
+        "reasoning_tokens": 402
+      },
+      "total_tokens": 8943
+    }
+  }
+]

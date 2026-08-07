@@ -1,0 +1,123 @@
+--- a/web-common/src/features/chat/core/messages/ToolMessage.svelte
++++ b/web-common/src/features/chat/core/messages/ToolMessage.svelte
+@@ -32,71 +32,64 @@
+     }
+   }
+ 
++  // Collect all tool results by ID so calls can be correlated with them
++  function indexToolResultsById(content: any[]) {
++    const toolResults = new Map();
++    for (const block of content) {
++      if (block.toolResult?.id) {
++        toolResults.set(block.toolResult.id, block.toolResult);
++      }
++    }
++    return toolResults;
++  }
++
++  // Determine whether a tool call + result should render as a chart
++  function getChartData(toolCall: any, toolResult: any) {
++    if (
++      !toolResult ||
++      toolResult.isError ||
++      toolCall.name !== "create_chart" ||
++      !isChartToolResult(toolResult)
++    ) {
++      return null;
++    }
++    return parseChartData(toolResult);
++  }
++
+   // Group tool calls with their results within this message
+   function groupToolCallsWithResults(content: any[]) {
+     const groups: any[] = [];
+-    const toolResults = new Map();
++    const toolResults = indexToolResultsById(content);
+ 
+-    // First pass: collect all tool results by ID within this message
+-    content.forEach((block) => {
+-      if (block.toolResult && block.toolResult.id) {
+-        toolResults.set(block.toolResult.id, block.toolResult);
+-      }
+-    });
+-
+-    // Second pass: process blocks and create groups
+     content.forEach((block, index) => {
+       if (block.text) {
+         groups.push({ type: "text", content: block.text, index });
+-      } else if (block.toolCall) {
+-        // Streaming merges tool results into toolCall blocks.
+-        // For initial fetch (GetConversation), calls/results are separate, so we attach via fallback.
+-        const toolResult =
+-          block.toolResult || toolResults.get(block.toolCall.id);
++        return;
++      }
+ 
+-        // Check if this is a chart tool result
+-        if (
+-          toolResult &&
+-          !toolResult.isError &&
+-          block.toolCall.name === "create_chart" &&
+-          isChartToolResult(toolResult)
+-        ) {
+-          const chartData = parseChartData(toolResult);
+-          if (chartData) {
+-            // Add both tool call+result block AND chart block
+-            groups.push({
+-              type: "tool",
+-              toolCall: block.toolCall,
+-              toolResult,
+-              index,
+-            });
+-            groups.push({
+-              type: "chart",
+-              chartType: chartData.chartType,
+-              chartSpec: chartData.chartSpec,
+-              toolCall: block.toolCall,
+-              toolResult,
+-              index,
+-            });
+-          } else {
+-            // Fallback to regular tool block if parsing fails
+-            groups.push({
+-              type: "tool",
+-              toolCall: block.toolCall,
+-              toolResult,
+-              index,
+-            });
+-          }
+-        } else {
+-          groups.push({
+-            type: "tool",
+-            toolCall: block.toolCall,
+-            toolResult,
+-            index,
+-          });
+-        }
++      if (!block.toolCall) {
++        // Skip standalone toolResult blocks as they should be merged with toolCalls
++        return;
+       }
+-      // Skip standalone toolResult blocks as they should be merged with toolCalls
++
++      // Streaming merges tool results into toolCall blocks.
++      // For initial fetch (GetConversation), calls/results are separate, so we attach via fallback.
++      const toolResult =
++        block.toolResult || toolResults.get(block.toolCall.id);
++
++      groups.push({ type: "tool", toolCall: block.toolCall, toolResult, index });
++
++      const chartData = getChartData(block.toolCall, toolResult);
++      if (chartData) {
++        groups.push({
++          type: "chart",
++          chartType: chartData.chartType,
++          chartSpec: chartData.chartSpec,
++          toolCall: block.toolCall,
++          toolResult,
++          index,
++        });
++      }
+     });
+ 
+     return groups;

@@ -1,0 +1,76 @@
+--- a/altair/utils/_vegafusion_data.py
++++ b/altair/utils/_vegafusion_data.py
+@@ -20,16 +20,19 @@
+ 
+ if TYPE_CHECKING:
+     from collections.abc import MutableMapping
++    from typing import TypeAlias, TypeGuard
+ 
+     from narwhals.typing import IntoDataFrame
+ 
+     from vegafusion.runtime import ChartState
++
++    _VegaFusionDataType: TypeAlias = DataFrameLike | IntoDataFrame
+ 
+ # Temporary storage for dataframes that have been extracted
+ # from charts by the vegafusion data transformer. Use a WeakValueDictionary
+ # rather than a dict so that the Python interpreter is free to garbage
+ # collect the stored DataFrames.
+-extracted_inline_tables: MutableMapping[str, Any] = WeakValueDictionary()
++extracted_inline_tables: MutableMapping[str, _VegaFusionDataType] = WeakValueDictionary()
+ 
+ # Special URL prefix that VegaFusion uses to denote that a
+ # dataset in a Vega spec corresponds to an entry in the `inline_datasets`
+@@ -42,6 +45,24 @@
+ 
+ 
+ _VegaFusionReturnType = Union[_ToVegaFusionReturnUrlDict, ToValuesReturnType]
++
++
++if TYPE_CHECKING:
++
++    def _supported_by_vegafusion(
++        data: DataType, is_v2: bool
++    ) -> TypeGuard[_VegaFusionDataType]: ...
++
++else:
++
++    def _supported_by_vegafusion(data: DataType, is_v2: bool) -> bool:
++        if is_v2:
++            # VegaFusion v2 support narwhals-compatible DataFrames
++            return isinstance(data, DataFrameLike) or isinstance(
++                nw.from_native(data, pass_through=True), (nw.DataFrame, nw.LazyFrame)
++            )
++        else:
++            return isinstance(data, DataFrameLike)
+ 
+ 
+ @overload
+@@ -75,15 +96,9 @@
+         if (version := importlib_version("vegafusion"))
+         else False
+     )
+-    if is_v2:
+-        # VegaFusion v2 support narwhals-compatible DataFrames
+-        supported_by_vf = isinstance(data, DataFrameLike) or isinstance(
+-            nw.from_native(data, pass_through=True), (nw.DataFrame, nw.LazyFrame)
+-        )
+-    else:
+-        supported_by_vf = isinstance(data, DataFrameLike)
+-
+-    if supported_by_vf and not isinstance(data, SupportsGeoInterface):
++    if _supported_by_vegafusion(data, is_v2) and not isinstance(
++        data, SupportsGeoInterface
++    ):
+         table_name = f"table_{uuid.uuid4()}".replace("-", "_")
+         extracted_inline_tables[table_name] = data
+         return {"url": VEGAFUSION_PREFIX + table_name}
+@@ -139,7 +154,7 @@
+     return table_names
+ 
+ 
+-def get_inline_tables(vega_spec: dict[str, Any]) -> dict[str, DataFrameLike]:
++def get_inline_tables(vega_spec: dict[str, Any]) -> dict[str, _VegaFusionDataType]:
+     """
+     Get the inline tables referenced by a Vega specification.
+ 

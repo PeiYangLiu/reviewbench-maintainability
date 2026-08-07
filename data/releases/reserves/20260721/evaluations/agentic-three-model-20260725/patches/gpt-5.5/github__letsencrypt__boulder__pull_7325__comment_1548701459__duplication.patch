@@ -1,0 +1,56 @@
+diff --git a/ca/ca.go b/ca/ca.go
+index 005955a..38eecdd 100644
+--- a/ca/ca.go
++++ b/ca/ca.go
+@@ -254,17 +254,6 @@ func (ca *certificateAuthorityImpl) IssuePrecertificate(ctx context.Context, iss
+ 		return nil, berrors.InternalServerError("Incomplete issue certificate request")
+ 	}
+ 
+-	// The CA must check if it is capable of issuing for the given
+-	// certificate profile name. The name is checked here instead of the
+-	// hash because the RA is unaware of what certificate profiles exist.
+-	if issueReq.CertProfileName == "" {
+-		issueReq.CertProfileName = DefaultCertProfileName
+-	}
+-	profileHashBytes, ok := ca.certProfiles.hashByName[issueReq.CertProfileName]
+-	if !ok {
+-		return nil, fmt.Errorf("the CA is not capable of using a profile named %s", issueReq.CertProfileName)
+-	}
+-
+ 	serialBigInt, validity, err := ca.generateSerialNumberAndValidity()
+ 	if err != nil {
+ 		return nil, err
+@@ -282,7 +271,7 @@ func (ca *certificateAuthorityImpl) IssuePrecertificate(ctx context.Context, iss
+ 		return nil, err
+ 	}
+ 
+-	precertDER, _, err := ca.issuePrecertificateInner(ctx, issueReq, serialBigInt, validity)
++	precertDER, profileHashBytes, err := ca.issuePrecertificateInner(ctx, issueReq, serialBigInt, validity)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -294,7 +283,7 @@ func (ca *certificateAuthorityImpl) IssuePrecertificate(ctx context.Context, iss
+ 
+ 	return &capb.IssuePrecertificateResponse{
+ 		DER:             precertDER,
+-		CertProfileHash: profileHashBytes[:],
++		CertProfileHash: profileHashBytes,
+ 	}, nil
+ }
+ 
+@@ -475,7 +464,7 @@ func generateSKID(pk crypto.PublicKey) ([]byte, error) {
+ 	return skid[0:20:20], nil
+ }
+ 
+-func (ca *certificateAuthorityImpl) issuePrecertificateInner(ctx context.Context, issueReq *capb.IssueCertificateRequest, serialBigInt *big.Int, validity validity) ([]byte, *issuance.Issuer, error) {
++func (ca *certificateAuthorityImpl) issuePrecertificateInner(ctx context.Context, issueReq *capb.IssueCertificateRequest, serialBigInt *big.Int, validity validity) ([]byte, []byte, error) {
+ 	// The CA must check if it is capable of issuing for the given
+ 	// certificate profile name. The name is checked here instead of the
+ 	// hash because the RA is unaware of what certificate profiles exist.
+@@ -587,5 +576,5 @@ func (ca *certificateAuthorityImpl) issuePrecertificateInner(ctx context.Context
+ 	ca.log.AuditInfof("Signing precert success: serial=[%s] regID=[%d] names=[%s] precertificate=[%s] certProfileName=[%s] certProfileHash=[%s]",
+ 		serialHex, issueReq.RegistrationID, strings.Join(csr.DNSNames, ", "), hex.EncodeToString(certDER), issueReq.CertProfileName, hex.EncodeToString(profileHashBytes[:]))
+ 
+-	return certDER, issuer, nil
++	return certDER, profileHashBytes[:], nil
+ }

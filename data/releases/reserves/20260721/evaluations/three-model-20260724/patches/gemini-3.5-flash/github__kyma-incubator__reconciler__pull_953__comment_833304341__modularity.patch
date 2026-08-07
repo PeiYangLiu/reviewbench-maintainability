@@ -1,0 +1,41 @@
+--- a/pkg/reconciler/instances/istio/bootstrap.go
++++ b/pkg/reconciler/instances/istio/bootstrap.go
+@@ -24,10 +24,17 @@
+ 
+ 	res := func(logger *zap.SugaredLogger) (actions.IstioPerformer, error) {
+ 		pathsConfig := os.Getenv(istioctlBinaryPathEnvKey)
+-		istioctlPaths, err := parsePaths(pathsConfig, ensureFileExecutable, logger)
++		istioctlPaths, err := parsePaths(pathsConfig)
+ 		if err != nil {
+ 			logger.Errorf("Could not create '%s' component reconciler: Error parsing env variable '%s': %s", name, istioctlBinaryPathEnvKey, err.Error())
+ 			return nil, err
++		}
++
++		for _, path := range istioctlPaths {
++			if err := ensureFileExecutable(path, logger); err != nil {
++				logger.Errorf("Could not create '%s' component reconciler: Error ensuring file executable '%s': %s", name, path, err.Error())
++				return nil, err
++			}
+ 		}
+ 
+ 		resolver, err := newDefaultCommanderResolver(istioctlPaths, logger)
+@@ -76,8 +83,7 @@
+ }
+ 
+ // parsePaths func parses and validates executable paths. The input must contain a list of full/absolute filesystem paths of binaries, separated by a semicolon character ';'
+-// isValid function is used to validate every single binary path in the input.
+-func parsePaths(input string, isValid func(string, *zap.SugaredLogger) error, logger *zap.SugaredLogger) ([]string, error) {
++func parsePaths(input string) ([]string, error) {
+ 	trimmed := strings.TrimSpace(input)
+ 	if trimmed == "" {
+ 		return nil, errors.Errorf("%s env variable is undefined or empty", istioctlBinaryPathEnvKey)
+@@ -91,9 +97,6 @@
+ 		val := strings.TrimSpace(path)
+ 		if val == "" {
+ 			return nil, errors.New("Invalid (empty) path provided")
+-		}
+-		if err := isValid(val, logger); err != nil {
+-			return nil, err
+ 		}
+ 		res = append(res, val)
+ 	}

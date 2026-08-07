@@ -1,0 +1,68 @@
+diff --git a/ddtrace/tracer/textmap.go b/ddtrace/tracer/textmap.go
+index b02f76a..2906208 100644
+--- a/ddtrace/tracer/textmap.go
++++ b/ddtrace/tracer/textmap.go
+@@ -265,27 +265,7 @@ func (p *propagator) injectTextMap(spanCtx ddtrace.SpanContext, writer TextMapWr
+ 	// propagate trace tags
+ 	var sb strings.Builder
+ 	if ctx.trace != nil {
+-		ctx.trace.mu.Lock()
+-		for k, v := range ctx.trace.propagatingTags {
+-			if err := isValidPropagatableTraceTag(k, v); err != nil {
+-				log.Warn("won't propagate tag '%s' (err: %s)", k, err.Error())
+-				ctx.trace.setTag(propagationErrorKey, "encoding_error")
+-				continue
+-			}
+-			if sb.Len()+len(k)+len(v) > p.cfg.MaxTagsHeaderLen {
+-				sb.Reset()
+-				log.Warn("won't propagate trace tags (err: max trace tags header len (%d) reached)", p.cfg.MaxTagsHeaderLen)
+-				ctx.trace.setTag(propagationErrorKey, "max_size")
+-				break
+-			}
+-			if sb.Len() > 0 {
+-				sb.WriteByte(',')
+-			}
+-			sb.WriteString(k)
+-			sb.WriteByte('=')
+-			sb.WriteString(v)
+-		}
+-		ctx.trace.mu.Unlock()
++		p.marshalPropagatingTags(ctx, &sb)
+ 		if sb.Len() > 0 {
+ 			writer.Set(traceTagsHeader, sb.String())
+ 		}
+@@ -293,6 +273,34 @@ func (p *propagator) injectTextMap(spanCtx ddtrace.SpanContext, writer TextMapWr
+ 	return nil
+ }
+ 
++// marshalPropagatingTags marshals the propagating tags of ctx into sb, holding
++// the trace lock for the duration of the operation.
++func (p *propagator) marshalPropagatingTags(ctx *spanContext, sb *strings.Builder) {
++	ctx.trace.mu.Lock()
++	defer ctx.trace.mu.Unlock()
++	for k, v := range ctx.trace.propagatingTags {
++		if err := isValidPropagatableTraceTag(k, v); err != nil {
++			log.Warn("won't propagate tag '%s' (err: %s)", k, err.Error())
++			ctx.trace.setTag(propagationErrorKey, "encoding_error")
++			continue
++		}
++		if sb.Len()+len(k)+len(v) > p.cfg.MaxTagsHeaderLen {
++			sb.Reset()
++			log.Warn("won't propagate trace tags (err: max trace tags header len (%d) reached)", p.cfg.MaxTagsHeaderLen)
++			ctx.trace.setTag(propagationErrorKey, "max_size")
++			break
++		}
++		if sb.Len() > 0 {
++			sb.WriteByte(',')
++		}
++		sb.WriteString(k)
++		sb.WriteByte('=')
++		sb.WriteString(v)
++	}
++}
++	return nil
++}
++
+ func (p *propagator) Extract(carrier interface{}) (ddtrace.SpanContext, error) {
+ 	switch c := carrier.(type) {
+ 	case TextMapReader:

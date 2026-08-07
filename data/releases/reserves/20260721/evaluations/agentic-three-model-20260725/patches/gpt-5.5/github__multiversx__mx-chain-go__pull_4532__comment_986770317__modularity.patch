@@ -1,0 +1,107 @@
+diff --git a/process/smartContract/processorV2/processV2.go b/process/smartContract/processorV2/processV2.go
+index 5279021..3e8d4b7 100644
+--- a/process/smartContract/processorV2/processV2.go
++++ b/process/smartContract/processorV2/processV2.go
+@@ -863,7 +863,7 @@ func (sc *scProcessor) doExecuteBuiltInFunction(
+ 		return 0, err
+ 	}
+ 
+-	isSCCallSelfShard, callType, parsedTransfer, scExecuteOutTransfer, err := sc.isSameShardSCExecutionAfterBuiltInFunc(tx, vmInput, vmOutput)
++	scExecutionAfterBuiltIn, err := sc.isSameShardSCExecutionAfterBuiltInFunc(tx, vmInput, vmOutput)
+ 	if err != nil {
+ 		return 0, sc.ProcessIfError(acntSnd, vmInput.CurrentTxHash, tx, err.Error(), []byte(""), snapshot, vmInput.GasLocked)
+ 	}
+@@ -872,9 +872,9 @@ func (sc *scProcessor) doExecuteBuiltInFunction(
+ 	newVMOutput := vmOutput
+ 
+ 	var errReturnCode vmcommon.ReturnCode
+-	if isSCCallSelfShard {
++	if scExecutionAfterBuiltIn.isSCCallSelfShard {
+ 		var newDestSC state.UserAccountHandler
+-		newVMInput, newDestSC, err = sc.prepareExecutionAfterBuiltInFunc(callType, vmInput, vmOutput, parsedTransfer, scExecuteOutTransfer, tx, acntSnd, snapshot)
++		newVMInput, newDestSC, err = sc.prepareExecutionAfterBuiltInFunc(scExecutionAfterBuiltIn.callType, vmInput, vmOutput, scExecutionAfterBuiltIn.parsedTransfer, scExecutionAfterBuiltIn.scExecuteOutTransfer, tx, acntSnd, snapshot)
+ 		if err != nil {
+ 			return 0, err
+ 		}
+@@ -892,7 +892,7 @@ func (sc *scProcessor) doExecuteBuiltInFunction(
+ 		createdAsyncCallback, scrResults = mergeOutputResultsWithBuiltinResults(tmpCreatedAsyncCallback, createdAsyncCallback, newSCRTxs, scrResults, newVMOutput, vmOutput)
+ 	}
+ 
+-	isSCCallCrossShard := !isSCCallSelfShard && txTypeOnDst == process.SCInvoking
++	isSCCallCrossShard := !scExecutionAfterBuiltIn.isSCCallSelfShard && txTypeOnDst == process.SCInvoking
+ 	if !isSCCallCrossShard /* isSCCallSelfShard || txTypeOnDst != process.SCInvoking */ {
+ 		scrResults, errReturnCode, err = sc.completeOutputProcessingAndCreateCallback(&vmInput.VMInput, newVMOutput, txHash, tx, scrResults, acntSnd, snapshot, createdAsyncCallback)
+ 		if errReturnCode != vmcommon.Ok || err != nil {
+@@ -1033,46 +1033,62 @@ func (sc *scProcessor) resolveBuiltInFunctions(
+ 	return vmOutput, nil
+ }
+ 
++type sameShardSCExecutionAfterBuiltInFuncResult struct {
++	isSCCallSelfShard	bool
++	callType		vmData.CallType
++	parsedTransfer		*vmcommon.ParsedESDTTransfers
++	scExecuteOutTransfer	*vmcommon.OutputTransfer
++}
++
+ func (sc *scProcessor) isSameShardSCExecutionAfterBuiltInFunc(
+ 	tx data.TransactionHandler,
+ 	vmInput *vmcommon.ContractCallInput,
+ 	vmOutput *vmcommon.VMOutput,
+-) (bool, vmData.CallType, *vmcommon.ParsedESDTTransfers, *vmcommon.OutputTransfer, error) {
++) (sameShardSCExecutionAfterBuiltInFuncResult, error) {
+ 	if vmOutput.ReturnCode != vmcommon.Ok {
+-		return false, 0, nil, nil, nil
++		return sameShardSCExecutionAfterBuiltInFuncResult{}, nil
+ 	}
+ 
+ 	parsedTransfer, err := sc.esdtTransferParser.ParseESDTTransfers(vmInput.CallerAddr, vmInput.RecipientAddr, vmInput.Function, vmInput.Arguments)
+ 	if err != nil {
+-		return false, 0, nil, nil, nil
++		return sameShardSCExecutionAfterBuiltInFuncResult{}, nil
+ 	}
+ 	if !core.IsSmartContractAddress(parsedTransfer.RcvAddr) {
+-		return false, 0, nil, nil, nil
++		return sameShardSCExecutionAfterBuiltInFuncResult{}, nil
+ 	}
+ 
+ 	if sc.shardCoordinator.ComputeId(parsedTransfer.RcvAddr) != sc.shardCoordinator.SelfId() {
+-		return false, 0, nil, nil, nil
++		return sameShardSCExecutionAfterBuiltInFuncResult{}, nil
+ 	}
+ 
+ 	callType := determineCallType(tx)
+ 	if callType == vmData.AsynchronousCallBack {
+-		return true, callType, parsedTransfer, nil, nil
++		return sameShardSCExecutionAfterBuiltInFuncResult{
++			isSCCallSelfShard: true,
++			callType:          callType,
++			parsedTransfer:    parsedTransfer,
++		}, nil
+ 	}
+ 
+ 	if len(parsedTransfer.CallFunction) == 0 {
+-		return false, 0, nil, nil, nil
++		return sameShardSCExecutionAfterBuiltInFuncResult{}, nil
+ 	}
+ 
+ 	outAcc, ok := vmOutput.OutputAccounts[string(parsedTransfer.RcvAddr)]
+ 	if !ok {
+-		return false, 0, nil, nil, nil
++		return sameShardSCExecutionAfterBuiltInFuncResult{}, nil
+ 	}
+ 	if len(outAcc.OutputTransfers) != 1 {
+-		return false, 0, nil, nil, nil
++		return sameShardSCExecutionAfterBuiltInFuncResult{}, nil
+ 	}
+ 
+ 	scExecuteOutTransfer := outAcc.OutputTransfers[0]
+-	return true, callType, parsedTransfer, &scExecuteOutTransfer, nil
++	return sameShardSCExecutionAfterBuiltInFuncResult{
++		isSCCallSelfShard:   true,
++		callType:            callType,
++		parsedTransfer:      parsedTransfer,
++		scExecuteOutTransfer: &scExecuteOutTransfer,
++	}, nil
+ }
+ 
+ func (sc *scProcessor) prepareExecutionAfterBuiltInFunc(

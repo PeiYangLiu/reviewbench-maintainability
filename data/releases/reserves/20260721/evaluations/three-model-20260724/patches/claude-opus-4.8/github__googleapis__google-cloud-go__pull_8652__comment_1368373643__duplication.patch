@@ -1,0 +1,69 @@
+--- a/spanner/client.go
++++ b/spanner/client.go
+@@ -647,6 +647,33 @@
+ 	}
+ }
+ 
++// batchWriteOption controls the behavior of Client.BatchWrite.
++type batchWriteOption struct {
++	// transactionTag will be included with the BatchWriteRequest.
++	transactionTag string
++	// priority is the RPC priority that is used for the BatchWrite operation.
++	priority sppb.RequestOptions_Priority
++}
++
++// A BatchWriteOption is an optional argument to BatchWrite.
++type BatchWriteOption func(*batchWriteOption)
++
++// BatchWriteTransactionTag returns a BatchWriteOption that will include the
++// given tag as a transaction tag for the BatchWrite request.
++func BatchWriteTransactionTag(tag string) BatchWriteOption {
++	return func(bwo *batchWriteOption) {
++		bwo.transactionTag = tag
++	}
++}
++
++// BatchWritePriority returns a BatchWriteOption that sets the RPC priority to
++// use for the BatchWrite operation.
++func BatchWritePriority(priority sppb.RequestOptions_Priority) BatchWriteOption {
++	return func(bwo *batchWriteOption) {
++		bwo.priority = priority
++	}
++}
++
+ // Apply applies a list of mutations atomically to the database.
+ func (c *Client) Apply(ctx context.Context, ms []*Mutation, opts ...ApplyOption) (commitTimestamp time.Time, err error) {
+ 	ao := &applyOption{}
+@@ -786,7 +813,7 @@
+ // timestamp-based keys, it may result in additional rows being added to the
+ // mutation's table. We recommend structuring your mutation groups to be
+ // idempotent to avoid this issue.
+-func (c *Client) BatchWrite(ctx context.Context, mgs []*MutationGroup, opts ...ApplyOption) *BatchWriteResponseIterator {
++func (c *Client) BatchWrite(ctx context.Context, mgs []*MutationGroup, opts ...BatchWriteOption) *BatchWriteResponseIterator {
+ 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/spanner.BatchWrite")
+ 
+ 	var err error
+@@ -794,12 +821,9 @@
+ 		trace.EndSpan(ctx, err)
+ 	}()
+ 
+-	ao := &applyOption{}
+-	for _, opt := range c.ao {
+-		opt(ao)
+-	}
++	bwo := &batchWriteOption{}
+ 	for _, opt := range opts {
+-		opt(ao)
++		opt(bwo)
+ 	}
+ 
+ 	mgsPb, err := mutationGroupsProto(mgs)
+@@ -818,7 +842,7 @@
+ 		stream, rpcErr := sh.getClient().BatchWrite(contextWithOutgoingMetadata(ct, sh.getMetadata(), c.disableRouteToLeader), &sppb.BatchWriteRequest{
+ 			Session:        sh.getID(),
+ 			MutationGroups: mgsPb,
+-			RequestOptions: createRequestOptions(ao.priority, "", ao.transactionTag),
++			RequestOptions: createRequestOptions(bwo.priority, "", bwo.transactionTag),
+ 		}, gax.WithGRPCOptions(grpc.Header(&md)))
+ 
+ 		if getGFELatencyMetricsFlag() && md != nil && c.ct != nil {

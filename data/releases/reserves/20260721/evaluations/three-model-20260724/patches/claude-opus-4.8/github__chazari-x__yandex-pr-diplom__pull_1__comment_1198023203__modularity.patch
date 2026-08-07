@@ -1,0 +1,192 @@
+--- a/internal/app/database/orders.go
++++ b/internal/app/database/orders.go
+@@ -2,13 +2,9 @@
+ 
+ import (
+ 	"database/sql"
+-	"encoding/json"
+ 	"errors"
+-	"io"
+ 	"log"
+-	"net/http"
+ 	"strconv"
+-	"strings"
+ 	"time"
+ )
+ 
+@@ -89,165 +85,21 @@
+ 	return nil
+ }
+ 
+-const workersCount = 1
+-
+-var workers = 0
+-
+-var inputCh = make(chan orderStr)
+-
+-type orderStr struct {
+-	number string
+-	status string
+-}
++// OrderProcessor is invoked when a new order is added so that an external
++// accrual system can be polled for its status. It is set by the dedicated
++// worker package, keeping the database layer free of HTTP/worker concerns
++// and preserving the single responsibility principle.
++var OrderProcessor func(db *DataBase, number string)
+ 
+ func (db *DataBase) getOrderInfo(number string) {
+-	go func(number string) {
+-		inputCh <- orderStr{number: number, status: "NEW"}
+-	}(number)
+-
+-	if workers < workersCount {
+-		for i := workers; i < workersCount; i++ {
+-			workers++
+-			db.newWorker(inputCh)
+-		}
++	if OrderProcessor != nil {
++		OrderProcessor(db, number)
+ 	}
+ }
+ 
+-func (db *DataBase) newWorker(input chan orderStr) {
+-	go func() {
+-		log.Print("starting goroutine")
+-
+-		defer func() {
+-			db.newWorker(input)
+-			if x := recover(); x != nil {
+-				log.Print("run time panic: ", x)
+-			}
+-		}()
+-
+-		for {
+-			for o := range input {
+-				resp, err := http.Get(db.ASA + "/api/orders/" + o.number)
+-				if err != nil {
+-					go func(o orderStr) {
+-						inputCh <- o
+-					}(o)
+-					log.Printf("go number: %s, err: %s", o.number, err.Error())
+-					resp.Body.Close()
+-					return
+-				}
+-
+-				b, err := io.ReadAll(resp.Body)
+-				if err != nil {
+-					go func(o orderStr) {
+-						inputCh <- o
+-					}(o)
+-					log.Printf("go number: %s, err: %s", o.number, err.Error())
+-					resp.Body.Close()
+-					return
+-				}
+-
+-				resp.Body.Close()
+-
+-				var status = 0
+-				if strings.Contains(resp.Status, "200") {
+-					status = http.StatusOK
+-				} else if strings.Contains(resp.Status, "429") {
+-					status = http.StatusTooManyRequests
+-				} else if strings.Contains(resp.Status, "500") {
+-					status = http.StatusInternalServerError
+-				} else if strings.Contains(resp.Status, "204") {
+-					status = http.StatusNoContent
+-				}
+-
+-				switch status {
+-				case http.StatusOK:
+-					var order Order
+-					err = json.Unmarshal(b, &order)
+-					if err != nil {
+-						go func(o orderStr) {
+-							inputCh <- o
+-						}(o)
+-						log.Printf("go number: %s, err: %s", o.number, err.Error())
+-						return
+-					}
+-
+-					order.Number = o.number
+-
+-					switch order.Status {
+-					case "PROCESSING":
+-						log.Printf("go number: %s, status: %s", o.number, order.Status)
+-						go func(o orderStr, order Order) {
+-							if o.status != order.Status {
+-								err := db.updateOrder(order)
+-								if err != nil {
+-									log.Printf("go number: %s, err: %s", o.number, err.Error())
+-									return
+-								}
+-								o.status = "PROCESSING"
+-							}
+-							inputCh <- o
+-						}(o, order)
+-					case "INVALID", "PROCESSED":
+-						log.Printf("go number: %s, status: %s, accrual: %g", o.number, order.Status, order.Accrual)
+-						go func(o orderStr, order Order) {
+-							if o.status != order.Status {
+-								err := db.updateOrder(order)
+-								if err != nil {
+-									o.status = order.Status
+-									inputCh <- o
+-									log.Printf("go number: %s, err: %s", o.number, err.Error())
+-									return
+-								}
+-							}
+-						}(o, order)
+-					default:
+-						log.Printf("go number: %s, status: %s", o.number, order.Status)
+-						go func(o orderStr) {
+-							inputCh <- o
+-						}(o)
+-					}
+-				case http.StatusTooManyRequests:
+-					log.Printf("go number: %s, status: %s", o.number, resp.Status)
+-					go func(o orderStr) {
+-						inputCh <- o
+-					}(o)
+-					atoi, err := strconv.Atoi(resp.Header.Get("Retry-After"))
+-					if err != nil {
+-						log.Printf("go number: %s, err: %s", o.number, err.Error())
+-						time.Sleep(time.Second * 15)
+-					} else {
+-						time.Sleep(time.Second * time.Duration(atoi))
+-					}
+-				case http.StatusInternalServerError:
+-					log.Printf("go number: %s, status: %s", o.number, resp.Status)
+-					go func(o orderStr) {
+-						inputCh <- o
+-					}(o)
+-				case http.StatusNoContent:
+-					log.Printf("go number: %s, status: %s", o.number, resp.Status)
+-					go func(o orderStr) {
+-						if o.status != "PROCESSING" {
+-							err := db.updateOrder(Order{Status: "PROCESSING", Number: o.number})
+-							if err != nil {
+-								log.Printf("go number: %s, err: %s", o.number, err.Error())
+-								return
+-							}
+-							o.status = "PROCESSING"
+-						}
+-						inputCh <- o
+-					}(o)
+-				default:
+-					log.Printf("go number: %s, status: %s", o.number, resp.Status)
+-					go func(o orderStr) {
+-						inputCh <- o
+-					}(o)
+-				}
+-			}
+-		}
+-	}()
+-}
+-
+-func (db *DataBase) updateOrder(order Order) error {
++// UpdateOrder persists the status and accrual for an order. It is exported so
++// that the accrual worker package can update orders after polling.
++func (db *DataBase) UpdateOrder(order Order) error {
+ 	exec, err := db.DB.Exec(dbUpdateOrder, order.Status, order.Accrual, order.Number)
+ 	if err != nil {
+ 		return err

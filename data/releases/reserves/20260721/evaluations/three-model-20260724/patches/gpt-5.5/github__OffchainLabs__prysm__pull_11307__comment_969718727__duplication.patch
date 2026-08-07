@@ -1,0 +1,103 @@
+--- a/validator/rpc/standard_api.go
++++ b/validator/rpc/standard_api.go
+@@ -430,7 +430,6 @@
+ 		return nil, status.Error(codes.FailedPrecondition, err.Error())
+ 	}
+ 
+-	defaultOption := validatorServiceConfig.DefaultProposerOption()
+ 	var pBuilderConfig *validatorServiceConfig.BuilderConfig
+ 	if s.validatorService.ProposerSettings != nil &&
+ 		s.validatorService.ProposerSettings.DefaultConfig != nil &&
+@@ -450,27 +449,7 @@
+ 	pOption.BuilderConfig = pBuilderConfig
+ 
+ 	if s.validatorService.ProposerSettings == nil {
+-		// get the default fee recipient defined with an invalid public key from beacon node
+-		resp, err := s.beaconNodeValidatorClient.GetFeeRecipientByPubKey(ctx, &eth.FeeRecipientByPubKeyRequest{
+-			PublicKey: []byte("0x0"),
+-		})
+-		if resp == nil || len(resp.FeeRecipient) == 0 || err != nil {
+-			s.validatorService.ProposerSettings = &validatorServiceConfig.ProposerSettings{
+-				ProposeConfig: map[[fieldparams.BLSPubkeyLength]byte]*validatorServiceConfig.ProposerOption{
+-					bytesutil.ToBytes48(validatorKey): &pOption,
+-				},
+-				DefaultConfig: &defaultOption,
+-			}
+-		} else {
+-			s.validatorService.ProposerSettings = &validatorServiceConfig.ProposerSettings{
+-				ProposeConfig: map[[fieldparams.BLSPubkeyLength]byte]*validatorServiceConfig.ProposerOption{
+-					bytesutil.ToBytes48(validatorKey): &pOption,
+-				},
+-				DefaultConfig: &validatorServiceConfig.ProposerOption{
+-					FeeRecipient: common.BytesToAddress(resp.FeeRecipient),
+-				},
+-			}
+-		}
++		s.initializeProposerSettings(ctx, validatorKey, &pOption)
+ 	} else if s.validatorService.ProposerSettings.ProposeConfig == nil {
+ 		s.validatorService.ProposerSettings.ProposeConfig = make(map[[fieldparams.BLSPubkeyLength]byte]*validatorServiceConfig.ProposerOption)
+ 		s.validatorService.ProposerSettings.ProposeConfig[bytesutil.ToBytes48(validatorKey)] = &pOption
+@@ -491,6 +470,26 @@
+ 		return &empty.Empty{}, status.Errorf(codes.Internal, "Could not set custom success code header: %v", err)
+ 	}
+ 	return &empty.Empty{}, nil
++}
++
++func (s *Server) initializeProposerSettings(ctx context.Context, validatorKey []byte, proposerOption *validatorServiceConfig.ProposerOption) {
++	defaultOption := validatorServiceConfig.DefaultProposerOption()
++	defaultConfig := &defaultOption
++	// get the default fee recipient defined with an invalid public key from beacon node
++	resp, err := s.beaconNodeValidatorClient.GetFeeRecipientByPubKey(ctx, &eth.FeeRecipientByPubKeyRequest{
++		PublicKey: []byte("0x0"),
++	})
++	if resp != nil && len(resp.FeeRecipient) != 0 && err == nil {
++		defaultConfig = &validatorServiceConfig.ProposerOption{
++			FeeRecipient: common.BytesToAddress(resp.FeeRecipient),
++		}
++	}
++	s.validatorService.ProposerSettings = &validatorServiceConfig.ProposerSettings{
++		ProposeConfig: map[[fieldparams.BLSPubkeyLength]byte]*validatorServiceConfig.ProposerOption{
++			bytesutil.ToBytes48(validatorKey): proposerOption,
++		},
++		DefaultConfig: defaultConfig,
++	}
+ }
+ 
+ func (s *Server) DeleteGasLimit(ctx context.Context, req *ethpbservice.DeleteGasLimitRequest) (*empty.Empty, error) {
+@@ -589,7 +588,6 @@
+ 	if err := validatePublicKey(validatorKey); err != nil {
+ 		return nil, status.Error(codes.FailedPrecondition, err.Error())
+ 	}
+-	defaultOption := validatorServiceConfig.DefaultProposerOption()
+ 	encoded := hexutil.Encode(req.Ethaddress)
+ 	if !common.IsHexAddress(encoded) {
+ 		return nil, status.Error(
+@@ -599,27 +597,7 @@
+ 	pOption.FeeRecipient = common.BytesToAddress(req.Ethaddress)
+ 	switch {
+ 	case s.validatorService.ProposerSettings == nil:
+-		// get the default fee recipient defined with an invalid public key from beacon node
+-		resp, err := s.beaconNodeValidatorClient.GetFeeRecipientByPubKey(ctx, &eth.FeeRecipientByPubKeyRequest{
+-			PublicKey: []byte("0x0"),
+-		})
+-		if resp == nil || len(resp.FeeRecipient) == 0 || err != nil {
+-			s.validatorService.ProposerSettings = &validatorServiceConfig.ProposerSettings{
+-				ProposeConfig: map[[fieldparams.BLSPubkeyLength]byte]*validatorServiceConfig.ProposerOption{
+-					bytesutil.ToBytes48(validatorKey): &pOption,
+-				},
+-				DefaultConfig: &defaultOption,
+-			}
+-		} else {
+-			s.validatorService.ProposerSettings = &validatorServiceConfig.ProposerSettings{
+-				ProposeConfig: map[[fieldparams.BLSPubkeyLength]byte]*validatorServiceConfig.ProposerOption{
+-					bytesutil.ToBytes48(validatorKey): &pOption,
+-				},
+-				DefaultConfig: &validatorServiceConfig.ProposerOption{
+-					FeeRecipient: common.BytesToAddress(resp.FeeRecipient),
+-				},
+-			}
+-		}
++		s.initializeProposerSettings(ctx, validatorKey, &pOption)
+ 	case s.validatorService.ProposerSettings.ProposeConfig == nil:
+ 		pOption.BuilderConfig = s.validatorService.ProposerSettings.DefaultConfig.BuilderConfig
+ 		s.validatorService.ProposerSettings.ProposeConfig = map[[fieldparams.BLSPubkeyLength]byte]*validatorServiceConfig.ProposerOption{

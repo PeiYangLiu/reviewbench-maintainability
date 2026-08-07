@@ -1,0 +1,151 @@
+diff --git a/substrate/client/consensus/beefy/src/round.rs b/substrate/client/consensus/beefy/src/round.rs
+index 270a251..668b058 100644
+--- a/substrate/client/consensus/beefy/src/round.rs
++++ b/substrate/client/consensus/beefy/src/round.rs
+@@ -93,6 +93,49 @@ pub enum VoteImportResult<B: Block, AuthorityId: AuthorityIdBound> {
+ 
+ pub(crate) type VoteWeight = u32;
+ 
++/// A `ValidatorSet` bundled with the pre-computed voting weight of each validator.
++///
++/// A validator may appear multiple times in the underlying `ValidatorSet`; its voting weight
++/// equals the number of occurrences. This wraps the two otherwise-parallel structures so the
++/// mapping is built and queried in a single place.
++#[derive(Debug, Decode, Encode, PartialEq)]
++pub(crate) struct WeightedValidatorSet<AuthorityId: AuthorityIdBound> {
++	validator_set: ValidatorSet<AuthorityId>,
++	voting_weights: BTreeMap<AuthorityId, VoteWeight>,
++}
++
++impl<AuthorityId: AuthorityIdBound> WeightedValidatorSet<AuthorityId> {
++	fn new(validator_set: ValidatorSet<AuthorityId>) -> Self {
++		let voting_weights =
++			validator_set.validators().iter().fold(BTreeMap::new(), |mut acc, authority| {
++				*acc.entry(authority.to_owned()).or_insert(0) += 1;
++				acc
++			});
++
++		Self { validator_set, voting_weights }
++	}
++
++	fn validator_set(&self) -> &ValidatorSet<AuthorityId> {
++		&self.validator_set
++	}
++
++	fn id(&self) -> ValidatorSetId {
++		self.validator_set.id()
++	}
++
++	fn validators(&self) -> &[AuthorityId] {
++		self.validator_set.validators()
++	}
++
++	fn len(&self) -> usize {
++		self.validator_set.len()
++	}
++
++	fn weight_for(&self, id: &AuthorityId) -> Option<VoteWeight> {
++		self.voting_weights.get(id).copied()
++	}
++}
++
+ /// Keeps track of all voting rounds (block numbers) within a session.
+ /// Only round numbers > `best_done` are of interest, all others are considered stale.
+ ///
+@@ -105,8 +148,7 @@ pub(crate) struct Rounds<B: Block, AuthorityId: AuthorityIdBound> {
+ 		VoteMessage<NumberFor<B>, AuthorityId, <AuthorityId as RuntimeAppPublic>::Signature>,
+ 	>,
+ 	session_start: NumberFor<B>,
+-	validator_set: ValidatorSet<AuthorityId>,
+-	voting_weights: BTreeMap<AuthorityId, VoteWeight>,
++	validator_set: WeightedValidatorSet<AuthorityId>,
+ 	mandatory_done: bool,
+ 	best_done: Option<NumberFor<B>>,
+ }
+@@ -120,25 +162,18 @@ where
+ 		session_start: NumberFor<B>,
+ 		validator_set: ValidatorSet<AuthorityId>,
+ 	) -> Self {
+-		let voting_weights =
+-			validator_set.validators().iter().fold(BTreeMap::new(), |mut acc, authority| {
+-				*acc.entry(authority.to_owned()).or_insert(0) += 1;
+-				acc
+-			});
+-
+ 		Rounds {
+ 			rounds: BTreeMap::new(),
+ 			previous_votes: BTreeMap::new(),
+ 			session_start,
+-			voting_weights,
+-			validator_set,
++			validator_set: WeightedValidatorSet::new(validator_set),
+ 			mandatory_done: false,
+ 			best_done: None,
+ 		}
+ 	}
+ 
+ 	pub(crate) fn validator_set(&self) -> &ValidatorSet<AuthorityId> {
+-		&self.validator_set
++		self.validator_set.validator_set()
+ 	}
+ 
+ 	pub(crate) fn validator_set_id(&self) -> ValidatorSetId {
+@@ -184,7 +219,7 @@ where
+ 			return VoteImportResult::Invalid;
+ 		}
+ 
+-		let Some(vote_weight) = self.voting_weights.get(&vote.id).copied() else {
++		let Some(vote_weight) = self.validator_set.weight_for(&vote.id) else {
+ 			debug!(
+ 				target: LOG_TARGET,
+ 				"🥩 invalid validator.id (missing vote weight), ignoring vote {:?}",
+@@ -364,7 +399,7 @@ mod tests {
+ 
+ 		// Ensure that by default all authorities have equal weight
+ 		for authority in rounds.validators() {
+-			assert_eq!(rounds.voting_weights.get(authority), Some(&1));
++			assert_eq!(rounds.validator_set.voting_weights.get(authority), Some(&1));
+ 		}
+ 	}
+ 
+@@ -407,26 +442,27 @@ mod tests {
+ 		);
+ 
+ 		assert_eq!(
+-			rounds.voting_weights.get(&Keyring::<ecdsa_crypto::AuthorityId>::Alice.public()),
++			rounds.validator_set.voting_weights.get(&Keyring::<ecdsa_crypto::AuthorityId>::Alice.public()),
+ 			Some(&3)
+ 		);
+ 		assert_eq!(
+-			rounds.voting_weights.get(&Keyring::<ecdsa_crypto::AuthorityId>::Bob.public()),
++			rounds.validator_set.voting_weights.get(&Keyring::<ecdsa_crypto::AuthorityId>::Bob.public()),
+ 			Some(&1)
+ 		);
+ 		assert_eq!(
+ 			rounds
++				.validator_set
+ 				.voting_weights
+ 				.get(&Keyring::<ecdsa_crypto::AuthorityId>::Charlie.public()),
+ 			Some(&2)
+ 		);
+ 		assert_eq!(
+-			rounds.voting_weights.get(&Keyring::<ecdsa_crypto::AuthorityId>::Dave.public()),
++			rounds.validator_set.voting_weights.get(&Keyring::<ecdsa_crypto::AuthorityId>::Dave.public()),
+ 			Some(&1)
+ 		);
+ 		// Eve is not part of the committee, should have no weight
+ 		assert_eq!(
+-			rounds.voting_weights.get(&Keyring::<ecdsa_crypto::AuthorityId>::Eve.public()),
++			rounds.validator_set.voting_weights.get(&Keyring::<ecdsa_crypto::AuthorityId>::Eve.public()),
+ 			None
+ 		);
+ 	}
+@@ -743,7 +779,7 @@ mod tests {
+ 		let mut rounds = Rounds::<Block, ecdsa_crypto::AuthorityId>::new(session_start, validators);
+ 
+ 		// Force a state where the validator exists in the set, but has no vote weight entry.
+-		rounds.voting_weights.remove(&Keyring::Alice.public());
++		rounds.validator_set.voting_weights.remove(&Keyring::Alice.public());
+ 
+ 		let payload = Payload::from_single_entry(MMR_ROOT_ID, vec![]);
+ 		let block_number = 1;

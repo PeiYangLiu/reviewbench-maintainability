@@ -1,0 +1,49 @@
+--- a/funcx_endpoint/funcx_endpoint/endpoint/endpoint.py
++++ b/funcx_endpoint/funcx_endpoint/endpoint/endpoint.py
+@@ -56,6 +56,17 @@
+         self.debug = debug
+         self.funcx_dir = funcx_dir if funcx_dir is not None else _DEFAULT_FUNCX_DIR
+         self.name = "default"
++        self._client: typing.Optional[FuncXClient] = None
++
++    def get_funcx_client(self, **client_options) -> FuncXClient:
++        """Lazily construct (and cache) a FuncXClient for reuse.
++
++        The first call determines the client options; subsequent calls return
++        the already-constructed client.
++        """
++        if self._client is None:
++            self._client = FuncXClient(**client_options)
++        return self._client
+ 
+     @property
+     def _endpoint_dir(self):
+@@ -120,7 +131,7 @@
+         """
+         # construct client to force login flow
+         # FIXME: `funcx` should provide a cleaner way of doing login
+-        FuncXClient(do_version_check=False)
++        self.get_funcx_client(do_version_check=False)
+ 
+         if os.path.exists(self.funcx_dir):
+             click.confirm(
+@@ -179,7 +190,7 @@
+             "environment": endpoint_config.config.environment,
+             "warn_about_url_mismatch": endpoint_config.config.warn_about_url_mismatch,
+         }
+-        funcx_client = FuncXClient(**funcx_client_options)
++        funcx_client = self.get_funcx_client(**funcx_client_options)
+ 
+         endpoint_uuid = self.check_endpoint_json(endpoint_json, endpoint_uuid)
+ 
+@@ -370,7 +381,9 @@
+         if lock_uuid is True:
+             endpoint_id = Endpoint.get_endpoint_id(endpoint_dir)
+             if endpoint_id:
+-                FuncXClient(do_version_check=False).lock_endpoint(endpoint_id)
++                self.get_funcx_client(do_version_check=False).lock_endpoint(
++                    endpoint_id
++                )
+             else:
+                 raise ValueError(f"Endpoint {name} could not be located")
+ 

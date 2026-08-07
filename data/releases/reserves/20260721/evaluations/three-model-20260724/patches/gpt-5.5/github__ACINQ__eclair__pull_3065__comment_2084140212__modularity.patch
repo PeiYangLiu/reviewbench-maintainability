@@ -1,0 +1,56 @@
+--- a/eclair-core/src/main/scala/fr/acinq/eclair/crypto/Sphinx.scala
++++ b/eclair-core/src/main/scala/fr/acinq/eclair/crypto/Sphinx.scala
+@@ -357,21 +357,24 @@
+     }
+ 
+     object Attribution {
++      private val MaxHops = 20
++      private val AttributionLength = 920
++
+       private def cipher(bytes: ByteVector, sharedSecret: ByteVector32): ByteVector = {
+         val key = generateKey("ammagext", sharedSecret)
+-        val stream = generateStream(key, 920)
++        val stream = generateStream(key, AttributionLength)
+         bytes xor stream
+       }
+ 
+       private def getHmacs(bytes: ByteVector): Seq[Seq[ByteVector]] =
+-        (0 until 20).map(i => (0 until (20 - i)).map(j => {
+-          val start = (20 + 20 * i - (i * (i - 1)) / 2 + j) * 4
++        (0 until MaxHops).map(i => (0 until (MaxHops - i)).map(j => {
++          val start = (MaxHops + MaxHops * i - (i * (i - 1)) / 2 + j) * 4
+           bytes.slice(start, start + 4)
+         }))
+ 
+       private def computeHmacs(mac: Mac32, reason: ByteVector, holdTimes: ByteVector, hmacs: Seq[Seq[ByteVector]], minNumHop: Int): Seq[ByteVector] = {
+-        (minNumHop until 20).map(i => {
+-          val y = 20 - i
++        (minNumHop until MaxHops).map(i => {
++          val y = MaxHops - i
+           mac.mac(reason ++
+             holdTimes.take(y * 4) ++
+             ByteVector.concat((0 until y - 1).map(j => hmacs(j)(i)))).bytes.take(4)
+@@ -382,10 +385,10 @@
+        * Create attribution data to send with the failure packet
+        */
+       def create(previousAttribution_opt: Option[ByteVector], reason: ByteVector, holdTime: FiniteDuration, sharedSecret: ByteVector32): ByteVector = {
+-        val previousAttribution = previousAttribution_opt.getOrElse(ByteVector.low(920))
++        val previousAttribution = previousAttribution_opt.getOrElse(ByteVector.low(AttributionLength))
+         val previousHmacs = getHmacs(previousAttribution).dropRight(1).map(_.drop(1))
+         val mac = Hmac256(generateKey("um", sharedSecret))
+-        val holdTimes = uint32.encode(holdTime.toMillis).map(_.bytes).getOrElse(ByteVector.high(4)) ++ previousAttribution.take(19 * 4)
++        val holdTimes = uint32.encode(holdTime.toMillis).map(_.bytes).getOrElse(ByteVector.high(4)) ++ previousAttribution.take((MaxHops - 1) * 4)
+         val hmacs = computeHmacs(mac, reason, holdTimes, previousHmacs, 0) +: previousHmacs
+         cipher(holdTimes ++ ByteVector.concat(hmacs.map(ByteVector.concat(_))), sharedSecret)
+       }
+@@ -399,8 +402,8 @@
+         val holdTime = uint32.decode(bytes.take(4).bits).require.value.milliseconds
+         val hmacs = getHmacs(bytes)
+         val mac = Hmac256(generateKey("um", sharedSecret))
+-        if (computeHmacs(mac, reason, bytes.take(20 * 4), hmacs.drop(1), minNumHop) == hmacs.head.drop(minNumHop)) {
+-          val unwraped = bytes.slice(4, 20 * 4) ++ ByteVector.low(4) ++ ByteVector.concat((hmacs.drop(1) :+ Seq()).map(s => ByteVector.low(4) ++ ByteVector.concat(s)))
++        if (computeHmacs(mac, reason, bytes.take(MaxHops * 4), hmacs.drop(1), minNumHop) == hmacs.head.drop(minNumHop)) {
++          val unwraped = bytes.slice(4, MaxHops * 4) ++ ByteVector.low(4) ++ ByteVector.concat((hmacs.drop(1) :+ Seq()).map(s => ByteVector.low(4) ++ ByteVector.concat(s)))
+           Some(holdTime, unwraped)
+         } else {
+           None

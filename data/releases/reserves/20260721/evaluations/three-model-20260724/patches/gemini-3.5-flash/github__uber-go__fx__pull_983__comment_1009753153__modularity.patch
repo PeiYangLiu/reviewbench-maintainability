@@ -1,0 +1,143 @@
+--- a/annotated.go
++++ b/annotated.go
+@@ -1110,8 +1110,8 @@
+ 		},
+ 	}
+ 
+-	// if already went through a ResultTags annotation,
+-	if taggedResType, resultTagged := checkIfResultTagged(types); resultTagged {
++	taggedResType, resultTagged := checkIfResultTagged(types)
++	if resultTagged {
+ 		for i := 1; i < taggedResType.NumField(); i++ {
+ 			origField := taggedResType.Field(i)
+ 			t := origField.Type
+@@ -1129,70 +1129,27 @@
+ 			}
+ 			fields = append(fields, field)
+ 		}
+-		resType := reflect.StructOf(fields)
+-		var outTypes []reflect.Type
+-		if hasError {
+-			outTypes = append(types[0:len(types)-1], resType, types[len(types)-1])
+-		} else {
+-			outTypes = append(types, resType)
+-		}
+-		return outTypes, func(results []reflect.Value) []reflect.Value {
+-			var (
+-				outErr     error
+-				outResults []reflect.Value
+-			)
+-			newOutResult := reflect.New(resType).Elem()
+-
+-			for i, r := range results {
+-				if i == len(results)-1 && hasError {
+-					// If hasError and this is the last item,
+-					// we are guaranteed that this is an error
+-					// object.
+-					if err, _ := r.Interface().(error); err != nil {
+-						outErr = err
+-					}
+-					continue
+-				}
+-				outResults = append(outResults, r)
+-				if i == 0 {
+-					for j := 1; j < resType.NumField(); j++ {
+-						newOutResult.Field(j).Set(r.Field(j))
+-					}
+-				}
+-			}
+-
+-			outResults = append(outResults, newOutResult)
+-
+-			if hasError {
+-				if outErr != nil {
+-					outResults = append(outResults, reflect.ValueOf(outErr))
+-				} else {
+-					outResults = append(outResults, _nilError)
+-				}
+-			}
+-
+-			return outResults
+-		}, nil
+-	}
+-	// not yet went through a ResultTags annotation
+-	for i, t := range types {
+-		if isOut(t) || t == _typeOfError {
+-			continue
+-		}
+-
+-		field := reflect.StructField{
+-			Name: fmt.Sprintf("Field%d", i),
+-			Type: t,
+-		}
+-
+-		if i < len(at.types) {
+-			if !t.Implements(at.types[i]) {
+-				return nil, nil, fmt.Errorf("invalid fx.As: %v does not implement %v", t, at.types[i])
+-			}
+-			field.Type = at.types[i]
+-		}
+-		fields = append(fields, field)
+-	}
++	} else {
++		for i, t := range types {
++			if isOut(t) || t == _typeOfError {
++				continue
++			}
++
++			field := reflect.StructField{
++				Name: fmt.Sprintf("Field%d", i),
++				Type: t,
++			}
++
++			if i < len(at.types) {
++				if !t.Implements(at.types[i]) {
++					return nil, nil, fmt.Errorf("invalid fx.As: %v does not implement %v", t, at.types[i])
++				}
++				field.Type = at.types[i]
++			}
++			fields = append(fields, field)
++		}
++	}
++
+ 	resType := reflect.StructOf(fields)
+ 	var outTypes []reflect.Type
+ 	if hasError {
+@@ -1200,7 +1157,8 @@
+ 	} else {
+ 		outTypes = append(types, resType)
+ 	}
+-	return outTypes, func(results []reflect.Value) []reflect.Value {
++
++	remap = func(results []reflect.Value) []reflect.Value {
+ 		var (
+ 			outErr     error
+ 			outResults []reflect.Value
+@@ -1218,8 +1176,14 @@
+ 				continue
+ 			}
+ 			outResults = append(outResults, r)
+-			if !isOut(r.Type()) && newOutResult.NumField() > i+1 {
+-				newOutResult.Field(i + 1).Set(r)
++			if !resultTagged {
++				if !isOut(r.Type()) && newOutResult.NumField() > i+1 {
++					newOutResult.Field(i + 1).Set(r)
++				}
++			} else if i == 0 {
++				for j := 1; j < resType.NumField(); j++ {
++					newOutResult.Field(j).Set(r.Field(j))
++				}
+ 			}
+ 		}
+ 
+@@ -1234,7 +1198,9 @@
+ 		}
+ 
+ 		return outResults
+-	}, nil
++	}
++
++	return outTypes, remap, nil
+ }
+ 
+ type annotated struct {

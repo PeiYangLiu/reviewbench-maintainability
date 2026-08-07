@@ -1,0 +1,96 @@
+--- a/pkg/util/taskgroup/taskgroup.go
++++ b/pkg/util/taskgroup/taskgroup.go
+@@ -18,11 +18,14 @@
+ type Group interface {
+ 	WithContext(ctx context.Context) context.Context
+ 	WithPanicHandler(f func(any))
++	SetPanicHandler(f func(any))
+ 	Wait() error
+ 	Go(name string, f func(logger *zap.Logger) error)
++	Context() context.Context
+ }
+ 
+ type group struct {
++	ctx          context.Context
+ 	cancel       context.CancelFunc
+ 	logger       *zap.Logger
+ 	panicHandler func(any)
+@@ -33,30 +36,70 @@
+ 	err      error
+ }
+ 
++// Option configures a Group.
++type Option func(*group)
++
++// WithContext returns an Option that associates a Context with the Group.
++// The context will be canceled if any goroutine returns an error.
++func WithContext(ctx context.Context) Option {
++	return func(g *group) {
++		g.ctx, g.cancel = context.WithCancel(ctx)
++	}
++}
++
++// WithPanicHandler returns an Option that sets a panic handler for the group.
++func WithPanicHandler(f func(any)) Option {
++	return func(g *group) {
++		g.panicHandler = f
++	}
++}
++
+ // NewGroup returns a new Group.
+-func NewGroup(logger *zap.Logger) Group {
+-	return &group{
+-		cancel:       nil, // Set separately by WithContext
+-		panicHandler: nil, // Set separately by WithPanicHandler
++func NewGroup(logger *zap.Logger, opts ...Option) Group {
++	g := &group{
++		ctx:          nil,
++		cancel:       nil,
++		panicHandler: nil,
+ 		logger:       logger,
+ 		wg:           sync.WaitGroup{},
+ 
+ 		errMutex: sync.Mutex{},
+ 		err:      nil,
+ 	}
++	for _, opt := range opts {
++		opt(g)
++	}
++	return g
+ }
+ 
+-// WithContext updates the current Group with a associated Context.
++// WithContext updates the current Group with an associated Context.
+ // The context will be canceled if any goroutine returns an error.
+ // See https://pkg.go.dev/golang.org/x/sync/errgroup#WithContext
++//
++// Deprecated: use WithContext option in NewGroup instead.
+ func (g *group) WithContext(ctx context.Context) context.Context {
+-	ctx, g.cancel = context.WithCancel(ctx)
+-	return ctx
++	g.ctx, g.cancel = context.WithCancel(ctx)
++	return g.ctx
++}
++
++// SetPanicHandler sets a panic handler for the group.
++func (g *group) SetPanicHandler(f func(any)) {
++	g.panicHandler = f
+ }
+ 
+ // WithPanicHandler sets a panic handler for the group.
++//
++// Deprecated: use WithPanicHandler option in NewGroup, or SetPanicHandler.
+ func (g *group) WithPanicHandler(f func(any)) {
+-	g.panicHandler = f
++	g.SetPanicHandler(f)
++}
++
++// Context returns the associated context, or context.Background() if none is set.
++func (g *group) Context() context.Context {
++	if g.ctx == nil {
++		return context.Background()
++	}
++	return g.ctx
+ }
+ 
+ // Wait blocks until all goroutines have completed.

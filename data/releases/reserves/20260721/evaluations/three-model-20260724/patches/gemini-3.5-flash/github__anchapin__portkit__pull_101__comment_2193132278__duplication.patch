@@ -1,0 +1,113 @@
+--- a/backend/src/main.py
++++ b/backend/src/main.py
+@@ -286,6 +286,18 @@
+             created_at=job.created_at,
+             updated_at=job.updated_at
+         )
++
++    async def update_job_state(session, status: str, progress: int, result_url: Optional[str] = None, error_message: Optional[str] = None):
++        logger.info(f"Job {job_id}: Updating status to {status}, progress to {progress}%...")
++        job = await crud.update_job_status(session, job_id, status)
++        await crud.upsert_progress(session, job_id, progress)
++        job = await crud.get_job(session, job_id)
++        mirror = mirror_dict_from_job(job, progress, result_url, error_message)
++        conversion_jobs_db[job_id] = mirror
++        await cache.set_job_status(job_id, mirror.model_dump())
++        await cache.set_progress(job_id, progress)
++        logger.info(f"Job {job_id}: Status updated to {status}, Progress: {progress}%")
++        return job
+     
+     try:
+         logger.info(f"Job {job_id}: Creating database session...")
+@@ -300,21 +312,8 @@
+             
+             # Stage 1: Preprocessing -> Processing
+             await asyncio.sleep(10)
+-            logger.info(f"Job {job_id}: Stage 1 delay completed, updating to processing...")
+-            job = await crud.update_job_status(session, job_id, "processing")
+-            logger.info(f"Job {job_id}: Status updated to {job.status}, updating progress to 25%...")
+-            await crud.upsert_progress(session, job_id, 25)
+-            logger.info(f"Job {job_id}: Progress updated to 25%, refreshing job from database...")
+-            # Refresh job from database to get latest status
+-            job = await crud.get_job(session, job_id)
+-            logger.info(f"Job {job_id}: Job refreshed, creating mirror...")
+-            # Mirror
+-            mirror = mirror_dict_from_job(job, 25)
+-            conversion_jobs_db[job_id] = mirror
+-            logger.info(f"Job {job_id}: Mirror created, updating cache...")
+-            await cache.set_job_status(job_id, mirror.model_dump())
+-            await cache.set_progress(job_id, 25)
+-            logger.info(f"Job {job_id}: Status updated to {job.status}, Progress: 25%")
++            logger.info(f"Job {job_id}: Stage 1 delay completed, updating state...")
++            job = await update_job_state(session, "processing", 25)
+ 
+             # Stage 2: Processing -> Postprocessing
+             logger.info(f"Job {job_id}: Starting stage 2 (15s delay)...")
+@@ -325,20 +324,8 @@
+             if job.status == "cancelled":
+                 logger.info(f"Job {job_id} was cancelled. Stopping AI simulation.")
+                 return
+-            logger.info(f"Job {job_id}: Not cancelled, updating to postprocessing...")
+-            job = await crud.update_job_status(session, job_id, "postprocessing")
+-            logger.info(f"Job {job_id}: Status updated to {job.status}, updating progress to 75%...")
+-            await crud.upsert_progress(session, job_id, 75)
+-            logger.info(f"Job {job_id}: Progress updated to 75%, refreshing job from database...")
+-            # Refresh job from database to get latest status
+-            job = await crud.get_job(session, job_id)
+-            logger.info(f"Job {job_id}: Job refreshed, creating mirror...")
+-            mirror = mirror_dict_from_job(job, 75)
+-            conversion_jobs_db[job_id] = mirror
+-            logger.info(f"Job {job_id}: Mirror created, updating cache...")
+-            await cache.set_job_status(job_id, mirror.model_dump())
+-            await cache.set_progress(job_id, 75)
+-            logger.info(f"Job {job_id}: Status updated to {job.status}, Progress: 75%")
++            logger.info(f"Job {job_id}: Not cancelled, updating state...")
++            job = await update_job_state(session, "postprocessing", 75)
+ 
+             # Stage 3: Postprocessing -> Completed
+             logger.info(f"Job {job_id}: Starting stage 3 (10s delay)...")
+@@ -349,19 +336,12 @@
+                 logger.info(f"Job {job_id} was cancelled. Stopping AI simulation.")
+                 return
+ 
+-            logger.info(f"Job {job_id}: Not cancelled, updating to completed...")
+-            job = await crud.update_job_status(session, job_id, "completed")
+-            logger.info(f"Job {job_id}: Status updated to {job.status}, updating progress to 100%...")
+-            await crud.upsert_progress(session, job_id, 100)
+-            logger.info(f"Job {job_id}: Progress updated to 100%, refreshing job from database...")
+-            # Refresh job from database to get latest status
+-            job = await crud.get_job(session, job_id)
+-            logger.info(f"Job {job_id}: Job refreshed, creating mock output file...")
++            logger.info(f"Job {job_id}: Not cancelled, creating mock output file...")
+             # Create mock output file
+             os.makedirs(CONVERSION_OUTPUTS_DIR, exist_ok=True)
+             mock_output_filename_internal = f"{job.id}_converted.zip"
+             mock_output_filepath = os.path.join(CONVERSION_OUTPUTS_DIR, mock_output_filename_internal)
+-            result_url = f"/api/v1/convert/{job.id}/download" # Changed path
++            result_url = f"/api/v1/convert/{job.id}/download"
+ 
+             try:
+                 logger.info(f"Job {job_id}: Creating mock output file at {mock_output_filepath}...")
+@@ -371,20 +351,10 @@
+                 logger.info(f"Job {job_id}: Mock output file created successfully")
+             except IOError as e:
+                 logger.error(f"Error creating mock output file for job {job_id}: {e}", exc_info=True)
+-                job = await crud.update_job_status(session, job_id, "failed")
+-                # Refresh job from database to get latest status
+-                job = await crud.get_job(session, job_id)
+-                mirror = mirror_dict_from_job(job, 0, None, f"Failed to create output file: {e}")
+-                conversion_jobs_db[job_id] = mirror
+-                await cache.set_job_status(job_id, mirror.model_dump())
+-                await cache.set_progress(job_id, 0)
++                await update_job_state(session, "failed", 0, error_message=f"Failed to create output file: {e}")
+                 return
+ 
+-            logger.info(f"Job {job_id}: Creating final mirror and updating cache...")
+-            mirror = mirror_dict_from_job(job, 100, result_url)
+-            conversion_jobs_db[job_id] = mirror
+-            await cache.set_job_status(job_id, mirror.model_dump())
+-            await cache.set_progress(job_id, 100)
++            await update_job_state(session, "completed", 100, result_url=result_url)
+             logger.info(f"Job {job_id}: AI Conversion COMPLETED. Output file: {mock_output_filepath}, Result URL: {result_url}")
+ 
+     except Exception as e:

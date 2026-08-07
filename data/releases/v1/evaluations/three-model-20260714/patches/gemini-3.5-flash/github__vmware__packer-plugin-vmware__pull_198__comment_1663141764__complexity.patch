@@ -1,0 +1,105 @@
+--- a/builder/vmware/common/driver_workstation9.go
++++ b/builder/vmware/common/driver_workstation9.go
+@@ -233,54 +233,61 @@
+ }
+ 
+ // checkNetmapConfExists checks if the network mapper configuration file exists.
+-// If not, if attempts to generate the file using generateNetmapConfig.
++// If not, it attempts to generate the file using generateNetmapConfig.
+ func checkNetmapConfExists() (NetworkNameMapper, error) {
+ 	pathNetmap := workstationNetmapConfPath()
+ 
+ 	// Check if the default network mapper configuration file exists.
+-	if _, err := os.Stat(pathNetmap); os.IsNotExist(err) {
+-		log.Printf("A network mapper configuration file does not exist in the default path: %s", pathNetmap)
+-
+-		// The file does not exist, check the alternate configuration path.
+-		libpath, _ := workstationVMwareRoot()
+-		pathNetworking := filepath.Join(libpath, "networking")
+-		log.Printf("Checking alternate path for network mapper configuration file: %s", pathNetworking)
+-		if _, err := os.Stat(pathNetworking); err == nil {
+-			// Alternate networking configuration path exists. Using this path.
+-			log.Printf("Located the network mapper configuration file: %s", pathNetworking)
+-			fd, err := os.Open(pathNetworking)
+-			if err != nil {
+-				return nil, err
+-			}
+-			defer fd.Close()
+-
+-			// Then we pass the handle to the networking configuration parser.
+-			return ReadNetworkingConfig(fd)
+-		} else if runtime.GOOS == "windows" {
+-			// Neither the default nor alternate exists.
+-			// Generate the network mapper configuration file in the default path.
+-			log.Printf("Generating a network mapper configuration file in the default path: %s", pathNetmap)
+-			pathNetmap, err := generateNetmapConfig()
+-			if err != nil {
+-				log.Fatalf("error generating the absent network configuration file: %v", err)
+-				return nil, err
+-			}
+-			// If the file exists, attempt to read the newly generated
+-			// network mapper configuration file.
+-			return ReadNetmapConfig(pathNetmap)
+-		} else {
+-			// For non-Windows, if neither the default nor alternate
+-			// configuration paths exist, return an error.
+-			return nil, fmt.Errorf("error determining network mappings from files in path: %s", libpath)
+-		}
+-	} else if err != nil {
+-		// There was an error other than the file not existing.
++	if _, err := os.Stat(pathNetmap); err == nil {
++		log.Printf("Located the network mapper configuration file: %s", pathNetmap)
++		return ReadNetmapConfig(pathNetmap)
++	} else if !os.IsNotExist(err) {
+ 		return nil, err
+ 	}
+ 
+-	// If the default network mapper configuration file exists, read the configuration.
+-	log.Printf("Located the network mapper configuration file: %s", pathNetmap)
+-	return ReadNetmapConfig(pathNetmap)
++	log.Printf("A network mapper configuration file does not exist in the default path: %s", pathNetmap)
++
++	// The file does not exist, check the alternate configuration path.
++	libpath, _ := workstationVMwareRoot()
++	pathNetworking := filepath.Join(libpath, "networking")
++	log.Printf("Checking alternate path for network mapper configuration file: %s", pathNetworking)
++
++	_, err := os.Stat(pathNetworking)
++	if err == nil {
++		// Alternate networking configuration path exists. Using this path.
++		log.Printf("Located the network mapper configuration file: %s", pathNetworking)
++		fd, err := os.Open(pathNetworking)
++		if err != nil {
++			return nil, err
++		}
++		defer fd.Close()
++
++		// Then we pass the handle to the networking configuration parser.
++		return ReadNetworkingConfig(fd)
++	}
++
++	wrappedErr := fmt.Errorf("failed to find network mapper configuration: %w", err)
++	if errors.Is(wrappedErr, os.ErrNotExist) && runtime.GOOS == "windows" {
++		// Neither the default nor alternate exists.
++		// Generate the network mapper configuration file in the default path.
++		log.Printf("Generating a network mapper configuration file in the default path: %s", pathNetmap)
++		pathNetmap, genErr := generateNetmapConfig()
++		if genErr != nil {
++			log.Fatalf("error generating the absent network configuration file: %v", genErr)
++			return nil, genErr
++		}
++		// If the file exists, attempt to read the newly generated
++		// network mapper configuration file.
++		return ReadNetmapConfig(pathNetmap)
++	}
++
++	if errors.Is(wrappedErr, os.ErrNotExist) {
++		// For non-Windows, if neither the default nor alternate
++		// configuration paths exist, return an error.
++		return nil, fmt.Errorf("error determining network mappings from files in path: %s: %w", libpath, wrappedErr)
++	}
++
++	return nil, wrappedErr
+ }
+ 
+ // generateNetmapConfig creates the network mapper configuration file in the

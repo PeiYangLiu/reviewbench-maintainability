@@ -1,0 +1,234 @@
+--- a/sniffy-module-nio/src/main/java/io/sniffy/nio/SniffySocketChannel.java
++++ b/sniffy-module-nio/src/main/java/io/sniffy/nio/SniffySocketChannel.java
+@@ -45,18 +45,13 @@
+     /* A physical operation and its accounting event share this lock, preserving wire order. */
+     private final Object connectionReadLock = new Object();
+     private final Object connectionWriteLock = new Object();
+-    private final Object bufferAccountingLock = new Object();
+     private final Object endpointPolicyLock = new Object();
+     private volatile InetSocketAddress physicalAddress;
+     private volatile EffectiveEndpointPolicy effectiveEndpointPolicy =
+             new EffectiveEndpointPolicy(null, null, 0L, false);
+ 
+-    // fields related to injecting latency fault
+-    private volatile int potentiallyBufferedInputBytes = 0;
+-    private volatile int potentiallyBufferedOutputBytes = 0;
+-
+-    private volatile long lastReadThreadId;
+-    private volatile long lastWriteThreadId;
++    // state related to injecting latency fault
++    private final FaultDelayAccounting faultDelayAccounting = new FaultDelayAccounting();
+ 
+     private boolean firstChunk = true;
+     private final ByteArrayOutputStream initialOutboundBytes = new ByteArrayOutputStream();
+@@ -146,38 +141,14 @@
+     }
+ 
+     private void sleepIfRequired(int bytesDown, EffectiveEndpointPolicy policy) throws ConnectException {
+-        int delayCycles = 0;
+-        synchronized (bufferAccountingLock) {
+-            lastReadThreadId = Thread.currentThread().getId();
+-            if (lastReadThreadId == lastWriteThreadId) {
+-                potentiallyBufferedOutputBytes = 0;
+-            }
+-            potentiallyBufferedInputBytes -= bytesDown;
+-            if (potentiallyBufferedInputBytes < 0) {
+-                delayCycles = 1 + (-1 * potentiallyBufferedInputBytes)
+-                        / SniffyNetworkConnection.DEFAULT_TCP_WINDOW_SIZE;
+-                potentiallyBufferedInputBytes = SniffyNetworkConnection.DEFAULT_TCP_WINDOW_SIZE;
+-            }
+-        }
+         // Policy resolution and sleeping can re-enter instrumentation; never perform them under
+         // the short cross-direction accounting critical section.
++        int delayCycles = faultDelayAccounting.registerRead(bytesDown);
+         if (delayCycles > 0) checkConnectionAllowed(policy, delayCycles);
+     }
+ 
+     private void sleepIfRequiredForWrite(int bytesUp, EffectiveEndpointPolicy policy) throws ConnectException {
+-        int delayCycles = 0;
+-        synchronized (bufferAccountingLock) {
+-            lastWriteThreadId = Thread.currentThread().getId();
+-            if (lastReadThreadId == lastWriteThreadId) {
+-                potentiallyBufferedInputBytes = 0;
+-            }
+-            potentiallyBufferedOutputBytes -= bytesUp;
+-            if (potentiallyBufferedOutputBytes < 0) {
+-                delayCycles = 1 + (-1 * potentiallyBufferedOutputBytes)
+-                        / SniffyNetworkConnection.DEFAULT_TCP_WINDOW_SIZE;
+-                potentiallyBufferedOutputBytes = SniffyNetworkConnection.DEFAULT_TCP_WINDOW_SIZE;
+-            }
+-        }
++        int delayCycles = faultDelayAccounting.registerWrite(bytesUp);
+         if (delayCycles > 0) checkConnectionAllowed(policy, delayCycles);
+     }
+ 
+@@ -867,6 +838,102 @@
+         }
+     }
+ 
++    /**
++     * Per-connection fault-delay accounting: tracks bytes potentially buffered in each direction and
++     * the last read/write threads, computing how many delay cycles a physical operation must incur.
++     * A single short critical section keeps cross-direction updates consistent while callers perform
++     * policy resolution and sleeping outside the lock.
++     */
++    static final class FaultDelayAccounting {
++        private final Object lock = new Object();
++        private volatile int potentiallyBufferedInputBytes = 0;
++        private volatile int potentiallyBufferedOutputBytes = 0;
++        private volatile long lastReadThreadId;
++        private volatile long lastWriteThreadId;
++
++        int registerRead(int bytesDown) {
++            synchronized (lock) {
++                lastReadThreadId = Thread.currentThread().getId();
++                if (lastReadThreadId == lastWriteThreadId) {
++                    potentiallyBufferedOutputBytes = 0;
++                }
++                potentiallyBufferedInputBytes -= bytesDown;
++                if (potentiallyBufferedInputBytes < 0) {
++                    int delayCycles = 1 + (-1 * potentiallyBufferedInputBytes)
++                            / SniffyNetworkConnection.DEFAULT_TCP_WINDOW_SIZE;
++                    potentiallyBufferedInputBytes = SniffyNetworkConnection.DEFAULT_TCP_WINDOW_SIZE;
++                    return delayCycles;
++                }
++                return 0;
++            }
++        }
++
++        int registerWrite(int bytesUp) {
++            synchronized (lock) {
++                lastWriteThreadId = Thread.currentThread().getId();
++                if (lastReadThreadId == lastWriteThreadId) {
++                    potentiallyBufferedInputBytes = 0;
++                }
++                potentiallyBufferedOutputBytes -= bytesUp;
++                if (potentiallyBufferedOutputBytes < 0) {
++                    int delayCycles = 1 + (-1 * potentiallyBufferedOutputBytes)
++                            / SniffyNetworkConnection.DEFAULT_TCP_WINDOW_SIZE;
++                    potentiallyBufferedOutputBytes = SniffyNetworkConnection.DEFAULT_TCP_WINDOW_SIZE;
++                    return delayCycles;
++                }
++                return 0;
++            }
++        }
++
++        int getPotentiallyBufferedInputBytes() {
++            synchronized (lock) {
++                return potentiallyBufferedInputBytes;
++            }
++        }
++
++        void setPotentiallyBufferedInputBytes(int value) {
++            synchronized (lock) {
++                this.potentiallyBufferedInputBytes = value;
++            }
++        }
++
++        int getPotentiallyBufferedOutputBytes() {
++            synchronized (lock) {
++                return potentiallyBufferedOutputBytes;
++            }
++        }
++
++        void setPotentiallyBufferedOutputBytes(int value) {
++            synchronized (lock) {
++                this.potentiallyBufferedOutputBytes = value;
++            }
++        }
++
++        long getLastReadThreadId() {
++            synchronized (lock) {
++                return lastReadThreadId;
++            }
++        }
++
++        void setLastReadThreadId(long value) {
++            synchronized (lock) {
++                this.lastReadThreadId = value;
++            }
++        }
++
++        long getLastWriteThreadId() {
++            synchronized (lock) {
++                return lastWriteThreadId;
++            }
++        }
++
++        void setLastWriteThreadId(long value) {
++            synchronized (lock) {
++                this.lastWriteThreadId = value;
++            }
++        }
++    }
++
+     interface IoOperationHook {
+         void beforeWrite() throws IOException;
+         void beforeRead() throws IOException;
+@@ -879,58 +946,42 @@
+ 
+     @Override
+     public int getPotentiallyBufferedInputBytes() {
+-        synchronized (bufferAccountingLock) {
+-            return potentiallyBufferedInputBytes;
+-        }
++        return faultDelayAccounting.getPotentiallyBufferedInputBytes();
+     }
+ 
+     @Override
+     public void setPotentiallyBufferedInputBytes(int potentiallyBufferedInputBytes) {
+-        synchronized (bufferAccountingLock) {
+-            this.potentiallyBufferedInputBytes = potentiallyBufferedInputBytes;
+-        }
++        faultDelayAccounting.setPotentiallyBufferedInputBytes(potentiallyBufferedInputBytes);
+     }
+ 
+     @Override
+     public int getPotentiallyBufferedOutputBytes() {
+-        synchronized (bufferAccountingLock) {
+-            return potentiallyBufferedOutputBytes;
+-        }
++        return faultDelayAccounting.getPotentiallyBufferedOutputBytes();
+     }
+ 
+     @Override
+     public void setPotentiallyBufferedOutputBytes(int potentiallyBufferedOutputBytes) {
+-        synchronized (bufferAccountingLock) {
+-            this.potentiallyBufferedOutputBytes = potentiallyBufferedOutputBytes;
+-        }
++        faultDelayAccounting.setPotentiallyBufferedOutputBytes(potentiallyBufferedOutputBytes);
+     }
+ 
+     @Override
+     public long getLastReadThreadId() {
+-        synchronized (bufferAccountingLock) {
+-            return lastReadThreadId;
+-        }
++        return faultDelayAccounting.getLastReadThreadId();
+     }
+ 
+     @Override
+     public void setLastReadThreadId(long lastReadThreadId) {
+-        synchronized (bufferAccountingLock) {
+-            this.lastReadThreadId = lastReadThreadId;
+-        }
++        faultDelayAccounting.setLastReadThreadId(lastReadThreadId);
+     }
+ 
+     @Override
+     public long getLastWriteThreadId() {
+-        synchronized (bufferAccountingLock) {
+-            return lastWriteThreadId;
+-        }
++        return faultDelayAccounting.getLastWriteThreadId();
+     }
+ 
+     @Override
+     public void setLastWriteThreadId(long lastWriteThreadId) {
+-        synchronized (bufferAccountingLock) {
+-            this.lastWriteThreadId = lastWriteThreadId;
+-        }
++        faultDelayAccounting.setLastWriteThreadId(lastWriteThreadId);
+     }
+ 
+ }

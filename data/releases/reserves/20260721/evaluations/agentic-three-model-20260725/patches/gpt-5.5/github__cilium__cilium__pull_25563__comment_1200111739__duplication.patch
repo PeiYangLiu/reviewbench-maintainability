@@ -1,0 +1,132 @@
+diff --git a/pkg/hubble/relay/observer/server.go b/pkg/hubble/relay/observer/server.go
+index 946be42..8092008 100644
+--- a/pkg/hubble/relay/observer/server.go
++++ b/pkg/hubble/relay/observer/server.go
+@@ -6,6 +6,7 @@ package observer
+ import (
+ 	"context"
+ 	"fmt"
++	"sync"
+ 
+ 	"github.com/sirupsen/logrus"
+ 	"golang.org/x/exp/slices"
+@@ -28,6 +29,46 @@ import (
+ // Reporting up to 10 unavailable nodes is probably reasonable.
+ const numUnavailableNodesReportMax = 10
+ 
++type namespaceManager struct {
++	mu         sync.Mutex
++	namespaces map[string]*observerpb.Namespace
++}
++
++// NewNamespaceManager creates a namespace manager.
++func NewNamespaceManager() *namespaceManager {
++	return &namespaceManager{
++		namespaces: make(map[string]*observerpb.Namespace),
++	}
++}
++
++// AddNamespace adds ns to the namespace manager.
++func (m *namespaceManager) AddNamespace(ns *observerpb.Namespace) {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++
++	key := ns.GetCluster() + "/" + ns.GetNamespace()
++	m.namespaces[key] = ns
++}
++
++// GetNamespaces returns all namespaces sorted by cluster and namespace.
++func (m *namespaceManager) GetNamespaces() []*observerpb.Namespace {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++
++	namespaces := make([]*observerpb.Namespace, 0, len(m.namespaces))
++	for _, ns := range m.namespaces {
++		namespaces = append(namespaces, ns)
++	}
++	slices.SortFunc(namespaces, func(a, b *observerpb.Namespace) bool {
++		if a.Cluster != b.Cluster {
++			return a.Cluster < b.Cluster
++		}
++		return a.Namespace < b.Namespace
++	})
++
++	return namespaces
++}
++
+ // PeerLister is the interface that wraps the List method.
+ type PeerLister interface {
+ 	// List returns a list of peers with active connections. If a peer cannot
+@@ -243,29 +284,7 @@ func (s *Server) GetNamespaces(ctx context.Context, req *observerpb.GetNamespace
+ 	// We are not using errgroup.WithContext because we will return partial
+ 	// results over failing on the first error
+ 	g := new(errgroup.Group)
+-
+-	namespaceCh := make(chan *observerpb.Namespace)
+-	done := make(chan struct{})
+-	// use a map as a set to de-duplicate namespaces returned
+-	namespaceSet := make(map[string]*observerpb.Namespace)
+-
+-	// this go routine aggregates the results by using a map as a set of unique
+-	// namespaces
+-	go func() {
+-		defer close(done)
+-		for {
+-			select {
+-			case <-ctx.Done():
+-				return
+-			case ns, ok := <-namespaceCh:
+-				if !ok {
+-					return
+-				}
+-				key := ns.GetCluster() + "/" + ns.GetNamespace()
+-				namespaceSet[key] = ns
+-			}
+-		}
+-	}()
++	namespaceManager := NewNamespaceManager()
+ 
+ 	for _, p := range s.peers.List() {
+ 		if !isAvailable(p.Conn) {
+@@ -292,7 +311,8 @@ func (s *Server) GetNamespaces(ctx context.Context, req *observerpb.GetNamespace
+ 				select {
+ 				case <-ctx.Done():
+ 					return ctx.Err()
+-				case namespaceCh <- ns:
++				default:
++					namespaceManager.AddNamespace(ns)
+ 				}
+ 			}
+ 			return nil
+@@ -303,30 +323,7 @@ func (s *Server) GetNamespaces(ctx context.Context, req *observerpb.GetNamespace
+ 		return nil, err
+ 	}
+ 
+-	// Close namespaceCh as a signal to the aggregator that all producers are
+-	// done, informing it to return
+-	close(namespaceCh)
+-
+-	// Wait for the aggregator Go routine to return
+-	select {
+-	case <-ctx.Done():
+-		return nil, ctx.Err()
+-	case <-done:
+-	}
+-
+-	// Convert our namespaceSet to a list and sort it before returning the results.
+-	namespaces := make([]*observerpb.Namespace, 0, len(namespaceSet))
+-	for _, ns := range namespaceSet {
+-		namespaces = append(namespaces, ns)
+-	}
+-	slices.SortFunc(namespaces, func(a, b *observerpb.Namespace) bool {
+-		if a.Cluster != b.Cluster {
+-			return a.Cluster < b.Cluster
+-		}
+-		return a.Namespace < b.Namespace
+-	})
+-
+-	return &observerpb.GetNamespacesResponse{Namespaces: namespaces}, nil
++	return &observerpb.GetNamespacesResponse{Namespaces: namespaceManager.GetNamespaces()}, nil
+ }
+ 
+ // ServerStatus implements observerpb.ObserverServer.ServerStatus by aggregating

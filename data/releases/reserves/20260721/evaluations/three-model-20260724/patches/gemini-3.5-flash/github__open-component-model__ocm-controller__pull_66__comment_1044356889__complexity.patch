@@ -1,0 +1,137 @@
+--- a/controllers/componentversion_controller.go
++++ b/controllers/componentversion_controller.go
+@@ -232,7 +232,7 @@
+ 		return ctrl.Result{RequeueAfter: obj.GetRequeueAfter()}, err
+ 	}
+ 
+-	componentDescriptor.References, err = r.parseReferences(ctx, obj, cv.GetDescriptor().References)
++	componentDescriptor.References, err = r.reconcileReferences(ctx, obj, cv.GetDescriptor().References)
+ 	if err != nil {
+ 		return ctrl.Result{
+ 			RequeueAfter: obj.GetRequeueAfter(),
+@@ -260,21 +260,20 @@
+ 	return ctrl.Result{RequeueAfter: obj.GetRequeueAfter()}, nil
+ }
+ 
+-// parseReferences takes a list of references to embedded components and constructs a dependency tree out of them.
+-func (r *ComponentVersionReconciler) parseReferences(ctx context.Context, parent *v1alpha1.ComponentVersion, references ocmdesc.References) ([]v1alpha1.Reference, error) {
++// reconcileReferences takes a list of references to embedded components, reconciles them, and constructs a dependency tree.
++func (r *ComponentVersionReconciler) reconcileReferences(ctx context.Context, parent *v1alpha1.ComponentVersion, references ocmdesc.References) ([]v1alpha1.Reference, error) {
+ 	result := make([]v1alpha1.Reference, 0)
+ 	for _, ref := range references {
+-		reference, err := r.parseReferencesLoopBody(ctx, parent, ref)
++		reference, err := r.reconcileReference(ctx, parent, ref)
+ 		if err != nil {
+-			return nil, fmt.Errorf("failed to parse reference: %w", err)
++			return nil, fmt.Errorf("failed to reconcile reference: %w", err)
+ 		}
+ 		result = append(result, *reference)
+ 	}
+ 	return result, nil
+ }
+ 
+-func (r *ComponentVersionReconciler) parseReferencesLoopBody(ctx context.Context, parent *v1alpha1.ComponentVersion, ref ocmdesc.ComponentReference) (*v1alpha1.Reference, error) {
+-	log := log.FromContext(ctx)
++func (r *ComponentVersionReconciler) reconcileReference(ctx context.Context, parent *v1alpha1.ComponentVersion, ref ocmdesc.ComponentReference) (*v1alpha1.Reference, error) {
+ 	// get component version
+ 	rcv, err := r.OCMClient.GetComponentVersion(ctx, parent, ref.ComponentName, ref.Version)
+ 	if err != nil {
+@@ -287,35 +286,11 @@
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed to convert component descriptor: %w", err)
+ 	}
+-	// setup the component descriptor kubernetes resource
+-	componentName, err := r.constructComponentName(ref.ComponentName, ref.Version, ref.GetMeta().ExtraIdentity)
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to generate name: %w", err)
+-	}
+-	descriptor := &v1alpha1.ComponentDescriptor{
+-		ObjectMeta: metav1.ObjectMeta{
+-			Namespace: parent.GetNamespace(),
+-			Name:      componentName,
+-		},
+-		Spec: v1alpha1.ComponentDescriptorSpec{
+-			ComponentVersionSpec: cd.(*compdesc.ComponentDescriptor).Spec,
+-			Version:              ref.Version,
+-		},
+-	}
+-
+-	if err := controllerutil.SetOwnerReference(parent, descriptor, r.Scheme); err != nil {
+-		return nil, fmt.Errorf("failed to set owner reference: %w", err)
+-	}
+-
+-	// create or update the component descriptor kubernetes resource
+-	// we don't need to update it
+-	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, descriptor, func() error {
+-		return nil
+-	})
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to create/update component descriptor: %w", err)
+-	}
+-	log.V(4).Info(fmt.Sprintf("%s(ed) descriptor", op), "descriptor", klog.KObj(descriptor))
++
++	descriptor, err := r.reconcileComponentDescriptor(ctx, parent, cd, ref.ComponentName, ref.Version, ref.GetMeta().ExtraIdentity)
++	if err != nil {
++		return nil, err
++	}
+ 
+ 	reference := v1alpha1.Reference{
+ 		Name:    ref.Name,
+@@ -328,7 +303,7 @@
+ 	}
+ 
+ 	if len(rcv.GetDescriptor().References) > 0 {
+-		out, err := r.parseReferences(ctx, parent, rcv.GetDescriptor().References)
++		out, err := r.reconcileReferences(ctx, parent, rcv.GetDescriptor().References)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -336,6 +311,48 @@
+ 	}
+ 
+ 	return &reference, nil
++}
++
++func (r *ComponentVersionReconciler) reconcileComponentDescriptor(
++	ctx context.Context,
++	parent *v1alpha1.ComponentVersion,
++	cd ocmdesc.ComponentDescriptorReader,
++	componentName string,
++	version string,
++	identity v1.Identity,
++) (*v1alpha1.ComponentDescriptor, error) {
++	log := log.FromContext(ctx)
++	// setup the component descriptor kubernetes resource
++	name, err := r.constructComponentName(componentName, version, identity)
++	if err != nil {
++		return nil, fmt.Errorf("failed to generate name: %w", err)
++	}
++	descriptor := &v1alpha1.ComponentDescriptor{
++		ObjectMeta: metav1.ObjectMeta{
++			Namespace: parent.GetNamespace(),
++			Name:      name,
++		},
++		Spec: v1alpha1.ComponentDescriptorSpec{
++			ComponentVersionSpec: cd.(*compdesc.ComponentDescriptor).Spec,
++			Version:              version,
++		},
++	}
++
++	if err := controllerutil.SetOwnerReference(parent, descriptor, r.Scheme); err != nil {
++		return nil, fmt.Errorf("failed to set owner reference: %w", err)
++	}
++
++	// create or update the component descriptor kubernetes resource
++	// we don't need to update it
++	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, descriptor, func() error {
++		return nil
++	})
++	if err != nil {
++		return nil, fmt.Errorf("failed to create/update component descriptor: %w", err)
++	}
++	log.V(4).Info(fmt.Sprintf("%s(ed) descriptor", op), "descriptor", klog.KObj(descriptor))
++
++	return descriptor, nil
+ }
+ 
+ // constructComponentName constructs a unique name from a component name and version.

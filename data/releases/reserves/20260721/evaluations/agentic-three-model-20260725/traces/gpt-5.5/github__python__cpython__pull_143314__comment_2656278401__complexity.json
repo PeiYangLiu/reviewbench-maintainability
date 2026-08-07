@@ -1,0 +1,92 @@
+[
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "static EXECV_CHAR**\nparse_envlist(PyObject* env, Py_ssize_t *envc_ptr)\n{\n    Py_ssize_t i, pos, envc;\n    PyObject *keys = NULL, *vals = NULL;\n    PyObject *key = NULL, *val = NULL, *key2 = NULL, *val2 = NULL, *keyval = NULL;\n    EXECV_CHAR **envlist;\n\n    i = PyMapping_Size(env);\n    if (i < 0)\n        return NULL;\n    envlist = PyMem_NEW(EXECV_CHAR *, i + 1);\n    if (envlist == NULL) {\n        PyErr_NoMemory();\n        return NULL;\n    }\n    envc = 0;\n    keys = PyMapping_Keys(env);\n    if (!keys)\n        goto error;\n    vals = PyMapping_Values(env);\n    if (!vals)\n        goto error;\n    if (!PyList_Check(keys) || !PyList_Check(vals)) {\n        PyErr_Format(PyExc_TypeError,\n                     \"env.keys() or env.values() is not a list\");\n        goto error;\n    }\n\n    for (pos = 0; pos < i; pos++) {\n        // The 'key' and 'val' must be strong references because\n        // of possible side-effects by PyUnicode_FSConverter().\n        key = PyList_GetItemRef(keys, pos);\n        if (key == NULL) {\n            goto error;\n        }\n        val = PyList_GetItemRef(vals, pos);\n        if (val == NULL) {\n            goto error;\n        }\n\n\n#if defined(HAVE_WEXECV) || defined(HAVE_WSPAWNV)\n        if (!PyUnicode_FSDecoder(key, &key2)) {\n            goto error;\n        }\n        if (!PyUnicode_FSDecoder(val, &val2)) {\n            goto error;\n        }\n        /* Search from index 1 because on Windows starting '=' is allowed for\n           defining hidden environment variables. */\n        if (PyUnicode_GET_LENGTH(key2) == 0 ||\n            PyUnicode_FindChar(key2, '=', 1, PyUnicode_GET_LENGTH(key2), 1) != -1)\n        {\n            PyErr_SetString(PyExc_ValueError, \"illegal environment variable name\");\n            goto error;\n        }\n        keyval = PyUnicode_FromFormat(\"%U=%U\", key2, val2);\n#else\n        if (!PyUnicode_FSConverter(key, &key2)) {\n            goto error;\n        }\n        if (!PyUnicode_FSConverter(val, &val2)) {\n            goto error;\n        }\n        if (PyBytes_GET_SIZE(key2) == 0 ||\n            strchr(PyBytes_AS_STRING(key2) + 1, '=') != NULL)\n        {\n            PyErr_SetString(PyExc_ValueError, \"illegal environment variable name\");\n            goto error;\n        }\n        keyval = PyBytes_FromFormat(\"%s=%s\", PyBytes_AS_STRING(key2),\n                                             PyBytes_AS_STRING(val2));\n#endif\n        Py_CLEAR(key);\n        Py_CLEAR(val);\n        Py_CLEAR(key2);\n        Py_CLEAR(val2);\n        if (!keyval)\n            goto error;\n\n        if (!fsconvert_strdup(keyval, &envlist[envc])) {\n            goto error;\n        }\n        envc++;\n\n        Py_CLEAR(keyval);\n    }\n    Py_DECREF(vals);\n    Py_DECREF(keys);\n\n    envlist[envc] = 0;\n    *envc_ptr = envc;\n    return envlist;\n\nerror:\n    Py_XDECREF(key);\n    Py_XDECREF(val);\n    Py_XDECREF(key2);\n    Py_XDECREF(val2);\n    Py_XDECREF(keyval);\n    Py_XDECREF(keys);\n    Py_XDECREF(vals);\n    free_string_array(envlist, envc);\n    return NULL;\n}",
+          "end_line": 7409,
+          "start_line": 7290
+        }
+      ]
+    },
+    "response_chars": 3274,
+    "round": 1,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 7409,
+          "replacement_lines": 106,
+          "start_line": 7290
+        }
+      ],
+      "current_file_lines": 18830,
+      "updated_excerpt": {
+        "content": "7280:         result = 1;\n7281:     } else\n7282:         PyErr_NoMemory();\n7283: #endif\n7284:     Py_DECREF(ub);\n7285:     return result;\n7286: }\n7287: #endif\n7288: \n7289: #if defined(HAVE_EXECV) || defined (HAVE_FEXECVE) || defined(HAVE_RTPSPAWN)\n7290: static EXECV_CHAR**\n7291: parse_envlist(PyObject* env, Py_ssize_t *envc_ptr)\n7292: {\n7293:     Py_ssize_t i, pos, envc;\n7294:     PyObject *keys = NULL, *vals = NULL;\n7295:     PyObject *key = NULL, *val = NULL, *key2 = NULL, *val2 = NULL, *keyval = NULL;\n7296:     EXECV_CHAR **envlist;\n7297: \n7298:     i = PyMapping_Size(env);\n7299:     if (i < 0)\n7300:         return NULL;\n7301:     envlist = PyMem_NEW(EXECV_CHAR *, i + 1);\n7302:     if (envlist == NULL) {\n7303:         PyErr_NoMemory();\n7304:         return NULL;\n7305:     }\n7306:     envc = 0;\n7307:     keys = PyMapping_Keys(env);\n7308:     if (!keys)\n7309:         goto error;\n7310:     vals = PyMapping_Values(env);\n7311:     if (!vals)\n7312:         goto error;\n7313:     if (!PyList_Check(keys) || !PyList_Check(vals)) {\n7314:         PyErr_Format(PyExc_TypeError,\n7315:                      \"env.keys() or env.values() is not a list\");\n7316:         goto error;\n7317:     }\n7318: \n7319:     for (pos = 0; pos < i; pos++) {\n7320:         // The 'key' and 'val' must be strong references because",
+        "end_line": 7320,
+        "path_lines": 18830,
+        "start_line": 7280
+      }
+    },
+    "usage": {
+      "input_tokens": 11731,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 3398,
+      "output_tokens_details": {
+        "reasoning_tokens": 2414
+      },
+      "total_tokens": 15129
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 7410,
+      "path": "Modules/posixmodule.c",
+      "start_line": 7319
+    },
+    "response_chars": 165,
+    "round": 2,
+    "tool_result": {
+      "content": "7319:     for (pos = 0; pos < i; pos++) {\n7320:         // The 'key' and 'val' must be strong references because\n7321:         // of possible side-effects by PyUnicode_FSConverter().\n7322:         key = PyList_GetItemRef(keys, pos);\n7323:         if (key == NULL) {\n7324:             goto error;\n7325:         }\n7326:         val = PyList_GetItemRef(vals, pos);\n7327:         if (val == NULL) {\n7328:             goto error;\n7329:         }\n7330: \n7331: \n7332: #if defined(HAVE_WEXECV) || defined(HAVE_WSPAWNV)\n7333:         if (!PyUnicode_FSDecoder(key, &key2)) {\n7334:             goto error;\n7335:         }\n7336:         if (!PyUnicode_FSDecoder(val, &val2)) {\n7337:             goto error;\n7338:         }\n7339:         /* Search from index 1 because on Windows starting '=' is allowed for\n7340:            defining hidden environment variables. */\n7341:         if (PyUnicode_GET_LENGTH(key2) == 0 ||\n7342:             PyUnicode_FindChar(key2, '=', 1, PyUnicode_GET_LENGTH(key2), 1) != -1)\n7343:         {\n7344:             PyErr_SetString(PyExc_ValueError, \"illegal environment variable name\");\n7345:             goto error;\n7346:         }\n7347:         keyval = PyUnicode_FromFormat(\"%U=%U\", key2, val2);\n7348: #else\n7349:         if (!PyUnicode_FSConverter(key, &key2)) {\n7350:             goto error;\n7351:         }\n7352:         if (!PyUnicode_FSConverter(val, &val2)) {\n7353:             goto error;\n7354:         }\n7355:         if (PyBytes_GET_SIZE(key2) == 0 ||\n7356:             strchr(PyBytes_AS_STRING(key2) + 1, '=') != NULL)\n7357:         {\n7358:             PyErr_SetString(PyExc_ValueError, \"illegal environment variable name\");\n7359:             goto error;\n7360:         }\n7361:         keyval = PyBytes_FromFormat(\"%s=%s\", PyBytes_AS_STRING(key2),\n7362:                                              PyBytes_AS_STRING(val2));\n7363: #endif\n7364:         Py_CLEAR(key);\n7365:         Py_CLEAR(val);\n7366:         Py_CLEAR(key2);\n7367:         Py_CLEAR(val2);\n7368:         if (!keyval)\n7369:             goto error;\n7370: \n7371:         if (!fsconvert_strdup(keyval, &envlist[envc])) {\n7372:             goto error;\n7373:         }\n7374:         envc++;\n7375: \n7376:         Py_CLEAR(keyval);\n7377:     }\n7378:     Py_DECREF(vals);\n7379:     Py_DECREF(keys);\n7380: \n7381:     envlist[envc] = 0;\n7382:     *envc_ptr = envc;\n7383:     return envlist;\n7384: \n7385: error:\n7386:     Py_XDECREF(key);\n7387:     Py_XDECREF(val);\n7388:     Py_XDECREF(key2);\n7389:     Py_XDECREF(val2);\n7390:     Py_XDECREF(keyval);\n7391:     Py_XDECREF(keys);\n7392:     Py_XDECREF(vals);\n7393:     free_string_array(envlist, envc);\n7394:     return NULL;\n7395: }\n7396: \n7397: static EXECV_CHAR**\n7398: parse_arglist(PyObject* argv, Py_ssize_t *argc)\n7399: {\n7400:     int i;\n7401:     EXECV_CHAR **argvlist = PyMem_NEW(EXECV_CHAR *, *argc+1);\n7402:     if (argvlist == NULL) {\n7403:         PyErr_NoMemory();\n7404:         return NULL;\n7405:     }\n7406:     for (i = 0; i < *argc; i++) {\n7407:         PyObject* item = PySequence_ITEM(argv, i);\n7408:         if (item == NULL)\n7409:             goto fail;\n7410:         if (!fsconvert_strdup(item, &argvlist[i])) {",
+      "end_line": 7410,
+      "path_lines": 18830,
+      "start_line": 7319
+    },
+    "usage": {
+      "input_tokens": 13243,
+      "input_tokens_details": {
+        "cached_tokens": 11520
+      },
+      "output_tokens": 601,
+      "output_tokens_details": {
+        "reasoning_tokens": 536
+      },
+      "total_tokens": 13844
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 3,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__python__cpython__pull_143314__comment_2656278401__complexity.patch"
+    },
+    "usage": {
+      "input_tokens": 14379,
+      "input_tokens_details": {
+        "cached_tokens": 13056
+      },
+      "output_tokens": 527,
+      "output_tokens_details": {
+        "reasoning_tokens": 516
+      },
+      "total_tokens": 14906
+    }
+  }
+]

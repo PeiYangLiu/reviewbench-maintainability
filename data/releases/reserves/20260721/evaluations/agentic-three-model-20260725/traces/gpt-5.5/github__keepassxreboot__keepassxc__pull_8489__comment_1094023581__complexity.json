@@ -1,0 +1,450 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 220,
+      "path": "src/browser/BrowserAction.h",
+      "start_line": 1
+    },
+    "response_chars": 84,
+    "round": 1,
+    "tool_result": {
+      "content": "1: /*\n2:  *  Copyright (C) 2022 KeePassXC Team <team@keepassxc.org>\n3:  *\n4:  *  This program is free software: you can redistribute it and/or modify\n5:  *  it under the terms of the GNU General Public License as published by\n6:  *  the Free Software Foundation, either version 3 of the License, or\n7:  *  (at your option) any later version.\n8:  *\n9:  *  This program is distributed in the hope that it will be useful,\n10:  *  but WITHOUT ANY WARRANTY; without even the implied warranty of\n11:  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n12:  *  GNU General Public License for more details.\n13:  *\n14:  *  You should have received a copy of the GNU General Public License\n15:  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.\n16:  */\n17: \n18: #ifndef BROWSERACTION_H\n19: #define BROWSERACTION_H\n20: \n21: #include <QJsonArray>\n22: #include <QJsonObject>\n23: #include <QString>\n24: \n25: class QLocalSocket;\n26: \n27: struct BrowserRequest\n28: {\n29:     QString hash;\n30:     QString nonce;\n31:     QString incrementedNonce;\n32:     QJsonObject decrypted;\n33: \n34:     inline bool isEmpty() const\n35:     {\n36:         return decrypted.isEmpty();\n37:     }\n38: \n39:     inline QJsonArray getArray(const QString& param) const\n40:     {\n41:         return decrypted.value(param).toArray();\n42:     }\n43: \n44:     inline QString getString(const QString& param) const\n45:     {\n46:         return decrypted.value(param).toString();\n47:     }\n48: };\n49: \n50: class BrowserAction\n51: {\n52: public:\n53:     explicit BrowserAction() = default;\n54:     ~BrowserAction() = default;\n55: \n56:     QJsonObject processClientMessage(QLocalSocket* socket, const QJsonObject& json);\n57: \n58: private:\n59:     QJsonObject handleAction(QLocalSocket* socket, const QJsonObject& json);\n60:     QJsonObject handleChangePublicKeys(const QJsonObject& json, const QString& action);\n61:     QJsonObject handleGetDatabaseHash(const QJsonObject& json, const QString& action);\n62:     QJsonObject handleAssociate(const QJsonObject& json, const QString& action);\n63:     QJsonObject handleTestAssociate(const QJsonObject& json, const QString& action);\n64:     QJsonObject handleGetLogins(const QJsonObject& json, const QString& action);\n65:     QJsonObject handleGeneratePassword(QLocalSocket* socket, const QJsonObject& json, const QString& action);\n66:     QJsonObject handleSetLogin(const QJsonObject& json, const QString& action);\n67:     QJsonObject handleLockDatabase(const QJsonObject& json, const QString& action);\n68:     QJsonObject handleGetDatabaseGroups(const QJsonObject& json, const QString& action);\n69:     QJsonObject handleCreateNewGroup(const QJsonObject& json, const QString& action);\n70:     QJsonObject handleGetTotp(const QJsonObject& json, const QString& action);\n71:     QJsonObject handleDeleteEntry(const QJsonObject& json, const QString& action);\n72:     QJsonObject handleGlobalAutoType(const QJsonObject& json, const QString& action);\n73: \n74: private:\n75:     QJsonObject buildMessage(const QString& nonce) const;\n76:     QJsonObject buildResponse(const QString& action, const QJsonObject& message, const QString& nonce);\n77:     QJsonObject getErrorReply(const QString& action, const int errorCode) const;\n78:     QJsonObject decryptMessage(const QString& message, const QString& nonce);\n79:     BrowserRequest decodeRequest(const QJsonObject& json);\n80: \n81: private:\n82:     static const int MaxUrlLength;\n83: \n84:     QString m_clientPublicKey;\n85:     QString m_publicKey;\n86:     QString m_secretKey;\n87:     bool m_associated = false;\n88: \n89:     friend class TestBrowser;\n90: };\n91: \n92: #endif // BROWSERACTION_H",
+      "end_line": 92,
+      "path_lines": 92,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 6288,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 57,
+      "output_tokens_details": {
+        "reasoning_tokens": 27
+      },
+      "total_tokens": 6345
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 200,
+      "path": "src/browser/BrowserMessageBuilder.h",
+      "start_line": 1
+    },
+    "response_chars": 282,
+    "round": 2,
+    "tool_result": {
+      "content": "1: /*\n2:  *  Copyright (C) 2022 KeePassXC Team <team@keepassxc.org>\n3:  *\n4:  *  This program is free software: you can redistribute it and/or modify\n5:  *  it under the terms of the GNU General Public License as published by\n6:  *  the Free Software Foundation, either version 3 of the License, or\n7:  *  (at your option) any later version.\n8:  *\n9:  *  This program is distributed in the hope that it will be useful,\n10:  *  but WITHOUT ANY WARRANTY; without even the implied warranty of\n11:  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n12:  *  GNU General Public License for more details.\n13:  *\n14:  *  You should have received a copy of the GNU General Public License\n15:  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.\n16:  */\n17: \n18: #ifndef BROWSERMESSAGEBUILDER_H\n19: #define BROWSERMESSAGEBUILDER_H\n20: \n21: #include <QPair>\n22: #include <QString>\n23: \n24: class QJsonObject;\n25: \n26: namespace\n27: {\n28:     enum\n29:     {\n30:         ERROR_KEEPASS_DATABASE_NOT_OPENED = 1,\n31:         ERROR_KEEPASS_DATABASE_HASH_NOT_RECEIVED = 2,\n32:         ERROR_KEEPASS_CLIENT_PUBLIC_KEY_NOT_RECEIVED = 3,\n33:         ERROR_KEEPASS_CANNOT_DECRYPT_MESSAGE = 4,\n34:         ERROR_KEEPASS_TIMEOUT_OR_NOT_CONNECTED = 5,\n35:         ERROR_KEEPASS_ACTION_CANCELLED_OR_DENIED = 6,\n36:         ERROR_KEEPASS_CANNOT_ENCRYPT_MESSAGE = 7,\n37:         ERROR_KEEPASS_ASSOCIATION_FAILED = 8,\n38:         ERROR_KEEPASS_KEY_CHANGE_FAILED = 9,\n39:         ERROR_KEEPASS_ENCRYPTION_KEY_UNRECOGNIZED = 10,\n40:         ERROR_KEEPASS_NO_SAVED_DATABASES_FOUND = 11,\n41:         ERROR_KEEPASS_INCORRECT_ACTION = 12,\n42:         ERROR_KEEPASS_EMPTY_MESSAGE_RECEIVED = 13,\n43:         ERROR_KEEPASS_NO_URL_PROVIDED = 14,\n44:         ERROR_KEEPASS_NO_LOGINS_FOUND = 15,\n45:         ERROR_KEEPASS_NO_GROUPS_FOUND = 16,\n46:         ERROR_KEEPASS_CANNOT_CREATE_NEW_GROUP = 17,\n47:         ERROR_KEEPASS_NO_VALID_UUID_PROVIDED = 18\n48:     };\n49: }\n50: \n51: class BrowserMessageBuilder\n52: {\n53: public:\n54:     explicit BrowserMessageBuilder() = default;\n55:     static BrowserMessageBuilder* instance();\n56: \n57:     QPair<QString, QString> getKeyPair();\n58: \n59:     QJsonObject buildMessage(const QString& nonce) const;\n60:     QJsonObject buildResponse(const QString& action,\n61:                               const QJsonObject& message,\n62:                               const QString& nonce,\n63:                               const QString& publicKey,\n64:                               const QString& secretKey);\n65:     QJsonObject getErrorReply(const QString& action, const int errorCode) const;\n66:     QString getErrorMessage(const int errorCode) const;\n67: \n68:     QString encryptMessage(const QJsonObject& message,\n69:                            const QString& nonce,\n70:                            const QString& publicKey,\n71:                            const QString& secretKey);\n72:     QJsonObject\n73:     decryptMessage(const QString& message, const QString& nonce, const QString& publicKey, const QString& secretKey);\n74:     QString encrypt(const QString& plaintext, const QString& nonce, const QString& publicKey, const QString& secretKey);\n75:     QByteArray\n76:     decrypt(const QString& encrypted, const QString& nonce, const QString& publicKey, const QString& secretKey);\n77: \n78:     QString getBase64FromKey(const uchar* array, const uint len);\n79:     QByteArray getQByteArray(const uchar* array, const uint len) const;\n80:     QJsonObject getJsonObject(const uchar* pArray, const uint len) const;\n81:     QJsonObject getJsonObject(const QByteArray& ba) const;\n82:     QByteArray base64Decode(const QString& str);\n83:     QString incrementNonce(const QString& nonce);\n84: \n85: private:\n86:     Q_DISABLE_COPY(BrowserMessageBuilder);\n87: \n88:     friend class TestBrowser;\n89: };\n90: \n91: static inline BrowserMessageBuilder* browserMessageBuilder()\n92: {\n93:     return BrowserMessageBuilder::instance();\n94: }\n95: \n96: #endif // BROWSERMESSAGEBUILDER_H",
+      "end_line": 96,
+      "path_lines": 96,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 7434,
+      "input_tokens_details": {
+        "cached_tokens": 5888
+      },
+      "output_tokens": 703,
+      "output_tokens_details": {
+        "reasoning_tokens": 608
+      },
+      "total_tokens": 8137
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 180,
+      "path": "src/browser/BrowserMessageBuilder.cpp",
+      "start_line": 1
+    },
+    "response_chars": 284,
+    "round": 3,
+    "tool_result": {
+      "content": "1: /*\n2:  *  Copyright (C) 2022 KeePassXC Team <team@keepassxc.org>\n3:  *\n4:  *  This program is free software: you can redistribute it and/or modify\n5:  *  it under the terms of the GNU General Public License as published by\n6:  *  the Free Software Foundation, either version 3 of the License, or\n7:  *  (at your option) any later version.\n8:  *\n9:  *  This program is distributed in the hope that it will be useful,\n10:  *  but WITHOUT ANY WARRANTY; without even the implied warranty of\n11:  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n12:  *  GNU General Public License for more details.\n13:  *\n14:  *  You should have received a copy of the GNU General Public License\n15:  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.\n16:  */\n17: \n18: #include \"BrowserMessageBuilder.h\"\n19: #include \"BrowserShared.h\"\n20: #include \"config-keepassx.h\"\n21: #include \"core/Global.h\"\n22: #include \"core/Tools.h\"\n23: \n24: #include <QJsonArray>\n25: #include <QJsonDocument>\n26: #include <QJsonObject>\n27: \n28: #include <botan/sodium.h>\n29: \n30: using namespace Botan::Sodium;\n31: \n32: Q_GLOBAL_STATIC(BrowserMessageBuilder, s_browserMessageBuilder);\n33: \n34: BrowserMessageBuilder* BrowserMessageBuilder::instance()\n35: {\n36:     return s_browserMessageBuilder;\n37: }\n38: \n39: QPair<QString, QString> BrowserMessageBuilder::getKeyPair()\n40: {\n41:     unsigned char pk[crypto_box_PUBLICKEYBYTES];\n42:     unsigned char sk[crypto_box_SECRETKEYBYTES];\n43:     crypto_box_keypair(pk, sk);\n44: \n45:     const QString publicKey = getBase64FromKey(pk, crypto_box_PUBLICKEYBYTES);\n46:     const QString secretKey = getBase64FromKey(sk, crypto_box_SECRETKEYBYTES);\n47:     return qMakePair(publicKey, secretKey);\n48: }\n49: \n50: QJsonObject BrowserMessageBuilder::getErrorReply(const QString& action, const int errorCode) const\n51: {\n52:     QJsonObject response;\n53:     response[\"action\"] = action;\n54:     response[\"errorCode\"] = QString::number(errorCode);\n55:     response[\"error\"] = getErrorMessage(errorCode);\n56:     return response;\n57: }\n58: \n59: QJsonObject BrowserMessageBuilder::buildMessage(const QString& nonce) const\n60: {\n61:     QJsonObject message;\n62:     message[\"version\"] = KEEPASSXC_VERSION;\n63:     message[\"success\"] = TRUE_STR;\n64:     message[\"nonce\"] = nonce;\n65:     return message;\n66: }\n67: \n68: QJsonObject BrowserMessageBuilder::buildResponse(const QString& action,\n69:                                                  const QJsonObject& message,\n70:                                                  const QString& nonce,\n71:                                                  const QString& publicKey,\n72:                                                  const QString& secretKey)\n73: {\n74:     QJsonObject response;\n75:     QString encryptedMessage = encryptMessage(message, nonce, publicKey, secretKey);\n76:     if (encryptedMessage.isEmpty()) {\n77:         return getErrorReply(action, ERROR_KEEPASS_CANNOT_ENCRYPT_MESSAGE);\n78:     }\n79: \n80:     response[\"action\"] = action;\n81:     response[\"message\"] = encryptedMessage;\n82:     response[\"nonce\"] = nonce;\n83:     return response;\n84: }\n85: \n86: QString BrowserMessageBuilder::getErrorMessage(const int errorCode) const\n87: {\n88:     switch (errorCode) {\n89:     case ERROR_KEEPASS_DATABASE_NOT_OPENED:\n90:         return QObject::tr(\"Database not opened\");\n91:     case ERROR_KEEPASS_DATABASE_HASH_NOT_RECEIVED:\n92:         return QObject::tr(\"Database hash not available\");\n93:     case ERROR_KEEPASS_CLIENT_PUBLIC_KEY_NOT_RECEIVED:\n94:         return QObject::tr(\"Client public key not received\");\n95:     case ERROR_KEEPASS_CANNOT_DECRYPT_MESSAGE:\n96:         return QObject::tr(\"Cannot decrypt message\");\n97:     case ERROR_KEEPASS_ACTION_CANCELLED_OR_DENIED:\n98:         return QObject::tr(\"Action cancelled or denied\");\n99:     case ERROR_KEEPASS_CANNOT_ENCRYPT_MESSAGE:\n100:         return QObject::tr(\"Message encryption failed.\");\n101:     case ERROR_KEEPASS_ASSOCIATION_FAILED:\n102:         return QObject::tr(\"KeePassXC association failed, try again\");\n103:     case ERROR_KEEPASS_ENCRYPTION_KEY_UNRECOGNIZED:\n104:         return QObject::tr(\"Encryption key is not recognized\");\n105:     case ERROR_KEEPASS_INCORRECT_ACTION:\n106:         return QObject::tr(\"Incorrect action\");\n107:     case ERROR_KEEPASS_EMPTY_MESSAGE_RECEIVED:\n108:         return QObject::tr(\"Empty message received\");\n109:     case ERROR_KEEPASS_NO_URL_PROVIDED:\n110:         return QObject::tr(\"No URL provided\");\n111:     case ERROR_KEEPASS_NO_LOGINS_FOUND:\n112:         return QObject::tr(\"No logins found\");\n113:     case ERROR_KEEPASS_NO_GROUPS_FOUND:\n114:         return QObject::tr(\"No groups found\");\n115:     case ERROR_KEEPASS_CANNOT_CREATE_NEW_GROUP:\n116:         return QObject::tr(\"Cannot create new group\");\n117:     case ERROR_KEEPASS_NO_VALID_UUID_PROVIDED:\n118:         return QObject::tr(\"No valid UUID provided\");\n119:     default:\n120:         return QObject::tr(\"Unknown error\");\n121:     }\n122: }\n123: \n124: QString BrowserMessageBuilder::encryptMessage(const QJsonObject& message,\n125:                                               const QString& nonce,\n126:                                               const QString& publicKey,\n127:                                               const QString& secretKey)\n128: {\n129:     if (message.isEmpty() || nonce.isEmpty()) {\n130:         return QString();\n131:     }\n132: \n133:     const QString reply(QJsonDocument(message).toJson());\n134:     if (!reply.isEmpty()) {\n135:         return encrypt(reply, nonce, publicKey, secretKey);\n136:     }\n137: \n138:     return QString();\n139: }\n140: \n141: QJsonObject BrowserMessageBuilder::decryptMessage(const QString& message,\n142:                                                   const QString& nonce,\n143:                                                   const QString& publicKey,\n144:                                                   const QString& secretKey)\n145: {\n146:     if (message.isEmpty() || nonce.isEmpty()) {\n147:         return QJsonObject();\n148:     }\n149: \n150:     QByteArray ba = decrypt(message, nonce, publicKey, secretKey);\n151:     if (ba.isEmpty()) {\n152:         return QJsonObject();\n153:     }\n154: \n155:     return getJsonObject(ba);\n156: }\n157: \n158: QString BrowserMessageBuilder::encrypt(const QString& plaintext,\n159:                                        const QString& nonce,\n160:                                        const QString& publicKey,\n161:                                        const QString& secretKey)\n162: {\n163:     const QByteArray ma = plaintext.toUtf8();\n164:     const QByteArray na = base64Decode(nonce);\n165:     const QByteArray ca = base64Decode(publicKey);\n166:     const QByteArray sa = base64Decode(secretKey);\n167: \n168:     std::vector<unsigned char> m(ma.cbegin(), ma.cend());\n169:     std::vector<unsigned char> n(na.cbegin(), na.cend());\n170:     std::vector<unsigned char> ck(ca.cbegin(), ca.cend());\n171:     std::vector<unsigned char> sk(sa.cbegin(), sa.cend());\n172: \n173:     std::vector<unsigned char> e;\n174:     e.resize(BrowserShared::NATIVEMSG_MAX_LENGTH);\n175: \n176:     if (m.empty() || n.empty() || ck.empty() || sk.empty()) {\n177:         return QString();\n178:     }\n179: \n180:     if (crypto_box_easy(e.data(), m.data(), m.size(), n.data(), ck.data(), sk.data()) == 0) {",
+      "end_line": 180,
+      "path_lines": 259,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 8638,
+      "input_tokens_details": {
+        "cached_tokens": 6912
+      },
+      "output_tokens": 670,
+      "output_tokens_details": {
+        "reasoning_tokens": 575
+      },
+      "total_tokens": 9308
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "#include <QLocalSocket>\n#include <QMap>\n#include <QVariant>",
+          "end_line": 26,
+          "start_line": 26
+        },
+        {
+          "content": "namespace\n{\n    QJsonObject buildResponse(const QString& action,\n                              const QString& nonce,\n                              const QMap<QString, QVariant>& params,\n                              const QString& publicKey,\n                              const QString& secretKey)\n    {\n        auto message = browserMessageBuilder()->buildMessage(nonce);\n        for (auto it = params.cbegin(); it != params.cend(); ++it) {\n            message[it.key()] = QJsonValue::fromVariant(it.value());\n        }\n\n        return browserMessageBuilder()->buildResponse(action, message, nonce, publicKey, secretKey);\n    }\n}\n\n",
+          "end_line": 42,
+          "start_line": 43
+        },
+        {
+          "content": "        QMap<QString, QVariant> params{{QStringLiteral(\"hash\"), browserRequest.hash}};\n\n        // Update a legacy database hash if found\n        const auto hashes = browserRequest.getArray(\"connectedKeys\");\n        if (!hashes.isEmpty()) {\n            const auto legacyHash = browserService()->getDatabaseHash(true);\n            if (hashes.contains(legacyHash)) {\n                params[QStringLiteral(\"oldHash\")] = legacyHash;\n            }\n        }\n\n        return ::buildResponse(action, browserRequest.incrementedNonce, params, m_clientPublicKey, m_secretKey);",
+          "end_line": 162,
+          "start_line": 150
+        },
+        {
+          "content": "        return ::buildResponse(action,\n                               browserRequest.incrementedNonce,\n                               {{QStringLiteral(\"hash\"), browserRequest.hash}, {QStringLiteral(\"id\"), id}},\n                               m_clientPublicKey,\n                               m_secretKey);",
+          "end_line": 194,
+          "start_line": 191
+        },
+        {
+          "content": "    return ::buildResponse(action,\n                           browserRequest.incrementedNonce,\n                           {{QStringLiteral(\"hash\"), browserRequest.hash}, {QStringLiteral(\"id\"), id}},\n                           m_clientPublicKey,\n                           m_secretKey);",
+          "end_line": 224,
+          "start_line": 220
+        },
+        {
+          "content": "    return ::buildResponse(action,\n                           browserRequest.incrementedNonce,\n                           {{QStringLiteral(\"count\"), users.count()},\n                            {QStringLiteral(\"entries\"), QVariant::fromValue(users)},\n                            {QStringLiteral(\"hash\"), browserRequest.hash},\n                            {QStringLiteral(\"id\"), id}},\n                           m_clientPublicKey,\n                           m_secretKey);",
+          "end_line": 272,
+          "start_line": 266
+        },
+        {
+          "content": "    return ::buildResponse(action,\n                           browserRequest.incrementedNonce,\n                           {{QStringLiteral(\"count\"), QVariant()},\n                            {QStringLiteral(\"entries\"), QVariant()},\n                            {QStringLiteral(\"error\"), result ? QStringLiteral(\"success\") : QStringLiteral(\"error\")},\n                            {QStringLiteral(\"hash\"), browserRequest.hash}},\n                           m_clientPublicKey,\n                           m_secretKey);",
+          "end_line": 354,
+          "start_line": 348
+        },
+        {
+          "content": "        return ::buildResponse(action, browserRequest.incrementedNonce, {}, m_clientPublicKey, m_secretKey);",
+          "end_line": 373,
+          "start_line": 372
+        },
+        {
+          "content": "    return ::buildResponse(action,\n                           browserRequest.incrementedNonce,\n                           {{QStringLiteral(\"groups\"), QVariant::fromValue(groups)}},\n                           m_clientPublicKey,\n                           m_secretKey);",
+          "end_line": 403,
+          "start_line": 400
+        },
+        {
+          "content": "    return ::buildResponse(action,\n                           browserRequest.incrementedNonce,\n                           {{QStringLiteral(\"name\"), newGroup[\"name\"].toVariant()},\n                            {QStringLiteral(\"uuid\"), newGroup[\"uuid\"].toVariant()}},\n                           m_clientPublicKey,\n                           m_secretKey);",
+          "end_line": 432,
+          "start_line": 428
+        },
+        {
+          "content": "    return ::buildResponse(action,\n                           browserRequest.incrementedNonce,\n                           {{QStringLiteral(\"totp\"), browserService()->getCurrentTotp(uuid)}},\n                           m_clientPublicKey,\n                           m_secretKey);",
+          "end_line": 459,
+          "start_line": 456
+        },
+        {
+          "content": "    return ::buildResponse(action,\n                           browserRequest.incrementedNonce,\n                           {{QStringLiteral(\"success\"), result ? TRUE_STR : FALSE_STR}},\n                           m_clientPublicKey,\n                           m_secretKey);",
+          "end_line": 488,
+          "start_line": 485
+        },
+        {
+          "content": "    return ::buildResponse(action, browserRequest.incrementedNonce, {}, m_clientPublicKey, m_secretKey);",
+          "end_line": 511,
+          "start_line": 510
+        }
+      ]
+    },
+    "response_chars": 5127,
+    "round": 4,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 26,
+          "replacement_lines": 3,
+          "start_line": 26
+        },
+        {
+          "end_line": 42,
+          "replacement_lines": 17,
+          "start_line": 43
+        },
+        {
+          "end_line": 162,
+          "replacement_lines": 12,
+          "start_line": 150
+        },
+        {
+          "end_line": 194,
+          "replacement_lines": 5,
+          "start_line": 191
+        },
+        {
+          "end_line": 224,
+          "replacement_lines": 5,
+          "start_line": 220
+        },
+        {
+          "end_line": 272,
+          "replacement_lines": 8,
+          "start_line": 266
+        },
+        {
+          "end_line": 354,
+          "replacement_lines": 8,
+          "start_line": 348
+        },
+        {
+          "end_line": 373,
+          "replacement_lines": 1,
+          "start_line": 372
+        },
+        {
+          "end_line": 403,
+          "replacement_lines": 5,
+          "start_line": 400
+        },
+        {
+          "end_line": 432,
+          "replacement_lines": 6,
+          "start_line": 428
+        },
+        {
+          "end_line": 459,
+          "replacement_lines": 5,
+          "start_line": 456
+        },
+        {
+          "end_line": 488,
+          "replacement_lines": 5,
+          "start_line": 485
+        },
+        {
+          "end_line": 511,
+          "replacement_lines": 1,
+          "start_line": 510
+        }
+      ],
+      "current_file_lines": 561,
+      "updated_excerpt": {
+        "content": "16:  */\n17: \n18: #include \"BrowserAction.h\"\n19: #include \"BrowserMessageBuilder.h\"\n20: #include \"BrowserService.h\"\n21: #include \"core/Global.h\"\n22: #include \"core/Tools.h\"\n23: \n24: #include <QJsonDocument>\n25: #include <QLocalSocket>\n26: #include <QLocalSocket>\n27: #include <QMap>\n28: #include <QVariant>\n29: const int BrowserAction::MaxUrlLength = 256;\n30: \n31: static const QString BROWSER_REQUEST_ASSOCIATE = QStringLiteral(\"associate\");\n32: static const QString BROWSER_REQUEST_CHANGE_PUBLIC_KEYS = QStringLiteral(\"change-public-keys\");\n33: static const QString BROWSER_REQUEST_CREATE_NEW_GROUP = QStringLiteral(\"create-new-group\");\n34: static const QString BROWSER_REQUEST_DELETE_ENTRY = QStringLiteral(\"delete-entry\");\n35: static const QString BROWSER_REQUEST_GENERATE_PASSWORD = QStringLiteral(\"generate-password\");\n36: static const QString BROWSER_REQUEST_GET_DATABASEHASH = QStringLiteral(\"get-databasehash\");\n37: static const QString BROWSER_REQUEST_GET_DATABASE_GROUPS = QStringLiteral(\"get-database-group\");\n38: static const QString BROWSER_REQUEST_GET_LOGINS = QStringLiteral(\"get-logins\");\n39: static const QString BROWSER_REQUEST_GET_TOTP = QStringLiteral(\"get-totp\");\n40: static const QString BROWSER_REQUEST_LOCK_DATABASE = QStringLiteral(\"lock-database\");\n41: static const QString BROWSER_REQUEST_REQUEST_AUTOTYPE = QStringLiteral(\"request-autotype\");\n42: static const QString BROWSER_REQUEST_SET_LOGIN = QStringLiteral(\"set-login\");\n43: static const QString BROWSER_REQUEST_TEST_ASSOCIATE = QStringLiteral(\"test-associate\");\n44: \n45: namespace\n46: {\n47:     QJsonObject buildResponse(const QString& action,\n48:                               const QString& nonce,\n49:                               const QMap<QString, QVariant>& params,\n50:                               const QString& publicKey,\n51:                               const QString& secretKey)\n52:     {\n53:         auto message = browserMessageBuilder()->buildMessage(nonce);\n54:         for (auto it = params.cbegin(); it != params.cend(); ++it) {\n55:             message[it.key()] = QJsonValue::fromVariant(it.value());\n56:         }",
+        "end_line": 56,
+        "path_lines": 561,
+        "start_line": 16
+      }
+    },
+    "usage": {
+      "input_tokens": 10744,
+      "input_tokens_details": {
+        "cached_tokens": 8448
+      },
+      "output_tokens": 4085,
+      "output_tokens_details": {
+        "reasoning_tokens": 3022
+      },
+      "total_tokens": 14829
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 570,
+      "path": "src/browser/BrowserAction.cpp",
+      "start_line": 18
+    },
+    "response_chars": 263,
+    "round": 5,
+    "tool_result": {
+      "content": "18: #include \"BrowserAction.h\"\n19: #include \"BrowserMessageBuilder.h\"\n20: #include \"BrowserService.h\"\n21: #include \"core/Global.h\"\n22: #include \"core/Tools.h\"\n23: \n24: #include <QJsonDocument>\n25: #include <QLocalSocket>\n26: #include <QLocalSocket>\n27: #include <QMap>\n28: #include <QVariant>\n29: const int BrowserAction::MaxUrlLength = 256;\n30: \n31: static const QString BROWSER_REQUEST_ASSOCIATE = QStringLiteral(\"associate\");\n32: static const QString BROWSER_REQUEST_CHANGE_PUBLIC_KEYS = QStringLiteral(\"change-public-keys\");\n33: static const QString BROWSER_REQUEST_CREATE_NEW_GROUP = QStringLiteral(\"create-new-group\");\n34: static const QString BROWSER_REQUEST_DELETE_ENTRY = QStringLiteral(\"delete-entry\");\n35: static const QString BROWSER_REQUEST_GENERATE_PASSWORD = QStringLiteral(\"generate-password\");\n36: static const QString BROWSER_REQUEST_GET_DATABASEHASH = QStringLiteral(\"get-databasehash\");\n37: static const QString BROWSER_REQUEST_GET_DATABASE_GROUPS = QStringLiteral(\"get-database-group\");\n38: static const QString BROWSER_REQUEST_GET_LOGINS = QStringLiteral(\"get-logins\");\n39: static const QString BROWSER_REQUEST_GET_TOTP = QStringLiteral(\"get-totp\");\n40: static const QString BROWSER_REQUEST_LOCK_DATABASE = QStringLiteral(\"lock-database\");\n41: static const QString BROWSER_REQUEST_REQUEST_AUTOTYPE = QStringLiteral(\"request-autotype\");\n42: static const QString BROWSER_REQUEST_SET_LOGIN = QStringLiteral(\"set-login\");\n43: static const QString BROWSER_REQUEST_TEST_ASSOCIATE = QStringLiteral(\"test-associate\");\n44: \n45: namespace\n46: {\n47:     QJsonObject buildResponse(const QString& action,\n48:                               const QString& nonce,\n49:                               const QMap<QString, QVariant>& params,\n50:                               const QString& publicKey,\n51:                               const QString& secretKey)\n52:     {\n53:         auto message = browserMessageBuilder()->buildMessage(nonce);\n54:         for (auto it = params.cbegin(); it != params.cend(); ++it) {\n55:             message[it.key()] = QJsonValue::fromVariant(it.value());\n56:         }\n57: \n58:         return browserMessageBuilder()->buildResponse(action, message, nonce, publicKey, secretKey);\n59:     }\n60: }\n61: \n62: QJsonObject BrowserAction::processClientMessage(QLocalSocket* socket, const QJsonObject& json)\n63: {\n64:     if (json.isEmpty()) {\n65:         return getErrorReply(\"\", ERROR_KEEPASS_EMPTY_MESSAGE_RECEIVED);\n66:     }\n67: \n68:     bool triggerUnlock = false;\n69:     const auto trigger = json.value(\"triggerUnlock\").toString();\n70:     if (!trigger.isEmpty() && trigger.compare(TRUE_STR) == 0) {\n71:         triggerUnlock = true;\n72:     }\n73: \n74:     const auto action = json.value(\"action\").toString();\n75:     if (action.isEmpty()) {\n76:         return getErrorReply(action, ERROR_KEEPASS_INCORRECT_ACTION);\n77:     }\n78: \n79:     if (action.compare(BROWSER_REQUEST_CHANGE_PUBLIC_KEYS) != 0 && action.compare(BROWSER_REQUEST_REQUEST_AUTOTYPE) != 0\n80:         && !browserService()->isDatabaseOpened()) {\n81:         if (m_clientPublicKey.isEmpty()) {\n82:             return getErrorReply(action, ERROR_KEEPASS_CLIENT_PUBLIC_KEY_NOT_RECEIVED);\n83:         } else if (!browserService()->openDatabase(triggerUnlock)) {\n84:             return getErrorReply(action, ERROR_KEEPASS_DATABASE_NOT_OPENED);\n85:         }\n86:     }\n87: \n88:     return handleAction(socket, json);\n89: }\n90: \n91: // Private functions\n92: ///////////////////////\n93: \n94: QJsonObject BrowserAction::handleAction(QLocalSocket* socket, const QJsonObject& json)\n95: {\n96:     QString action = json.value(\"action\").toString();\n97: \n98:     if (action.compare(BROWSER_REQUEST_CHANGE_PUBLIC_KEYS) == 0) {\n99:         return handleChangePublicKeys(json, action);\n100:     } else if (action.compare(BROWSER_REQUEST_GET_DATABASEHASH) == 0) {\n101:         return handleGetDatabaseHash(json, action);\n102:     } else if (action.compare(BROWSER_REQUEST_ASSOCIATE) == 0) {\n103:         return handleAssociate(json, action);\n104:     } else if (action.compare(BROWSER_REQUEST_TEST_ASSOCIATE) == 0) {\n105:         return handleTestAssociate(json, action);\n106:     } else if (action.compare(BROWSER_REQUEST_GET_LOGINS) == 0) {\n107:         return handleGetLogins(json, action);\n108:     } else if (action.compare(BROWSER_REQUEST_GENERATE_PASSWORD) == 0) {\n109:         return handleGeneratePassword(socket, json, action);\n110:     } else if (action.compare(BROWSER_REQUEST_SET_LOGIN) == 0) {\n111:         return handleSetLogin(json, action);\n112:     } else if (action.compare(BROWSER_REQUEST_LOCK_DATABASE) == 0) {\n113:         return handleLockDatabase(json, action);\n114:     } else if (action.compare(BROWSER_REQUEST_GET_DATABASE_GROUPS) == 0) {\n115:         return handleGetDatabaseGroups(json, action);\n116:     } else if (action.compare(BROWSER_REQUEST_CREATE_NEW_GROUP) == 0) {\n117:         return handleCreateNewGroup(json, action);\n118:     } else if (action.compare(BROWSER_REQUEST_GET_TOTP) == 0) {\n119:         return handleGetTotp(json, action);\n120:     } else if (action.compare(BROWSER_REQUEST_DELETE_ENTRY) == 0) {\n121:         return handleDeleteEntry(json, action);\n122:     } else if (action.compare(BROWSER_REQUEST_REQUEST_AUTOTYPE) == 0) {\n123:         return handleGlobalAutoType(json, action);\n124:     }\n125: \n126:     // Action was not recognized\n127:     return getErrorReply(action, ERROR_KEEPASS_INCORRECT_ACTION);\n128: }\n129: \n130: QJsonObject BrowserAction::handleChangePublicKeys(const QJsonObject& json, const QString& action)\n131: {\n132:     const auto nonce = json.value(\"nonce\").toString();\n133:     const auto clientPublicKey = json.value(\"publicKey\").toString();\n134: \n135:     if (clientPublicKey.isEmpty() || nonce.isEmpty()) {\n136:         return getErrorReply(action, ERROR_KEEPASS_CLIENT_PUBLIC_KEY_NOT_RECEIVED);\n137:     }\n138: \n139:     m_associated = false;\n140:     auto keyPair = browserMessageBuilder()->getKeyPair();\n141:     if (keyPair.first.isEmpty() || keyPair.second.isEmpty()) {\n142:         return getErrorReply(action, ERROR_KEEPASS_ENCRYPTION_KEY_UNRECOGNIZED);\n143:     }\n144: \n145:     m_clientPublicKey = clientPublicKey;\n146:     m_publicKey = keyPair.first;\n147:     m_secretKey = keyPair.second;\n148: \n149:     auto response = browserMessageBuilder()->buildMessage(browserMessageBuilder()->incrementNonce(nonce));\n150:     response[\"action\"] = action;\n151:     response[\"publicKey\"] = keyPair.first;\n152: \n153:     return response;\n154: }\n155: \n156: QJsonObject BrowserAction::handleGetDatabaseHash(const QJsonObject& json, const QString& action)\n157: {\n158:     const auto browserRequest = decodeRequest(json);\n159:     if (browserRequest.isEmpty()) {\n160:         return getErrorReply(action, ERROR_KEEPASS_CANNOT_DECRYPT_MESSAGE);\n161:     }\n162: \n163:     if (browserRequest.hash.isEmpty()) {\n164:         return getErrorReply(action, ERROR_KEEPASS_DATABASE_HASH_NOT_RECEIVED);\n165:     }\n166: \n167:     const auto command = browserRequest.getString(\"action\");\n168:     if (!command.isEmpty() && command.compare(BROWSER_REQUEST_GET_DATABASEHASH) == 0) {\n169:         QMap<QString, QVariant> params{{QStringLiteral(\"hash\"), browserRequest.hash}};\n170: \n171:         // Update a legacy database hash if found\n172:         const auto hashes = browserRequest.getArray(\"connectedKeys\");\n173:         if (!hashes.isEmpty()) {\n174:             const auto legacyHash = browserService()->getDatabaseHash(true);\n175:             if (hashes.contains(legacyHash)) {\n176:                 params[QStringLiteral(\"oldHash\")] = legacyHash;\n177:             }\n178:         }\n179: \n180:         return ::buildResponse(action, browserRequest.incrementedNonce, params, m_clientPublicKey, m_secretKey);\n181:     }\n182: \n183:     return getErrorReply(action, ERROR_KEEPASS_CANNOT_DECRYPT_MESSAGE);\n184: }\n185: \n186: QJsonObject BrowserAction::handleAssociate(const QJsonObject& json, const QString& action)\n187: {\n188:     const auto browserRequest = decodeRequest(json);\n189:     if (browserRequest.isEmpty()) {\n190:         return getErrorReply(action, ERROR_KEEPASS_CANNOT_DECRYPT_MESSAGE);\n191:     }\n192: \n193:     const auto key = browserRequest.getString(\"key\");\n194:     if (key.isEmpty()) {\n195:         return getErrorReply(action, ERROR_KEEPASS_ASSOCIATION_FAILED);\n196:     }\n197: \n198:     if (key.compare(m_clientPublicKey) == 0) {\n199:         // Check for identification key. If it's not found, ensure backwards compatibility and use the current public\n200:         // key\n201:         const auto idKey = browserRequest.getString(\"idKey\");\n202:         const auto id = browserService()->storeKey((idKey.isEmpty() ? key : idKey));\n203:         if (id.isEmpty()) {\n204:             return getErrorReply(action, ERROR_KEEPASS_ACTION_CANCELLED_OR_DENIED);\n205:         }\n206: \n207:         m_associated = true;\n208: \n209:         return ::buildResponse(action,\n210:                                browserRequest.incrementedNonce,\n211:                                {{QStringLiteral(\"hash\"), browserRequest.hash}, {QStringLiteral(\"id\"), id}},\n212:                                m_clientPublicKey,\n213:                                m_secretKey);\n214:     }\n215: \n216:     return getErrorReply(action, ERROR_KEEPASS_ASSOCIATION_FAILED);\n217: }\n218: \n219: QJsonObject BrowserAction::handleTestAssociate(const QJsonObject& json, const QString& action)\n220: {\n221:     const auto browserRequest = decodeRequest(json);\n222:     if (browserRequest.isEmpty()) {\n223:         return getErrorReply(action, ERROR_KEEPASS_CANNOT_DECRYPT_MESSAGE);\n224:     }\n225: \n226:     const auto responseKey = browserRequest.getString(\"key\");\n227:     const auto id = browserRequest.getString(\"id\");\n228:     if (responseKey.isEmpty() || id.isEmpty()) {\n229:         return getErrorReply(action, ERROR_KEEPASS_DATABASE_NOT_OPENED);\n230:     }\n231: \n232:     const auto key = browserService()->getKey(id);\n233:     if (key.isEmpty() || key.compare(responseKey) != 0) {\n234:         return getErrorReply(action, ERROR_KEEPASS_ASSOCIATION_FAILED);\n235:     }\n236: \n237:     m_associated = true;\n238: \n239:     return ::buildResponse(action,\n240:                            browserRequest.incrementedNonce,\n241:                            {{QStringLiteral(\"hash\"), browserRequest.hash}, {QStringLiteral(\"id\"), id}},\n242:                            m_clientPublicKey,\n243:                            m_secretKey);\n244: }\n245: \n246: QJsonObject BrowserAction::handleGetLogins(const QJsonObject& json, const QString& action)\n247: {\n248:     if (!m_associated) {\n249:         return getErrorReply(action, ERROR_KEEPASS_ASSOCIATION_FAILED);\n250:     }\n251: \n252:     const auto browserRequest = decodeRequest(json);\n253:     if (browserRequest.isEmpty()) {\n254:         return getErrorReply(action, ERROR_KEEPASS_CANNOT_DECRYPT_MESSAGE);\n255:     }\n256: \n257:     const auto siteUrl = browserRequest.getString(\"url\");\n258:     if (siteUrl.isEmpty()) {\n259:         return getErrorReply(action, ERROR_KEEPASS_NO_URL_PROVIDED);\n260:     }\n261: \n262:     const auto keys = browserRequest.getArray(\"keys\");\n263: \n264:     StringPairList keyList;\n265:     for (const auto val : keys) {\n266:         const auto keyObject = val.toObject();\n267:         keyList.push_back(qMakePair(keyObject.value(\"id\").toString(), keyObject.value(\"key\").toString()));\n268:     }\n269: \n270:     const auto id = browserRequest.getString(\"id\");\n271:     const auto formUrl = browserRequest.getString(\"submitUrl\");\n272:     const auto auth = browserRequest.getString(\"httpAuth\");\n273:     const bool httpAuth = auth.compare(TRUE_STR) == 0;\n274: \n275:     EntryParameters entryParameters;\n276:     entryParameters.dbid = id;\n277:     entryParameters.hash = browserRequest.hash, entryParameters.siteUrl = siteUrl;\n278:     entryParameters.formUrl = formUrl;\n279: \n280:     const QJsonArray users = browserService()->findEntries(entryParameters, keyList, httpAuth);\n281:     if (users.isEmpty()) {\n282:         return getErrorReply(action, ERROR_KEEPASS_NO_LOGINS_FOUND);\n283:     }\n284: \n285:     return ::buildResponse(action,\n286:                            browserRequest.incrementedNonce,\n287:                            {{QStringLiteral(\"count\"), users.count()},\n288:                             {QStringLiteral(\"entries\"), QVariant::fromValue(users)},\n289:                             {QStringLiteral(\"hash\"), browserRequest.hash},\n290:                             {QStringLiteral(\"id\"), id}},\n291:                            m_clientPublicKey,\n292:                            m_secretKey);\n293: }\n294: \n295: QJsonObject BrowserAction::handleGeneratePassword(QLocalSocket* socket, const QJsonObject& json, const QString& action)\n296: {\n297:     const auto browserRequest = decodeRequest(json);\n298:     if (browserRequest.isEmpty()) {\n299:         return getErrorReply(action, ERROR_KEEPASS_CANNOT_DECRYPT_MESSAGE);\n300:     }\n301: \n302:     const auto requestId = browserRequest.getString(\"requestID\");\n303: \n304:     // Do not allow multiple requests from the same client\n305:     if (browserService()->isPasswordGeneratorRequested()) {\n306:         auto errorReply = getErrorReply(action, ERROR_KEEPASS_ACTION_CANCELLED_OR_DENIED);\n307: \n308:         // Append requestID to the response if found\n309:         if (!requestId.isEmpty()) {\n310:             errorReply[\"requestID\"] = requestId;\n311:         }\n312: \n313:         return errorReply;\n314:     }\n315: \n316:     KeyPairMessage keyPairMessage = {socket, browserRequest.incrementedNonce, m_clientPublicKey, m_secretKey};\n317: \n318:     browserService()->showPasswordGenerator(keyPairMessage);\n319:     return {};\n320: }\n321: \n322: QJsonObject BrowserAction::handleSetLogin(const QJsonObject& json, const QString& action)\n323: {\n324:     if (!m_associated) {\n325:         return getErrorReply(action, ERROR_KEEPASS_ASSOCIATION_FAILED);\n326:     }\n327: \n328:     const auto browserRequest = decodeRequest(json);\n329:     if (browserRequest.isEmpty()) {\n330:         return getErrorReply(action, ERROR_KEEPASS_CANNOT_DECRYPT_MESSAGE);\n331:     }\n332: \n333:     const auto url = browserRequest.getString(\"url\");\n334:     if (url.isEmpty()) {\n335:         return getErrorReply(action, ERROR_KEEPASS_NO_URL_PROVIDED);\n336:     }\n337: \n338:     const auto id = browserRequest.getString(\"id\");\n339:     const auto login = browserRequest.getString(\"login\");\n340:     const auto password = browserRequest.getString(\"password\");\n341:     const auto submitUrl = browserRequest.getString(\"submitUrl\");\n342:     const auto uuid = browserRequest.getString(\"uuid\");\n343:     const auto group = browserRequest.getString(\"group\");\n344:     const auto groupUuid = browserRequest.getString(\"groupUuid\");\n345:     const auto downloadFavicon = browserRequest.getString(\"downloadFavicon\");\n346:     const QString realm;\n347: \n348:     EntryParameters entryParameters;\n349:     entryParameters.dbid = id;\n350:     entryParameters.login = login;\n351:     entryParameters.password = password;\n352:     entryParameters.siteUrl = url;\n353:     entryParameters.formUrl = submitUrl;\n354:     entryParameters.realm = realm;\n355: \n356:     bool result = true;\n357:     if (uuid.isEmpty()) {\n358:         auto dlFavicon = !downloadFavicon.isEmpty() && downloadFavicon.compare(TRUE_STR) == 0;\n359:         browserService()->addEntry(entryParameters, group, groupUuid, dlFavicon);\n360:     } else {\n361:         if (!Tools::isValidUuid(uuid)) {\n362:             return getErrorReply(action, ERROR_KEEPASS_NO_VALID_UUID_PROVIDED);\n363:         }\n364: \n365:         result = browserService()->updateEntry(entryParameters, uuid);\n366:     }\n367: \n368:     return ::buildResponse(action,\n369:                            browserRequest.incrementedNonce,\n370:                            {{QStringLiteral(\"count\"), QVariant()},\n371:                             {QStringLiteral(\"entries\"), QVariant()},\n372:                             {QStringLiteral(\"error\"), result ? QStringLiteral(\"success\") : QStringLiteral(\"error\")},\n373:                             {QStringLiteral(\"hash\"), browserRequest.hash}},\n374:                            m_clientPublicKey,\n375:                            m_secretKey);\n376: }\n377: \n378: QJsonObject BrowserAction::handleLockDatabase(const QJsonObject& json, const QString& action)\n379: {\n380:     const auto browserRequest = decodeRequest(json);\n381:     if (browserRequest.isEmpty()) {\n382:         return getErrorReply(action, ERROR_KEEPASS_CANNOT_DECRYPT_MESSAGE);\n383:     }\n384: \n385:     if (browserRequest.hash.isEmpty()) {\n386:         return getErrorReply(action, ERROR_KEEPASS_DATABASE_HASH_NOT_RECEIVED);\n387:     }\n388: \n389:     const auto command = browserRequest.getString(\"action\");\n390:     if (!command.isEmpty() && command.compare(BROWSER_REQUEST_LOCK_DATABASE) == 0) {\n391:         browserService()->lockDatabase();\n392: \n393:         return ::buildResponse(action, browserRequest.incrementedNonce, {}, m_clientPublicKey, m_secretKey);\n394:     }\n395: \n396:     return getErrorReply(action, ERROR_KEEPASS_DATABASE_HASH_NOT_RECEIVED);\n397: }\n398: \n399: QJsonObject BrowserAction::handleGetDatabaseGroups(const QJsonObject& json, const QString& action)\n400: {\n401:     if (!m_associated) {\n402:         return getErrorReply(action, ERROR_KEEPASS_ASSOCIATION_FAILED);\n403:     }\n404: \n405:     const auto browserRequest = decodeRequest(json);\n406:     if (browserRequest.isEmpty()) {\n407:         return getErrorReply(action, ERROR_KEEPASS_CANNOT_DECRYPT_MESSAGE);\n408:     }\n409: \n410:     const auto command = browserRequest.getString(\"action\");\n411:     if (command.isEmpty() || command.compare(BROWSER_REQUEST_GET_DATABASE_GROUPS) != 0) {\n412:         return getErrorReply(action, ERROR_KEEPASS_INCORRECT_ACTION);\n413:     }\n414: \n415:     const QJsonObject groups = browserService()->getDatabaseGroups();\n416:     if (groups.isEmpty()) {\n417:         return getErrorReply(action, ERROR_KEEPASS_NO_GROUPS_FOUND);",
+      "end_line": 417,
+      "path_lines": 561,
+      "start_line": 18
+    },
+    "usage": {
+      "input_tokens": 12691,
+      "input_tokens_details": {
+        "cached_tokens": 10496
+      },
+      "output_tokens": 822,
+      "output_tokens_details": {
+        "reasoning_tokens": 730
+      },
+      "total_tokens": 13513
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 570,
+      "path": "src/browser/BrowserAction.cpp",
+      "start_line": 415
+    },
+    "response_chars": 266,
+    "round": 6,
+    "tool_result": {
+      "content": "415:     const QJsonObject groups = browserService()->getDatabaseGroups();\n416:     if (groups.isEmpty()) {\n417:         return getErrorReply(action, ERROR_KEEPASS_NO_GROUPS_FOUND);\n418:     }\n419: \n420:     return ::buildResponse(action,\n421:                            browserRequest.incrementedNonce,\n422:                            {{QStringLiteral(\"groups\"), QVariant::fromValue(groups)}},\n423:                            m_clientPublicKey,\n424:                            m_secretKey);\n425: }\n426: \n427: QJsonObject BrowserAction::handleCreateNewGroup(const QJsonObject& json, const QString& action)\n428: {\n429:     if (!m_associated) {\n430:         return getErrorReply(action, ERROR_KEEPASS_ASSOCIATION_FAILED);\n431:     }\n432: \n433:     const auto browserRequest = decodeRequest(json);\n434:     if (browserRequest.isEmpty()) {\n435:         return getErrorReply(action, ERROR_KEEPASS_CANNOT_DECRYPT_MESSAGE);\n436:     }\n437: \n438:     const auto command = browserRequest.getString(\"action\");\n439:     if (command.isEmpty() || command.compare(BROWSER_REQUEST_CREATE_NEW_GROUP) != 0) {\n440:         return getErrorReply(action, ERROR_KEEPASS_INCORRECT_ACTION);\n441:     }\n442: \n443:     const auto group = browserRequest.getString(\"groupName\");\n444:     const QJsonObject newGroup = browserService()->createNewGroup(group);\n445:     if (newGroup.isEmpty() || newGroup[\"name\"].toString().isEmpty() || newGroup[\"uuid\"].toString().isEmpty()) {\n446:         return getErrorReply(action, ERROR_KEEPASS_CANNOT_CREATE_NEW_GROUP);\n447:     }\n448: \n449:     return ::buildResponse(action,\n450:                            browserRequest.incrementedNonce,\n451:                            {{QStringLiteral(\"name\"), newGroup[\"name\"].toVariant()},\n452:                             {QStringLiteral(\"uuid\"), newGroup[\"uuid\"].toVariant()}},\n453:                            m_clientPublicKey,\n454:                            m_secretKey);\n455: }\n456: \n457: QJsonObject BrowserAction::handleGetTotp(const QJsonObject& json, const QString& action)\n458: {\n459:     if (!m_associated) {\n460:         return getErrorReply(action, ERROR_KEEPASS_ASSOCIATION_FAILED);\n461:     }\n462: \n463:     const auto browserRequest = decodeRequest(json);\n464:     if (browserRequest.isEmpty()) {\n465:         return getErrorReply(action, ERROR_KEEPASS_CANNOT_DECRYPT_MESSAGE);\n466:     }\n467: \n468:     const auto command = browserRequest.getString(\"action\");\n469:     if (command.isEmpty() || command.compare(BROWSER_REQUEST_GET_TOTP) != 0) {\n470:         return getErrorReply(action, ERROR_KEEPASS_INCORRECT_ACTION);\n471:     }\n472: \n473:     const auto uuid = browserRequest.getString(\"uuid\");\n474:     if (!Tools::isValidUuid(uuid)) {\n475:         return getErrorReply(action, ERROR_KEEPASS_NO_VALID_UUID_PROVIDED);\n476:     }\n477: \n478:     return ::buildResponse(action,\n479:                            browserRequest.incrementedNonce,\n480:                            {{QStringLiteral(\"totp\"), browserService()->getCurrentTotp(uuid)}},\n481:                            m_clientPublicKey,\n482:                            m_secretKey);\n483: }\n484: \n485: QJsonObject BrowserAction::handleDeleteEntry(const QJsonObject& json, const QString& action)\n486: {\n487:     if (!m_associated) {\n488:         return getErrorReply(action, ERROR_KEEPASS_ASSOCIATION_FAILED);\n489:     }\n490: \n491:     const auto browserRequest = decodeRequest(json);\n492:     if (browserRequest.isEmpty()) {\n493:         return getErrorReply(action, ERROR_KEEPASS_CANNOT_DECRYPT_MESSAGE);\n494:     }\n495: \n496:     const auto command = browserRequest.getString(\"action\");\n497:     if (command.isEmpty() || command.compare(BROWSER_REQUEST_DELETE_ENTRY) != 0) {\n498:         return getErrorReply(action, ERROR_KEEPASS_INCORRECT_ACTION);\n499:     }\n500: \n501:     const auto uuid = browserRequest.getString(\"uuid\");\n502:     if (!Tools::isValidUuid(uuid)) {\n503:         return getErrorReply(action, ERROR_KEEPASS_NO_VALID_UUID_PROVIDED);\n504:     }\n505: \n506:     const auto result = browserService()->deleteEntry(uuid);\n507: \n508:     return ::buildResponse(action,\n509:                            browserRequest.incrementedNonce,\n510:                            {{QStringLiteral(\"success\"), result ? TRUE_STR : FALSE_STR}},\n511:                            m_clientPublicKey,\n512:                            m_secretKey);\n513: }\n514: \n515: QJsonObject BrowserAction::handleGlobalAutoType(const QJsonObject& json, const QString& action)\n516: {\n517:     const auto browserRequest = decodeRequest(json);\n518:     if (browserRequest.isEmpty()) {\n519:         return getErrorReply(action, ERROR_KEEPASS_CANNOT_DECRYPT_MESSAGE);\n520:     }\n521: \n522:     const auto command = browserRequest.getString(\"action\");\n523:     if (command.isEmpty() || command.compare(BROWSER_REQUEST_REQUEST_AUTOTYPE) != 0) {\n524:         return getErrorReply(action, ERROR_KEEPASS_INCORRECT_ACTION);\n525:     }\n526: \n527:     const auto topLevelDomain = browserRequest.getString(\"search\");\n528:     if (topLevelDomain.length() > BrowserAction::MaxUrlLength) {\n529:         return getErrorReply(action, ERROR_KEEPASS_NO_URL_PROVIDED);\n530:     }\n531: \n532:     browserService()->requestGlobalAutoType(topLevelDomain);\n533: \n534:     return ::buildResponse(action, browserRequest.incrementedNonce, {}, m_clientPublicKey, m_secretKey);\n535: }\n536: \n537: QJsonObject BrowserAction::decryptMessage(const QString& message, const QString& nonce)\n538: {\n539:     return browserMessageBuilder()->decryptMessage(message, nonce, m_clientPublicKey, m_secretKey);\n540: }\n541: \n542: QJsonObject BrowserAction::getErrorReply(const QString& action, const int errorCode) const\n543: {\n544:     return browserMessageBuilder()->getErrorReply(action, errorCode);\n545: }\n546: \n547: QJsonObject BrowserAction::buildResponse(const QString& action, const QJsonObject& message, const QString& nonce)\n548: {\n549:     return browserMessageBuilder()->buildResponse(action, message, nonce, m_clientPublicKey, m_secretKey);\n550: }\n551: \n552: BrowserRequest BrowserAction::decodeRequest(const QJsonObject& json)\n553: {\n554:     const auto nonce = json.value(\"nonce\").toString();\n555:     const auto encrypted = json.value(\"message\").toString();\n556: \n557:     return {browserService()->getDatabaseHash(),\n558:             nonce,\n559:             browserMessageBuilder()->incrementNonce(nonce),\n560:             decryptMessage(encrypted, nonce)};\n561: }",
+      "end_line": 561,
+      "path_lines": 561,
+      "start_line": 415
+    },
+    "usage": {
+      "input_tokens": 17604,
+      "input_tokens_details": {
+        "cached_tokens": 12544
+      },
+      "output_tokens": 323,
+      "output_tokens_details": {
+        "reasoning_tokens": 231
+      },
+      "total_tokens": 17927
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "#include <QJsonDocument>\n#include <QJsonValue>\n#include <QLocalSocket>\n#include <QMap>\n#include <QVariant>\n\nconst int BrowserAction::MaxUrlLength = 256;",
+          "end_line": 29,
+          "start_line": 24
+        }
+      ]
+    },
+    "response_chars": 548,
+    "round": 7,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 29,
+          "replacement_lines": 7,
+          "start_line": 24
+        }
+      ],
+      "current_file_lines": 562,
+      "updated_excerpt": {
+        "content": "14:  *  You should have received a copy of the GNU General Public License\n15:  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.\n16:  */\n17: \n18: #include \"BrowserAction.h\"\n19: #include \"BrowserMessageBuilder.h\"\n20: #include \"BrowserService.h\"\n21: #include \"core/Global.h\"\n22: #include \"core/Tools.h\"\n23: \n24: #include <QJsonDocument>\n25: #include <QJsonValue>\n26: #include <QLocalSocket>\n27: #include <QMap>\n28: #include <QVariant>\n29: \n30: const int BrowserAction::MaxUrlLength = 256;\n31: \n32: static const QString BROWSER_REQUEST_ASSOCIATE = QStringLiteral(\"associate\");\n33: static const QString BROWSER_REQUEST_CHANGE_PUBLIC_KEYS = QStringLiteral(\"change-public-keys\");\n34: static const QString BROWSER_REQUEST_CREATE_NEW_GROUP = QStringLiteral(\"create-new-group\");\n35: static const QString BROWSER_REQUEST_DELETE_ENTRY = QStringLiteral(\"delete-entry\");\n36: static const QString BROWSER_REQUEST_GENERATE_PASSWORD = QStringLiteral(\"generate-password\");\n37: static const QString BROWSER_REQUEST_GET_DATABASEHASH = QStringLiteral(\"get-databasehash\");\n38: static const QString BROWSER_REQUEST_GET_DATABASE_GROUPS = QStringLiteral(\"get-database-group\");\n39: static const QString BROWSER_REQUEST_GET_LOGINS = QStringLiteral(\"get-logins\");\n40: static const QString BROWSER_REQUEST_GET_TOTP = QStringLiteral(\"get-totp\");\n41: static const QString BROWSER_REQUEST_LOCK_DATABASE = QStringLiteral(\"lock-database\");\n42: static const QString BROWSER_REQUEST_REQUEST_AUTOTYPE = QStringLiteral(\"request-autotype\");\n43: static const QString BROWSER_REQUEST_SET_LOGIN = QStringLiteral(\"set-login\");\n44: static const QString BROWSER_REQUEST_TEST_ASSOCIATE = QStringLiteral(\"test-associate\");\n45: \n46: namespace\n47: {\n48:     QJsonObject buildResponse(const QString& action,\n49:                               const QString& nonce,\n50:                               const QMap<QString, QVariant>& params,\n51:                               const QString& publicKey,\n52:                               const QString& secretKey)\n53:     {\n54:         auto message = browserMessageBuilder()->buildMessage(nonce);",
+        "end_line": 54,
+        "path_lines": 562,
+        "start_line": 14
+      }
+    },
+    "usage": {
+      "input_tokens": 19378,
+      "input_tokens_details": {
+        "cached_tokens": 17152
+      },
+      "output_tokens": 1061,
+      "output_tokens_details": {
+        "reasoning_tokens": 877
+      },
+      "total_tokens": 20439
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/browser/BrowserAction.cpp",
+      "query": "buildMessage(browserRequest.incrementedNonce)"
+    },
+    "response_chars": 322,
+    "round": 8,
+    "tool_result": {
+      "matches": [],
+      "query": "buildMessage(browserRequest.incrementedNonce)",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 20076,
+      "input_tokens_details": {
+        "cached_tokens": 19200
+      },
+      "output_tokens": 1218,
+      "output_tokens_details": {
+        "reasoning_tokens": 1126
+      },
+      "total_tokens": 21294
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/browser/BrowserAction.cpp",
+      "query": "buildResponse(action, message"
+    },
+    "response_chars": 193,
+    "round": 9,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 59,
+          "text": "        return browserMessageBuilder()->buildResponse(action, message, nonce, publicKey, secretKey);"
+        },
+        {
+          "line": 550,
+          "text": "    return browserMessageBuilder()->buildResponse(action, message, nonce, m_clientPublicKey, m_secretKey);"
+        }
+      ],
+      "query": "buildResponse(action, message",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 20136,
+      "input_tokens_details": {
+        "cached_tokens": 19712
+      },
+      "output_tokens": 686,
+      "output_tokens_details": {
+        "reasoning_tokens": 629
+      },
+      "total_tokens": 20822
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/browser/BrowserAction.cpp",
+      "query": "QJsonDocument"
+    },
+    "response_chars": 161,
+    "round": 10,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 24,
+          "text": "#include <QJsonDocument>"
+        }
+      ],
+      "query": "QJsonDocument",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 20256,
+      "input_tokens_details": {
+        "cached_tokens": 19712
+      },
+      "output_tokens": 476,
+      "output_tokens_details": {
+        "reasoning_tokens": 423
+      },
+      "total_tokens": 20732
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 11,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__keepassxreboot__keepassxc__pull_8489__comment_1094023581__complexity.patch"
+    },
+    "usage": {
+      "input_tokens": 20324,
+      "input_tokens_details": {
+        "cached_tokens": 19712
+      },
+      "output_tokens": 1563,
+      "output_tokens_details": {
+        "reasoning_tokens": 1552
+      },
+      "total_tokens": 21887
+    }
+  }
+]

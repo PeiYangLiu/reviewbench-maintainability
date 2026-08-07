@@ -1,0 +1,90 @@
+diff --git a/internal/app/database/orders.go b/internal/app/database/orders.go
+index 6c16868..8e244ef 100644
+--- a/internal/app/database/orders.go
++++ b/internal/app/database/orders.go
+@@ -113,6 +113,12 @@ func (db *DataBase) getOrderInfo(number string) {
+ 	}
+ }
+ 
++func (db *DataBase) requeue(o orderStr) {
++	go func(o orderStr) {
++		inputCh <- o
++	}(o)
++}
++
+ func (db *DataBase) newWorker(input chan orderStr) {
+ 	go func() {
+ 		log.Print("starting goroutine")
+@@ -128,9 +134,7 @@ func (db *DataBase) newWorker(input chan orderStr) {
+ 			for o := range input {
+ 				resp, err := http.Get(db.ASA + "/api/orders/" + o.number)
+ 				if err != nil {
+-					go func(o orderStr) {
+-						inputCh <- o
+-					}(o)
++					db.requeue(o)
+ 					log.Printf("go number: %s, err: %s", o.number, err.Error())
+ 					resp.Body.Close()
+ 					return
+@@ -138,9 +142,7 @@ func (db *DataBase) newWorker(input chan orderStr) {
+ 
+ 				b, err := io.ReadAll(resp.Body)
+ 				if err != nil {
+-					go func(o orderStr) {
+-						inputCh <- o
+-					}(o)
++					db.requeue(o)
+ 					log.Printf("go number: %s, err: %s", o.number, err.Error())
+ 					resp.Body.Close()
+ 					return
+@@ -164,9 +166,7 @@ func (db *DataBase) newWorker(input chan orderStr) {
+ 					var order Order
+ 					err = json.Unmarshal(b, &order)
+ 					if err != nil {
+-						go func(o orderStr) {
+-							inputCh <- o
+-						}(o)
++						db.requeue(o)
+ 						log.Printf("go number: %s, err: %s", o.number, err.Error())
+ 						return
+ 					}
+@@ -202,15 +202,11 @@ func (db *DataBase) newWorker(input chan orderStr) {
+ 						}(o, order)
+ 					default:
+ 						log.Printf("go number: %s, status: %s", o.number, order.Status)
+-						go func(o orderStr) {
+-							inputCh <- o
+-						}(o)
++					db.requeue(o)
+ 					}
+ 				case http.StatusTooManyRequests:
+ 					log.Printf("go number: %s, status: %s", o.number, resp.Status)
+-					go func(o orderStr) {
+-						inputCh <- o
+-					}(o)
++					db.requeue(o)
+ 					atoi, err := strconv.Atoi(resp.Header.Get("Retry-After"))
+ 					if err != nil {
+ 						log.Printf("go number: %s, err: %s", o.number, err.Error())
+@@ -220,9 +216,7 @@ func (db *DataBase) newWorker(input chan orderStr) {
+ 					}
+ 				case http.StatusInternalServerError:
+ 					log.Printf("go number: %s, status: %s", o.number, resp.Status)
+-					go func(o orderStr) {
+-						inputCh <- o
+-					}(o)
++					db.requeue(o)
+ 				case http.StatusNoContent:
+ 					log.Printf("go number: %s, status: %s", o.number, resp.Status)
+ 					go func(o orderStr) {
+@@ -238,9 +232,7 @@ func (db *DataBase) newWorker(input chan orderStr) {
+ 					}(o)
+ 				default:
+ 					log.Printf("go number: %s, status: %s", o.number, resp.Status)
+-					go func(o orderStr) {
+-						inputCh <- o
+-					}(o)
++					db.requeue(o)
+ 				}
+ 			}
+ 		}

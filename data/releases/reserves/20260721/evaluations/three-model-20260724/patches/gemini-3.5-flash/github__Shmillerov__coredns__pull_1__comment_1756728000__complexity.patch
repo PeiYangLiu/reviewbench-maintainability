@@ -1,0 +1,106 @@
+--- a/core/dnsserver/register.go
++++ b/core/dnsserver/register.go
+@@ -77,18 +77,7 @@
+ 			}
+ 
+ 			if port == "" {
+-				switch trans {
+-				case transport.DNS:
+-					port = Port
+-				case transport.TLS:
+-					port = transport.TLSPort
+-				case transport.QUIC:
+-					port = transport.QUICPort
+-				case transport.GRPC:
+-					port = transport.GRPCPort
+-				case transport.HTTPS:
+-					port = transport.HTTPSPort
+-				}
++				port = defaultPortForTransport(trans)
+ 			}
+ 
+ 			if len(hosts) > 1 {
+@@ -163,41 +152,11 @@
+ 	var servers []caddy.Server
+ 	for addr, group := range groups {
+ 		for range group[0].NumSocks {
+-			// switch on addr
+-			switch tr, _ := parse.Transport(addr); tr {
+-			case transport.DNS:
+-				s, err := NewServer(addr, group)
+-				if err != nil {
+-					return nil, err
+-				}
+-				servers = append(servers, s)
+-
+-			case transport.TLS:
+-				s, err := NewServerTLS(addr, group)
+-				if err != nil {
+-					return nil, err
+-				}
+-				servers = append(servers, s)
+-
+-			case transport.QUIC:
+-				s, err := NewServerQUIC(addr, group)
+-				if err != nil {
+-					return nil, err
+-				}
+-				servers = append(servers, s)
+-
+-			case transport.GRPC:
+-				s, err := NewServergRPC(addr, group)
+-				if err != nil {
+-					return nil, err
+-				}
+-				servers = append(servers, s)
+-
+-			case transport.HTTPS:
+-				s, err := NewServerHTTPS(addr, group)
+-				if err != nil {
+-					return nil, err
+-				}
++			s, err := newServer(addr, group)
++			if err != nil {
++				return nil, err
++			}
++			if s != nil {
+ 				servers = append(servers, s)
+ 			}
+ 		}
+@@ -335,3 +294,36 @@
+ )
+ 
+ var _ caddy.GracefulServer = new(Server)
++
++func newServer(addr string, group []*Config) (caddy.Server, error) {
++	tr, _ := parse.Transport(addr)
++	switch tr {
++	case transport.DNS:
++		return NewServer(addr, group)
++	case transport.TLS:
++		return NewServerTLS(addr, group)
++	case transport.QUIC:
++		return NewServerQUIC(addr, group)
++	case transport.GRPC:
++		return NewServergRPC(addr, group)
++	case transport.HTTPS:
++		return NewServerHTTPS(addr, group)
++	}
++	return nil, nil
++}
++
++func defaultPortForTransport(trans string) string {
++	switch trans {
++	case transport.DNS:
++		return Port
++	case transport.TLS:
++		return transport.TLSPort
++	case transport.QUIC:
++		return transport.QUICPort
++	case transport.GRPC:
++		return transport.GRPCPort
++	case transport.HTTPS:
++		return transport.HTTPSPort
++	}
++	return ""
++}

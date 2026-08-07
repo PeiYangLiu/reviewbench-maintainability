@@ -1,0 +1,69 @@
+--- a/src/main/scala/edu/ie3/simona/service/results/ResultServiceProxy.scala
++++ b/src/main/scala/edu/ie3/simona/service/results/ResultServiceProxy.scala
+@@ -138,6 +138,32 @@
+         _ ! ResultResponse(Map(result.getInputModel -> List(result)))
+       )
+ 
++    /** Method for extracting results from the provided result maps.
++      *
++      * @param uuids
++      *   For which results should be returned.
++      * @param primaryResults
++      *   A map: uuid to primary result.
++      * @param additionalResults
++      *   A map: uuid to additional result.
++      * @return
++      *   A map: uuid to results.
++      */
++    private def resultsFor(
++        uuids: Iterable[UUID],
++        primaryResults: Map[UUID, ResultEntity],
++        additionalResults: Map[UUID, ResultEntity],
++    ): Map[UUID, List[ResultEntity]] =
++      uuids.flatMap { uuid =>
++        (primaryResults.get(uuid), additionalResults.get(uuid)) match {
++          case (Some(res), Some(additional)) =>
++            Some(uuid -> List(res, additional))
++          case (Some(res), None) =>
++            Some(uuid -> List(res))
++          case _ => None
++        }
++      }.toMap
++
+     /** Checks if the proxy is waiting for the given uuids at the specified
+       * tick.
+       *
+@@ -298,15 +324,7 @@
+           uuids
+       }
+ 
+-      filteredUuid.flatMap { uuid =>
+-        (mainResult.get(uuid), additionalResults.get(uuid)) match {
+-          case (Some(res), Some(additional)) =>
+-            Some(uuid -> List(res, additional))
+-          case (Some(res), None) =>
+-            Some(uuid -> List(res))
+-          case _ => None
+-        }
+-      }.toMap
++      resultsFor(filteredUuid, mainResult, additionalResults)
+     }
+ 
+   }
+@@ -469,14 +487,8 @@
+           } else None
+         }.toMap
+ 
+-        val allChangedResults = newPrimary.map { case (uuid, result) =>
+-          newAdditional.get(uuid) match {
+-            case Some(additional) =>
+-              uuid -> Seq(result, additional)
+-            case None =>
+-              uuid -> Seq(result)
+-          }
+-        }
++        val allChangedResults =
++          stateData.resultsFor(newPrimary.keys, newPrimary, newAdditional)
+ 
+         // notify listener
+         stateData.notifyListener(allChangedResults)

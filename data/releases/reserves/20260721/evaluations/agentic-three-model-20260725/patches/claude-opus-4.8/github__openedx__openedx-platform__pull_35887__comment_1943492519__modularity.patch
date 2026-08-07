@@ -1,0 +1,87 @@
+diff --git a/cms/djangoapps/contentstore/rest_api/v0/views/course_optimizer.py b/cms/djangoapps/contentstore/rest_api/v0/views/course_optimizer.py
+index 1846146..8b4a30a 100644
+--- a/cms/djangoapps/contentstore/rest_api/v0/views/course_optimizer.py
++++ b/cms/djangoapps/contentstore/rest_api/v0/views/course_optimizer.py
+@@ -150,35 +150,7 @@ class LinkCheckStatusView(DeveloperErrorViewMixin, APIView):
+             self.permission_denied(request)
+ 
+         task_status = _latest_task_status(request, course_id)
+-        status = None
+-        created_at = None
+-        broken_links_dto = None
+-        error = None
+-        if task_status is None:
+-            # The task hasn't been initialized yet; did we store info in the session already?
+-            try:
+-                session_status = request.session['link_check_status']
+-                status = session_status[course_id]
+-            except KeyError:
+-                status = 'Uninitiated'
+-        else:
+-            status = task_status.state
+-            created_at = task_status.created
+-            if task_status.state == UserTaskStatus.SUCCEEDED:
+-                artifact = UserTaskArtifact.objects.get(status=task_status, name='BrokenLinks')
+-                with artifact.file as file:
+-                    content = file.read()
+-                    json_content = json.loads(content)
+-                    broken_links_dto = generate_broken_links_descriptor(json_content, request.user)
+-            elif task_status.state in (UserTaskStatus.FAILED, UserTaskStatus.CANCELED):
+-                errors = UserTaskArtifact.objects.filter(status=task_status, name='Error')
+-                if errors:
+-                    error = errors[0].text
+-                    try:
+-                        error = json.loads(error)
+-                    except ValueError:
+-                        # Wasn't JSON, just use the value as a string
+-                        pass
++        status, created_at, broken_links_dto, error = _get_task_status_info(request, course_id, task_status)
+ 
+         data = {
+             'LinkCheckStatus': status,
+@@ -191,6 +163,45 @@ class LinkCheckStatusView(DeveloperErrorViewMixin, APIView):
+         return Response(serializer.data)
+ 
+ 
++def _get_task_status_info(request, course_id, task_status):
++    """
++    Derive the link check status and results from a task status.
++
++    Retrieves the task state, creation time, broken links descriptor, and any
++    error information. This retrieval logic is kept separate from the request
++    handling in the view for a clearer separation of concerns.
++    """
++    status = None
++    created_at = None
++    broken_links_dto = None
++    error = None
++    if task_status is None:
++        # The task hasn't been initialized yet; did we store info in the session already?
++        try:
++            session_status = request.session['link_check_status']
++            status = session_status[course_id]
++        except KeyError:
++            status = 'Uninitiated'
++    else:
++        status = task_status.state
++        created_at = task_status.created
++        if task_status.state == UserTaskStatus.SUCCEEDED:
++            artifact = UserTaskArtifact.objects.get(status=task_status, name='BrokenLinks')
++            with artifact.file as file:
++                content = file.read()
++                json_content = json.loads(content)
++                broken_links_dto = generate_broken_links_descriptor(json_content, request.user)
++        elif task_status.state in (UserTaskStatus.FAILED, UserTaskStatus.CANCELED):
++            errors = UserTaskArtifact.objects.filter(status=task_status, name='Error')
++            if errors:
++                error = errors[0].text
++                try:
++                    error = json.loads(error)
++                except ValueError:
++                    # Wasn't JSON, just use the value as a string
++                    pass
++    return status, created_at, broken_links_dto, error
++
+ def _latest_task_status(request, course_key_string, view_func=None):
+     """
+     Get the most recent link check status update for the specified course

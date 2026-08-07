@@ -1,0 +1,92 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 240,
+      "path": "cachi2/core/models/output.py",
+      "start_line": 1
+    },
+    "response_chars": 85,
+    "round": 1,
+    "tool_result": {
+      "content": "1: import logging\n2: import string\n3: from pathlib import Path\n4: from typing import Any, Literal, Mapping, Optional\n5: \n6: import pydantic\n7: \n8: from cachi2.core.models.validators import unique_sorted\n9: \n10: log = logging.getLogger(__name__)\n11: \n12: \n13: class Property(pydantic.BaseModel):\n14:     \"\"\"A property inside an SBOM component.\"\"\"\n15: \n16:     name: str\n17:     value: str\n18: \n19: \n20: FOUND_BY_CACHI2_PROPERTY: Property = Property(name=\"cachi2:found_by\", value=\"cachi2\")\n21: \n22: \n23: class Component(pydantic.BaseModel):\n24:     \"\"\"A software component such as a dependency or a package.\n25: \n26:     Compliant to the CycloneDX specification:\n27:     https://cyclonedx.org/docs/1.4/json/#components\n28:     \"\"\"\n29: \n30:     name: str\n31:     version: Optional[str]\n32:     properties: list[Property] = []\n33:     purl: Optional[str]  # optional while it is not implemented for all package managers\n34:     type: Literal[\"library\"] = \"library\"\n35: \n36:     def key(self) -> str:\n37:         \"\"\"Uniquely identifies a package.\n38: \n39:         Used mainly for sorting and deduplication.\n40:         \"\"\"\n41:         if self.purl:\n42:             return self.purl\n43: \n44:         return f\"{self.name}:{self.version}\"\n45: \n46:     @pydantic.validator(\"properties\", always=True)\n47:     def _add_found_by_property(cls, properties: list[Property]) -> list[Property]:\n48:         if FOUND_BY_CACHI2_PROPERTY not in properties:\n49:             properties.append(FOUND_BY_CACHI2_PROPERTY)\n50: \n51:         return properties\n52: \n53:     @classmethod\n54:     def from_package_dict(cls, package: Mapping[str, Any]) -> \"Component\":\n55:         \"\"\"Create a Component from a Cachi2 package dictionary.\n56: \n57:         A Cachi2 package has extra fields which are unnecessary and can cause validation errors.\n58:         \"\"\"\n59:         return Component(\n60:             name=package.get(\"name\", None),\n61:             version=package.get(\"version\", None),\n62:             purl=package.get(\"purl\", None),\n63:         )\n64: \n65: \n66: class Tool(pydantic.BaseModel):\n67:     \"\"\"A tool used to generate the SBOM content.\"\"\"\n68: \n69:     vendor: str\n70:     name: str\n71: \n72: \n73: class Metadata(pydantic.BaseModel):\n74:     \"\"\"Metadata field in a SBOM.\"\"\"\n75: \n76:     tools: list[Tool] = [Tool(vendor=\"red hat\", name=\"cachi2\")]\n77: \n78: \n79: class Sbom(pydantic.BaseModel):\n80:     \"\"\"Software bill of materials in the CycloneDX format.\n81: \n82:     See full specification at:\n83:     https://cyclonedx.org/docs/1.4/json\n84:     \"\"\"\n85: \n86:     bom_format: Literal[\"CycloneDX\"] = pydantic.Field(alias=\"bomFormat\", default=\"CycloneDX\")\n87:     components: list[Component] = []\n88:     metadata: Metadata = Metadata()\n89:     spec_version: str = pydantic.Field(alias=\"specVersion\", default=\"1.4\")\n90:     version: int = 1\n91: \n92:     @pydantic.validator(\"components\")\n93:     def _unique_components(cls, components: list[Component]) -> list[Component]:\n94:         \"\"\"Sort and de-duplicate components.\"\"\"\n95:         return unique_sorted(components, by=lambda component: component.key())\n96: \n97: \n98: class EnvironmentVariable(pydantic.BaseModel):\n99:     \"\"\"An environment variable.\"\"\"\n100: \n101:     name: str\n102:     value: str\n103:     kind: Literal[\"literal\", \"path\"]\n104: \n105:     def resolve_value(self, relative_to_path: Path) -> str:\n106:         \"\"\"Return the resolved value of this environment variable.\n107: \n108:         For \"literal\" variables, the resolved value is simply the value it was created with.\n109:         For \"path\" variables, the value is joined to the specified path.\n110:         \"\"\"\n111:         if self.kind == \"path\":\n112:             value = str(relative_to_path / self.value)\n113:         else:\n114:             value = self.value\n115:         return value\n116: \n117: \n118: class ProjectFile(pydantic.BaseModel):\n119:     \"\"\"A file to be written into the user's project directory.\n120: \n121:     Typically should be used to inject configuration files (e.g. .npmrc) or to modify lockfiles\n122:     (e.g. requirements.txt).\n123: \n124:     The content of the file is interpreted as a string.Template. The following placeholders will\n125:     be replaced:\n126:         * ${output_dir} - the absolute path to the output directory\n127:     \"\"\"\n128: \n129:     abspath: Path\n130:     template: str\n131: \n132:     def resolve_content(self, output_dir: Path) -> str:\n133:         \"\"\"Return the resolved content of this file.\n134: \n135:         Uses Template.safe_substitute, so if the template contains invalid placeholders,\n136:         they will simply stay unresolved rather than causing errors.\n137: \n138:         Example:\n139:             foo @ file://${output_dir}/deps/pip/...\n140:             bar==1.0.0  # comment with $placeholder\n141:             baz==1.0.0  # comment with $ invalid placeholder\n142: \n143:             =>\n144:             foo @ file:///cachi2/output/deps/pip/...\n145:             bar==1.0.0  # comment with $placeholder\n146:             baz==1.0.0  # comment with $ invalid placeholder\n147:         \"\"\"\n148:         template = string.Template(self.template)\n149:         return template.safe_substitute(output_dir=output_dir)\n150: \n151: \n152: class BuildConfig(pydantic.BaseModel):\n153:     \"\"\"Holds output used to configure a repository for a build.\"\"\"\n154: \n155:     environment_variables: list[EnvironmentVariable] = []\n156:     project_files: list[ProjectFile] = []\n157: \n158:     @pydantic.validator(\"environment_variables\")\n159:     def _unique_env_vars(cls, env_vars: list[EnvironmentVariable]) -> list[EnvironmentVariable]:\n160:         \"\"\"Sort and de-duplicate environment variables by name.\"\"\"\n161:         return unique_sorted(env_vars, by=lambda env_var: env_var.name)\n162: \n163:     @pydantic.validator(\"project_files\")\n164:     def _unique_project_files(cls, project_files: list[ProjectFile]) -> list[ProjectFile]:\n165:         \"\"\"Sort and de-duplicate project files by path.\"\"\"\n166:         return unique_sorted(project_files, by=lambda f: f.abspath)\n167: \n168: \n169: class RequestOutput(pydantic.BaseModel):\n170:     \"\"\"Results of processing one or more package managers.\"\"\"\n171: \n172:     build_config: BuildConfig\n173:     sbom: Sbom\n174: \n175:     @classmethod\n176:     def empty(cls) -> \"RequestOutput\":\n177:         \"\"\"Return an empty RequestOutput.\"\"\"\n178:         return cls(sbom=Sbom(), build_config=BuildConfig())\n179: \n180:     @classmethod\n181:     def from_obj_list(\n182:         cls,\n183:         components: list[Component],\n184:         environment_variables: Optional[list[EnvironmentVariable]] = None,\n185:         project_files: Optional[list[ProjectFile]] = None,\n186:     ) -> \"RequestOutput\":\n187:         \"\"\"Create a RequestOutput from internal Sbom and BuildConfig contents.\"\"\"\n188:         if environment_variables is None:\n189:             environment_variables = []\n190: \n191:         if project_files is None:\n192:             project_files = []\n193: \n194:         return RequestOutput(\n195:             sbom=Sbom(components=components),\n196:             build_config=BuildConfig(\n197:                 environment_variables=environment_variables, project_files=project_files\n198:             ),\n199:         )",
+      "end_line": 199,
+      "path_lines": 199,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 8168,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 77,
+      "output_tokens_details": {
+        "reasoning_tokens": 46
+      },
+      "total_tokens": 8245
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "        component = Component(\n            name=merged_component[\"name\"],\n            version=merged_component[\"version\"],\n            purl=merged_component[\"purl\"],\n        )",
+          "end_line": 657,
+          "start_line": 657
+        }
+      ]
+    },
+    "response_chars": 259,
+    "round": 2,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 657,
+          "replacement_lines": 5,
+          "start_line": 657
+        }
+      ],
+      "current_file_lines": 748,
+      "updated_excerpt": {
+        "content": "647: \n648: def _generate_component_list(component_info: list[NpmComponentInfo]) -> list[Component]:\n649:     \"\"\"Convert a list of NpmComponentInfo objects into a list of Component objects for the SBOM.\"\"\"\n650:     merged_component_info = _merge_npm_sbom_properties(component_info)\n651:     properties = {\n652:         \"dev\": Property(name=\"cdx:npm:package:development\", value=\"true\"),\n653:         \"bundled\": Property(name=\"cdx:npm:package:bundled\", value=\"true\"),\n654:     }\n655:     components: list[Component] = []\n656:     for merged_component in merged_component_info:\n657:         component = Component(\n658:             name=merged_component[\"name\"],\n659:             version=merged_component[\"version\"],\n660:             purl=merged_component[\"purl\"],\n661:         )\n662:         for property_name, property_obj in properties.items():\n663:             if merged_component.get(property_name, False):\n664:                 component.properties.append(property_obj)\n665:         components.append(component)\n666: \n667:     return components\n668: \n669: \n670: def fetch_npm_source(request: Request) -> RequestOutput:\n671:     \"\"\"Resolve and fetch npm dependencies for the given request.\n672: \n673:     :param request: the request to process\n674:     :return: A RequestOutput object with content for all npm packages in the request\n675:     \"\"\"\n676:     component_info: list[NpmComponentInfo] = []\n677:     project_files: list[ProjectFile] = []\n678: \n679:     npm_deps_dir = request.output_dir.join_within_root(\"deps\", \"npm\")\n680:     npm_deps_dir.path.mkdir(parents=True, exist_ok=True)\n681: \n682:     for package in request.npm_packages:\n683:         info = _resolve_npm(request.source_dir.join_within_root(package.path), npm_deps_dir)\n684:         component_info.append(info[\"package\"])\n685: \n686:         for dependency in info[\"dependencies\"]:\n687:             component_info.append(dependency)",
+        "end_line": 687,
+        "path_lines": 748,
+        "start_line": 647
+      }
+    },
+    "usage": {
+      "input_tokens": 10376,
+      "input_tokens_details": {
+        "cached_tokens": 7936
+      },
+      "output_tokens": 245,
+      "output_tokens_details": {
+        "reasoning_tokens": 170
+      },
+      "total_tokens": 10621
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 3,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__hermetoproject__hermeto__pull_280__comment_1293967358__complexity.patch"
+    },
+    "usage": {
+      "input_tokens": 11041,
+      "input_tokens_details": {
+        "cached_tokens": 9984
+      },
+      "output_tokens": 115,
+      "output_tokens_details": {
+        "reasoning_tokens": 104
+      },
+      "total_tokens": 11156
+    }
+  }
+]

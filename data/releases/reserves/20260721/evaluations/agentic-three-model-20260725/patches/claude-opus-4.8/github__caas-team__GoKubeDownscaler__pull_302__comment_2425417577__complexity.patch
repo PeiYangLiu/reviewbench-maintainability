@@ -1,0 +1,75 @@
+diff --git a/internal/pkg/values/scope.go b/internal/pkg/values/scope.go
+index dd880df..198990d 100644
+--- a/internal/pkg/values/scope.go
++++ b/internal/pkg/values/scope.go
+@@ -225,44 +225,50 @@ func (s Scopes) GetScaleChildren() bool {
+ }
+ 
+ // GetExcluded checks if the scopes exclude scaling.
+-func (s Scopes) GetExcluded() (excluded, upscaleOnExclusion bool) { //nolint: nonamedreturns, cyclop // could be refactored in the future to simplify cyclop
+-	upscaleOnExclusion = false
++func (s Scopes) GetExcluded() (excluded, upscaleOnExclusion bool) { //nolint: nonamedreturns // names clarify the two boolean return values
++	return s.isExcluded(), s.GetUpscaleOnExclusion()
++}
+ 
++// GetUpscaleOnExclusion checks if excluded workloads should be upscaled instead of skipped.
++func (s Scopes) GetUpscaleOnExclusion() bool {
+ 	for _, scope := range s {
+-		if scope.UpscaleOnExclusion.isSet && scope.UpscaleOnExclusion.value {
+-			upscaleOnExclusion = true
++		if scope.UpscaleOnExclusion.isSet {
++			return scope.UpscaleOnExclusion.value
+ 		}
++	}
++
++	return false
++}
+ 
++// isExcluded checks if the scopes exclude scaling via an exclude timespan or an exclude-until timestamp.
++func (s Scopes) isExcluded() bool {
++	return s.isExcludedByTimespan() || s.isExcludedByTimestamp()
++}
++
++// isExcludedByTimespan checks if the uppermost scope that sets Exclude is currently in an exclude timespan.
++func (s Scopes) isExcludedByTimespan() bool {
++	for _, scope := range s {
+ 		if scope.Exclude == nil {
+ 			continue
+ 		}
+ 
+-		if scope.Exclude.inTimeSpans() && !upscaleOnExclusion {
+-			return true, false
+-		}
+-
+-		break
++		return scope.Exclude.inTimeSpans()
+ 	}
+ 
+-	upscaleOnExclusion = false
++	return false
++}
+ 
++// isExcludedByTimestamp checks if the uppermost scope that sets ExcludeUntil is still excluded.
++func (s Scopes) isExcludedByTimestamp() bool {
+ 	for _, scope := range s {
+-		if scope.UpscaleOnExclusion.isSet && scope.UpscaleOnExclusion.value {
+-			upscaleOnExclusion = true
+-		}
+-
+ 		if scope.ExcludeUntil == nil {
+ 			continue
+ 		}
+ 
+-		if scope.ExcludeUntil.After(time.Now()) && !upscaleOnExclusion {
+-			return true, false
+-		}
+-
+-		break
++		return scope.ExcludeUntil.After(time.Now())
+ 	}
+ 
+-	return false, upscaleOnExclusion
++	return false
+ }
+ 
+ // IsInGracePeriod gets the grace period of the uppermost scope that has it set.

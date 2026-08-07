@@ -1,0 +1,163 @@
+--- a/internal/staticanalysis/parsing/js_parsing.go
++++ b/internal/staticanalysis/parsing/js_parsing.go
+@@ -112,75 +112,96 @@
+ 	}
+ }
+ 
++func (t parserTokenJSON) toIdentifier() (parsedIdentifier, bool) {
++	symbolSubtype := token.CheckIdentifierType(t.TokenSubType)
++	if symbolSubtype == token.Other || symbolSubtype == token.Unknown {
++		return parsedIdentifier{}, false
++	}
++	return parsedIdentifier{
++		Type: symbolSubtype,
++		Name: t.Data.(string),
++		Pos:  t.Pos,
++	}, true
++}
++
++func (t parserTokenJSON) toLiteral() parsedLiteral[any] {
++	lit := parsedLiteral[any]{
++		Type:     t.TokenSubType,
++		GoType:   fmt.Sprintf("%T", t.Data),
++		Value:    t.Data,
++		RawValue: t.Extra["raw"].(string),
++		InArray:  t.Extra["array"] == true,
++		Pos:      t.Pos,
++	}
++	// check for BigInteger types which have to be represented as strings in JSON
++	if lit.Type == "Numeric" && lit.GoType == "string" {
++		if intAsString, ok := lit.Value.(string); ok {
++			var bigInt big.Int
++			if _, valid := bigInt.SetString(intAsString, 0); valid {
++				lit.Value = &bigInt
++				lit.GoType = fmt.Sprintf("%T", bigInt)
++			}
++		}
++	}
++	return lit
++}
++
++func (t parserTokenJSON) toComment() parsedComment {
++	return parsedComment{
++		Type: t.TokenSubType,
++		Data: t.Data.(string),
++		Pos:  t.Pos,
++	}
++}
++
++func (s parserStatusJSON) toStatus() parserStatus {
++	return parserStatus{
++		Type:    s.StatusType,
++		Name:    s.StatusSubType,
++		Message: s.Message,
++		Pos:     s.Pos,
++	}
++}
++
++func processFileData(data parseDataJSON) languageData {
++	fileData := languageData{
++		ValidInput: true,
++	}
++	for _, t := range data.Tokens {
++		switch t.TokenType {
++		case identifier:
++			if ident, ok := t.toIdentifier(); ok {
++				fileData.Identifiers = append(fileData.Identifiers, ident)
++			}
++		case literal:
++			fileData.Literals = append(fileData.Literals, t.toLiteral())
++		case comment:
++			fileData.Comments = append(fileData.Comments, t.toComment())
++		default:
++			log.Warn(fmt.Sprintf("parseJS: unrecognised token type %s", t.TokenType))
++		}
++	}
++	for _, s := range data.Status {
++		status := s.toStatus()
++		switch s.StatusType {
++		case parseInfo:
++			fileData.Info = append(fileData.Info, status)
++		case parseError:
++			fileData.Errors = append(fileData.Errors, status)
++			if strings.Contains(status.Message, fatalSyntaxErrorMarker) {
++				fileData.ValidInput = false
++			}
++		}
++	}
++	return fileData
++}
++
+ func (p parseOutputJSON) process() languageResult {
+ 	processedOutput := languageResult{}
+ 
+ 	// convert the elements into more natural data structure
+ 	for filename, data := range p {
+-		fileData := languageData{
+-			ValidInput: true,
+-		}
+-		for _, t := range data.Tokens {
+-			switch t.TokenType {
+-			case identifier:
+-				symbolSubtype := token.CheckIdentifierType(t.TokenSubType)
+-				if symbolSubtype == token.Other || symbolSubtype == token.Unknown {
+-					break
+-				}
+-				fileData.Identifiers = append(fileData.Identifiers, parsedIdentifier{
+-					Type: token.CheckIdentifierType(t.TokenSubType),
+-					Name: t.Data.(string),
+-					Pos:  t.Pos,
+-				})
+-			case literal:
+-				literal := parsedLiteral[any]{
+-					Type:     t.TokenSubType,
+-					GoType:   fmt.Sprintf("%T", t.Data),
+-					Value:    t.Data,
+-					RawValue: t.Extra["raw"].(string),
+-					InArray:  t.Extra["array"] == true,
+-					Pos:      t.Pos,
+-				}
+-				// check for BigInteger types which have to be represented as strings in JSON
+-				if literal.Type == "Numeric" && literal.GoType == "string" {
+-					if intAsString, ok := literal.Value.(string); ok {
+-						var bigInt big.Int
+-						if _, valid := bigInt.SetString(intAsString, 0); valid {
+-							literal.Value = &bigInt
+-							literal.GoType = fmt.Sprintf("%T", bigInt)
+-						}
+-					}
+-				}
+-				fileData.Literals = append(fileData.Literals, literal)
+-			case comment:
+-				fileData.Comments = append(fileData.Comments, parsedComment{
+-					Type: t.TokenSubType,
+-					Data: t.Data.(string),
+-					Pos:  t.Pos,
+-				})
+-			default:
+-				log.Warn(fmt.Sprintf("parseJS: unrecognised token type %s", t.TokenType))
+-			}
+-		}
+-		for _, s := range data.Status {
+-			status := parserStatus{
+-				Type:    s.StatusType,
+-				Name:    s.StatusSubType,
+-				Message: s.Message,
+-				Pos:     s.Pos,
+-			}
+-			switch s.StatusType {
+-			case parseInfo:
+-				fileData.Info = append(fileData.Info, status)
+-			case parseError:
+-				fileData.Errors = append(fileData.Errors, status)
+-				if strings.Contains(status.Message, fatalSyntaxErrorMarker) {
+-					fileData.ValidInput = false
+-				}
+-			}
+-		}
+-
+-		processedOutput[filename] = fileData
++		processedOutput[filename] = processFileData(data)
+ 	}
+ 
+ 	return processedOutput

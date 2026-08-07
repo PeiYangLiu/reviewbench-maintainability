@@ -1,0 +1,109 @@
+diff --git a/bec_server/bec_server/data_processing/lmfit1d_service.py b/bec_server/bec_server/data_processing/lmfit1d_service.py
+index 348aecc..4330e46 100644
+--- a/bec_server/bec_server/data_processing/lmfit1d_service.py
++++ b/bec_server/bec_server/data_processing/lmfit1d_service.py
+@@ -60,34 +60,44 @@ class LmfitService1D(DAPServiceBase):
+         self.oversample = 1
+ 
+     def _build_model(self, model: str | list[str] | tuple[str, ...]) -> lmfit.Model:
+-        if isinstance(model, (list, tuple)):
+-            return self._build_composite_model(self._coerce_model_list(model))
+         if isinstance(model, str):
+-            return self._build_single_model(model)
+-        raise ValueError(f"Unknown model {model}")
++            model_cls = self._get_model_cls(model)
++            return model_cls()
+ 
+-    def _build_single_model(self, model_name: str) -> lmfit.Model:
+-        model_cls = self._get_model_cls(model_name)
+-        return model_cls()
+-
+-    def _build_composite_model(self, model_list: Sequence[str]) -> lmfit.Model:
+-        if not model_list:
+-            raise ValueError("Composite model list cannot be empty.")
+-        self.model_components = {}
+-        self.model_prefixes = {}
+-        self.model_sequence = []
+-        self.model_name_sequence = list(model_list)
+-        composite_model: lmfit.model.Model | None = None
+-        for index, model_name in enumerate(model_list):
+-            component_name = self._component_name(model_name, index)
+-            component = self._create_component(model_name, component_name)
+-            composite_model = component if composite_model is None else composite_model + component
+-        self._build_component_lookup()
+-        logger.debug(
+-            f"Initialized composite lmfit model with components={list(self.model_components.keys())} "
+-            f"prefixes={self.model_prefixes}"
+-        )
+-        return composite_model
++        if isinstance(model, (list, tuple)):
++            if not model:
++                raise ValueError("Composite model list cannot be empty.")
++            self.model_components = {}
++            self.model_prefixes = {}
++            self.model_sequence = []
++            self.model_name_sequence = list(model)
++            composite_model = None
++            for index, model_name in enumerate(model):
++                component_name = f"{model_name}_{index}"
++                prefix = f"{component_name}_"
++                model_cls = self._get_model_cls(model_name)
++                component = model_cls(prefix=prefix)
++                self.model_sequence.append(component_name)
++                self.model_prefixes[component_name] = prefix
++                self.model_components[component_name] = component
++                composite_model = component if composite_model is None else composite_model + component
++
++            unique_names = len(set(self.model_name_sequence)) == len(self.model_name_sequence)
++            self.model_name_to_component = (
++                {
++                    name: self.model_sequence[idx]
++                    for idx, name in enumerate(self.model_name_sequence)
++                }
++                if unique_names
++                else None
++            )
++            logger.debug(
++                f"Initialized composite lmfit model with components={list(self.model_components.keys())} "
++                f"prefixes={self.model_prefixes}"
++            )
++            return composite_model
++
++        raise ValueError(f"Unknown model {model}")
+ 
+     @staticmethod
+     def _get_model_cls(model_name: str):
+@@ -95,33 +105,6 @@ class LmfitService1D(DAPServiceBase):
+         if not model_cls:
+             raise ValueError(f"Unknown model {model_name}")
+         return model_cls
+-
+-    @staticmethod
+-    def _component_name(model_name: str, index: int) -> str:
+-        return f"{model_name}_{index}"
+-
+-    def _create_component(self, model_name: str, component_name: str):
+-        model_cls = self._get_model_cls(model_name)
+-        prefix = f"{component_name}_"
+-        self.model_sequence.append(component_name)
+-        self.model_prefixes[component_name] = prefix
+-        component = model_cls(prefix=prefix)
+-        self.model_components[component_name] = component
+-        return component
+-
+-    @staticmethod
+-    def _coerce_model_list(model_list: Iterable[str]) -> list[str]:
+-        return list(model_list)
+-
+-    def _build_component_lookup(self) -> None:
+-        unique_names = len(set(self.model_name_sequence)) == len(self.model_name_sequence)
+-        if unique_names:
+-            self.model_name_to_component = {
+-                name: self.model_sequence[idx] for idx, name in enumerate(self.model_name_sequence)
+-            }
+-        else:
+-            self.model_name_to_component = None
+-
+     def _expand_composite_parameters(self, parameters: dict | list | tuple) -> dict:
+         if self.model_components is None or self.model_prefixes is None:
+             return parameters

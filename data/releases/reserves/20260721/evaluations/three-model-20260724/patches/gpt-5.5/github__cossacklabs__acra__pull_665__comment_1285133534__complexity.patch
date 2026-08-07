@@ -1,0 +1,70 @@
+--- a/decryptor/mysql/prepared_statements.go
++++ b/decryptor/mysql/prepared_statements.go
+@@ -24,22 +24,26 @@
+ 
+ // PreparedStatementRegistry is a MySQL PreparedStatementRegistry.
+ type PreparedStatementRegistry struct {
+-	statements          map[string]base.PreparedStatement
+-	querySelectSettings map[string][]*encryptor.QueryDataItem
++	statements map[string]*preparedStatementRegistryItem
++}
++
++type preparedStatementRegistryItem struct {
++	statement                 base.PreparedStatement
++	querySelectSettings       []*encryptor.QueryDataItem
++	hasQuerySelectSettings    bool
+ }
+ 
+ // NewPreparedStatementRegistry makes a new empty prepared statement registry.
+ func NewPreparedStatementRegistry() *PreparedStatementRegistry {
+ 	return &PreparedStatementRegistry{
+-		statements:          make(map[string]base.PreparedStatement),
+-		querySelectSettings: make(map[string][]*encryptor.QueryDataItem),
++		statements: make(map[string]*preparedStatementRegistryItem),
+ 	}
+ }
+ 
+ // StatementByID returns a prepared statement from the registry by its id, if it exists.
+ func (r *PreparedStatementRegistry) StatementByID(stmtID string) (base.PreparedStatement, error) {
+-	if s, ok := r.statements[stmtID]; ok {
+-		return s, nil
++	if item, ok := r.statements[stmtID]; ok {
++		return item.statement, nil
+ 	}
+ 	return nil, ErrStatementNotFound
+ }
+@@ -56,18 +60,30 @@
+ // AddStatement adds a prepared statement to the registry.
+ // If an existing statement with the same name exists, it is replaced with the new one.
+ func (r *PreparedStatementRegistry) AddStatement(statement base.PreparedStatement) {
+-	r.statements[statement.Name()] = statement
++	stmtID := statement.Name()
++	if item, ok := r.statements[stmtID]; ok {
++		item.statement = statement
++		return
++	}
++
++	r.statements[stmtID] = &preparedStatementRegistryItem{statement: statement}
+ }
+ 
+ // AddQuerySettings query settings to the registry
+ func (r *PreparedStatementRegistry) AddQuerySettings(stmtID string, settings []*encryptor.QueryDataItem) {
+-	r.querySelectSettings[stmtID] = settings
++	if item, ok := r.statements[stmtID]; ok {
++		item.querySelectSettings = settings
++		item.hasQuerySelectSettings = true
++	}
+ }
+ 
+ // QuerySettingsByID query setting by stmtID
+ func (r *PreparedStatementRegistry) QuerySettingsByID(stmtID string) ([]*encryptor.QueryDataItem, bool) {
+-	settings, ok := r.querySelectSettings[stmtID]
+-	return settings, ok
++	item, ok := r.statements[stmtID]
++	if !ok || !item.hasQuerySelectSettings {
++		return nil, false
++	}
++	return item.querySelectSettings, true
+ }
+ 
+ // PreparedStatement is a MySQL PreparedStatement.

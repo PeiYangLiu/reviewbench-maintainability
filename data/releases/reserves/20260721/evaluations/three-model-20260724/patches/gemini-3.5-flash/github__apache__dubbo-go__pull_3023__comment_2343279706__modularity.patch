@@ -1,0 +1,95 @@
+--- a/filter/accesslog/filter.go
++++ b/filter/accesslog/filter.go
+@@ -163,25 +163,29 @@
+ 	}
+ 
+ 	if len(invocation.Arguments()) > 0 {
+-		builder := strings.Builder{}
+-		// todo(after the paramTypes were set to the invocation. we should change this implementation)
+-		typeBuilder := strings.Builder{}
+-
+-		builder.WriteString(reflect.ValueOf(invocation.Arguments()[0]).String())
+-		typeBuilder.WriteString(reflect.TypeOf(invocation.Arguments()[0]).Name())
+-		for idx := 1; idx < len(invocation.Arguments()); idx++ {
+-			arg := invocation.Arguments()[idx]
+-			builder.WriteString(",")
+-			builder.WriteString(reflect.ValueOf(arg).String())
+-
+-			typeBuilder.WriteString(",")
+-			typeBuilder.WriteString(reflect.TypeOf(arg).Name())
+-		}
+-		dataMap[Arguments] = builder.String()
+-		dataMap[Types] = typeBuilder.String()
++		dataMap[Arguments], dataMap[Types] = buildArgumentsAndTypes(invocation.Arguments())
+ 	}
+ 
+ 	return dataMap
++}
++
++// buildArgumentsAndTypes builds argument strings and types strings from invocation arguments
++func buildArgumentsAndTypes(arguments []interface{}) (string, string) {
++	builder := strings.Builder{}
++	// todo(after the paramTypes were set to the invocation. we should change this implementation)
++	typeBuilder := strings.Builder{}
++
++	builder.WriteString(reflect.ValueOf(arguments[0]).String())
++	typeBuilder.WriteString(reflect.TypeOf(arguments[0]).Name())
++	for idx := 1; idx < len(arguments); idx++ {
++		arg := arguments[idx]
++		builder.WriteString(",")
++		builder.WriteString(reflect.ValueOf(arg).String())
++
++		typeBuilder.WriteString(",")
++		typeBuilder.WriteString(reflect.TypeOf(arg).Name())
++	}
++	return builder.String(), typeBuilder.String()
+ }
+ 
+ // OnResponse do nothing
+@@ -273,18 +277,24 @@
+ 	}
+ }
+ 
++// isToday checks if the file's modification time is today
++func isToday(file *os.File) bool {
++	now := time.Now().Format(FileDateFormat)
++	if fileInfo, err := file.Stat(); err == nil {
++		last := fileInfo.ModTime().Format(FileDateFormat)
++		return now == last
++	}
++	return false
++}
++
+ // getOrOpenLogFile gets or opens the log file with proper caching and handle management
+ func (f *Filter) getOrOpenLogFile(accessLog string) (*os.File, error) {
+ 	f.fileLock.RLock()
+ 	if logFile, exists := f.fileCache[accessLog]; exists {
+ 		// Check if we need to rotate the log
+-		now := time.Now().Format(FileDateFormat)
+-		if fileInfo, err := logFile.Stat(); err == nil {
+-			last := fileInfo.ModTime().Format(FileDateFormat)
+-			if now == last {
+-				f.fileLock.RUnlock()
+-				return logFile, nil
+-			}
++		if isToday(logFile) {
++			f.fileLock.RUnlock()
++			return logFile, nil
+ 		}
+ 	}
+ 	f.fileLock.RUnlock()
+@@ -295,12 +305,8 @@
+ 
+ 	// Double-check after acquiring write lock
+ 	if logFile, exists := f.fileCache[accessLog]; exists {
+-		now := time.Now().Format(FileDateFormat)
+-		if fileInfo, err := logFile.Stat(); err == nil {
+-			last := fileInfo.ModTime().Format(FileDateFormat)
+-			if now == last {
+-				return logFile, nil
+-			}
++		if isToday(logFile) {
++			return logFile, nil
+ 		}
+ 		// Close the old file before rotation
+ 		logFile.Close()

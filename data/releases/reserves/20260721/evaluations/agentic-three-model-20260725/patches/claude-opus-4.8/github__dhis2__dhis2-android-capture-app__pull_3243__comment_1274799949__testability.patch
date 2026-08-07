@@ -1,0 +1,121 @@
+diff --git a/commons/src/main/java/org/dhis2/commons/bindings/TEICardExtensions.kt b/commons/src/main/java/org/dhis2/commons/bindings/TEICardExtensions.kt
+index 2bd26f4..aa9a938 100644
+--- a/commons/src/main/java/org/dhis2/commons/bindings/TEICardExtensions.kt
++++ b/commons/src/main/java/org/dhis2/commons/bindings/TEICardExtensions.kt
+@@ -53,13 +53,65 @@ fun List<Enrollment>.hasFollowUp(): Boolean {
+     } ?: false
+ }
+ 
++data class EnrollmentIconData(
++    val programColor: Int,
++    val imageResource: Int,
++    val remainingEnrollments: Int? = null
++)
++
++fun List<Program>.getEnrollmentIconsData(
++    context: Context,
++    currentProgram: String?
++): List<EnrollmentIconData> {
++    val listSize = this.size
++    val iconsData = mutableListOf<EnrollmentIconData>()
++    var programCount = 0
++    run outer@{
++        filter { it.uid() != currentProgram }
++            .forEach inner@{ program ->
++                val color = ColorUtils.getColorFrom(
++                    program.style().color(),
++                    ColorUtils.getPrimaryColor(
++                        context,
++                        ColorUtils.ColorType.PRIMARY
++                    )
++                )
++                programCount++
++                if (programCount >= 4 && listSize > 4) {
++                    val otherEnrollmentsCount = getOtherEnrollmentsForTei(listSize)
++                    iconsData.add(
++                        EnrollmentIconData(
++                            programColor = color,
++                            imageResource = -1,
++                            remainingEnrollments = otherEnrollmentsCount
++                        )
++                    )
++                    return@outer
++                } else {
++                    val imageResource =
++                        ResourceManager(context)
++                            .getObjectStyleDrawableResource(
++                                program.style().icon(),
++                                R.drawable.ic_default_icon
++                            )
++                    iconsData.add(
++                        EnrollmentIconData(
++                            programColor = color,
++                            imageResource = imageResource
++                        )
++                    )
++                }
++            }
++    }
++    return iconsData
++}
++
+ fun List<Program>.addEnrollmentIcons(
+     context: Context,
+     parent: ComposeView,
+     currentProgram: String?
+ ) {
+-    val listSize = this.size
+-    var programCount = 0
++    val iconsData = getEnrollmentIconsData(context, currentProgram)
+     parent.apply {
+         setContent {
+             MdcTheme {
+@@ -67,37 +119,18 @@ fun List<Program>.addEnrollmentIcons(
+                     horizontalArrangement = spacedBy(Dp(4f)),
+                     verticalAlignment = Alignment.CenterVertically
+                 ) {
+-                    run outer@{
+-                        filter { it.uid() != currentProgram }
+-                            .forEach inner@{ program ->
+-                                val color = ColorUtils.getColorFrom(
+-                                    program.style().color(),
+-                                    ColorUtils.getPrimaryColor(
+-                                        context,
+-                                        ColorUtils.ColorType.PRIMARY
+-                                    )
++                    iconsData.forEach { iconData ->
++                        if (iconData.remainingEnrollments != null) {
++                            SquareWithNumber(iconData.remainingEnrollments)
++                        } else {
++                            MetadataIcon(
++                                metadataIconData = MetadataIconData(
++                                    programColor = iconData.programColor,
++                                    iconResource = iconData.imageResource,
++                                    sizeInDp = 24
+                                 )
+-                                programCount++
+-                                if (programCount >= 4 && listSize > 4) {
+-                                    val otherEnrollmentsCount = getOtherEnrollmentsForTei(listSize)
+-                                    SquareWithNumber(otherEnrollmentsCount)
+-                                    return@outer
+-                                } else {
+-                                    val imageResource =
+-                                        ResourceManager(context)
+-                                            .getObjectStyleDrawableResource(
+-                                                program.style().icon(),
+-                                                R.drawable.ic_default_icon
+-                                            )
+-                                    MetadataIcon(
+-                                        metadataIconData = MetadataIconData(
+-                                            programColor = color,
+-                                            iconResource = imageResource,
+-                                            sizeInDp = 24
+-                                        )
+-                                    )
+-                                }
+-                            }
++                            )
++                        }
+                     }
+                 }
+             }

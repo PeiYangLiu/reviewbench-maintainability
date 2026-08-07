@@ -1,0 +1,454 @@
+--- a/cpp/src/reader/aligned_chunk_reader.cc
++++ b/cpp/src/reader/aligned_chunk_reader.cc
+@@ -748,17 +748,27 @@
+     return ret;
+ }
+ 
+-int AlignedChunkReader::i32_DECODE_TV_BATCH(ByteStream& time_in,
+-                                            ByteStream& value_in,
+-                                            RowAppender& row_appender,
+-                                            Filter* filter) {
++namespace {
++
++// Shared implementation for the fixed-width batch time/value decode paths.
++// The type-specific value read/skip operations are injected via functors, and
++// @value_filter_pass encapsulates the per-value filter check (float/double
++// intentionally supply a no-op that always passes, matching the original
++// hand-written variants).
++template <typename T, typename BitmapVec, typename ReadBatchFn,
++          typename SkipFn, typename ValueFilterFn>
++int decode_tv_batch_impl(Decoder* time_decoder, const BitmapVec& notnull_bitmap,
++                         int& cur_value_index, ByteStream& time_in,
++                         ByteStream& value_in, RowAppender& row_appender,
++                         Filter* filter, ReadBatchFn read_batch, SkipFn skip,
++                         ValueFilterFn value_filter_pass) {
+     int ret = E_OK;
+     const int BATCH = 129;
+     int64_t times[BATCH];
+-    int32_t values[BATCH];
++    T values[BATCH];
+     const uint32_t null_mask_base = 1 << 7;
+ 
+-    while (time_decoder_->has_remaining(time_in)) {
++    while (time_decoder->has_remaining(time_in)) {
+         if (row_appender.remaining() < (uint32_t)BATCH) {
+             ret = E_OVERFLOW;
+             break;
+@@ -769,16 +779,16 @@
+         if (filter != nullptr) {
+             int64_t block_min, block_max;
+             int block_count;
+-            if (time_decoder_->peek_next_block_range_int64(
++            if (time_decoder->peek_next_block_range_int64(
+                     time_in, block_min, block_max, block_count)) {
+                 if (!filter->satisfy_start_end_time(block_min, block_max)) {
+                     int skipped = 0;
+-                    time_decoder_->skip_peeked_block_int64(time_in, skipped);
++                    time_decoder->skip_peeked_block_int64(time_in, skipped);
+                     int nonnull = 0;
+                     for (int i = 0; i < block_count; ++i) {
+                         int vi = cur_value_index + 1 + i;
+-                        if (!value_page_col_notnull_bitmap_.empty() &&
+-                            ((value_page_col_notnull_bitmap_[vi / 8] & 0xFF) &
++                        if (!notnull_bitmap.empty() &&
++                            ((notnull_bitmap[vi / 8] & 0xFF) &
+                              (null_mask_base >> (vi % 8))) != 0) {
+                             ++nonnull;
+                         }
+@@ -791,8 +801,7 @@
+                         // value decoder.  Same defect the multi-value path
+                         // already guards against.
+                         int sk = 0;
+-                        if (RET_FAIL(value_decoder_->skip_int32(nonnull, sk,
+-                                                                value_in))) {
++                        if (RET_FAIL(skip(nonnull, sk, value_in))) {
+                             break;
+                         }
+                         if (sk != nonnull) {
+@@ -809,8 +818,8 @@
+         }
+ 
+         int time_count = 0;
+-        if (RET_FAIL(time_decoder_->read_batch_int64(times, BATCH, time_count,
+-                                                     time_in))) {
++        if (RET_FAIL(time_decoder->read_batch_int64(times, BATCH, time_count,
++                                                    time_in))) {
+             break;
+         }
+         if (time_count == 0) break;
+@@ -819,8 +828,8 @@
+         int nonnull_count = 0;
+         for (int i = 0; i < time_count; ++i) {
+             int vi = cur_value_index + 1 + i;
+-            if (value_page_col_notnull_bitmap_.empty() ||
+-                ((value_page_col_notnull_bitmap_[vi / 8] & 0xFF) &
++            if (notnull_bitmap.empty() ||
++                ((notnull_bitmap[vi / 8] & 0xFF) &
+                  (null_mask_base >> (vi % 8))) == 0) {
+                 is_null[i] = true;
+             } else {
+@@ -839,8 +848,7 @@
+         if (pass_count == 0) {
+             if (nonnull_count > 0) {
+                 int skipped = 0;
+-                if (RET_FAIL(value_decoder_->skip_int32(nonnull_count, skipped,
+-                                                        value_in))) {
++                if (RET_FAIL(skip(nonnull_count, skipped, value_in))) {
+                     break;
+                 }
+                 if (skipped != nonnull_count) {
+@@ -854,8 +862,8 @@
+ 
+         int value_count = 0;
+         if (nonnull_count > 0) {
+-            if (RET_FAIL(value_decoder_->read_batch_int32(
+-                    values, nonnull_count, value_count, value_in))) {
++            if (RET_FAIL(
++                    read_batch(values, nonnull_count, value_count, value_in))) {
+                 break;
+             }
+         }
+@@ -875,9 +883,9 @@
+                 row_appender.append(0, (char*)&times[i], sizeof(int64_t));
+                 row_appender.append_null(1);
+             } else {
+-                int32_t val = values[val_idx++];
++                T val = values[val_idx++];
+                 if (filter != nullptr && !block_all_pass &&
+-                    !filter->satisfy(times[i], (int64_t)val)) {
++                    !value_filter_pass(filter, times[i], val)) {
+                     continue;
+                 }
+                 if (UNLIKELY(!row_appender.add_row())) {
+@@ -885,290 +893,64 @@
+                     break;
+                 }
+                 row_appender.append(0, (char*)&times[i], sizeof(int64_t));
+-                row_appender.append(1, (char*)&val, sizeof(int32_t));
++                row_appender.append(1, (char*)&val, sizeof(T));
+             }
+         }
+         if (ret != E_OK) break;
+     }
+     return ret;
++}
++
++}  // namespace
++
++int AlignedChunkReader::i32_DECODE_TV_BATCH(ByteStream& time_in,
++                                            ByteStream& value_in,
++                                            RowAppender& row_appender,
++                                            Filter* filter) {
++    return decode_tv_batch_impl<int32_t>(
++        time_decoder_, value_page_col_notnull_bitmap_, cur_value_index,
++        time_in, value_in, row_appender, filter,
++        [this](int32_t* out, int n, int& actual, ByteStream& in) {
++            return value_decoder_->read_batch_int32(out, n, actual, in);
++        },
++        [this](int n, int& skipped, ByteStream& in) {
++            return value_decoder_->skip_int32(n, skipped, in);
++        },
++        [](Filter* f, int64_t t, int32_t v) {
++            return f->satisfy(t, (int64_t)v);
++        });
+ }
+ 
+ int AlignedChunkReader::i64_DECODE_TV_BATCH(ByteStream& time_in,
+                                             ByteStream& value_in,
+                                             RowAppender& row_appender,
+                                             Filter* filter) {
+-    int ret = E_OK;
+-    const int BATCH = 129;
+-    int64_t times[BATCH];
+-    int64_t values[BATCH];
+-    const uint32_t null_mask_base = 1 << 7;
+-
+-    while (time_decoder_->has_remaining(time_in)) {
+-        if (row_appender.remaining() < (uint32_t)BATCH) {
+-            ret = E_OVERFLOW;
+-            break;
+-        }
+-
+-        // Block-level time filter check: skip entire block if out of range
+-        bool block_all_pass = false;
+-        if (filter != nullptr) {
+-            int64_t block_min, block_max;
+-            int block_count;
+-            if (time_decoder_->peek_next_block_range_int64(
+-                    time_in, block_min, block_max, block_count)) {
+-                if (!filter->satisfy_start_end_time(block_min, block_max)) {
+-                    int skipped = 0;
+-                    time_decoder_->skip_peeked_block_int64(time_in, skipped);
+-                    int nonnull = 0;
+-                    for (int i = 0; i < block_count; ++i) {
+-                        int vi = cur_value_index + 1 + i;
+-                        if (!value_page_col_notnull_bitmap_.empty() &&
+-                            ((value_page_col_notnull_bitmap_[vi / 8] & 0xFF) &
+-                             (null_mask_base >> (vi % 8))) != 0) {
+-                            ++nonnull;
+-                        }
+-                    }
+-                    cur_value_index += block_count;
+-                    if (nonnull > 0) {
+-                        // See i32 path above for the rationale.
+-                        int sk = 0;
+-                        if (RET_FAIL(value_decoder_->skip_int64(nonnull, sk,
+-                                                                value_in))) {
+-                            break;
+-                        }
+-                        if (sk != nonnull) {
+-                            ret = E_TSFILE_CORRUPTED;
+-                            break;
+-                        }
+-                    }
+-                    continue;
+-                }
+-                if (filter->contain_start_end_time(block_min, block_max)) {
+-                    block_all_pass = true;
+-                }
+-            }
+-        }
+-
+-        int time_count = 0;
+-        if (RET_FAIL(time_decoder_->read_batch_int64(times, BATCH, time_count,
+-                                                     time_in))) {
+-            break;
+-        }
+-        if (time_count == 0) break;
+-
+-        bool is_null[BATCH];
+-        int nonnull_count = 0;
+-        for (int i = 0; i < time_count; ++i) {
+-            int vi = cur_value_index + 1 + i;
+-            if (value_page_col_notnull_bitmap_.empty() ||
+-                ((value_page_col_notnull_bitmap_[vi / 8] & 0xFF) &
+-                 (null_mask_base >> (vi % 8))) == 0) {
+-                is_null[i] = true;
+-            } else {
+-                is_null[i] = false;
+-                ++nonnull_count;
+-            }
+-        }
+-
+-        bool time_mask[BATCH];
+-        int pass_count = time_count;
+-        if (filter != nullptr && !block_all_pass) {
+-            pass_count =
+-                filter->satisfy_batch_time(times, time_count, time_mask);
+-        }
+-
+-        if (pass_count == 0) {
+-            if (nonnull_count > 0) {
+-                int skipped = 0;
+-                if (RET_FAIL(value_decoder_->skip_int64(nonnull_count, skipped,
+-                                                        value_in))) {
+-                    break;
+-                }
+-                if (skipped != nonnull_count) {
+-                    ret = E_TSFILE_CORRUPTED;
+-                    break;
+-                }
+-            }
+-            cur_value_index += time_count;
+-            continue;
+-        }
+-
+-        int value_count = 0;
+-        if (nonnull_count > 0) {
+-            if (RET_FAIL(value_decoder_->read_batch_int64(
+-                    values, nonnull_count, value_count, value_in))) {
+-                break;
+-            }
+-        }
+-
+-        int val_idx = 0;
+-        for (int i = 0; i < time_count; ++i) {
+-            cur_value_index++;
+-            if (filter != nullptr && !block_all_pass && !time_mask[i]) {
+-                if (!is_null[i]) ++val_idx;
+-                continue;
+-            }
+-            if (is_null[i]) {
+-                if (UNLIKELY(!row_appender.add_row())) {
+-                    ret = E_OVERFLOW;
+-                    break;
+-                }
+-                row_appender.append(0, (char*)&times[i], sizeof(int64_t));
+-                row_appender.append_null(1);
+-            } else {
+-                int64_t val = values[val_idx++];
+-                if (filter != nullptr && !block_all_pass &&
+-                    !filter->satisfy(times[i], val)) {
+-                    continue;
+-                }
+-                if (UNLIKELY(!row_appender.add_row())) {
+-                    ret = E_OVERFLOW;
+-                    break;
+-                }
+-                row_appender.append(0, (char*)&times[i], sizeof(int64_t));
+-                row_appender.append(1, (char*)&val, sizeof(int64_t));
+-            }
+-        }
+-        if (ret != E_OK) break;
+-    }
+-    return ret;
++    return decode_tv_batch_impl<int64_t>(
++        time_decoder_, value_page_col_notnull_bitmap_, cur_value_index,
++        time_in, value_in, row_appender, filter,
++        [this](int64_t* out, int n, int& actual, ByteStream& in) {
++            return value_decoder_->read_batch_int64(out, n, actual, in);
++        },
++        [this](int n, int& skipped, ByteStream& in) {
++            return value_decoder_->skip_int64(n, skipped, in);
++        },
++        [](Filter* f, int64_t t, int64_t v) { return f->satisfy(t, v); });
+ }
+ 
+ int AlignedChunkReader::float_DECODE_TV_BATCH(ByteStream& time_in,
+                                               ByteStream& value_in,
+                                               RowAppender& row_appender,
+                                               Filter* filter) {
+-    int ret = E_OK;
+-    const int BATCH = 129;
+-    int64_t times[BATCH];
+-    float values[BATCH];
+-    const uint32_t null_mask_base = 1 << 7;
+-
+-    while (time_decoder_->has_remaining(time_in)) {
+-        if (row_appender.remaining() < (uint32_t)BATCH) {
+-            ret = E_OVERFLOW;
+-            break;
+-        }
+-
+-        // Block-level time filter check
+-        bool block_all_pass = false;
+-        if (filter != nullptr) {
+-            int64_t block_min, block_max;
+-            int block_count;
+-            if (time_decoder_->peek_next_block_range_int64(
+-                    time_in, block_min, block_max, block_count)) {
+-                if (!filter->satisfy_start_end_time(block_min, block_max)) {
+-                    int skipped = 0;
+-                    time_decoder_->skip_peeked_block_int64(time_in, skipped);
+-                    int nonnull = 0;
+-                    for (int i = 0; i < block_count; ++i) {
+-                        int vi = cur_value_index + 1 + i;
+-                        if (!value_page_col_notnull_bitmap_.empty() &&
+-                            ((value_page_col_notnull_bitmap_[vi / 8] & 0xFF) &
+-                             (null_mask_base >> (vi % 8))) != 0) {
+-                            ++nonnull;
+-                        }
+-                    }
+-                    cur_value_index += block_count;
+-                    if (nonnull > 0) {
+-                        // See i32 path above for the rationale.
+-                        int sk = 0;
+-                        if (RET_FAIL(value_decoder_->skip_float(nonnull, sk,
+-                                                                value_in))) {
+-                            break;
+-                        }
+-                        if (sk != nonnull) {
+-                            ret = E_TSFILE_CORRUPTED;
+-                            break;
+-                        }
+-                    }
+-                    continue;
+-                }
+-                if (filter->contain_start_end_time(block_min, block_max)) {
+-                    block_all_pass = true;
+-                }
+-            }
+-        }
+-
+-        int time_count = 0;
+-        if (RET_FAIL(time_decoder_->read_batch_int64(times, BATCH, time_count,
+-                                                     time_in))) {
+-            break;
+-        }
+-        if (time_count == 0) break;
+-
+-        bool is_null[BATCH];
+-        int nonnull_count = 0;
+-        for (int i = 0; i < time_count; ++i) {
+-            int vi = cur_value_index + 1 + i;
+-            if (value_page_col_notnull_bitmap_.empty() ||
+-                ((value_page_col_notnull_bitmap_[vi / 8] & 0xFF) &
+-                 (null_mask_base >> (vi % 8))) == 0) {
+-                is_null[i] = true;
+-            } else {
+-                is_null[i] = false;
+-                ++nonnull_count;
+-            }
+-        }
+-
+-        bool time_mask[BATCH];
+-        int pass_count = time_count;
+-        if (filter != nullptr && !block_all_pass) {
+-            pass_count =
+-                filter->satisfy_batch_time(times, time_count, time_mask);
+-        }
+-
+-        if (pass_count == 0) {
+-            if (nonnull_count > 0) {
+-                int skipped = 0;
+-                if (RET_FAIL(value_decoder_->skip_float(nonnull_count, skipped,
+-                                                        value_in))) {
+-                    break;
+-                }
+-                if (skipped != nonnull_count) {
+-                    ret = E_TSFILE_CORRUPTED;
+-                    break;
+-                }
+-            }
+-            cur_value_index += time_count;
+-            continue;
+-        }
+-
+-        int value_count = 0;
+-        if (nonnull_count > 0) {
+-            if (RET_FAIL(value_decoder_->read_batch_float(
+-                    values, nonnull_count, value_count, value_in))) {
+-                break;
+-            }
+-        }
+-
+-        int val_idx = 0;
+-        for (int i = 0; i < time_count; ++i) {
+-            cur_value_index++;
+-            if (filter != nullptr && !block_all_pass && !time_mask[i]) {
+-                if (!is_null[i]) ++val_idx;
+-                continue;
+-            }
+-            if (is_null[i]) {
+-                if (UNLIKELY(!row_appender.add_row())) {
+-                    ret = E_OVERFLOW;
+-                    break;
+-                }
+-                row_appender.append(0, (char*)&times[i], sizeof(int64_t));
+-                row_appender.append_null(1);
+-            } else {
+-                float val = values[val_idx++];
+-                if (UNLIKELY(!row_appender.add_row())) {
+-                    ret = E_OVERFLOW;
+-                    break;
+-                }
+-                row_appender.append(0, (char*)&times[i], sizeof(int64_t));
+-                row_appender.append(1, (char*)&val, sizeof(float));
+-            }
+-        }
+-        if (ret != E_OK) break;
+-    }
+-    return ret;
++    return decode_tv_batch_impl<float>(
++        time_decoder_, value_page_col_notnull_bitmap_, cur_value_index,
++        time_in, value_in, row_appender, filter,
++        [this](float* out, int n, int& actual, ByteStream& in) {
++            return value_decoder_->read_batch_float(out, n, actual, in);
++        },
++        [this](int n, int& skipped, ByteStream& in) {
++            return value_decoder_->skip_float(n, skipped, in);
++        },
++        [](Filter*, int64_t, float) { return true; });
+ }
+ 
+ int AlignedChunkReader::double_DECODE_TV_BATCH(ByteStream& time_in,

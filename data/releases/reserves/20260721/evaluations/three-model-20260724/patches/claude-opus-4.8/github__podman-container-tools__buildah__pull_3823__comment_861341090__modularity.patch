@@ -1,0 +1,62 @@
+--- a/image.go
++++ b/image.go
+@@ -149,11 +149,20 @@
+ 	return omediaType, dmediaType, nil
+ }
+ 
++// ExtractRootfsOptions is consumed by ExtractRootfs() which allows users to
++// control which content gets exported as part of the container's root
++// filesystem.
++type ExtractRootfsOptions struct {
++	StripSetuidBit bool // strip the setuid bit off of items being extracted.
++	StripSetgidBit bool // strip the setgid bit off of items being extracted.
++	StripStickyBit bool // strip the sticky bit off of items being extracted.
++}
++
+ // Extract the container's whole filesystem as if it were a single layer.
+-// Takes copierStripOpts as argument which allows caller to configure
++// Takes ExtractRootfsOptions as argument which allows caller to configure
+ // preserve nature of setuid,setgid,sticky and extended attributes
+ // on extracted rootfs.
+-func (i *containerImageRef) extractRootfs(copierStripOpts copier.GetOptions) (io.ReadCloser, chan error, error) {
++func (i *containerImageRef) extractRootfs(opts ExtractRootfsOptions) (io.ReadCloser, chan error, error) {
+ 	var uidMap, gidMap []idtools.IDMap
+ 	mountPoint, err := i.store.Mount(i.containerID, i.mountLabel)
+ 	if err != nil {
+@@ -169,10 +178,9 @@
+ 		copierOptions := copier.GetOptions{
+ 			UIDMap:         uidMap,
+ 			GIDMap:         gidMap,
+-			StripSetuidBit: copierStripOpts.StripSetuidBit,
+-			StripSetgidBit: copierStripOpts.StripSetgidBit,
+-			StripStickyBit: copierStripOpts.StripStickyBit,
+-			StripXattrs:    copierStripOpts.StripXattrs,
++			StripSetuidBit: opts.StripSetuidBit,
++			StripSetgidBit: opts.StripSetgidBit,
++			StripStickyBit: opts.StripStickyBit,
+ 		}
+ 		err = copier.Get(mountPoint, mountPoint, copierOptions, []string{"."}, pipeWriter)
+ 		errChan <- err
+@@ -383,7 +391,7 @@
+ 		var errChan chan error
+ 		if i.squash {
+ 			// Extract the root filesystem as a single layer.
+-			rc, errChan, err = i.extractRootfs(copier.GetOptions{})
++			rc, errChan, err = i.extractRootfs(ExtractRootfsOptions{})
+ 			if err != nil {
+ 				return nil, err
+ 			}
+@@ -822,10 +830,10 @@
+ }
+ 
+ // Extract the container's whole filesystem as if it were a single layer from current builder instance
+-func (b *Builder) ExtractRootfs(options CommitOptions, copierStripOpts copier.GetOptions) (io.ReadCloser, chan error, error) {
++func (b *Builder) ExtractRootfs(options CommitOptions, opts ExtractRootfsOptions) (io.ReadCloser, chan error, error) {
+ 	src, err := b.makeContainerImageRef(options)
+ 	if err != nil {
+ 		return nil, nil, errors.Wrapf(err, "error creating image reference for container %q to extract its contents", b.ContainerID)
+ 	}
+-	return src.extractRootfs(copierStripOpts)
+-}
++	return src.extractRootfs(opts)
++}

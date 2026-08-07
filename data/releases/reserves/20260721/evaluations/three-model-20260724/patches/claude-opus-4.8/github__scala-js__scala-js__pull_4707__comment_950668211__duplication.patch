@@ -1,0 +1,85 @@
+--- a/linker/shared/src/main/scala/org/scalajs/linker/frontend/optimizer/OptimizerCore.scala
++++ b/linker/shared/src/main/scala/org/scalajs/linker/frontend/optimizer/OptimizerCore.scala
+@@ -3230,7 +3230,7 @@
+   }
+ 
+   private def constantFoldBinaryOp_except_String_+(op: BinaryOp.Code,
+-      lhs: Literal, rhs: Literal)(implicit pos: Position): Literal = {
++      lhs: Literal, rhs: Literal)(implicit pos: Position): Option[Literal] = {
+     import BinaryOp._
+ 
+     @inline def int(lit: Literal): Int = (lit: @unchecked) match {
+@@ -3257,7 +3257,7 @@
+       case StringLiteral(value) => value
+     }
+ 
+-    (op: @switch) match {
++    def rawConstantFold: Literal = (op: @switch) match {
+       case === => BooleanLiteral(literal_===(lhs, rhs, isJSStrictEq = false))
+       case !== => BooleanLiteral(!literal_===(lhs, rhs, isJSStrictEq = false))
+ 
+@@ -3330,6 +3330,24 @@
+       case Boolean_&  => BooleanLiteral(boolean(lhs) & boolean(rhs))
+ 
+       case String_charAt => CharLiteral(string(lhs).charAt(int(rhs)))
++    }
++
++    /* Validation and folding are kept together here, so that each operation's
++     * correctness can be reasoned about locally.
++     */
++    (op: @switch) match {
++      case Int_/ | Int_% =>
++        if (int(rhs) == 0) None
++        else Some(rawConstantFold)
++      case Long_/ | Long_% =>
++        if (long(rhs) == 0L) None
++        else Some(rawConstantFold)
++      case String_charAt =>
++        val index = int(rhs)
++        if (index < 0 || index >= string(lhs).length()) None
++        else Some(rawConstantFold)
++      case _ =>
++        Some(rawConstantFold)
+     }
+   }
+ 
+@@ -3383,35 +3401,13 @@
+       implicit pos: Position): PreTransform = {
+     import BinaryOp._
+ 
+-    def constant(lhsLit: Literal, rhsLit: Literal): PreTransform =
+-      PreTransLit(constantFoldBinaryOp_except_String_+(op, lhsLit, rhsLit))
+-
+     def nonConstant(): PreTransform = foldBinaryOpNonConstant(op, lhs, rhs)
+ 
+     (lhs, rhs) match {
+-      case (PreTransLit(lhsLit), PreTransLit(rhsLit)) =>
+-        op match {
+-          case String_+ =>
+-            nonConstant()
+-          case Int_/ | Int_% =>
+-            rhsLit match {
+-              case IntLiteral(0) => nonConstant()
+-              case _             => constant(lhsLit, rhsLit)
+-            }
+-          case Long_/ | Long_% =>
+-            rhsLit match {
+-              case LongLiteral(0) => nonConstant()
+-              case _              => constant(lhsLit, rhsLit)
+-            }
+-          case String_charAt =>
+-            (lhsLit, rhsLit) match {
+-              case (StringLiteral(lhsStr), IntLiteral(rhsInt)) if rhsInt < 0 || rhsInt >= lhsStr.length() =>
+-                nonConstant()
+-              case _ =>
+-                constant(lhsLit, rhsLit)
+-            }
+-          case _ =>
+-            constant(lhsLit, rhsLit)
++      case (PreTransLit(lhsLit), PreTransLit(rhsLit)) if op != String_+ =>
++        constantFoldBinaryOp_except_String_+(op, lhsLit, rhsLit) match {
++          case Some(result) => PreTransLit(result)
++          case None         => nonConstant()
+         }
+ 
+       case _ =>

@@ -1,0 +1,181 @@
+diff --git a/feature/experimental/system/gnmi/benchmarking/ate_tests/internal/setup/setup.go b/feature/experimental/system/gnmi/benchmarking/ate_tests/internal/setup/setup.go
+index ad3c50f..e9233a1 100644
+--- a/feature/experimental/system/gnmi/benchmarking/ate_tests/internal/setup/setup.go
++++ b/feature/experimental/system/gnmi/benchmarking/ate_tests/internal/setup/setup.go
+@@ -36,15 +36,15 @@ import (
+ )
+ 
+ const (
+-	ISISInstance          = "DEFAULT"
+-	ISISMetric            = 100
+-	DUTAreaAddress        = "49.0001"
+-	DUTSysID              = "1920.0000.2001"
+-	RouteCount            = 200
+-	PeerGrpName           = "BGP-PEER-GROUP"
+-	DUTAs                 = 64500
+-	ATEAs                 = 64501
+-	ateAs2                = 64502
++	isisInstance          = "DEFAULT"
++	isisMetric            = 100
++	dutAreaAddress        = "49.0001"
++	dutSysID              = "1920.0000.2001"
++	routeCount            = 200
++	peerGrpName           = "BGP-PEER-GROUP"
++	dutAS                 = 64500
++	ateAS                 = 64501
++	ateAS2                = 64502
+ 	dutStartIPAddr        = "192.0.2.1"
+ 	ateStartIPAddr        = "192.0.2.2"
+ 	plenIPv4              = 30
+@@ -54,10 +54,10 @@ const (
+ )
+ 
+ var (
+-	DUTIPList       = make(map[string]net.IP)
+-	ATEIPList       = make(map[string]net.IP)
+-	ISISMetricArray []uint32
+-	ISISSetBitArray []bool
++	dutIPList       = make(map[string]net.IP)
++	ateIPList       = make(map[string]net.IP)
++	isisMetricArray []uint32
++	isisSetBitArray []bool
+ )
+ 
+ // BuildIPList builds list of ip addresses for the ports in binding file.
+@@ -69,8 +69,8 @@ func BuildIPList(t *testing.T) {
+ 	for _, dp := range dut.Ports() {
+ 		dutNextIP := nextIP(net.ParseIP(dutStartIPAddr), dutIPIndex, ipSubnet)
+ 		ateNextIP := nextIP(net.ParseIP(ateStartIPAddr), ateIPIndex, ipSubnet)
+-		DUTIPList[dp.ID()] = dutNextIP
+-		ATEIPList[dp.ID()] = ateNextIP
++		dutIPList[dp.ID()] = dutNextIP
++		ateIPList[dp.ID()] = ateNextIP
+ 
+ 		// Increment DUT and ATE host ip index by 4.
+ 		dutIPIndex = dutIPIndex + 4
+@@ -106,22 +106,22 @@ func BuildBenchmarkingConfig(t *testing.T) *oc.Root {
+ 
+ 	bgp := netInstance.GetOrCreateProtocol(oc.PolicyTypes_INSTALL_PROTOCOL_TYPE_BGP, "BGP").GetOrCreateBgp()
+ 	global := bgp.GetOrCreateGlobal()
+-	global.As = ygot.Uint32(DUTAs)
++	global.As = ygot.Uint32(dutAS)
+ 	global.RouterId = ygot.String(dutStartIPAddr)
+ 
+ 	afi := global.GetOrCreateAfiSafi(oc.BgpTypes_AFI_SAFI_TYPE_IPV4_UNICAST)
+ 	afi.Enabled = ygot.Bool(true)
+ 
+-	pg := bgp.GetOrCreatePeerGroup(PeerGrpName)
+-	pg.PeerAs = ygot.Uint32(ATEAs)
+-	pg.PeerGroupName = ygot.String(PeerGrpName)
++	pg := bgp.GetOrCreatePeerGroup(peerGrpName)
++	pg.PeerAs = ygot.Uint32(ateAS)
++	pg.PeerGroupName = ygot.String(peerGrpName)
+ 
+ 	// ISIS configs.
+-	isis := netInstance.GetOrCreateProtocol(oc.PolicyTypes_INSTALL_PROTOCOL_TYPE_ISIS, ISISInstance).GetOrCreateIsis()
++	isis := netInstance.GetOrCreateProtocol(oc.PolicyTypes_INSTALL_PROTOCOL_TYPE_ISIS, isisInstance).GetOrCreateIsis()
+ 
+ 	globalISIS := isis.GetOrCreateGlobal()
+ 	globalISIS.AuthenticationCheck = ygot.Bool(true)
+-	globalISIS.Net = []string{fmt.Sprintf("%v.%v.00", DUTAreaAddress, DUTSysID)}
++	globalISIS.Net = []string{fmt.Sprintf("%v.%v.00", dutAreaAddress, dutSysID)}
+ 	lspBit := globalISIS.GetOrCreateLspBit().GetOrCreateOverloadBit()
+ 	lspBit.SetBit = ygot.Bool(false)
+ 	isisTimers := globalISIS.GetOrCreateTimers()
+@@ -158,16 +158,16 @@ func BuildBenchmarkingConfig(t *testing.T) *oc.Root {
+ 		if *deviations.InterfaceEnabled {
+ 			s4.Enabled = ygot.Bool(true)
+ 		}
+-		a4 := s4.GetOrCreateAddress(DUTIPList[dp.ID()].String())
++		a4 := s4.GetOrCreateAddress(dutIPList[dp.ID()].String())
+ 		a4.PrefixLength = ygot.Uint8(plenIPv4)
+ 
+ 		// BGP neighbor configs.
+-		nv4 := bgp.GetOrCreateNeighbor(ATEIPList[dp.ID()].String())
+-		nv4.PeerGroup = ygot.String(PeerGrpName)
++		nv4 := bgp.GetOrCreateNeighbor(ateIPList[dp.ID()].String())
++		nv4.PeerGroup = ygot.String(peerGrpName)
+ 		if dp.ID() == "port1" {
+-			nv4.PeerAs = ygot.Uint32(ateAs2)
++			nv4.PeerAs = ygot.Uint32(ateAS2)
+ 		} else {
+-			nv4.PeerAs = ygot.Uint32(ATEAs)
++			nv4.PeerAs = ygot.Uint32(ateAS)
+ 		}
+ 		nv4.Enabled = ygot.Bool(true)
+ 
+@@ -205,33 +205,33 @@ func ConfigureATE(t *testing.T, ate *ondatra.ATEDevice) {
+ 	topo := ate.Topology().New()
+ 
+ 	for _, dp := range ate.Ports() {
+-		ISISMetricArray = append(ISISMetricArray, ISISMetric)
+-		ISISSetBitArray = append(ISISSetBitArray, true)
++		isisMetricArray = append(isisMetricArray, isisMetric)
++		isisSetBitArray = append(isisSetBitArray, true)
+ 		atePortAttr := attrs.Attributes{
+ 			Name:    "ate" + dp.ID(),
+-			IPv4:    ATEIPList[dp.ID()].String(),
++			IPv4:    ateIPList[dp.ID()].String(),
+ 			IPv4Len: plenIPv4,
+ 		}
+ 		iDut1 := topo.AddInterface(dp.Name()).WithPort(dp)
+-		iDut1.IPv4().WithAddress(atePortAttr.IPv4CIDR()).WithDefaultGateway(DUTIPList[dp.ID()].String())
++		iDut1.IPv4().WithAddress(atePortAttr.IPv4CIDR()).WithDefaultGateway(dutIPList[dp.ID()].String())
+ 
+ 		// Add BGP routes and ISIS routes. ATE port1 is ingress port.
+ 		if dp.ID() == "port1" {
+ 			bgpDut1 := iDut1.BGP()
+-			bgpDut1.AddPeer().WithPeerAddress(DUTIPList[dp.ID()].String()).WithLocalASN(ateAs2).
++			bgpDut1.AddPeer().WithPeerAddress(dutIPList[dp.ID()].String()).WithLocalASN(ateAS2).
+ 				WithTypeExternal()
+ 
+ 			isisDut1 := iDut1.ISIS()
+-			isisDut1.WithLevelL2().WithNetworkTypePointToPoint().WithTERouterID(DUTIPList[dp.ID()].String()).WithAuthMD5(authPassword)
++			isisDut1.WithLevelL2().WithNetworkTypePointToPoint().WithTERouterID(dutIPList[dp.ID()].String()).WithAuthMD5(authPassword)
+ 
+ 			netCIDR := fmt.Sprintf("%s/%d", advertiseBGPRoutesv4, 32)
+ 			bgpNeti1 := iDut1.AddNetwork("bgpNeti1")
+-			bgpNeti1.IPv4().WithAddress(netCIDR).WithCount(RouteCount)
++			bgpNeti1.IPv4().WithAddress(netCIDR).WithCount(routeCount)
+ 			bgpNeti1.BGP().WithNextHopAddress(atePortAttr.IPv4)
+ 
+ 			netCIDR = fmt.Sprintf("%s/%d", advertiseISISRoutesv4, 32)
+ 			isisnet1 := iDut1.AddNetwork("isisnet1")
+-			isisnet1.IPv4().WithAddress(netCIDR).WithCount(RouteCount)
++			isisnet1.IPv4().WithAddress(netCIDR).WithCount(routeCount)
+ 			isisnet1.ISIS().WithActive(true).WithIPReachabilityMetric(20)
+ 
+ 			continue
+@@ -239,12 +239,12 @@ func ConfigureATE(t *testing.T, ate *ondatra.ATEDevice) {
+ 
+ 		// Add BGP on ATE.
+ 		bgpDut1 := iDut1.BGP()
+-		bgpDut1.AddPeer().WithPeerAddress(DUTIPList[dp.ID()].String()).WithLocalASN(ATEAs).
++		bgpDut1.AddPeer().WithPeerAddress(dutIPList[dp.ID()].String()).WithLocalASN(ateAS).
+ 			WithTypeExternal()
+ 
+ 		// Add ISIS on ATE.
+ 		isisDut1 := iDut1.ISIS()
+-		isisDut1.WithLevelL2().WithNetworkTypePointToPoint().WithTERouterID(DUTIPList[dp.ID()].String()).WithAuthMD5(authPassword)
++		isisDut1.WithLevelL2().WithNetworkTypePointToPoint().WithTERouterID(dutIPList[dp.ID()].String()).WithAuthMD5(authPassword)
+ 
+ 	}
+ 
+@@ -256,7 +256,7 @@ func ConfigureATE(t *testing.T, ate *ondatra.ATEDevice) {
+ 
+ // VerifyISISTelemetry verifies ISIS telemetry on DUT.
+ func VerifyISISTelemetry(t *testing.T, dut *ondatra.DUTDevice) {
+-	statePath := gnmi.OC().NetworkInstance(*deviations.DefaultNetworkInstance).Protocol(oc.PolicyTypes_INSTALL_PROTOCOL_TYPE_ISIS, ISISInstance).Isis()
++	statePath := gnmi.OC().NetworkInstance(*deviations.DefaultNetworkInstance).Protocol(oc.PolicyTypes_INSTALL_PROTOCOL_TYPE_ISIS, isisInstance).Isis()
+ 	for _, dp := range dut.Ports() {
+ 		nbrPath := statePath.Interface(dp.Name())
+ 		query := nbrPath.LevelAny().AdjacencyAny().AdjacencyState().State()
+@@ -274,7 +274,7 @@ func VerifyISISTelemetry(t *testing.T, dut *ondatra.DUTDevice) {
+ // VerifyBgpTelemetry verifies BGP telemetry on DUT.
+ func VerifyBgpTelemetry(t *testing.T, dut *ondatra.DUTDevice) {
+ 	statePath := gnmi.OC().NetworkInstance(*deviations.DefaultNetworkInstance).Protocol(oc.PolicyTypes_INSTALL_PROTOCOL_TYPE_BGP, "BGP").Bgp()
+-	for _, peerAddr := range ATEIPList {
++	for _, peerAddr := range ateIPList {
+ 		nbrIP := peerAddr.String()
+ 		nbrPath := statePath.Neighbor(nbrIP)
+ 

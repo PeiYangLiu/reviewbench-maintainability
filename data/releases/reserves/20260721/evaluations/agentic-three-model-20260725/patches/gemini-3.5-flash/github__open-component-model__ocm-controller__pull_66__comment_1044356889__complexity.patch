@@ -1,0 +1,111 @@
+diff --git a/controllers/componentversion_controller.go b/controllers/componentversion_controller.go
+index 3288c17..debf198 100644
+--- a/controllers/componentversion_controller.go
++++ b/controllers/componentversion_controller.go
+@@ -232,7 +232,7 @@ func (r *ComponentVersionReconciler) reconcile(ctx context.Context, obj *v1alpha
+ 		return ctrl.Result{RequeueAfter: obj.GetRequeueAfter()}, err
+ 	}
+ 
+-	componentDescriptor.References, err = r.parseReferences(ctx, obj, cv.GetDescriptor().References)
++	componentDescriptor.References, err = r.reconcileReferences(ctx, obj, cv.GetDescriptor().References)
+ 	if err != nil {
+ 		return ctrl.Result{
+ 			RequeueAfter: obj.GetRequeueAfter(),
+@@ -260,30 +260,63 @@ func (r *ComponentVersionReconciler) reconcile(ctx context.Context, obj *v1alpha
+ 	return ctrl.Result{RequeueAfter: obj.GetRequeueAfter()}, nil
+ }
+ 
+-// parseReferences takes a list of references to embedded components and constructs a dependency tree out of them.
+-func (r *ComponentVersionReconciler) parseReferences(ctx context.Context, parent *v1alpha1.ComponentVersion, references ocmdesc.References) ([]v1alpha1.Reference, error) {
++// reconcileReferences takes a list of references to embedded components and constructs a dependency tree out of them.
++func (r *ComponentVersionReconciler) reconcileReferences(ctx context.Context, parent *v1alpha1.ComponentVersion, references ocmdesc.References) ([]v1alpha1.Reference, error) {
+ 	result := make([]v1alpha1.Reference, 0)
+ 	for _, ref := range references {
+-		reference, err := r.parseReferencesLoopBody(ctx, parent, ref)
++		reference, err := r.reconcileReference(ctx, parent, ref)
+ 		if err != nil {
+-			return nil, fmt.Errorf("failed to parse reference: %w", err)
++			return nil, fmt.Errorf("failed to reconcile reference: %w", err)
+ 		}
+ 		result = append(result, *reference)
+ 	}
+ 	return result, nil
+ }
+ 
+-func (r *ComponentVersionReconciler) parseReferencesLoopBody(ctx context.Context, parent *v1alpha1.ComponentVersion, ref ocmdesc.ComponentReference) (*v1alpha1.Reference, error) {
+-	log := log.FromContext(ctx)
++func (r *ComponentVersionReconciler) reconcileReference(ctx context.Context, parent *v1alpha1.ComponentVersion, ref ocmdesc.ComponentReference) (*v1alpha1.Reference, error) {
+ 	// get component version
+ 	rcv, err := r.OCMClient.GetComponentVersion(ctx, parent, ref.ComponentName, ref.Version)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed to get component version: %w", err)
+ 	}
+ 	defer rcv.Close()
++
++	descriptor, err := r.reconcileComponentDescriptor(ctx, parent, ref, rcv.GetDescriptor())
++	if err != nil {
++		return nil, fmt.Errorf("failed to reconcile component descriptor for reference: %w", err)
++	}
++
++	reference := v1alpha1.Reference{
++		Name:    ref.Name,
++		Version: ref.Version,
++		ComponentDescriptorRef: meta.NamespacedObjectReference{
++			Name:      descriptor.Name,
++			Namespace: descriptor.Namespace,
++		},
++		ExtraIdentity: ref.ExtraIdentity,
++	}
++
++	if len(rcv.GetDescriptor().References) > 0 {
++		out, err := r.reconcileReferences(ctx, parent, rcv.GetDescriptor().References)
++		if err != nil {
++			return nil, err
++		}
++		reference.References = out
++	}
++
++	return &reference, nil
++}
++
++func (r *ComponentVersionReconciler) reconcileComponentDescriptor(
++	ctx context.Context,
++	parent *v1alpha1.ComponentVersion,
++	ref ocmdesc.ComponentReference,
++	componentDescriptor *ocmdesc.ComponentDescriptor,
++) (*v1alpha1.ComponentDescriptor, error) {
++	log := log.FromContext(ctx)
+ 	// convert ComponentDescriptor to v3alpha1
+ 	dv := &compdesc.DescriptorVersion{}
+-	cd, err := dv.ConvertFrom(rcv.GetDescriptor())
++	cd, err := dv.ConvertFrom(componentDescriptor)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed to convert component descriptor: %w", err)
+ 	}
+@@ -317,25 +350,7 @@ func (r *ComponentVersionReconciler) parseReferencesLoopBody(ctx context.Context
+ 	}
+ 	log.V(4).Info(fmt.Sprintf("%s(ed) descriptor", op), "descriptor", klog.KObj(descriptor))
+ 
+-	reference := v1alpha1.Reference{
+-		Name:    ref.Name,
+-		Version: ref.Version,
+-		ComponentDescriptorRef: meta.NamespacedObjectReference{
+-			Name:      descriptor.Name,
+-			Namespace: descriptor.Namespace,
+-		},
+-		ExtraIdentity: ref.ExtraIdentity,
+-	}
+-
+-	if len(rcv.GetDescriptor().References) > 0 {
+-		out, err := r.parseReferences(ctx, parent, rcv.GetDescriptor().References)
+-		if err != nil {
+-			return nil, err
+-		}
+-		reference.References = out
+-	}
+-
+-	return &reference, nil
++	return descriptor, nil
+ }
+ 
+ // constructComponentName constructs a unique name from a component name and version.

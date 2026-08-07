@@ -1,0 +1,55 @@
+diff --git a/spanner/client.go b/spanner/client.go
+index 0dab330..2328cec 100644
+--- a/spanner/client.go
++++ b/spanner/client.go
+@@ -772,6 +772,15 @@ func (r *BatchWriteResponseIterator) Do(f func(r *sppb.BatchWriteResponse) error
+ 	}
+ }
+ 
++// BatchWriteOptions provides options for a BatchWrite request.
++type BatchWriteOptions struct {
++	// TransactionTag will be included with the CommitRequest.
++	TransactionTag string
++
++	// Priority is the RPC priority that is used for the commit operation.
++	Priority sppb.RequestOptions_Priority
++}
++
+ // BatchWrite applies a list of mutation groups in a collection of efficient
+ // transactions. The mutation groups are applied non-atomically in an
+ // unspecified order and thus, they must be independent of each other. Partial
+@@ -786,7 +795,9 @@ func (r *BatchWriteResponseIterator) Do(f func(r *sppb.BatchWriteResponse) error
+ // timestamp-based keys, it may result in additional rows being added to the
+ // mutation's table. We recommend structuring your mutation groups to be
+ // idempotent to avoid this issue.
+-func (c *Client) BatchWrite(ctx context.Context, mgs []*MutationGroup, opts ...ApplyOption) *BatchWriteResponseIterator {
++//
++// The set of options for the BatchWrite request is provided via BatchWriteOptions.
++func (c *Client) BatchWrite(ctx context.Context, mgs []*MutationGroup, opts BatchWriteOptions) *BatchWriteResponseIterator {
+ 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/spanner.BatchWrite")
+ 
+ 	var err error
+@@ -794,14 +805,6 @@ func (c *Client) BatchWrite(ctx context.Context, mgs []*MutationGroup, opts ...A
+ 		trace.EndSpan(ctx, err)
+ 	}()
+ 
+-	ao := &applyOption{}
+-	for _, opt := range c.ao {
+-		opt(ao)
+-	}
+-	for _, opt := range opts {
+-		opt(ao)
+-	}
+-
+ 	mgsPb, err := mutationGroupsProto(mgs)
+ 	if err != nil {
+ 		return &BatchWriteResponseIterator{err: err}
+@@ -818,7 +821,7 @@ func (c *Client) BatchWrite(ctx context.Context, mgs []*MutationGroup, opts ...A
+ 		stream, rpcErr := sh.getClient().BatchWrite(contextWithOutgoingMetadata(ct, sh.getMetadata(), c.disableRouteToLeader), &sppb.BatchWriteRequest{
+ 			Session:        sh.getID(),
+ 			MutationGroups: mgsPb,
+-			RequestOptions: createRequestOptions(ao.priority, "", ao.transactionTag),
++			RequestOptions: createRequestOptions(opts.Priority, "", opts.TransactionTag),
+ 		}, gax.WithGRPCOptions(grpc.Header(&md)))
+ 
+ 		if getGFELatencyMetricsFlag() && md != nil && c.ct != nil {

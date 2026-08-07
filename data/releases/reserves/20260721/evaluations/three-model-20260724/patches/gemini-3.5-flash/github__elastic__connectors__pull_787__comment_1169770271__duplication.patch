@@ -1,0 +1,68 @@
+--- a/connectors/sources/sharepoint.py
++++ b/connectors/sources/sharepoint.py
+@@ -190,6 +190,23 @@
+         await self.session.close()
+         self.session = None
+ 
++    async def _convert_to_b64_and_read(self, source_file_name):
++        """Converts file content to base64, reads it, and removes the temporary file."""
++        await asyncio.to_thread(
++            convert_to_b64,
++            source=source_file_name,
++        )
++        async with aiofiles.open(file=source_file_name, mode="r") as target_file:
++            # base64 on macOS will add a EOL, so we strip() here
++            attachment_content = (await target_file.read()).strip()
++        try:
++            await remove(source_file_name)  # pyright: ignore
++        except Exception as exception:
++            logger.warning(
++                f"Could not remove file from: {source_file_name}. Error: {exception}"
++            )
++        return attachment_content
++
+     @retryable(
+         retries=RETRIES,
+         interval=RETRY_INTERVAL,
+@@ -237,19 +254,7 @@
+ 
+             source_file_name = async_buffer.name
+ 
+-        await asyncio.to_thread(
+-            convert_to_b64,
+-            source=source_file_name,
+-        )
+-        async with aiofiles.open(file=source_file_name, mode="r") as target_file:
+-            # base64 on macOS will add a EOL, so we strip() here
+-            attachment_content = (await target_file.read()).strip()
+-        try:
+-            await remove(source_file_name)  # pyright: ignore
+-        except Exception as exception:
+-            logger.warning(
+-                f"Could not remove file from: {source_file_name}. Error: {exception}"
+-            )
++        attachment_content = await self._convert_to_b64_and_read(source_file_name)
+         return {
+             "_id": document.get("id"),
+             "_timestamp": document.get("_timestamp"),
+@@ -308,19 +313,7 @@
+             async with NamedTemporaryFile(mode="wb", delete=False) as async_buffer:
+                 await async_buffer.write(bytes(response_data, "utf-8"))
+                 source_file_name = async_buffer.name
+-        await asyncio.to_thread(
+-            convert_to_b64,
+-            source=source_file_name,
+-        )
+-        async with aiofiles.open(file=source_file_name) as target_file:
+-            # base64 on macOS will add a EOL, so we strip() here
+-            attachment_content = (await target_file.read()).strip()
+-        try:
+-            await remove(source_file_name)  # pyright: ignore
+-        except Exception as exception:
+-            logger.warning(
+-                f"Could not remove file from: {source_file_name}. Error: {exception}"
+-            )
++        attachment_content = await self._convert_to_b64_and_read(source_file_name)
+         return {
+             "_id": document.get("id"),
+             "_timestamp": document.get("_timestamp"),

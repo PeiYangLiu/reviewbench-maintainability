@@ -1,0 +1,68 @@
+diff --git a/addons/controllers/calico/calicoconfig_controller.go b/addons/controllers/calico/calicoconfig_controller.go
+index 75a9518..ddc38ee 100644
+--- a/addons/controllers/calico/calicoconfig_controller.go
++++ b/addons/controllers/calico/calicoconfig_controller.go
+@@ -105,23 +105,18 @@ func (r *CalicoConfigReconciler) ReconcileCalicoConfig(
+ 	calicoConfig *cniv1alpha1.CalicoConfig,
+ 	cluster *clusterapiv1beta1.Cluster) (_ ctrl.Result, retErr error) {
+ 
+-	var patchConfig bool
+-
+ 	patchHelper, err := clusterapipatchutil.NewHelper(calicoConfig, r.Client)
+ 	if err != nil {
+ 		return ctrl.Result{}, err
+ 	}
+ 	// patch CalicoConfig before returning the function
+ 	defer func() {
+-		// patchConfig will be true if owner reference or secretRef are added
+-		if patchConfig {
+-			r.Log.Info("Patching CalicoConfig")
+-			if err := patchHelper.Patch(r.Ctx, calicoConfig); err != nil {
+-				r.Log.Error(err, "Error patching CalicoConfig")
+-				retErr = err
+-			}
+-			r.Log.Info("Successfully patched CalicoConfig")
++		r.Log.Info("Patching CalicoConfig")
++		if err := patchHelper.Patch(r.Ctx, calicoConfig); err != nil {
++			r.Log.Error(err, "Error patching CalicoConfig")
++			retErr = err
+ 		}
++		r.Log.Info("Successfully patched CalicoConfig")
+ 	}()
+ 
+ 	// if CalicoConfig is marked for deletion, then no reconciliation is needed
+@@ -130,7 +125,7 @@ func (r *CalicoConfigReconciler) ReconcileCalicoConfig(
+ 	}
+ 
+ 	// reconcile CalicoConfig by creating the data values secret for CalicoConfig
+-	if err := r.ReconcileCalicoConfigNormal(calicoConfig, cluster, &patchConfig); err != nil {
++	if err := r.ReconcileCalicoConfigNormal(calicoConfig, cluster); err != nil {
+ 		r.Log.Error(err, "Error reconciling CalicoConfig to create/patch data values secret")
+ 		return ctrl.Result{}, err
+ 	}
+@@ -142,8 +137,7 @@ func (r *CalicoConfigReconciler) ReconcileCalicoConfig(
+ // ReconcileCalicoConfigNormal reconciles CalicoConfig by creating/patching data values secret
+ func (r *CalicoConfigReconciler) ReconcileCalicoConfigNormal(
+ 	calicoConfig *cniv1alpha1.CalicoConfig,
+-	cluster *clusterapiv1beta1.Cluster,
+-	patchConfig *bool) (retErr error) {
++	cluster *clusterapiv1beta1.Cluster) (retErr error) {
+ 
+ 	// add owner reference to CalicoConfig if not already added by TanzuClusterBootstrap Controller
+ 	ownerReference := metav1.OwnerReference{
+@@ -155,7 +149,6 @@ func (r *CalicoConfigReconciler) ReconcileCalicoConfigNormal(
+ 	if !clusterapiutil.HasOwnerRef(calicoConfig.OwnerReferences, ownerReference) {
+ 		r.Log.Info("Adding owner reference to CalicoConfig")
+ 		calicoConfig.OwnerReferences = clusterapiutil.EnsureOwnerRef(calicoConfig.OwnerReferences, ownerReference)
+-		*patchConfig = true
+ 	}
+ 
+ 	// create/patch data values secret for CalicoConfig
+@@ -170,7 +163,6 @@ func (r *CalicoConfigReconciler) ReconcileCalicoConfigNormal(
+ 	// add the name of the data values secret in the CalicoConfig Status field
+ 	if calicoConfig.Status.SecretName != secretNamespacedName.Name {
+ 		calicoConfig.Status.SecretName = secretNamespacedName.Name
+-		*patchConfig = true
+ 	}
+ 	return nil
+ }

@@ -1,0 +1,96 @@
+--- a/src/TwigComponent/src/ComponentFactory.php
++++ b/src/TwigComponent/src/ComponentFactory.php
+@@ -18,6 +18,42 @@
+ use Symfony\UX\TwigComponent\Event\PostMountEvent;
+ use Symfony\UX\TwigComponent\Event\PreMountEvent;
+ use Twig\Environment;
++use Twig\Loader\LoaderInterface;
++
++interface ComponentTemplateFinderInterface
++{
++    public function findAnonymousComponentTemplate(string $name): ?string;
++}
++
++final class TwigComponentTemplateFinder implements ComponentTemplateFinderInterface
++{
++    public function __construct(private LoaderInterface $loader)
++    {
++    }
++
++    public function findAnonymousComponentTemplate(string $name): ?string
++    {
++        $componentPath = rtrim(str_replace(':', '/', $name));
++
++        if ($this->loader->exists($componentPath)) {
++            return $componentPath;
++        }
++
++        if ($this->loader->exists($componentPath.'.html.twig')) {
++            return $componentPath.'.html.twig';
++        }
++
++        if ($this->loader->exists('components/'.$componentPath)) {
++            return 'components/'.$componentPath;
++        }
++
++        if ($this->loader->exists('/components/'.$componentPath.'.html.twig')) {
++            return '/components/'.$componentPath.'.html.twig';
++        }
++
++        return null;
++    }
++}
+ 
+ /**
+  * @author Kevin Bond <kevinbond@gmail.com>
+@@ -26,18 +62,21 @@
+  */
+ final class ComponentFactory
+ {
++    private ComponentTemplateFinderInterface $componentTemplateFinder;
++
+     /**
+      * @param array<string, array>        $config
+      * @param array<class-string, string> $classMap
+      */
+     public function __construct(
+-        private Environment $environment,
++        Environment|ComponentTemplateFinderInterface $environment,
+         private ServiceLocator $components,
+         private PropertyAccessorInterface $propertyAccessor,
+         private EventDispatcherInterface $eventDispatcher,
+         private array $config,
+         private array $classMap
+     ) {
++        $this->componentTemplateFinder = $environment instanceof Environment ? new TwigComponentTemplateFinder($environment->getLoader()) : $environment;
+     }
+ 
+     public function metadataFor(string $name): ComponentMetadata
+@@ -215,26 +254,7 @@
+ 
+     public function findAnonymousComponentTemplate(string $name): ?string
+     {
+-        $loader = $this->environment->getLoader();
+-        $componentPath = rtrim(str_replace(':', '/', $name));
+-
+-        if ($loader->exists($componentPath)) {
+-            return $componentPath;
+-        }
+-
+-        if ($loader->exists($componentPath.'.html.twig')) {
+-            return $componentPath.'.html.twig';
+-        }
+-
+-        if ($loader->exists('components/'.$componentPath)) {
+-            return 'components/'.$componentPath;
+-        }
+-
+-        if ($loader->exists('/components/'.$componentPath.'.html.twig')) {
+-            return '/components/'.$componentPath.'.html.twig';
+-        }
+-
+-        return null;
++        return $this->componentTemplateFinder->findAnonymousComponentTemplate($name);
+     }
+ 
+     /**

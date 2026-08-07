@@ -1,0 +1,63 @@
+--- a/druidctl/cmd/listresources/listresources.go
++++ b/druidctl/cmd/listresources/listresources.go
+@@ -15,9 +15,50 @@
+ 	"github.com/gardener/etcd-druid/druidctl/internal/log"
+ 	"github.com/gardener/etcd-druid/druidctl/internal/printer"
+ 
++	"k8s.io/apimachinery/pkg/api/meta"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
++	"k8s.io/apimachinery/pkg/runtime/schema"
+ )
++
++// resourceMeta captures the resolved metadata for a requested resource token.
++type resourceMeta struct {
++	GVR        schema.GroupVersionResource
++	Kind       string
++	Namespaced bool
++}
++
++// resolveResources resolves the provided resource tokens (short names, plural,
++// kind, etc.) into their fully qualified metadata using the RESTMapper, which
++// implicitly handles all naming variations.
++func resolveResources(mapper meta.RESTMapper, tokens []string) ([]resourceMeta, error) {
++	metas := make([]resourceMeta, 0, len(tokens))
++	seen := map[schema.GroupVersionResource]struct{}{}
++	for _, token := range tokens {
++		gvr, err := mapper.ResourceFor(schema.GroupVersionResource{Resource: token})
++		if err != nil {
++			return nil, fmt.Errorf("unable to resolve resource %q: %w", token, err)
++		}
++		if _, ok := seen[gvr]; ok {
++			continue
++		}
++		seen[gvr] = struct{}{}
++		gvk, err := mapper.KindFor(gvr)
++		if err != nil {
++			return nil, fmt.Errorf("unable to resolve kind for resource %q: %w", token, err)
++		}
++		mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
++		if err != nil {
++			return nil, fmt.Errorf("unable to resolve mapping for resource %q: %w", token, err)
++		}
++		metas = append(metas, resourceMeta{
++			GVR:        gvr,
++			Kind:       gvk.Kind,
++			Namespaced: mapping.Scope.Name() == meta.RESTScopeNameNamespace,
++		})
++	}
++	return metas, nil
++}
+ 
+ // ResourceKey identifies a Kubernetes resource kind by group/version/resource/Kind.
+ type ResourceKey struct {
+@@ -104,8 +145,7 @@
+ 	if len(tokens) == 0 || (len(tokens) == 1 && tokens[0] == "all") {
+ 		tokens = defaultResourceTokens()
+ 	}
+-	resolver := newRESTMapperResolver(genClient.RESTMapper())
+-	metas, err := resolver.resolve(tokens)
++	metas, err := resolveResources(genClient.RESTMapper(), tokens)
+ 	if err != nil {
+ 		return err
+ 	}

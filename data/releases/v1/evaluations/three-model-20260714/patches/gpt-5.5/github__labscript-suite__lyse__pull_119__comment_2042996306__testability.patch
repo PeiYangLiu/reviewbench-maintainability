@@ -1,0 +1,125 @@
+--- a/lyse/__init__.py
++++ b/lyse/__init__.py
+@@ -44,27 +44,60 @@
+ # Import this way so LYSE_DIR is exposed when someone does import lyse or from lyse import *
+ from lyse.utils import LYSE_DIR
+ 
+-# If running stand-alone, and not from within lyse, the below two variables
+-# will be as follows. Otherwise lyse will override them with spinning_top =
+-# True and path <name of hdf5 file being analysed>:
+-spinning_top = False
+-# data to be sent back to the lyse GUI if running within lyse
+-_updated_data = {}
+-# dictionary of plot id's to classes to use for Plot object
+-_plot_classes = {}
+-# A fake Plot object to subclass if we are not running in the GUI
+-Plot=object
+-# An empty dictionary of plots (overwritten by the analysis worker if running within lyse)
+-plots = {}
+-# A threading.Event to delay the 
+-delay_event = threading.Event()
+-# a flag to determine whether we should wait for the delay event
+-_delay_flag = False
+-
+-if len(sys.argv) > 1:
+-    path = sys.argv[1]
+-else:
+-    path = None
++class _AnalysisContext:
++    """Runtime state shared with lyse GUI analysis worker subprocesses.
++
++    The GUI overwrites this state so that analysis scripts can run unchanged
++    from the command line or from within lyse. The module-level names below are
++    retained for backwards compatibility with existing scripts and worker code.
++    """
++
++    def __init__(self):
++        # True when running under the lyse GUI analysis worker.
++        self.spinning_top = False
++        # Data to be sent back to the lyse GUI if running within lyse.
++        self._updated_data = {}
++        # Dictionary of plot id's to classes to use for Plot object.
++        self._plot_classes = {}
++        # A fake Plot object to subclass if we are not running in the GUI.
++        self.Plot = object
++        # Plots managed by the analysis worker if running within lyse.
++        self.plots = {}
++        # A threading.Event to delay returning results to the GUI.
++        self.delay_event = threading.Event()
++        # A flag to determine whether we should wait for the delay event.
++        self._delay_flag = False
++        # Path of the hdf5 file being analysed when run from the command line.
++        self.path = sys.argv[1] if len(sys.argv) > 1 else None
++
++
++_analysis_context = _AnalysisContext()
++_CONTEXT_GLOBALS = frozenset(vars(_analysis_context))
++globals().update(
++    {name: getattr(_analysis_context, name) for name in _CONTEXT_GLOBALS}
++)
++
++
++class _LyseModule(types.ModuleType):
++    def __setattr__(self, name, value):
++        if name in _CONTEXT_GLOBALS:
++            setattr(_analysis_context, name, value)
++        super().__setattr__(name, value)
++
++
++sys.modules[__name__].__class__ = _LyseModule
++
++
++def _record_updated_result(h5_path, group, name, value):
++    """Record a saved result for the lyse GUI dataframe update response."""
++    if not _analysis_context.spinning_top:
++        return
++    updated_data = _analysis_context._updated_data
++    if h5_path not in updated_data:
++        updated_data[h5_path] = {}
++    if group.startswith('results'):
++        toplevel = group.replace('results/', '', 1)
++        updated_data[h5_path][toplevel, name] = value
+ 
+ 
+ class _RoutineStorage(object):
+@@ -646,12 +679,7 @@
+             raise PermissionError(dedent(msg))
+         set_attributes(self.h5_file[group], {name: value})
+             
+-        if spinning_top:
+-            if self.h5_path not in _updated_data:
+-                _updated_data[self.h5_path] = {}
+-            if group.startswith('results'):
+-                toplevel = group.replace('results/', '', 1)
+-                _updated_data[self.h5_path][toplevel, name] = value
++        _record_updated_result(self.h5_path, group, name, value)
+ 
+     @open_file('r+')
+     def save_result_array(self, name, data, group=None, 
+@@ -1210,21 +1238,22 @@
+ 
+ 
+ def register_plot_class(identifier, cls):
+-    if not spinning_top:
++    if not _analysis_context.spinning_top:
+         msg = """Warning: lyse.register_plot_class has no effect on scripts not run with
+             the lyse GUI.
+             """
+         sys.stderr.write(dedent(msg))
+-    _plot_classes[identifier] = cls
++    _analysis_context._plot_classes[identifier] = cls
+ 
+ def get_plot_class(identifier):
+-    return _plot_classes.get(identifier, None)
++    return _analysis_context._plot_classes.get(identifier, None)
+ 
+ def delay_results_return():
+     global _delay_flag
+-    if not spinning_top:
++    if not _analysis_context.spinning_top:
+         msg = """Warning: lyse.delay_results_return has no effect on scripts not run 
+             with the lyse GUI.
+             """
+         sys.stderr.write(dedent(msg))
++    _analysis_context._delay_flag = True
+     _delay_flag = True

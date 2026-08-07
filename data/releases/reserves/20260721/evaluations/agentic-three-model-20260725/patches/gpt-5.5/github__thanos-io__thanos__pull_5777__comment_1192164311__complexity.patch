@@ -1,0 +1,46 @@
+diff --git a/pkg/receive/multitsdb.go b/pkg/receive/multitsdb.go
+index f55e0b2..c85b0c4 100644
+--- a/pkg/receive/multitsdb.go
++++ b/pkg/receive/multitsdb.go
+@@ -548,20 +548,11 @@ func (t *MultiTSDB) startTSDB(logger log.Logger, tenantID string, tenant *tenant
+ 	// Extract tenant's external labels from hashring configs.
+ 	// If one tenant appears in multiple hashring configs,
+ 	// only the external label set from the first hashring config is applied.
+-hcLoop:
+-	for _, hc := range t.hashringConfigs {
+-		for _, tenant := range hc.Tenants {
+-			if tenant != tenantID {
+-				continue
+-			}
+-
+-			var err error
+-			lset, err = parseAndExtendSortedLabels(lset, hc.ExternalLabels, t.logger)
+-			if err != nil {
+-				return errors.Wrap(err, "failed to parse external labels for tenant "+tenantID)
+-			}
+-
+-			break hcLoop
++	if externalLabels, ok := t.externalLabelsForTenant(tenantID); ok {
++		var err error
++		lset, err = parseAndExtendSortedLabels(lset, externalLabels, t.logger)
++		if err != nil {
++			return errors.Wrap(err, "failed to parse external labels for tenant "+tenantID)
+ 		}
+ 	}
+ 
+@@ -601,6 +592,15 @@ hcLoop:
+ 	return nil
+ }
+ 
++func (t *MultiTSDB) externalLabelsForTenant(tenantID string) ([]string, bool) {
++	for _, hc := range t.hashringConfigs {
++		if slices.Contains(hc.Tenants, tenantID) {
++			return hc.ExternalLabels, true
++		}
++	}
++	return nil, false
++}
++
+ func (t *MultiTSDB) defaultTenantDataDir(tenantID string) string {
+ 	return path.Join(t.dataDir, tenantID)
+ }

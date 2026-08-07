@@ -1,0 +1,414 @@
+--- a/internal/pkg/repository_ch/error_groups.go
++++ b/internal/pkg/repository_ch/error_groups.go
+@@ -37,196 +37,221 @@
+ 		aggTable, startDate := getHistData(req.Duration)
+ 
+ 		if req.Order == types.OrderFrequent {
+-			countQ := sq.
+-				Select(
+-					"_group_hash",
+-					"countMerge(counts) as count",
+-				).
+-				From(aggTable).
+-				Where(where).
+-				Where(sq.GtOrEq{startDate: r.nowFn().Add(-req.Duration.Abs())}).
+-				GroupBy("_group_hash").
+-				OrderBy("count DESC").
+-				Limit(uint64(req.Limit)).
+-				Offset(uint64(req.Offset))
+-
+-			countQuery, countArgs := countQ.MustSql()
+-			metricLabels := []string{aggTable, "SELECT"}
+-			countRows, err := r.conn.Query(ctx, metricLabels, countQuery, countArgs...)
+-			if err != nil {
+-				incErrorMetric(err, metricLabels)
+-				return nil, fmt.Errorf("failed to get error groups count: %w", err)
+-			}
+-
+-			var (
+-				groups    []types.ErrorGroup
+-				idxByHash = map[uint64]int{}
+-				hashes    []uint64
+-			)
+-			for countRows.Next() {
+-				var group types.ErrorGroup
+-				if err = countRows.Scan(
+-					&group.Hash,
+-					&group.Count,
+-				); err != nil {
+-					return nil, fmt.Errorf("failed to scan row: %w", err)
+-				}
+-
+-				groups = append(groups, group)
+-				hashes = append(hashes, group.Hash)
+-				idxByHash[group.Hash] = len(groups) - 1
+-			}
+-
+-			if len(groups) == 0 {
+-				return nil, nil
+-			}
+-
+-			where["_group_hash"] = hashes
+-			q := sq.
+-				Select(
+-					"_group_hash",
+-					"source",
+-					"any(message) as message",
+-					"minMerge(first_seen_at) as first_seen_at",
+-					"maxMerge(last_seen_at) as last_seen_at",
+-				).
+-				From("error_groups").
+-				Where(where).
+-				GroupBy("_group_hash", "source")
+-
+-			query, args := q.MustSql()
+-			metricLabels = []string{"error_groups", "SELECT"}
+-			rows, err := r.conn.Query(ctx, metricLabels, query, args...)
+-			if err != nil {
+-				incErrorMetric(err, metricLabels)
+-				return nil, fmt.Errorf("failed to get error groups: %w", err)
+-			}
+-
+-			var (
+-				hash                uint64
+-				message, source     string
+-				firstSeen, lastSeen time.Time
+-			)
+-			for rows.Next() {
+-				if err = rows.Scan(
+-					&hash,
+-					&source,
+-					&message,
+-					&firstSeen,
+-					&lastSeen,
+-				); err != nil {
+-					return nil, fmt.Errorf("failed to scan row: %w", err)
+-				}
+-
+-				idx := idxByHash[hash]
+-				groups[idx].Source = source
+-				groups[idx].Message = message
+-				groups[idx].FirstSeenAt = firstSeen
+-				groups[idx].LastSeenAt = lastSeen
+-			}
+-
+-			return groups, nil
+-		}
+-
+-		subQ := sq.
+-			Select("_group_hash").
+-			From("error_groups").
+-			Where(where).
+-			Having(sq.GtOrEq{"maxMerge(last_seen_at)": r.nowFn().Add(-req.Duration.Abs())}).
+-			GroupBy("_group_hash").
+-			OrderBy(orderBy(req.Order, true)).
+-			Limit(uint64(req.Limit)).
+-			Offset(uint64(req.Offset))
+-
+-		in := "IN"
+-		if r.sharded {
+-			subQ = subQ.Distinct()
+-			in = "GLOBAL IN"
+-		}
+-
+-		subQuery, subArgs := subQ.MustSql()
+-
+-		q := sq.
+-			Select(
+-				"_group_hash",
+-				"source",
+-				"any(message) as message",
+-				"minMerge(first_seen_at) as first_seen_at",
+-				"maxMerge(last_seen_at) as last_seen_at",
+-			).
+-			From("error_groups").
+-			Where(where).
+-			Where(fmt.Sprintf("_group_hash %s (%s)", in, subQuery), subArgs...).
+-			GroupBy("_group_hash", "source").
+-			OrderBy(orderBy(req.Order, false))
+-
+-		query, args := q.MustSql()
+-		metricLabels := []string{"error_groups", "SELECT"}
+-		rows, err := r.conn.Query(ctx, metricLabels, query, args...)
+-		if err != nil {
+-			incErrorMetric(err, metricLabels)
+-			return nil, fmt.Errorf("failed to get error groups: %w", err)
+-		}
+-
+-		var (
+-			groups    []types.ErrorGroup
+-			idxByHash = map[uint64]int{}
+-			hashes    []uint64
+-		)
+-		for rows.Next() {
+-			var group types.ErrorGroup
+-			if err = rows.Scan(
+-				&group.Hash,
+-				&group.Source,
+-				&group.Message,
+-				&group.FirstSeenAt,
+-				&group.LastSeenAt,
+-			); err != nil {
+-				return nil, fmt.Errorf("failed to scan row: %w", err)
+-			}
+-
+-			groups = append(groups, group)
+-			hashes = append(hashes, group.Hash)
+-			idxByHash[group.Hash] = len(groups) - 1
+-		}
+-
+-		if len(groups) == 0 {
+-			return nil, nil
+-		}
+-
+-		where["_group_hash"] = hashes
+-		countQ := sq.
+-			Select(
+-				"_group_hash",
+-				"countMerge(counts) as count",
+-			).
+-			From(aggTable).
+-			Where(where).
+-			GroupBy("_group_hash")
+-
+-		countQuery, countArgs := countQ.MustSql()
+-		metricLabels = []string{aggTable, "SELECT"}
+-		countRows, err := r.conn.Query(ctx, metricLabels, countQuery, countArgs...)
+-		if err != nil {
+-			incErrorMetric(err, metricLabels)
+-			return nil, fmt.Errorf("failed to get error groups count: %w", err)
+-		}
+-
+-		var hash, count uint64
+-		for countRows.Next() {
+-			if err = countRows.Scan(
+-				&hash,
+-				&count,
+-			); err != nil {
+-				return nil, fmt.Errorf("failed to scan row: %w", err)
+-			}
+-
+-			groups[idxByHash[hash]].Count = count
+-		}
+-
+-		return groups, nil
+-	}
+-
++			return r.getErrorGroupsFrequent(ctx, req, where, aggTable, startDate)
++		}
++		return r.getErrorGroupsWithDuration(ctx, req, where, aggTable)
++	}
++
++	return r.getErrorGroupsNoDuration(ctx, req, where)
++}
++
++func (r *repository) getErrorGroupsFrequent(
++	ctx context.Context,
++	req types.GetErrorGroupsRequest,
++	where sq.Eq,
++	aggTable, startDate string,
++) ([]types.ErrorGroup, error) {
++	countQ := sq.
++		Select(
++			"_group_hash",
++			"countMerge(counts) as count",
++		).
++		From(aggTable).
++		Where(where).
++		Where(sq.GtOrEq{startDate: r.nowFn().Add(-req.Duration.Abs())}).
++		GroupBy("_group_hash").
++		OrderBy("count DESC").
++		Limit(uint64(req.Limit)).
++		Offset(uint64(req.Offset))
++
++	countQuery, countArgs := countQ.MustSql()
++	metricLabels := []string{aggTable, "SELECT"}
++	countRows, err := r.conn.Query(ctx, metricLabels, countQuery, countArgs...)
++	if err != nil {
++		incErrorMetric(err, metricLabels)
++		return nil, fmt.Errorf("failed to get error groups count: %w", err)
++	}
++
++	var (
++		groups    []types.ErrorGroup
++		idxByHash = map[uint64]int{}
++		hashes    []uint64
++	)
++	for countRows.Next() {
++		var group types.ErrorGroup
++		if err = countRows.Scan(
++			&group.Hash,
++			&group.Count,
++		); err != nil {
++			return nil, fmt.Errorf("failed to scan row: %w", err)
++		}
++
++		groups = append(groups, group)
++		hashes = append(hashes, group.Hash)
++		idxByHash[group.Hash] = len(groups) - 1
++	}
++
++	if len(groups) == 0 {
++		return nil, nil
++	}
++
++	where["_group_hash"] = hashes
++	q := sq.
++		Select(
++			"_group_hash",
++			"source",
++			"any(message) as message",
++			"minMerge(first_seen_at) as first_seen_at",
++			"maxMerge(last_seen_at) as last_seen_at",
++		).
++		From("error_groups").
++		Where(where).
++		GroupBy("_group_hash", "source")
++
++	query, args := q.MustSql()
++	metricLabels = []string{"error_groups", "SELECT"}
++	rows, err := r.conn.Query(ctx, metricLabels, query, args...)
++	if err != nil {
++		incErrorMetric(err, metricLabels)
++		return nil, fmt.Errorf("failed to get error groups: %w", err)
++	}
++
++	var (
++		hash                uint64
++		message, source     string
++		firstSeen, lastSeen time.Time
++	)
++	for rows.Next() {
++		if err = rows.Scan(
++			&hash,
++			&source,
++			&message,
++			&firstSeen,
++			&lastSeen,
++		); err != nil {
++			return nil, fmt.Errorf("failed to scan row: %w", err)
++		}
++
++		idx := idxByHash[hash]
++		groups[idx].Source = source
++		groups[idx].Message = message
++		groups[idx].FirstSeenAt = firstSeen
++		groups[idx].LastSeenAt = lastSeen
++	}
++
++	return groups, nil
++}
++
++func (r *repository) getErrorGroupsWithDuration(
++	ctx context.Context,
++	req types.GetErrorGroupsRequest,
++	where sq.Eq,
++	aggTable string,
++) ([]types.ErrorGroup, error) {
++	subQ := sq.
++		Select("_group_hash").
++		From("error_groups").
++		Where(where).
++		Having(sq.GtOrEq{"maxMerge(last_seen_at)": r.nowFn().Add(-req.Duration.Abs())}).
++		GroupBy("_group_hash").
++		OrderBy(orderBy(req.Order, true)).
++		Limit(uint64(req.Limit)).
++		Offset(uint64(req.Offset))
++
++	in := "IN"
++	if r.sharded {
++		subQ = subQ.Distinct()
++		in = "GLOBAL IN"
++	}
++
++	subQuery, subArgs := subQ.MustSql()
++
++	q := sq.
++		Select(
++			"_group_hash",
++			"source",
++			"any(message) as message",
++			"minMerge(first_seen_at) as first_seen_at",
++			"maxMerge(last_seen_at) as last_seen_at",
++		).
++		From("error_groups").
++		Where(where).
++		Where(fmt.Sprintf("_group_hash %s (%s)", in, subQuery), subArgs...).
++		GroupBy("_group_hash", "source").
++		OrderBy(orderBy(req.Order, false))
++
++	query, args := q.MustSql()
++	metricLabels := []string{"error_groups", "SELECT"}
++	rows, err := r.conn.Query(ctx, metricLabels, query, args...)
++	if err != nil {
++		incErrorMetric(err, metricLabels)
++		return nil, fmt.Errorf("failed to get error groups: %w", err)
++	}
++
++	var (
++		groups    []types.ErrorGroup
++		idxByHash = map[uint64]int{}
++		hashes    []uint64
++	)
++	for rows.Next() {
++		var group types.ErrorGroup
++		if err = rows.Scan(
++			&group.Hash,
++			&group.Source,
++			&group.Message,
++			&group.FirstSeenAt,
++			&group.LastSeenAt,
++		); err != nil {
++			return nil, fmt.Errorf("failed to scan row: %w", err)
++		}
++
++		groups = append(groups, group)
++		hashes = append(hashes, group.Hash)
++		idxByHash[group.Hash] = len(groups) - 1
++	}
++
++	if len(groups) == 0 {
++		return nil, nil
++	}
++
++	where["_group_hash"] = hashes
++	countQ := sq.
++		Select(
++			"_group_hash",
++			"countMerge(counts) as count",
++		).
++		From(aggTable).
++		Where(where).
++		GroupBy("_group_hash")
++
++	countQuery, countArgs := countQ.MustSql()
++	metricLabels = []string{aggTable, "SELECT"}
++	countRows, err := r.conn.Query(ctx, metricLabels, countQuery, countArgs...)
++	if err != nil {
++		incErrorMetric(err, metricLabels)
++		return nil, fmt.Errorf("failed to get error groups count: %w", err)
++	}
++
++	var hash, count uint64
++	for countRows.Next() {
++		if err = countRows.Scan(
++			&hash,
++			&count,
++		); err != nil {
++			return nil, fmt.Errorf("failed to scan row: %w", err)
++		}
++
++		groups[idxByHash[hash]].Count = count
++	}
++
++	return groups, nil
++}
++
++func (r *repository) getErrorGroupsNoDuration(
++	ctx context.Context,
++	req types.GetErrorGroupsRequest,
++	where sq.Eq,
++) ([]types.ErrorGroup, error) {
+ 	subQ := sq.
+ 		Select("_group_hash").
+ 		From("error_groups").

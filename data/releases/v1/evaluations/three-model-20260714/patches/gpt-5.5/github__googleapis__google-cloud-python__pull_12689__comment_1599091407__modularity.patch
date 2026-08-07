@@ -1,0 +1,53 @@
+--- a/scripts/updateapilist.py
++++ b/scripts/updateapilist.py
+@@ -145,20 +145,40 @@
+     )
+ 
+ 
++class Extractor:
++    def __init__(self, is_split_repo: bool = True):
++        if is_split_repo:
++            self.path_format = SPLIT_REPO_PATH_FORMAT
++            self.repos_key = REPO_RESPONSE_KEY
++            self.repo_filter = allowed_repo
++        else:
++            self.path_format = MONO_REPO_PATH_FORMAT
++            self.repos_key = PACKAGE_RESPONSE_KEY
++            self.repo_filter = lambda repo: True
++
++    def client_for_repo(self, repo_slug) -> Optional[CloudClient]:
++        path = self.path_format.format(repo_slug=repo_slug)
++        url = f"{RAW_CONTENT_BASE_URL}/{path}/{REPO_METADATA_FILENAME}"
++        response = requests.get(url)
++        if response.status_code != requests.codes.ok:
++            return
++
++        return CloudClient(response.json())
++
++    def get_clients_batch_from_response_json(self, response_json) -> List[CloudClient]:
++        return [
++            self.client_for_repo(repo[self.repos_key])
++            for repo in response_json
++            if self.repo_filter(repo)
++        ]
++
++
+ def client_for_repo(repo_slug, is_split_repo: bool = True) -> Optional[CloudClient]:
+-    path = SPLIT_REPO_PATH_FORMAT if is_split_repo else MONO_REPO_PATH_FORMAT
+-    path = path.format(repo_slug=repo_slug)
+-    url = f"{RAW_CONTENT_BASE_URL}/{path}/{REPO_METADATA_FILENAME}"
+-    response = requests.get(url)
+-    if response.status_code != requests.codes.ok:
+-        return
+-
+-    return CloudClient(response.json())
++    return Extractor(is_split_repo).client_for_repo(repo_slug)
+ 
+ 
+ def get_clients_batch_from_response_json(response_json, is_split_repo: bool = True) -> List[CloudClient]:
+-    repos_key = REPO_RESPONSE_KEY if is_split_repo else PACKAGE_RESPONSE_KEY
+-    return [client_for_repo(repo[repos_key], is_split_repo) for repo in response_json if (not is_split_repo or allowed_repo(repo))]
++    return Extractor(is_split_repo).get_clients_batch_from_response_json(response_json)
+ 
+ 
+ def mono_repo_clients(token: str) -> List[CloudClient]:

@@ -1,0 +1,87 @@
+diff --git a/foundation/console/down_command.go b/foundation/console/down_command.go
+index cfc8999..7e563cb 100644
+--- a/foundation/console/down_command.go
++++ b/foundation/console/down_command.go
+@@ -8,12 +8,21 @@ import (
+ 	"github.com/goravel/framework/contracts/console"
+ 	"github.com/goravel/framework/contracts/console/command"
+ 	"github.com/goravel/framework/contracts/foundation"
++	"github.com/goravel/framework/contracts/hash"
++	"github.com/goravel/framework/contracts/view"
+ 	"github.com/goravel/framework/support/file"
+ 	"github.com/goravel/framework/support/str"
+ )
+ 
+ type DownCommand struct {
+-	app foundation.Application
++	app  foundation.Application
++	hash hash.Hash
++	view view.View
++}
++
++type DownCommandDependencies struct {
++	Hash hash.Hash
++	View view.View
+ }
+ 
+ type MaintenanceOptions struct {
+@@ -24,8 +33,30 @@ type MaintenanceOptions struct {
+ 	Status   int    `json:"status"`
+ }
+ 
+-func NewDownCommand(app foundation.Application) *DownCommand {
+-	return &DownCommand{app}
++func NewDownCommand(app foundation.Application, dependencies ...DownCommandDependencies) *DownCommand {
++	command := &DownCommand{app: app}
++	if len(dependencies) > 0 {
++		command.hash = dependencies[0].Hash
++		command.view = dependencies[0].View
++	}
++
++	return command
++}
++
++func (r *DownCommand) makeHash() hash.Hash {
++	if r.hash != nil {
++		return r.hash
++	}
++
++	return r.app.MakeHash()
++}
++
++func (r *DownCommand) makeView() view.View {
++	if r.view != nil {
++		return r.view
++	}
++
++	return r.app.MakeView()
+ }
+ 
+ // Signature The name and signature of the console command.
+@@ -85,7 +116,7 @@ func (r *DownCommand) Handle(ctx console.Context) error {
+ 	}
+ 
+ 	if render := ctx.Option("render"); render != "" {
+-		if r.app.MakeView().Exists(render) {
++		if r.makeView().Exists(render) {
+ 			options.Render = render
+ 		} else {
+ 			ctx.Error("Unable to find the view template")
+@@ -98,7 +129,7 @@ func (r *DownCommand) Handle(ctx console.Context) error {
+ 	}
+ 
+ 	if secret := ctx.Option("secret"); secret != "" {
+-		hash, err := r.app.MakeHash().Make(secret)
++		hash, err := r.makeHash().Make(secret)
+ 		if err != nil {
+ 			ctx.Error("Unable to generate and hash the secret")
+ 		} else {
+@@ -108,7 +139,7 @@ func (r *DownCommand) Handle(ctx console.Context) error {
+ 
+ 	if withSecret := ctx.OptionBool("with-secret"); withSecret {
+ 		secret := str.Random(40)
+-		hash, err := r.app.MakeHash().Make(secret)
++		hash, err := r.makeHash().Make(secret)
+ 
+ 		if err != nil {
+ 			ctx.Error("Unable to generate and hash the secret")

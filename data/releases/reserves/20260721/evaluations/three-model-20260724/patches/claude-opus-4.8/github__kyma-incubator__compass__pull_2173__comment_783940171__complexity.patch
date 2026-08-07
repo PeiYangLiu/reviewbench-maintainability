@@ -1,0 +1,74 @@
+--- a/components/director/internal/nsadapter/handler/exposed_systems_handler.go
++++ b/components/director/internal/nsadapter/handler/exposed_systems_handler.go
+@@ -18,6 +18,13 @@
+ 	"github.com/kyma-incubator/compass/components/director/pkg/persistence"
+ 	"github.com/kyma-incubator/compass/components/director/pkg/str"
+ 	"github.com/pkg/errors"
++)
++
++const (
++	// reportTypeFull represents a full report of all SCCs and their exposed systems
++	reportTypeFull = "full"
++	// reportTypeDelta represents a delta report containing only changes for particular SCCs
++	reportTypeDelta = "delta"
+ )
+ 
+ //go:generate mockery --exported --name=applicationService --output=automock --outpkg=automock --case=underscore
+@@ -94,7 +101,7 @@
+ 	}()
+ 
+ 	reportType := req.URL.Query().Get("reportType")
+-	if reportType != "full" && reportType != "delta" {
++	if reportType != reportTypeFull && reportType != reportTypeDelta {
+ 		httputil.RespondWithError(ctx, rw, http.StatusBadRequest, httputil.Error{
+ 			Code:    http.StatusBadRequest,
+ 			Message: "missing or invalid required report type query parameter",
+@@ -150,26 +157,31 @@
+ 	details := make([]httputil.Detail, 0)
+ 	filteredSccs := filterSccsByInternalID(ctx, sccs, &details)
+ 
+-	if reportType == "delta" {
+-		a.processDelta(ctx, filteredSccs, &details)
+-		if len(details) == 0 {
+-			httputils.RespondWithBody(ctx, rw, http.StatusNoContent, struct{}{})
+-			return
+-		}
+-		httputil.RespondWithError(ctx, rw, http.StatusOK, httputil.DetailedError{
+-			Code:    http.StatusOK,
+-			Message: "Update/create failed for some on-premise systems",
+-			Details: details,
+-		})
+-		return
+-	}
+-
+-	if reportType == "full" {
+-		a.processDelta(ctx, filteredSccs, &details)
+-		a.handleUnreachableScc(ctx, reportData)
++	if reportType == reportTypeDelta {
++		a.handleDeltaReport(ctx, rw, filteredSccs, details)
++		return
++	}
++
++	a.handleFullReport(ctx, rw, filteredSccs, reportData, details)
++}
++
++func (a *Handler) handleDeltaReport(ctx context.Context, rw http.ResponseWriter, filteredSccs []*nsmodel.SCC, details []httputil.Detail) {
++	a.processDelta(ctx, filteredSccs, &details)
++	if len(details) == 0 {
+ 		httputils.RespondWithBody(ctx, rw, http.StatusNoContent, struct{}{})
+ 		return
+ 	}
++	httputil.RespondWithError(ctx, rw, http.StatusOK, httputil.DetailedError{
++		Code:    http.StatusOK,
++		Message: "Update/create failed for some on-premise systems",
++		Details: details,
++	})
++}
++
++func (a *Handler) handleFullReport(ctx context.Context, rw http.ResponseWriter, filteredSccs []*nsmodel.SCC, reportData nsmodel.Report, details []httputil.Detail) {
++	a.processDelta(ctx, filteredSccs, &details)
++	a.handleUnreachableScc(ctx, reportData)
++	httputils.RespondWithBody(ctx, rw, http.StatusNoContent, struct{}{})
+ }
+ 
+ func (a *Handler) listTenantsByExternalIDs(ctx context.Context, ids []string) ([]*model.BusinessTenantMapping, error) {

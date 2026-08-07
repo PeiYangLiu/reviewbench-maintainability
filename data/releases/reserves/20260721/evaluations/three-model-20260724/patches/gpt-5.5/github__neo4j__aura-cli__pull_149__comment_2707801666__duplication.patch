@@ -1,0 +1,99 @@
+--- a/neo4j-cli/aura/internal/subcommands/deployment/get.go
++++ b/neo4j-cli/aura/internal/subcommands/deployment/get.go
+@@ -10,6 +10,55 @@
+ 	"github.com/neo4j/cli/neo4j-cli/aura/internal/output"
+ 	"github.com/spf13/cobra"
+ )
++
++type defaultScopedFlag struct {
++	name         string
++	value        *string
++	defaultValue string
++}
++
++func getDefaultScopedAuraFlags(cfg *clicfg.Config, organizationIdFlag, projectIdFlag string, organizationId, projectId *string) []defaultScopedFlag {
++	defaultSetting, err := cfg.Settings.Aura.GetDefault()
++	if err != nil {
++		log.Fatal(err)
++	}
++
++	return []defaultScopedFlag{
++		{
++			name:         organizationIdFlag,
++			value:        organizationId,
++			defaultValue: defaultSetting.OrganizationId,
++		},
++		{
++			name:         projectIdFlag,
++			value:        projectId,
++			defaultValue: defaultSetting.ProjectId,
++		},
++	}
++}
++
++func markDefaultScopedAuraFlagsRequired(cmd *cobra.Command, cfg *clicfg.Config, organizationIdFlag, projectIdFlag string, organizationId, projectId *string) error {
++	for _, flag := range getDefaultScopedAuraFlags(cfg, organizationIdFlag, projectIdFlag, organizationId, projectId) {
++		if flag.defaultValue != "" {
++			continue
++		}
++
++		err := cmd.MarkFlagRequired(flag.name)
++		if err != nil {
++			log.Fatal(err)
++		}
++	}
++
++	return nil
++}
++
++func updateDefaultScopedAuraFlagValues(cfg *clicfg.Config, organizationIdFlag, projectIdFlag string, organizationId, projectId *string) {
++	for _, flag := range getDefaultScopedAuraFlags(cfg, organizationIdFlag, projectIdFlag, organizationId, projectId) {
++		if *flag.value == "" {
++			*flag.value = flag.defaultValue
++		}
++	}
++}
+ 
+ func NewGetCmd(cfg *clicfg.Config) *cobra.Command {
+ 	var (
+@@ -28,37 +77,11 @@
+ 		Long:  "Returns details about a specific Fleet Manager deployment.",
+ 		Args:  cobra.ExactArgs(1),
+ 		PreRunE: func(cmd *cobra.Command, args []string) error {
+-			defaultSetting, err := cfg.Settings.Aura.GetDefault()
+-			if err != nil {
+-				log.Fatal(err)
+-			}
+-			if defaultSetting.OrganizationId == "" {
+-				err := cmd.MarkFlagRequired(organizationIdFlag)
+-				if err != nil {
+-					log.Fatal(err)
+-				}
+-			}
+-
+-			if defaultSetting.ProjectId == "" {
+-				err := cmd.MarkFlagRequired(projectIdFlag)
+-				if err != nil {
+-					log.Fatal(err)
+-				}
+-			}
+-
+-			return nil
++			return markDefaultScopedAuraFlagsRequired(cmd, cfg, organizationIdFlag, projectIdFlag, &organizationId, &projectId)
+ 		},
+ 		RunE: func(cmd *cobra.Command, args []string) error {
+-			defaultSetting, err := cfg.Settings.Aura.GetDefault()
+-			if err != nil {
+-				log.Fatal(err)
+-			}
+-			if organizationId == "" {
+-				organizationId = defaultSetting.OrganizationId
+-			}
+-			if projectId == "" {
+-				projectId = defaultSetting.ProjectId
+-			}
++			updateDefaultScopedAuraFlagValues(cfg, organizationIdFlag, projectIdFlag, &organizationId, &projectId)
++
+ 			deploymentId := args[0]
+ 			path := fmt.Sprintf("/organizations/%s/projects/%s/fleet-manager/deployments/%s", organizationId, projectId, deploymentId)
+ 

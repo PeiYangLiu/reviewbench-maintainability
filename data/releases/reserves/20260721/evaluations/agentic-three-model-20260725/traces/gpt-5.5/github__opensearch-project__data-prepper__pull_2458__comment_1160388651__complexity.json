@@ -1,0 +1,356 @@
+[
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "                for (final BulkOperationWithHandle bulkOperation: bulkRequestForRetry.getOperations()) {\n                    releaseEventReference(bulkOperation, true);\n                }",
+          "end_line": 248,
+          "start_line": 245
+        },
+        {
+          "content": "    private void releaseEventReference(final BulkOperationWithHandle bulkOperation, final boolean result) {\n        final EventHandle eventHandle = bulkOperation.getEventHandle();\n        acknowledgementSetManager.releaseEventReference(eventHandle, result);\n    }\n\n",
+          "end_line": 253,
+          "start_line": 254
+        },
+        {
+          "content": "                    sentDocumentsCounter.increment();\n                    releaseEventReference(bulkOperationWithHandle, true);",
+          "end_line": 286,
+          "start_line": 283
+        },
+        {
+          "content": "                sentDocumentsCounter.increment();\n                releaseEventReference(bulkOperationWithHandle, true);",
+          "end_line": 310,
+          "start_line": 307
+        }
+      ]
+    },
+    "response_chars": 921,
+    "round": 1,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 248,
+          "replacement_lines": 3,
+          "start_line": 245
+        },
+        {
+          "end_line": 253,
+          "replacement_lines": 5,
+          "start_line": 254
+        },
+        {
+          "end_line": 286,
+          "replacement_lines": 2,
+          "start_line": 283
+        },
+        {
+          "end_line": 310,
+          "replacement_lines": 2,
+          "start_line": 307
+        }
+      ],
+      "current_file_lines": 330,
+      "updated_excerpt": {
+        "content": "235:             }\n236:             if (bulkResponse.errors()) {\n237:                 handleRetriesAndFailures(bulkRequestForRetry, retryCount, backOffUtils, bulkResponse, null);\n238:             } else {\n239:                 final int numberOfDocs = bulkRequestForRetry.getOperationsCount();\n240:                 final boolean firstAttempt = (retryCount == 1);\n241:                 if (firstAttempt) {\n242:                     sentDocumentsOnFirstAttemptCounter.increment(numberOfDocs);\n243:                 }\n244:                 sentDocumentsCounter.increment(bulkRequestForRetry.getOperationsCount());\n245:                 for (final BulkOperationWithHandle bulkOperation: bulkRequestForRetry.getOperations()) {\n246:                     releaseEventReference(bulkOperation, true);\n247:                 }\n248:                 retryCountMap.remove(bulkRequestForRetry);\n249:             }\n250:         }\n251:     }\n252: \n253:     private void releaseEventReference(final BulkOperationWithHandle bulkOperation, final boolean result) {\n254:         final EventHandle eventHandle = bulkOperation.getEventHandle();\n255:         acknowledgementSetManager.releaseEventReference(eventHandle, result);\n256:     }\n257: \n258:     private AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> createBulkRequestForRetry(\n259:             final AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> request, final BulkResponse response) {\n260:         int newCount = retryCountMap.containsKey(request) ? (retryCountMap.get(request) + 1) : 1;\n261:         if (response == null) {\n262:             retryCountMap.put(request, newCount);\n263:             // first attempt or retry due to Exception\n264:             return request;\n265:         } else {\n266:             final AccumulatingBulkRequest requestToReissue = bulkRequestSupplier.get();\n267:             final ImmutableList.Builder<FailedBulkOperation> nonRetryableFailures = ImmutableList.builder();\n268:             if (request != requestToReissue) {\n269:                 retryCountMap.put(requestToReissue, newCount);\n270:                 retryCountMap.remove(request);\n271:             }\n272:             int index = 0;\n273:             for (final BulkResponseItem bulkItemResponse : response.items()) {\n274:                 BulkOperationWithHandle bulkOperationWithHandle =\n275:                     (BulkOperationWithHandle)request.getOperationAt(index);",
+        "end_line": 275,
+        "path_lines": 330,
+        "start_line": 235
+      }
+    },
+    "usage": {
+      "input_tokens": 4271,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 593,
+      "output_tokens_details": {
+        "reasoning_tokens": 400
+      },
+      "total_tokens": 4864
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 330,
+      "path": "data-prepper-plugins/opensearch/src/main/java/org/opensearch/dataprepper/plugins/sink/opensearch/BulkRetryStrategy.java",
+      "start_line": 1
+    },
+    "response_chars": 196,
+    "round": 2,
+    "tool_result": {
+      "content": "1: /*\n2:  * Copyright OpenSearch Contributors\n3:  * SPDX-License-Identifier: Apache-2.0\n4:  */\n5: \n6: package org.opensearch.dataprepper.plugins.sink.opensearch;\n7: \n8: import com.fasterxml.jackson.databind.ObjectMapper;\n9: import com.google.common.collect.ImmutableList;\n10: import org.opensearch.dataprepper.metrics.PluginMetrics;\n11: import io.micrometer.core.instrument.Counter;\n12: import org.opensearch.client.opensearch._types.OpenSearchException;\n13: import org.opensearch.action.bulk.BackoffPolicy;\n14: import org.opensearch.dataprepper.model.event.EventHandle;\n15: import org.opensearch.client.opensearch.core.BulkRequest;\n16: import org.opensearch.client.opensearch.core.BulkResponse;\n17: import org.opensearch.client.opensearch.core.bulk.BulkResponseItem;\n18: import org.opensearch.common.unit.TimeValue;\n19: import org.opensearch.dataprepper.model.configuration.PluginSetting;\n20: import org.opensearch.dataprepper.plugins.sink.opensearch.bulk.AccumulatingBulkRequest;\n21: import org.opensearch.dataprepper.plugins.sink.opensearch.dlq.FailedBulkOperation;\n22: import org.opensearch.rest.RestStatus;\n23: import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSetManager;\n24: \n25: import java.io.IOException;\n26: import java.util.Arrays;\n27: import java.util.HashSet;\n28: import java.util.List;\n29: import java.util.Map;\n30: import java.util.HashMap;\n31: import java.util.Objects;\n32: import java.util.Set;\n33: import java.util.function.BiConsumer;\n34: import java.util.function.Supplier;\n35: \n36: public final class BulkRetryStrategy {\n37:     public static final String DOCUMENTS_SUCCESS = \"documentsSuccess\";\n38:     public static final String DOCUMENTS_SUCCESS_FIRST_ATTEMPT = \"documentsSuccessFirstAttempt\";\n39:     public static final String DOCUMENT_ERRORS = \"documentErrors\";\n40:     public static final String BULK_REQUEST_FAILED = \"bulkRequestFailed\";\n41:     public static final String BULK_REQUEST_NUMBER_OF_RETRIES = \"bulkRequestNumberOfRetries\";\n42:     public static final String BULK_BAD_REQUEST_ERRORS = \"bulkBadRequestErrors\";\n43:     public static final String BULK_REQUEST_NOT_ALLOWED_ERRORS = \"bulkRequestNotAllowedErrors\";\n44:     public static final String BULK_REQUEST_INVALID_INPUT_ERRORS = \"bulkRequestInvalidInputErrors\";\n45:     public static final String BULK_REQUEST_NOT_FOUND_ERRORS = \"bulkRequestNotFoundErrors\";\n46:     public static final String BULK_REQUEST_TIMEOUT_ERRORS = \"bulkRequestTimeoutErrors\";\n47:     public static final String BULK_REQUEST_SERVER_ERRORS = \"bulkRequestServerErrors\";\n48: \n49:     private static final Set<Integer> NON_RETRY_STATUS = new HashSet<>(\n50:             Arrays.asList(\n51:                     RestStatus.BAD_REQUEST.getStatus(),\n52:                     RestStatus.NOT_FOUND.getStatus(),\n53:                     RestStatus.CONFLICT.getStatus()\n54:             ));\n55: \n56:     private static final Set<Integer> BAD_REQUEST_ERRORS = new HashSet<>(\n57:             Arrays.asList(\n58:                     RestStatus.BAD_REQUEST.getStatus(),\n59:                     RestStatus.EXPECTATION_FAILED.getStatus(),\n60:                     RestStatus.UNPROCESSABLE_ENTITY.getStatus(),\n61:                     RestStatus.FAILED_DEPENDENCY.getStatus(),\n62:                     RestStatus.NOT_ACCEPTABLE.getStatus()\n63:             ));\n64: \n65:     private static final Set<Integer> NOT_ALLOWED_ERRORS = new HashSet<>(\n66:             Arrays.asList(\n67:                     RestStatus.UNAUTHORIZED.getStatus(),\n68:                     RestStatus.FORBIDDEN.getStatus(),\n69:                     RestStatus.PAYMENT_REQUIRED.getStatus(),\n70:                     RestStatus.METHOD_NOT_ALLOWED.getStatus(),\n71:                     RestStatus.PROXY_AUTHENTICATION.getStatus(),\n72:                     RestStatus.LOCKED.getStatus(),\n73:                     RestStatus.TOO_MANY_REQUESTS.getStatus()\n74:             ));\n75: \n76:     private static final Set<Integer> INVALID_INPUT_ERRORS = new HashSet<>(\n77:             Arrays.asList(\n78:                     RestStatus.REQUEST_ENTITY_TOO_LARGE.getStatus(),\n79:                     RestStatus.REQUEST_URI_TOO_LONG.getStatus(),\n80:                     RestStatus.REQUESTED_RANGE_NOT_SATISFIED.getStatus(),\n81:                     RestStatus.LENGTH_REQUIRED.getStatus(),\n82:                     RestStatus.PRECONDITION_FAILED.getStatus(),\n83:                     RestStatus.UNSUPPORTED_MEDIA_TYPE.getStatus(),\n84:                     RestStatus.CONFLICT.getStatus()\n85:             ));\n86: \n87:     private static final Set<Integer> NOT_FOUND_ERRORS = new HashSet<>(\n88:             Arrays.asList(\n89:                     RestStatus.NOT_FOUND.getStatus(),\n90:                     RestStatus.GONE.getStatus()\n91:             ));\n92: \n93:     private static final Set<Integer> TIMEOUT_ERROR = new HashSet<>(\n94:             Arrays.asList(\n95:                     RestStatus.REQUEST_TIMEOUT.getStatus()\n96:             ));\n97: \n98:     private final RequestFunction<AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest>, BulkResponse> requestFunction;\n99:     private final BiConsumer<List<FailedBulkOperation>, Throwable> logFailure;\n100:     private final PluginMetrics pluginMetrics;\n101:     private final Supplier<AccumulatingBulkRequest> bulkRequestSupplier;\n102:     private final int maxRetries;\n103:     private final AcknowledgementSetManager acknowledgementSetManager;\n104:     private final Map<AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest>, Integer> retryCountMap;\n105:     private final String pluginId;\n106:     private final String pluginName;\n107:     private final String pipelineName;\n108:     private final ObjectMapper objectMapper;\n109: \n110:     private final Counter sentDocumentsCounter;\n111:     private final Counter sentDocumentsOnFirstAttemptCounter;\n112:     private final Counter documentErrorsCounter;\n113:     private final Counter bulkRequestFailedCounter;\n114:     private final Counter bulkRequestNumberOfRetries;\n115:     private final Counter bulkRequestBadErrors;\n116:     private final Counter bulkRequestNotAllowedErrors;\n117:     private final Counter bulkRequestInvalidInputErrors;\n118:     private final Counter bulkRequestNotFoundErrors;\n119:     private final Counter bulkRequestTimeoutErrors;\n120:     private final Counter bulkRequestServerErrors;\n121: \n122:     public BulkRetryStrategy(final RequestFunction<AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest>, BulkResponse> requestFunction,\n123:                              final BiConsumer<List<FailedBulkOperation>, Throwable> logFailure,\n124:                              final PluginMetrics pluginMetrics,\n125:                              final int maxRetries,\n126:                              final AcknowledgementSetManager acknowledgementSetManager,\n127:                              final Supplier<AccumulatingBulkRequest> bulkRequestSupplier,\n128:                              final PluginSetting pluginSetting) {\n129:         this.requestFunction = requestFunction;\n130:         this.logFailure = logFailure;\n131:         this.pluginMetrics = pluginMetrics;\n132:         this.bulkRequestSupplier = bulkRequestSupplier;\n133:         this.maxRetries = maxRetries;\n134:         this.retryCountMap = new HashMap<>();\n135:         this.pipelineName = pluginSetting.getPipelineName();\n136:         this.pluginId = pluginSetting.getName();\n137:         this.pluginName = pluginSetting.getName();\n138:         this.objectMapper = new ObjectMapper();\n139:         this.acknowledgementSetManager = acknowledgementSetManager;\n140: \n141:         sentDocumentsCounter = pluginMetrics.counter(DOCUMENTS_SUCCESS);\n142:         sentDocumentsOnFirstAttemptCounter = pluginMetrics.counter(DOCUMENTS_SUCCESS_FIRST_ATTEMPT);\n143:         documentErrorsCounter = pluginMetrics.counter(DOCUMENT_ERRORS);\n144:         bulkRequestFailedCounter = pluginMetrics.counter(BULK_REQUEST_FAILED);\n145:         bulkRequestNumberOfRetries = pluginMetrics.counter(BULK_REQUEST_NUMBER_OF_RETRIES);\n146:         bulkRequestBadErrors = pluginMetrics.counter(BULK_BAD_REQUEST_ERRORS);\n147:         bulkRequestNotAllowedErrors = pluginMetrics.counter(BULK_REQUEST_NOT_ALLOWED_ERRORS);\n148:         bulkRequestInvalidInputErrors = pluginMetrics.counter(BULK_REQUEST_INVALID_INPUT_ERRORS);\n149:         bulkRequestNotFoundErrors = pluginMetrics.counter(BULK_REQUEST_NOT_FOUND_ERRORS);\n150:         bulkRequestTimeoutErrors = pluginMetrics.counter(BULK_REQUEST_TIMEOUT_ERRORS);\n151:         bulkRequestServerErrors = pluginMetrics.counter(BULK_REQUEST_SERVER_ERRORS);\n152:     }\n153: \n154:     public void execute(final AccumulatingBulkRequest bulkRequest) throws InterruptedException {\n155:         // Exponential backoff run forever\n156:         // TODO: replace with custom backoff policy setting including maximum interval between retries\n157:         final BackOffUtils backOffUtils = new BackOffUtils(\n158:                 BackoffPolicy.exponentialBackoff(TimeValue.timeValueMillis(50), Integer.MAX_VALUE).iterator());\n159:         handleRetry(bulkRequest, null, backOffUtils);\n160:     }\n161: \n162:     public boolean canRetry(final BulkResponse response) {\n163:         for (final BulkResponseItem bulkItemResponse : response.items()) {\n164:             if (bulkItemResponse.error() != null && !NON_RETRY_STATUS.contains(bulkItemResponse.status())) {\n165:                 return true;\n166:             }\n167:         }\n168:         return false;\n169:     }\n170: \n171:     public static boolean canRetry(final Exception e) {\n172:         return (e instanceof IOException ||\n173:                 (e instanceof OpenSearchException &&\n174:                         !NON_RETRY_STATUS.contains(((OpenSearchException) e).status())));\n175:     }\n176: \n177:     private void handleRetriesAndFailures(final AccumulatingBulkRequest bulkRequestForRetry,\n178:                                           final int retryCount,\n179:                                           final BackOffUtils backOffUtils,\n180:                                           final BulkResponse bulkResponse,\n181:                                           Exception e) throws InterruptedException {\n182:         final boolean doRetry = (Objects.isNull(e)) ? canRetry(bulkResponse) : canRetry(e);\n183:         if (!Objects.isNull(bulkResponse) && retryCount == 1) { // first attempt\n184:             for (final BulkResponseItem bulkItemResponse : bulkResponse.items()) {\n185:                 if (bulkItemResponse.error() == null) {\n186:                     sentDocumentsOnFirstAttemptCounter.increment();\n187:                 }\n188:             }\n189:         }\n190:         if (doRetry && retryCount < maxRetries) {\n191:             handleRetry(bulkRequestForRetry, bulkResponse, backOffUtils);\n192:             bulkRequestNumberOfRetries.increment();\n193:         } else {\n194:             if (doRetry && retryCount >= maxRetries) {\n195:                 e = new RuntimeException(String.format(\"Number of retries reached the limit of max retries(configured value %d)\", maxRetries));\n196:             }\n197:             if (Objects.isNull(e)) {\n198:                 handleFailures(bulkRequestForRetry, bulkResponse.items());\n199:             } else {\n200:                 handleFailures(bulkRequestForRetry, e);\n201:             }\n202:             bulkRequestFailedCounter.increment();\n203:         }\n204:     }\n205: \n206:     private void handleRetry(final AccumulatingBulkRequest request, final BulkResponse response,\n207:                              final BackOffUtils backOffUtils) throws InterruptedException {\n208:         final AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> bulkRequestForRetry = createBulkRequestForRetry(request, response);\n209:         int retryCount = retryCountMap.get(bulkRequestForRetry);\n210:         if (backOffUtils.hasNext()) {\n211:             // Wait for backOff duration\n212:             backOffUtils.next();\n213:             final BulkResponse bulkResponse;\n214:             try {\n215:                 bulkResponse = requestFunction.apply(bulkRequestForRetry);\n216:             } catch (Exception e) {\n217:                 if (e instanceof OpenSearchException) {\n218:                     int status = ((OpenSearchException) e).status();\n219:                     if (NOT_ALLOWED_ERRORS.contains(status)) {\n220:                         bulkRequestNotAllowedErrors.increment();\n221:                     } else if (INVALID_INPUT_ERRORS.contains(status)) {\n222:                         bulkRequestInvalidInputErrors.increment();\n223:                     } else if (NOT_FOUND_ERRORS.contains(status)) {\n224:                         bulkRequestNotFoundErrors.increment();\n225:                     } else if (status == RestStatus.REQUEST_TIMEOUT.getStatus()) {\n226:                         bulkRequestTimeoutErrors.increment();\n227:                     } else if (status >= RestStatus.INTERNAL_SERVER_ERROR.getStatus()) {\n228:                         bulkRequestServerErrors.increment();\n229:                     } else { // Default to Bad Requests\n230:                         bulkRequestBadErrors.increment();\n231:                     }\n232:                 }\n233:                 handleRetriesAndFailures(bulkRequestForRetry, retryCount, backOffUtils, null, e);\n234:                 return;\n235:             }\n236:             if (bulkResponse.errors()) {\n237:                 handleRetriesAndFailures(bulkRequestForRetry, retryCount, backOffUtils, bulkResponse, null);\n238:             } else {\n239:                 final int numberOfDocs = bulkRequestForRetry.getOperationsCount();\n240:                 final boolean firstAttempt = (retryCount == 1);\n241:                 if (firstAttempt) {\n242:                     sentDocumentsOnFirstAttemptCounter.increment(numberOfDocs);\n243:                 }\n244:                 sentDocumentsCounter.increment(bulkRequestForRetry.getOperationsCount());\n245:                 for (final BulkOperationWithHandle bulkOperation: bulkRequestForRetry.getOperations()) {\n246:                     releaseEventReference(bulkOperation, true);\n247:                 }\n248:                 retryCountMap.remove(bulkRequestForRetry);\n249:             }\n250:         }\n251:     }\n252: \n253:     private void releaseEventReference(final BulkOperationWithHandle bulkOperation, final boolean result) {\n254:         final EventHandle eventHandle = bulkOperation.getEventHandle();\n255:         acknowledgementSetManager.releaseEventReference(eventHandle, result);\n256:     }\n257: \n258:     private AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> createBulkRequestForRetry(\n259:             final AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> request, final BulkResponse response) {\n260:         int newCount = retryCountMap.containsKey(request) ? (retryCountMap.get(request) + 1) : 1;\n261:         if (response == null) {\n262:             retryCountMap.put(request, newCount);\n263:             // first attempt or retry due to Exception\n264:             return request;\n265:         } else {\n266:             final AccumulatingBulkRequest requestToReissue = bulkRequestSupplier.get();\n267:             final ImmutableList.Builder<FailedBulkOperation> nonRetryableFailures = ImmutableList.builder();\n268:             if (request != requestToReissue) {\n269:                 retryCountMap.put(requestToReissue, newCount);\n270:                 retryCountMap.remove(request);\n271:             }\n272:             int index = 0;\n273:             for (final BulkResponseItem bulkItemResponse : response.items()) {\n274:                 BulkOperationWithHandle bulkOperationWithHandle =\n275:                     (BulkOperationWithHandle)request.getOperationAt(index);\n276:                 if (bulkItemResponse.error() != null) {\n277:                     if (!NON_RETRY_STATUS.contains(bulkItemResponse.status())) {\n278:                         requestToReissue.addOperation(bulkOperationWithHandle);\n279:                     } else {\n280:                         nonRetryableFailures.add(FailedBulkOperation.builder()\n281:                                 .withBulkOperation(bulkOperationWithHandle)\n282:                                 .withBulkResponseItem(bulkItemResponse)\n283:                                 .build());\n284:                         documentErrorsCounter.increment();\n285:                     }\n286:                 } else {\n287:                     sentDocumentsCounter.increment();\n288:                     releaseEventReference(bulkOperationWithHandle, true);\n289:                 index++;\n290:             }\n291:             logFailure.accept(nonRetryableFailures.build(), null);\n292:             return requestToReissue;\n293:         }\n294:     }\n295: \n296:     private void handleFailures(final AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> accumulatingBulkRequest, final List<BulkResponseItem> itemResponses) {\n297:         assert accumulatingBulkRequest.getOperationsCount() == itemResponses.size();\n298:         final ImmutableList.Builder<FailedBulkOperation> failures = ImmutableList.builder();\n299:         for (int i = 0; i < itemResponses.size(); i++) {\n300:             final BulkResponseItem bulkItemResponse = itemResponses.get(i);\n301:             final BulkOperationWithHandle bulkOperationWithHandle = (BulkOperationWithHandle)accumulatingBulkRequest.getOperationAt(i);\n302:             if (bulkItemResponse.error() != null) {\n303:                 failures.add(FailedBulkOperation.builder()\n304:                     .withBulkOperation(bulkOperationWithHandle)\n305:                     .withBulkResponseItem(bulkItemResponse)\n306:                     .build());\n307:                 documentErrorsCounter.increment();\n308:             } else {\n309:                 sentDocumentsCounter.increment();\n310:                 releaseEventReference(bulkOperationWithHandle, true);\n311:         }\n312:         logFailure.accept(failures.build(), null);\n313:     }\n314: \n315:     private void handleFailures(final AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> accumulatingBulkRequest, final Throwable failure) {\n316:         documentErrorsCounter.increment(accumulatingBulkRequest.getOperationsCount());\n317:         final ImmutableList.Builder<FailedBulkOperation> failures = ImmutableList.builder();\n318:         final List<BulkOperationWithHandle> bulkOperations = accumulatingBulkRequest.getOperations();\n319:         for (int i = 0; i < bulkOperations.size(); i++) {\n320:             final BulkOperationWithHandle bulkOperation = bulkOperations.get(i);\n321:             failures.add(FailedBulkOperation.builder()\n322:                     .withBulkOperation(bulkOperation)\n323:                     .withFailure(failure)\n324:                     .build());\n325:         }\n326: \n327:         logFailure.accept(failures.build(), failure);\n328:     }\n329: \n330: }",
+      "end_line": 330,
+      "path_lines": 330,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 5170,
+      "input_tokens_details": {
+        "cached_tokens": 3840
+      },
+      "output_tokens": 618,
+      "output_tokens_details": {
+        "reasoning_tokens": 552
+      },
+      "total_tokens": 5788
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "                } else {\n                    sentDocumentsCounter.increment();\n                    releaseEventReference(bulkOperationWithHandle, true);\n                }\n                index++;",
+          "end_line": 290,
+          "start_line": 286
+        },
+        {
+          "content": "            } else {\n                sentDocumentsCounter.increment();\n                releaseEventReference(bulkOperationWithHandle, true);\n            }",
+          "end_line": 311,
+          "start_line": 308
+        }
+      ]
+    },
+    "response_chars": 1134,
+    "round": 3,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 290,
+          "replacement_lines": 5,
+          "start_line": 286
+        },
+        {
+          "end_line": 311,
+          "replacement_lines": 4,
+          "start_line": 308
+        }
+      ],
+      "current_file_lines": 330,
+      "updated_excerpt": {
+        "content": "276:                 if (bulkItemResponse.error() != null) {\n277:                     if (!NON_RETRY_STATUS.contains(bulkItemResponse.status())) {\n278:                         requestToReissue.addOperation(bulkOperationWithHandle);\n279:                     } else {\n280:                         nonRetryableFailures.add(FailedBulkOperation.builder()\n281:                                 .withBulkOperation(bulkOperationWithHandle)\n282:                                 .withBulkResponseItem(bulkItemResponse)\n283:                                 .build());\n284:                         documentErrorsCounter.increment();\n285:                     }\n286:                 } else {\n287:                     sentDocumentsCounter.increment();\n288:                     releaseEventReference(bulkOperationWithHandle, true);\n289:                 }\n290:                 index++;\n291:             logFailure.accept(nonRetryableFailures.build(), null);\n292:             return requestToReissue;\n293:         }\n294:     }\n295: \n296:     private void handleFailures(final AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> accumulatingBulkRequest, final List<BulkResponseItem> itemResponses) {\n297:         assert accumulatingBulkRequest.getOperationsCount() == itemResponses.size();\n298:         final ImmutableList.Builder<FailedBulkOperation> failures = ImmutableList.builder();\n299:         for (int i = 0; i < itemResponses.size(); i++) {\n300:             final BulkResponseItem bulkItemResponse = itemResponses.get(i);\n301:             final BulkOperationWithHandle bulkOperationWithHandle = (BulkOperationWithHandle)accumulatingBulkRequest.getOperationAt(i);\n302:             if (bulkItemResponse.error() != null) {\n303:                 failures.add(FailedBulkOperation.builder()\n304:                     .withBulkOperation(bulkOperationWithHandle)\n305:                     .withBulkResponseItem(bulkItemResponse)\n306:                     .build());\n307:                 documentErrorsCounter.increment();\n308:             } else {\n309:                 sentDocumentsCounter.increment();\n310:                 releaseEventReference(bulkOperationWithHandle, true);\n311:             }\n312:         logFailure.accept(failures.build(), null);\n313:     }\n314: \n315:     private void handleFailures(final AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> accumulatingBulkRequest, final Throwable failure) {\n316:         documentErrorsCounter.increment(accumulatingBulkRequest.getOperationsCount());",
+        "end_line": 316,
+        "path_lines": 330,
+        "start_line": 276
+      }
+    },
+    "usage": {
+      "input_tokens": 9554,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 707,
+      "output_tokens_details": {
+        "reasoning_tokens": 445
+      },
+      "total_tokens": 10261
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 320,
+      "path": "data-prepper-plugins/opensearch/src/main/java/org/opensearch/dataprepper/plugins/sink/opensearch/BulkRetryStrategy.java",
+      "start_line": 250
+    },
+    "response_chars": 832,
+    "round": 4,
+    "tool_result": {
+      "content": "250:         }\n251:     }\n252: \n253:     private void releaseEventReference(final BulkOperationWithHandle bulkOperation, final boolean result) {\n254:         final EventHandle eventHandle = bulkOperation.getEventHandle();\n255:         acknowledgementSetManager.releaseEventReference(eventHandle, result);\n256:     }\n257: \n258:     private AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> createBulkRequestForRetry(\n259:             final AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> request, final BulkResponse response) {\n260:         int newCount = retryCountMap.containsKey(request) ? (retryCountMap.get(request) + 1) : 1;\n261:         if (response == null) {\n262:             retryCountMap.put(request, newCount);\n263:             // first attempt or retry due to Exception\n264:             return request;\n265:         } else {\n266:             final AccumulatingBulkRequest requestToReissue = bulkRequestSupplier.get();\n267:             final ImmutableList.Builder<FailedBulkOperation> nonRetryableFailures = ImmutableList.builder();\n268:             if (request != requestToReissue) {\n269:                 retryCountMap.put(requestToReissue, newCount);\n270:                 retryCountMap.remove(request);\n271:             }\n272:             int index = 0;\n273:             for (final BulkResponseItem bulkItemResponse : response.items()) {\n274:                 BulkOperationWithHandle bulkOperationWithHandle =\n275:                     (BulkOperationWithHandle)request.getOperationAt(index);\n276:                 if (bulkItemResponse.error() != null) {\n277:                     if (!NON_RETRY_STATUS.contains(bulkItemResponse.status())) {\n278:                         requestToReissue.addOperation(bulkOperationWithHandle);\n279:                     } else {\n280:                         nonRetryableFailures.add(FailedBulkOperation.builder()\n281:                                 .withBulkOperation(bulkOperationWithHandle)\n282:                                 .withBulkResponseItem(bulkItemResponse)\n283:                                 .build());\n284:                         documentErrorsCounter.increment();\n285:                     }\n286:                 } else {\n287:                     sentDocumentsCounter.increment();\n288:                     releaseEventReference(bulkOperationWithHandle, true);\n289:                 }\n290:                 index++;\n291:             logFailure.accept(nonRetryableFailures.build(), null);\n292:             return requestToReissue;\n293:         }\n294:     }\n295: \n296:     private void handleFailures(final AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> accumulatingBulkRequest, final List<BulkResponseItem> itemResponses) {\n297:         assert accumulatingBulkRequest.getOperationsCount() == itemResponses.size();\n298:         final ImmutableList.Builder<FailedBulkOperation> failures = ImmutableList.builder();\n299:         for (int i = 0; i < itemResponses.size(); i++) {\n300:             final BulkResponseItem bulkItemResponse = itemResponses.get(i);\n301:             final BulkOperationWithHandle bulkOperationWithHandle = (BulkOperationWithHandle)accumulatingBulkRequest.getOperationAt(i);\n302:             if (bulkItemResponse.error() != null) {\n303:                 failures.add(FailedBulkOperation.builder()\n304:                     .withBulkOperation(bulkOperationWithHandle)\n305:                     .withBulkResponseItem(bulkItemResponse)\n306:                     .build());\n307:                 documentErrorsCounter.increment();\n308:             } else {\n309:                 sentDocumentsCounter.increment();\n310:                 releaseEventReference(bulkOperationWithHandle, true);\n311:             }\n312:         logFailure.accept(failures.build(), null);\n313:     }\n314: \n315:     private void handleFailures(final AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> accumulatingBulkRequest, final Throwable failure) {\n316:         documentErrorsCounter.increment(accumulatingBulkRequest.getOperationsCount());\n317:         final ImmutableList.Builder<FailedBulkOperation> failures = ImmutableList.builder();\n318:         final List<BulkOperationWithHandle> bulkOperations = accumulatingBulkRequest.getOperations();\n319:         for (int i = 0; i < bulkOperations.size(); i++) {\n320:             final BulkOperationWithHandle bulkOperation = bulkOperations.get(i);",
+      "end_line": 320,
+      "path_lines": 330,
+      "start_line": 250
+    },
+    "usage": {
+      "input_tokens": 10286,
+      "input_tokens_details": {
+        "cached_tokens": 8960
+      },
+      "output_tokens": 703,
+      "output_tokens_details": {
+        "reasoning_tokens": 441
+      },
+      "total_tokens": 10989
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "            }\n",
+          "end_line": 290,
+          "start_line": 291
+        },
+        {
+          "content": "        }\n",
+          "end_line": 311,
+          "start_line": 312
+        }
+      ]
+    },
+    "response_chars": 474,
+    "round": 5,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 290,
+          "replacement_lines": 1,
+          "start_line": 291
+        },
+        {
+          "end_line": 311,
+          "replacement_lines": 1,
+          "start_line": 312
+        }
+      ],
+      "current_file_lines": 332,
+      "updated_excerpt": {
+        "content": "281:                                 .withBulkOperation(bulkOperationWithHandle)\n282:                                 .withBulkResponseItem(bulkItemResponse)\n283:                                 .build());\n284:                         documentErrorsCounter.increment();\n285:                     }\n286:                 } else {\n287:                     sentDocumentsCounter.increment();\n288:                     releaseEventReference(bulkOperationWithHandle, true);\n289:                 }\n290:                 index++;\n291:             }\n292:             logFailure.accept(nonRetryableFailures.build(), null);\n293:             return requestToReissue;\n294:         }\n295:     }\n296: \n297:     private void handleFailures(final AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> accumulatingBulkRequest, final List<BulkResponseItem> itemResponses) {\n298:         assert accumulatingBulkRequest.getOperationsCount() == itemResponses.size();\n299:         final ImmutableList.Builder<FailedBulkOperation> failures = ImmutableList.builder();\n300:         for (int i = 0; i < itemResponses.size(); i++) {\n301:             final BulkResponseItem bulkItemResponse = itemResponses.get(i);\n302:             final BulkOperationWithHandle bulkOperationWithHandle = (BulkOperationWithHandle)accumulatingBulkRequest.getOperationAt(i);\n303:             if (bulkItemResponse.error() != null) {\n304:                 failures.add(FailedBulkOperation.builder()\n305:                     .withBulkOperation(bulkOperationWithHandle)\n306:                     .withBulkResponseItem(bulkItemResponse)\n307:                     .build());\n308:                 documentErrorsCounter.increment();\n309:             } else {\n310:                 sentDocumentsCounter.increment();\n311:                 releaseEventReference(bulkOperationWithHandle, true);\n312:             }\n313:         }\n314:         logFailure.accept(failures.build(), null);\n315:     }\n316: \n317:     private void handleFailures(final AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> accumulatingBulkRequest, final Throwable failure) {\n318:         documentErrorsCounter.increment(accumulatingBulkRequest.getOperationsCount());\n319:         final ImmutableList.Builder<FailedBulkOperation> failures = ImmutableList.builder();\n320:         final List<BulkOperationWithHandle> bulkOperations = accumulatingBulkRequest.getOperations();\n321:         for (int i = 0; i < bulkOperations.size(); i++) {",
+        "end_line": 321,
+        "path_lines": 332,
+        "start_line": 281
+      }
+    },
+    "usage": {
+      "input_tokens": 11343,
+      "input_tokens_details": {
+        "cached_tokens": 9984
+      },
+      "output_tokens": 732,
+      "output_tokens_details": {
+        "reasoning_tokens": 580
+      },
+      "total_tokens": 12075
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 332,
+      "path": "data-prepper-plugins/opensearch/src/main/java/org/opensearch/dataprepper/plugins/sink/opensearch/BulkRetryStrategy.java",
+      "start_line": 230
+    },
+    "response_chars": 198,
+    "round": 6,
+    "tool_result": {
+      "content": "230:                         bulkRequestBadErrors.increment();\n231:                     }\n232:                 }\n233:                 handleRetriesAndFailures(bulkRequestForRetry, retryCount, backOffUtils, null, e);\n234:                 return;\n235:             }\n236:             if (bulkResponse.errors()) {\n237:                 handleRetriesAndFailures(bulkRequestForRetry, retryCount, backOffUtils, bulkResponse, null);\n238:             } else {\n239:                 final int numberOfDocs = bulkRequestForRetry.getOperationsCount();\n240:                 final boolean firstAttempt = (retryCount == 1);\n241:                 if (firstAttempt) {\n242:                     sentDocumentsOnFirstAttemptCounter.increment(numberOfDocs);\n243:                 }\n244:                 sentDocumentsCounter.increment(bulkRequestForRetry.getOperationsCount());\n245:                 for (final BulkOperationWithHandle bulkOperation: bulkRequestForRetry.getOperations()) {\n246:                     releaseEventReference(bulkOperation, true);\n247:                 }\n248:                 retryCountMap.remove(bulkRequestForRetry);\n249:             }\n250:         }\n251:     }\n252: \n253:     private void releaseEventReference(final BulkOperationWithHandle bulkOperation, final boolean result) {\n254:         final EventHandle eventHandle = bulkOperation.getEventHandle();\n255:         acknowledgementSetManager.releaseEventReference(eventHandle, result);\n256:     }\n257: \n258:     private AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> createBulkRequestForRetry(\n259:             final AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> request, final BulkResponse response) {\n260:         int newCount = retryCountMap.containsKey(request) ? (retryCountMap.get(request) + 1) : 1;\n261:         if (response == null) {\n262:             retryCountMap.put(request, newCount);\n263:             // first attempt or retry due to Exception\n264:             return request;\n265:         } else {\n266:             final AccumulatingBulkRequest requestToReissue = bulkRequestSupplier.get();\n267:             final ImmutableList.Builder<FailedBulkOperation> nonRetryableFailures = ImmutableList.builder();\n268:             if (request != requestToReissue) {\n269:                 retryCountMap.put(requestToReissue, newCount);\n270:                 retryCountMap.remove(request);\n271:             }\n272:             int index = 0;\n273:             for (final BulkResponseItem bulkItemResponse : response.items()) {\n274:                 BulkOperationWithHandle bulkOperationWithHandle =\n275:                     (BulkOperationWithHandle)request.getOperationAt(index);\n276:                 if (bulkItemResponse.error() != null) {\n277:                     if (!NON_RETRY_STATUS.contains(bulkItemResponse.status())) {\n278:                         requestToReissue.addOperation(bulkOperationWithHandle);\n279:                     } else {\n280:                         nonRetryableFailures.add(FailedBulkOperation.builder()\n281:                                 .withBulkOperation(bulkOperationWithHandle)\n282:                                 .withBulkResponseItem(bulkItemResponse)\n283:                                 .build());\n284:                         documentErrorsCounter.increment();\n285:                     }\n286:                 } else {\n287:                     sentDocumentsCounter.increment();\n288:                     releaseEventReference(bulkOperationWithHandle, true);\n289:                 }\n290:                 index++;\n291:             }\n292:             logFailure.accept(nonRetryableFailures.build(), null);\n293:             return requestToReissue;\n294:         }\n295:     }\n296: \n297:     private void handleFailures(final AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> accumulatingBulkRequest, final List<BulkResponseItem> itemResponses) {\n298:         assert accumulatingBulkRequest.getOperationsCount() == itemResponses.size();\n299:         final ImmutableList.Builder<FailedBulkOperation> failures = ImmutableList.builder();\n300:         for (int i = 0; i < itemResponses.size(); i++) {\n301:             final BulkResponseItem bulkItemResponse = itemResponses.get(i);\n302:             final BulkOperationWithHandle bulkOperationWithHandle = (BulkOperationWithHandle)accumulatingBulkRequest.getOperationAt(i);\n303:             if (bulkItemResponse.error() != null) {\n304:                 failures.add(FailedBulkOperation.builder()\n305:                     .withBulkOperation(bulkOperationWithHandle)\n306:                     .withBulkResponseItem(bulkItemResponse)\n307:                     .build());\n308:                 documentErrorsCounter.increment();\n309:             } else {\n310:                 sentDocumentsCounter.increment();\n311:                 releaseEventReference(bulkOperationWithHandle, true);\n312:             }\n313:         }\n314:         logFailure.accept(failures.build(), null);\n315:     }\n316: \n317:     private void handleFailures(final AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> accumulatingBulkRequest, final Throwable failure) {\n318:         documentErrorsCounter.increment(accumulatingBulkRequest.getOperationsCount());\n319:         final ImmutableList.Builder<FailedBulkOperation> failures = ImmutableList.builder();\n320:         final List<BulkOperationWithHandle> bulkOperations = accumulatingBulkRequest.getOperations();\n321:         for (int i = 0; i < bulkOperations.size(); i++) {\n322:             final BulkOperationWithHandle bulkOperation = bulkOperations.get(i);\n323:             failures.add(FailedBulkOperation.builder()\n324:                     .withBulkOperation(bulkOperation)\n325:                     .withFailure(failure)\n326:                     .build());\n327:         }\n328: \n329:         logFailure.accept(failures.build(), failure);\n330:     }\n331: \n332: }",
+      "end_line": 332,
+      "path_lines": 332,
+      "start_line": 230
+    },
+    "usage": {
+      "input_tokens": 12024,
+      "input_tokens_details": {
+        "cached_tokens": 11008
+      },
+      "output_tokens": 1238,
+      "output_tokens_details": {
+        "reasoning_tokens": 1172
+      },
+      "total_tokens": 13262
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "",
+          "end_line": 14,
+          "start_line": 14
+        },
+        {
+          "content": "    private void releaseEventReference(final BulkOperationWithHandle bulkOperation, final boolean result) {\n        acknowledgementSetManager.releaseEventReference(bulkOperation.getEventHandle(), result);\n    }",
+          "end_line": 256,
+          "start_line": 253
+        }
+      ]
+    },
+    "response_chars": 840,
+    "round": 7,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 14,
+          "replacement_lines": 0,
+          "start_line": 14
+        },
+        {
+          "end_line": 256,
+          "replacement_lines": 3,
+          "start_line": 253
+        }
+      ],
+      "current_file_lines": 330,
+      "updated_excerpt": {
+        "content": "4:  */\n5: \n6: package org.opensearch.dataprepper.plugins.sink.opensearch;\n7: \n8: import com.fasterxml.jackson.databind.ObjectMapper;\n9: import com.google.common.collect.ImmutableList;\n10: import org.opensearch.dataprepper.metrics.PluginMetrics;\n11: import io.micrometer.core.instrument.Counter;\n12: import org.opensearch.client.opensearch._types.OpenSearchException;\n13: import org.opensearch.action.bulk.BackoffPolicy;\n14: import org.opensearch.client.opensearch.core.BulkRequest;\n15: import org.opensearch.client.opensearch.core.BulkResponse;\n16: import org.opensearch.client.opensearch.core.bulk.BulkResponseItem;\n17: import org.opensearch.common.unit.TimeValue;\n18: import org.opensearch.dataprepper.model.configuration.PluginSetting;\n19: import org.opensearch.dataprepper.plugins.sink.opensearch.bulk.AccumulatingBulkRequest;\n20: import org.opensearch.dataprepper.plugins.sink.opensearch.dlq.FailedBulkOperation;\n21: import org.opensearch.rest.RestStatus;\n22: import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSetManager;\n23: \n24: import java.io.IOException;\n25: import java.util.Arrays;\n26: import java.util.HashSet;\n27: import java.util.List;\n28: import java.util.Map;\n29: import java.util.HashMap;\n30: import java.util.Objects;\n31: import java.util.Set;\n32: import java.util.function.BiConsumer;\n33: import java.util.function.Supplier;\n34: \n35: public final class BulkRetryStrategy {\n36:     public static final String DOCUMENTS_SUCCESS = \"documentsSuccess\";\n37:     public static final String DOCUMENTS_SUCCESS_FIRST_ATTEMPT = \"documentsSuccessFirstAttempt\";\n38:     public static final String DOCUMENT_ERRORS = \"documentErrors\";\n39:     public static final String BULK_REQUEST_FAILED = \"bulkRequestFailed\";\n40:     public static final String BULK_REQUEST_NUMBER_OF_RETRIES = \"bulkRequestNumberOfRetries\";\n41:     public static final String BULK_BAD_REQUEST_ERRORS = \"bulkBadRequestErrors\";\n42:     public static final String BULK_REQUEST_NOT_ALLOWED_ERRORS = \"bulkRequestNotAllowedErrors\";\n43:     public static final String BULK_REQUEST_INVALID_INPUT_ERRORS = \"bulkRequestInvalidInputErrors\";\n44:     public static final String BULK_REQUEST_NOT_FOUND_ERRORS = \"bulkRequestNotFoundErrors\";",
+        "end_line": 44,
+        "path_lines": 330,
+        "start_line": 4
+      }
+    },
+    "usage": {
+      "input_tokens": 13412,
+      "input_tokens_details": {
+        "cached_tokens": 11520
+      },
+      "output_tokens": 883,
+      "output_tokens_details": {
+        "reasoning_tokens": 663
+      },
+      "total_tokens": 14295
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 330,
+      "path": "data-prepper-plugins/opensearch/src/main/java/org/opensearch/dataprepper/plugins/sink/opensearch/BulkRetryStrategy.java",
+      "start_line": 1
+    },
+    "response_chars": 196,
+    "round": 8,
+    "tool_result": {
+      "content": "1: /*\n2:  * Copyright OpenSearch Contributors\n3:  * SPDX-License-Identifier: Apache-2.0\n4:  */\n5: \n6: package org.opensearch.dataprepper.plugins.sink.opensearch;\n7: \n8: import com.fasterxml.jackson.databind.ObjectMapper;\n9: import com.google.common.collect.ImmutableList;\n10: import org.opensearch.dataprepper.metrics.PluginMetrics;\n11: import io.micrometer.core.instrument.Counter;\n12: import org.opensearch.client.opensearch._types.OpenSearchException;\n13: import org.opensearch.action.bulk.BackoffPolicy;\n14: import org.opensearch.client.opensearch.core.BulkRequest;\n15: import org.opensearch.client.opensearch.core.BulkResponse;\n16: import org.opensearch.client.opensearch.core.bulk.BulkResponseItem;\n17: import org.opensearch.common.unit.TimeValue;\n18: import org.opensearch.dataprepper.model.configuration.PluginSetting;\n19: import org.opensearch.dataprepper.plugins.sink.opensearch.bulk.AccumulatingBulkRequest;\n20: import org.opensearch.dataprepper.plugins.sink.opensearch.dlq.FailedBulkOperation;\n21: import org.opensearch.rest.RestStatus;\n22: import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSetManager;\n23: \n24: import java.io.IOException;\n25: import java.util.Arrays;\n26: import java.util.HashSet;\n27: import java.util.List;\n28: import java.util.Map;\n29: import java.util.HashMap;\n30: import java.util.Objects;\n31: import java.util.Set;\n32: import java.util.function.BiConsumer;\n33: import java.util.function.Supplier;\n34: \n35: public final class BulkRetryStrategy {\n36:     public static final String DOCUMENTS_SUCCESS = \"documentsSuccess\";\n37:     public static final String DOCUMENTS_SUCCESS_FIRST_ATTEMPT = \"documentsSuccessFirstAttempt\";\n38:     public static final String DOCUMENT_ERRORS = \"documentErrors\";\n39:     public static final String BULK_REQUEST_FAILED = \"bulkRequestFailed\";\n40:     public static final String BULK_REQUEST_NUMBER_OF_RETRIES = \"bulkRequestNumberOfRetries\";\n41:     public static final String BULK_BAD_REQUEST_ERRORS = \"bulkBadRequestErrors\";\n42:     public static final String BULK_REQUEST_NOT_ALLOWED_ERRORS = \"bulkRequestNotAllowedErrors\";\n43:     public static final String BULK_REQUEST_INVALID_INPUT_ERRORS = \"bulkRequestInvalidInputErrors\";\n44:     public static final String BULK_REQUEST_NOT_FOUND_ERRORS = \"bulkRequestNotFoundErrors\";\n45:     public static final String BULK_REQUEST_TIMEOUT_ERRORS = \"bulkRequestTimeoutErrors\";\n46:     public static final String BULK_REQUEST_SERVER_ERRORS = \"bulkRequestServerErrors\";\n47: \n48:     private static final Set<Integer> NON_RETRY_STATUS = new HashSet<>(\n49:             Arrays.asList(\n50:                     RestStatus.BAD_REQUEST.getStatus(),\n51:                     RestStatus.NOT_FOUND.getStatus(),\n52:                     RestStatus.CONFLICT.getStatus()\n53:             ));\n54: \n55:     private static final Set<Integer> BAD_REQUEST_ERRORS = new HashSet<>(\n56:             Arrays.asList(\n57:                     RestStatus.BAD_REQUEST.getStatus(),\n58:                     RestStatus.EXPECTATION_FAILED.getStatus(),\n59:                     RestStatus.UNPROCESSABLE_ENTITY.getStatus(),\n60:                     RestStatus.FAILED_DEPENDENCY.getStatus(),\n61:                     RestStatus.NOT_ACCEPTABLE.getStatus()\n62:             ));\n63: \n64:     private static final Set<Integer> NOT_ALLOWED_ERRORS = new HashSet<>(\n65:             Arrays.asList(\n66:                     RestStatus.UNAUTHORIZED.getStatus(),\n67:                     RestStatus.FORBIDDEN.getStatus(),\n68:                     RestStatus.PAYMENT_REQUIRED.getStatus(),\n69:                     RestStatus.METHOD_NOT_ALLOWED.getStatus(),\n70:                     RestStatus.PROXY_AUTHENTICATION.getStatus(),\n71:                     RestStatus.LOCKED.getStatus(),\n72:                     RestStatus.TOO_MANY_REQUESTS.getStatus()\n73:             ));\n74: \n75:     private static final Set<Integer> INVALID_INPUT_ERRORS = new HashSet<>(\n76:             Arrays.asList(\n77:                     RestStatus.REQUEST_ENTITY_TOO_LARGE.getStatus(),\n78:                     RestStatus.REQUEST_URI_TOO_LONG.getStatus(),\n79:                     RestStatus.REQUESTED_RANGE_NOT_SATISFIED.getStatus(),\n80:                     RestStatus.LENGTH_REQUIRED.getStatus(),\n81:                     RestStatus.PRECONDITION_FAILED.getStatus(),\n82:                     RestStatus.UNSUPPORTED_MEDIA_TYPE.getStatus(),\n83:                     RestStatus.CONFLICT.getStatus()\n84:             ));\n85: \n86:     private static final Set<Integer> NOT_FOUND_ERRORS = new HashSet<>(\n87:             Arrays.asList(\n88:                     RestStatus.NOT_FOUND.getStatus(),\n89:                     RestStatus.GONE.getStatus()\n90:             ));\n91: \n92:     private static final Set<Integer> TIMEOUT_ERROR = new HashSet<>(\n93:             Arrays.asList(\n94:                     RestStatus.REQUEST_TIMEOUT.getStatus()\n95:             ));\n96: \n97:     private final RequestFunction<AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest>, BulkResponse> requestFunction;\n98:     private final BiConsumer<List<FailedBulkOperation>, Throwable> logFailure;\n99:     private final PluginMetrics pluginMetrics;\n100:     private final Supplier<AccumulatingBulkRequest> bulkRequestSupplier;\n101:     private final int maxRetries;\n102:     private final AcknowledgementSetManager acknowledgementSetManager;\n103:     private final Map<AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest>, Integer> retryCountMap;\n104:     private final String pluginId;\n105:     private final String pluginName;\n106:     private final String pipelineName;\n107:     private final ObjectMapper objectMapper;\n108: \n109:     private final Counter sentDocumentsCounter;\n110:     private final Counter sentDocumentsOnFirstAttemptCounter;\n111:     private final Counter documentErrorsCounter;\n112:     private final Counter bulkRequestFailedCounter;\n113:     private final Counter bulkRequestNumberOfRetries;\n114:     private final Counter bulkRequestBadErrors;\n115:     private final Counter bulkRequestNotAllowedErrors;\n116:     private final Counter bulkRequestInvalidInputErrors;\n117:     private final Counter bulkRequestNotFoundErrors;\n118:     private final Counter bulkRequestTimeoutErrors;\n119:     private final Counter bulkRequestServerErrors;\n120: \n121:     public BulkRetryStrategy(final RequestFunction<AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest>, BulkResponse> requestFunction,\n122:                              final BiConsumer<List<FailedBulkOperation>, Throwable> logFailure,\n123:                              final PluginMetrics pluginMetrics,\n124:                              final int maxRetries,\n125:                              final AcknowledgementSetManager acknowledgementSetManager,\n126:                              final Supplier<AccumulatingBulkRequest> bulkRequestSupplier,\n127:                              final PluginSetting pluginSetting) {\n128:         this.requestFunction = requestFunction;\n129:         this.logFailure = logFailure;\n130:         this.pluginMetrics = pluginMetrics;\n131:         this.bulkRequestSupplier = bulkRequestSupplier;\n132:         this.maxRetries = maxRetries;\n133:         this.retryCountMap = new HashMap<>();\n134:         this.pipelineName = pluginSetting.getPipelineName();\n135:         this.pluginId = pluginSetting.getName();\n136:         this.pluginName = pluginSetting.getName();\n137:         this.objectMapper = new ObjectMapper();\n138:         this.acknowledgementSetManager = acknowledgementSetManager;\n139: \n140:         sentDocumentsCounter = pluginMetrics.counter(DOCUMENTS_SUCCESS);\n141:         sentDocumentsOnFirstAttemptCounter = pluginMetrics.counter(DOCUMENTS_SUCCESS_FIRST_ATTEMPT);\n142:         documentErrorsCounter = pluginMetrics.counter(DOCUMENT_ERRORS);\n143:         bulkRequestFailedCounter = pluginMetrics.counter(BULK_REQUEST_FAILED);\n144:         bulkRequestNumberOfRetries = pluginMetrics.counter(BULK_REQUEST_NUMBER_OF_RETRIES);\n145:         bulkRequestBadErrors = pluginMetrics.counter(BULK_BAD_REQUEST_ERRORS);\n146:         bulkRequestNotAllowedErrors = pluginMetrics.counter(BULK_REQUEST_NOT_ALLOWED_ERRORS);\n147:         bulkRequestInvalidInputErrors = pluginMetrics.counter(BULK_REQUEST_INVALID_INPUT_ERRORS);\n148:         bulkRequestNotFoundErrors = pluginMetrics.counter(BULK_REQUEST_NOT_FOUND_ERRORS);\n149:         bulkRequestTimeoutErrors = pluginMetrics.counter(BULK_REQUEST_TIMEOUT_ERRORS);\n150:         bulkRequestServerErrors = pluginMetrics.counter(BULK_REQUEST_SERVER_ERRORS);\n151:     }\n152: \n153:     public void execute(final AccumulatingBulkRequest bulkRequest) throws InterruptedException {\n154:         // Exponential backoff run forever\n155:         // TODO: replace with custom backoff policy setting including maximum interval between retries\n156:         final BackOffUtils backOffUtils = new BackOffUtils(\n157:                 BackoffPolicy.exponentialBackoff(TimeValue.timeValueMillis(50), Integer.MAX_VALUE).iterator());\n158:         handleRetry(bulkRequest, null, backOffUtils);\n159:     }\n160: \n161:     public boolean canRetry(final BulkResponse response) {\n162:         for (final BulkResponseItem bulkItemResponse : response.items()) {\n163:             if (bulkItemResponse.error() != null && !NON_RETRY_STATUS.contains(bulkItemResponse.status())) {\n164:                 return true;\n165:             }\n166:         }\n167:         return false;\n168:     }\n169: \n170:     public static boolean canRetry(final Exception e) {\n171:         return (e instanceof IOException ||\n172:                 (e instanceof OpenSearchException &&\n173:                         !NON_RETRY_STATUS.contains(((OpenSearchException) e).status())));\n174:     }\n175: \n176:     private void handleRetriesAndFailures(final AccumulatingBulkRequest bulkRequestForRetry,\n177:                                           final int retryCount,\n178:                                           final BackOffUtils backOffUtils,\n179:                                           final BulkResponse bulkResponse,\n180:                                           Exception e) throws InterruptedException {\n181:         final boolean doRetry = (Objects.isNull(e)) ? canRetry(bulkResponse) : canRetry(e);\n182:         if (!Objects.isNull(bulkResponse) && retryCount == 1) { // first attempt\n183:             for (final BulkResponseItem bulkItemResponse : bulkResponse.items()) {\n184:                 if (bulkItemResponse.error() == null) {\n185:                     sentDocumentsOnFirstAttemptCounter.increment();\n186:                 }\n187:             }\n188:         }\n189:         if (doRetry && retryCount < maxRetries) {\n190:             handleRetry(bulkRequestForRetry, bulkResponse, backOffUtils);\n191:             bulkRequestNumberOfRetries.increment();\n192:         } else {\n193:             if (doRetry && retryCount >= maxRetries) {\n194:                 e = new RuntimeException(String.format(\"Number of retries reached the limit of max retries(configured value %d)\", maxRetries));\n195:             }\n196:             if (Objects.isNull(e)) {\n197:                 handleFailures(bulkRequestForRetry, bulkResponse.items());\n198:             } else {\n199:                 handleFailures(bulkRequestForRetry, e);\n200:             }\n201:             bulkRequestFailedCounter.increment();\n202:         }\n203:     }\n204: \n205:     private void handleRetry(final AccumulatingBulkRequest request, final BulkResponse response,\n206:                              final BackOffUtils backOffUtils) throws InterruptedException {\n207:         final AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> bulkRequestForRetry = createBulkRequestForRetry(request, response);\n208:         int retryCount = retryCountMap.get(bulkRequestForRetry);\n209:         if (backOffUtils.hasNext()) {\n210:             // Wait for backOff duration\n211:             backOffUtils.next();\n212:             final BulkResponse bulkResponse;\n213:             try {\n214:                 bulkResponse = requestFunction.apply(bulkRequestForRetry);\n215:             } catch (Exception e) {\n216:                 if (e instanceof OpenSearchException) {\n217:                     int status = ((OpenSearchException) e).status();\n218:                     if (NOT_ALLOWED_ERRORS.contains(status)) {\n219:                         bulkRequestNotAllowedErrors.increment();\n220:                     } else if (INVALID_INPUT_ERRORS.contains(status)) {\n221:                         bulkRequestInvalidInputErrors.increment();\n222:                     } else if (NOT_FOUND_ERRORS.contains(status)) {\n223:                         bulkRequestNotFoundErrors.increment();\n224:                     } else if (status == RestStatus.REQUEST_TIMEOUT.getStatus()) {\n225:                         bulkRequestTimeoutErrors.increment();\n226:                     } else if (status >= RestStatus.INTERNAL_SERVER_ERROR.getStatus()) {\n227:                         bulkRequestServerErrors.increment();\n228:                     } else { // Default to Bad Requests\n229:                         bulkRequestBadErrors.increment();\n230:                     }\n231:                 }\n232:                 handleRetriesAndFailures(bulkRequestForRetry, retryCount, backOffUtils, null, e);\n233:                 return;\n234:             }\n235:             if (bulkResponse.errors()) {\n236:                 handleRetriesAndFailures(bulkRequestForRetry, retryCount, backOffUtils, bulkResponse, null);\n237:             } else {\n238:                 final int numberOfDocs = bulkRequestForRetry.getOperationsCount();\n239:                 final boolean firstAttempt = (retryCount == 1);\n240:                 if (firstAttempt) {\n241:                     sentDocumentsOnFirstAttemptCounter.increment(numberOfDocs);\n242:                 }\n243:                 sentDocumentsCounter.increment(bulkRequestForRetry.getOperationsCount());\n244:                 for (final BulkOperationWithHandle bulkOperation: bulkRequestForRetry.getOperations()) {\n245:                     releaseEventReference(bulkOperation, true);\n246:                 }\n247:                 retryCountMap.remove(bulkRequestForRetry);\n248:             }\n249:         }\n250:     }\n251: \n252:     private void releaseEventReference(final BulkOperationWithHandle bulkOperation, final boolean result) {\n253:         acknowledgementSetManager.releaseEventReference(bulkOperation.getEventHandle(), result);\n254:     }\n255: \n256:     private AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> createBulkRequestForRetry(\n257:             final AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> request, final BulkResponse response) {\n258:         int newCount = retryCountMap.containsKey(request) ? (retryCountMap.get(request) + 1) : 1;\n259:         if (response == null) {\n260:             retryCountMap.put(request, newCount);\n261:             // first attempt or retry due to Exception\n262:             return request;\n263:         } else {\n264:             final AccumulatingBulkRequest requestToReissue = bulkRequestSupplier.get();\n265:             final ImmutableList.Builder<FailedBulkOperation> nonRetryableFailures = ImmutableList.builder();\n266:             if (request != requestToReissue) {\n267:                 retryCountMap.put(requestToReissue, newCount);\n268:                 retryCountMap.remove(request);\n269:             }\n270:             int index = 0;\n271:             for (final BulkResponseItem bulkItemResponse : response.items()) {\n272:                 BulkOperationWithHandle bulkOperationWithHandle =\n273:                     (BulkOperationWithHandle)request.getOperationAt(index);\n274:                 if (bulkItemResponse.error() != null) {\n275:                     if (!NON_RETRY_STATUS.contains(bulkItemResponse.status())) {\n276:                         requestToReissue.addOperation(bulkOperationWithHandle);\n277:                     } else {\n278:                         nonRetryableFailures.add(FailedBulkOperation.builder()\n279:                                 .withBulkOperation(bulkOperationWithHandle)\n280:                                 .withBulkResponseItem(bulkItemResponse)\n281:                                 .build());\n282:                         documentErrorsCounter.increment();\n283:                     }\n284:                 } else {\n285:                     sentDocumentsCounter.increment();\n286:                     releaseEventReference(bulkOperationWithHandle, true);\n287:                 }\n288:                 index++;\n289:             }\n290:             logFailure.accept(nonRetryableFailures.build(), null);\n291:             return requestToReissue;\n292:         }\n293:     }\n294: \n295:     private void handleFailures(final AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> accumulatingBulkRequest, final List<BulkResponseItem> itemResponses) {\n296:         assert accumulatingBulkRequest.getOperationsCount() == itemResponses.size();\n297:         final ImmutableList.Builder<FailedBulkOperation> failures = ImmutableList.builder();\n298:         for (int i = 0; i < itemResponses.size(); i++) {\n299:             final BulkResponseItem bulkItemResponse = itemResponses.get(i);\n300:             final BulkOperationWithHandle bulkOperationWithHandle = (BulkOperationWithHandle)accumulatingBulkRequest.getOperationAt(i);\n301:             if (bulkItemResponse.error() != null) {\n302:                 failures.add(FailedBulkOperation.builder()\n303:                     .withBulkOperation(bulkOperationWithHandle)\n304:                     .withBulkResponseItem(bulkItemResponse)\n305:                     .build());\n306:                 documentErrorsCounter.increment();\n307:             } else {\n308:                 sentDocumentsCounter.increment();\n309:                 releaseEventReference(bulkOperationWithHandle, true);\n310:             }\n311:         }\n312:         logFailure.accept(failures.build(), null);\n313:     }\n314: \n315:     private void handleFailures(final AccumulatingBulkRequest<BulkOperationWithHandle, BulkRequest> accumulatingBulkRequest, final Throwable failure) {\n316:         documentErrorsCounter.increment(accumulatingBulkRequest.getOperationsCount());\n317:         final ImmutableList.Builder<FailedBulkOperation> failures = ImmutableList.builder();\n318:         final List<BulkOperationWithHandle> bulkOperations = accumulatingBulkRequest.getOperations();\n319:         for (int i = 0; i < bulkOperations.size(); i++) {\n320:             final BulkOperationWithHandle bulkOperation = bulkOperations.get(i);\n321:             failures.add(FailedBulkOperation.builder()\n322:                     .withBulkOperation(bulkOperation)\n323:                     .withFailure(failure)\n324:                     .build());\n325:         }\n326: \n327:         logFailure.accept(failures.build(), failure);\n328:     }\n329: \n330: }",
+      "end_line": 330,
+      "path_lines": 330,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 14168,
+      "input_tokens_details": {
+        "cached_tokens": 13056
+      },
+      "output_tokens": 566,
+      "output_tokens_details": {
+        "reasoning_tokens": 500
+      },
+      "total_tokens": 14734
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 9,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__opensearch-project__data-prepper__pull_2458__comment_1160388651__complexity.patch"
+    },
+    "usage": {
+      "input_tokens": 18532,
+      "input_tokens_details": {
+        "cached_tokens": 13568
+      },
+      "output_tokens": 252,
+      "output_tokens_details": {
+        "reasoning_tokens": 241
+      },
+      "total_tokens": 18784
+    }
+  }
+]

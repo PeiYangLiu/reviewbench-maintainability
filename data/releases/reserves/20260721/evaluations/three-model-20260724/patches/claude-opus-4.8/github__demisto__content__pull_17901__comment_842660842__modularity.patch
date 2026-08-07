@@ -1,0 +1,64 @@
+--- a/Packs/Palo_Alto_Networks_Enterprise_DLP/Integrations/Palo_Alto_Networks_Enterprise_DLP/Palo_Alto_Networks_Enterprise_DLP.py
++++ b/Packs/Palo_Alto_Networks_Enterprise_DLP/Integrations/Palo_Alto_Networks_Enterprise_DLP/Palo_Alto_Networks_Enterprise_DLP.py
+@@ -345,6 +345,34 @@
+     return details_obj
+ 
+ 
++def create_incident(raw_incident: dict, region: str) -> dict:
++    """
++    Builds a Demisto incident from a raw DLP notification incident.
++    Args:
++        raw_incident: The raw incident data from the DLP notification.
++        region: The DLP region the incident belongs to.
++
++    Returns: A Demisto incident dict.
++    """
++    raw_incident['region'] = region
++    incident_creation_time = dateparser.parse(raw_incident['createdAt'])
++    parsed_details = parse_incident_details(raw_incident['incidentDetails'])
++    raw_incident['incidentDetails'] = parsed_details
++    if not raw_incident['userId']:
++        for header in parsed_details['headers']:
++            if header['attribute_name'] == 'username':
++                raw_incident['userId'] = header['attribute_value']
++
++    event_dump = json.dumps(raw_incident)
++    return {
++        'name': f'Palo Alto Networks DLP Incident {raw_incident["incidentId"]}',
++        'type': 'Data Loss Prevention',
++        'occurred': incident_creation_time.isoformat(),  # type: ignore
++        'rawJSON': event_dump,
++        'details': event_dump
++    }
++
++
+ def fetch_incidents(client: Client, regions: str, start_time: int = None, end_time: int = None):
+     if start_time and end_time:
+         print_debug_msg(f'Start fetching incidents between {start_time} and {end_time}.')
+@@ -358,25 +386,8 @@
+         for notification in notifications:
+             raw_incident = notification['incident']
+             previous_notifications = notification['previous_notifications']
+-            raw_incident['region'] = region
+             raw_incident['previousNotification'] = previous_notifications[0] if len(previous_notifications) > 0 else None
+-            incident_creation_time = dateparser.parse(raw_incident['createdAt'])
+-            parsed_details = parse_incident_details(raw_incident['incidentDetails'])
+-            raw_incident['incidentDetails'] = parsed_details
+-            if not raw_incident['userId']:
+-                for header in parsed_details['headers']:
+-                    if header['attribute_name'] == 'username':
+-                        raw_incident['userId'] = header['attribute_value']
+-
+-            event_dump = json.dumps(raw_incident)
+-            incident = {
+-                'name': f'Palo Alto Networks DLP Incident {raw_incident["incidentId"]}',
+-                'type': 'Data Loss Prevention',
+-                'occurred': incident_creation_time.isoformat(),  # type: ignore
+-                'rawJSON': event_dump,
+-                'details': event_dump
+-            }
+-            incidents.append(incident)
++            incidents.append(create_incident(raw_incident, region))
+     return incidents
+ 
+ 

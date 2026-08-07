@@ -1,0 +1,87 @@
+diff --git a/packages/dds/merge-tree/src/partialLengths.ts b/packages/dds/merge-tree/src/partialLengths.ts
+index 401d9c4..3925666 100644
+--- a/packages/dds/merge-tree/src/partialLengths.ts
++++ b/packages/dds/merge-tree/src/partialLengths.ts
+@@ -1299,6 +1299,34 @@ function cloneOverlapRemoveClients(
+ 	return newTree;
+ }
+ 
++/**
++ * Combines two `overlapClients` red-black trees, returning the combined tree.
++ * If the destination tree is defined, it is modified in-place and returned; otherwise a clone of the
++ * source tree (if any) is returned.
++ *
++ * Combination is performed additively on `seglen` on a per-client basis.
++ */
++function combineOverlapClientTrees(
++	dest: RedBlackTree<number, IOverlapClient> | undefined,
++	src: RedBlackTree<number, IOverlapClient> | undefined,
++): RedBlackTree<number, IOverlapClient> | undefined {
++	if (!dest) {
++		return cloneOverlapRemoveClients(src);
++	}
++	if (src) {
++		src.map((srcProp: Property<number, IOverlapClient>) => {
++			const destProp = dest.get(srcProp.key);
++			if (destProp) {
++				destProp.data.seglen += srcProp.data.seglen;
++			} else {
++				dest.put(srcProp.data.clientId, { ...srcProp.data });
++			}
++			return true;
++		});
++	}
++	return dest;
++}
++
+ /**
+  * Combines the `overlapRemoveClients` field of two `PartialSequenceLength` objects,
+  * modifying the first PartialSequenceLength's bookkeeping in-place.
+@@ -1306,39 +1334,14 @@ function cloneOverlapRemoveClients(
+  * Combination is performed additively on `seglen` on a per-client basis.
+  */
+ export function combineOverlapClients(a: PartialSequenceLength, b: PartialSequenceLength) {
+-	const overlapRemoveClientsA = a.overlapRemoveClients;
+-	if (overlapRemoveClientsA) {
+-		if (b.overlapRemoveClients) {
+-			b.overlapRemoveClients.map((bProp: Property<number, IOverlapClient>) => {
+-				const aProp = overlapRemoveClientsA.get(bProp.key);
+-				if (aProp) {
+-					aProp.data.seglen += bProp.data.seglen;
+-				} else {
+-					overlapRemoveClientsA.put(bProp.data.clientId, { ...bProp.data });
+-				}
+-				return true;
+-			});
+-		}
+-	} else {
+-		a.overlapRemoveClients = cloneOverlapRemoveClients(b.overlapRemoveClients);
+-	}
+-
+-	const overlapObliterateClientsA = a.overlapObliterateClients;
+-	if (overlapObliterateClientsA) {
+-		if (b.overlapObliterateClients) {
+-			b.overlapObliterateClients.map((bProp: Property<number, IOverlapClient>) => {
+-				const aProp = overlapObliterateClientsA.get(bProp.key);
+-				if (aProp) {
+-					aProp.data.seglen += bProp.data.seglen;
+-				} else {
+-					overlapObliterateClientsA.put(bProp.data.clientId, { ...bProp.data });
+-				}
+-				return true;
+-			});
+-		}
+-	} else {
+-		a.overlapObliterateClients = cloneOverlapRemoveClients(b.overlapObliterateClients);
+-	}
++	a.overlapRemoveClients = combineOverlapClientTrees(
++		a.overlapRemoveClients,
++		b.overlapRemoveClients,
++	);
++	a.overlapObliterateClients = combineOverlapClientTrees(
++		a.overlapObliterateClients,
++		b.overlapObliterateClients,
++	);
+ }
+ 
+ /**

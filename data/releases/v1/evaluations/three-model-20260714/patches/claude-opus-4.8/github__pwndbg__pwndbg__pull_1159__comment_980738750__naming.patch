@@ -1,0 +1,66 @@
+--- a/pwndbg/heap/ptmalloc.py
++++ b/pwndbg/heap/ptmalloc.py
+@@ -32,6 +32,24 @@
+     return ptr & ~(HEAP_MAX_SIZE - 1)
+ 
+ 
++# Some fields of the malloc_chunk struct were renamed in newer glibc versions.
++# Map the canonical name we use throughout pwndbg to the possible struct field
++# names, preferring the newer one when present.
++_MALLOC_CHUNK_FIELD_RENAMES = {
++    "prev_size": "mchunk_prev_size",
++    "size": "mchunk_size",
++}
++
++
++def resolve_renamed_field(gdb_value, name):
++    """Return the actual field name for `name` in `gdb_value`, accounting for
++    fields that were renamed across glibc versions."""
++    renamed = _MALLOC_CHUNK_FIELD_RENAMES.get(name)
++    if renamed is not None and renamed in (field.name for field in gdb_value.type.fields()):
++        return renamed
++    return name
++
++
+ class Chunk:
+     def __init__(self, addr):
+         self._gdbValue = pwndbg.gdblib.memory.poi(pwndbg.heap.current.malloc_chunk, addr)
+@@ -46,10 +64,7 @@
+     @property
+     def prev_size(self):
+         if self._prev_size is None:
+-            if "mchunk_prev_size" in (field.name for field in self._gdbValue.type.fields()):
+-                prev_size_field_name = "mchunk_prev_size"
+-            else:
+-                prev_size_field_name = "prev_size"
++            prev_size_field_name = resolve_renamed_field(self._gdbValue, "prev_size")
+ 
+             try:
+                 self._prev_size = int(self._gdbValue[prev_size_field_name])
+@@ -61,10 +76,7 @@
+     @property
+     def size(self):
+         if self._size is None:
+-            if "mchunk_size" in (field.name for field in self._gdbValue.type.fields()):
+-                size_field_name = "mchunk_size"
+-            else:
+-                size_field_name = "size"
++            size_field_name = resolve_renamed_field(self._gdbValue, "size")
+ 
+             try:
+                 self._size = int(self._gdbValue[size_field_name])
+@@ -358,12 +370,9 @@
+             bk        == 24
+             ...
+         """
+-        renames = {
+-            "mchunk_size": "size",
+-            "mchunk_prev_size": "prev_size",
+-        }
++        renames = {v: k for k, v in _MALLOC_CHUNK_FIELD_RENAMES.items()}
+         val = self.malloc_chunk
+-        chunk_keys = [renames[key] if key in renames else key for key in val.keys()]
++        chunk_keys = [renames.get(key, key) for key in val.keys()]
+         try:
+             return chunk_keys.index(key) * pwndbg.gdblib.arch.ptrsize
+         except Exception:

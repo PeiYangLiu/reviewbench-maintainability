@@ -1,0 +1,107 @@
+--- a/src/veranda/raster/mosaic/netcdf.py
++++ b/src/veranda/raster/mosaic/netcdf.py
+@@ -447,6 +447,39 @@
+         file_register = pd.DataFrame(file_register_dict)
+         return super().from_xarray(data, file_register, mosaic=mosaic, **kwargs)
+ 
++    @staticmethod
++    def _data_variable_attributes(data, data_variables):
++        nodatavals = dict()
++        scale_factors = dict()
++        offsets = dict()
++        dtypes = dict()
++        for data_variable in data_variables:
++            dtypes[data_variable] = data[data_variable].data.dtype.name
++            nodatavals[data_variable] = data[data_variable].attrs.get('_FillValue', 0)
++            scale_factors[data_variable] = data[data_variable].attrs.get('scale_factor', 1)
++            offsets[data_variable] = data[data_variable].attrs.get('add_offset', 0)
++
++        return nodatavals, scale_factors, offsets, dtypes
++
++    @staticmethod
++    def _stack_dims(data, stack_dim_names, unlimited_dims):
++        stack_dims = dict()
++        for stack_dim_name in stack_dim_names:
++            if stack_dim_name in unlimited_dims:
++                stack_dims[stack_dim_name] = None
++            else:
++                stack_dims[stack_dim_name] = len(data[stack_dim_name])
++
++        return stack_dims
++
++    @staticmethod
++    def _dim_names(data):
++        all_dims = list(data.dims)
++        space_dims = all_dims[-2:]
++        stack_dim_names = all_dims[:-2]
++
++        return space_dims, stack_dim_names
++
+     def write(self, data, encoder=None, encoder_kwargs=None, overwrite=False, unlimited_dims=None, **kwargs):
+         """
+         Writes a certain chunk of NetCDF data to disk.
+@@ -470,25 +503,9 @@
+         data_geom = self.raster_geom_from_data(data, sref=self.mosaic.sref)
+         unlimited_dims = to_list(unlimited_dims)
+         data_variables = list(data.data_vars)
+-        all_dims = list(data.dims)
+-        space_dims = all_dims[-2:]
+-        stack_dim_names = all_dims[:-2]
+-        stack_dims = dict()
+-        for stack_dim_name in stack_dim_names:
+-            if stack_dim_name in unlimited_dims:
+-                stack_dims[stack_dim_name] = None
+-            else:
+-                stack_dims[stack_dim_name] = len(data[stack_dim_name])
+-
+-        nodatavals = dict()
+-        scale_factors = dict()
+-        offsets = dict()
+-        dtypes = dict()
+-        for data_variable in data_variables:
+-            dtypes[data_variable] = data[data_variable].data.dtype.name
+-            nodatavals[data_variable] = data[data_variable].attrs.get('_FillValue', 0)
+-            scale_factors[data_variable] = data[data_variable].attrs.get('scale_factor', 1)
+-            offsets[data_variable] = data[data_variable].attrs.get('add_offset', 0)
++        space_dims, stack_dim_names = self._dim_names(data)
++        stack_dims = self._stack_dims(data, stack_dim_names, unlimited_dims)
++        nodatavals, scale_factors, offsets, dtypes = self._data_variable_attributes(data, data_variables)
+ 
+         for filepath, file_group in self._file_register.groupby('filepath'):
+             tile_id = file_group.iloc[0].get('tile_id', '0')
+@@ -545,19 +562,8 @@
+         data_variables = to_list(data_variables) if data_variables is not None else list(self._data.data_vars)
+         data = self.data[data_variables]
+ 
+-        all_dims = list(data.dims)
+-        space_dims = all_dims[-2:]
+-        stack_dim_names = all_dims[:-2]
+-
+-        nodatavals = dict()
+-        scale_factors = dict()
+-        offsets = dict()
+-        dtypes = dict()
+-        for data_variable in data_variables:
+-            dtypes[data_variable] = data[data_variable].data.dtype.name
+-            nodatavals[data_variable] = data[data_variable].attrs.get('_FillValue', 0)
+-            scale_factors[data_variable] = data[data_variable].attrs.get('scale_factor', 1)
+-            offsets[data_variable] = data[data_variable].attrs.get('add_offset', 0)
++        space_dims, stack_dim_names = self._dim_names(data)
++        nodatavals, scale_factors, offsets, dtypes = self._data_variable_attributes(data, data_variables)
+ 
+         for filepath, file_group in self._file_register.groupby('filepath'):
+             tile_id = file_group.iloc[0].get('tile_id', '0')
+@@ -575,12 +581,7 @@
+             layer_ids = np.unique(file_group[self._file_dim])
+             data_write = data_write.sel(**{self._file_dim: layer_ids})
+ 
+-            stack_dims = dict()
+-            for stack_dim_name in stack_dim_names:
+-                if stack_dim_name in unlimited_dims:
+-                    stack_dims[stack_dim_name] = None
+-                else:
+-                    stack_dims[stack_dim_name] = len(data_write[stack_dim_name])
++            stack_dims = self._stack_dims(data_write, stack_dim_names, unlimited_dims)
+ 
+             with NetCdf4File(filepath, mode='w', data_variables=data_variables, stack_dims=stack_dims,
+                              space_dims={space_dims[0]: tile.n_rows, space_dims[1]: tile.n_cols},

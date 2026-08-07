@@ -1,0 +1,33 @@
+--- a/internal/telemetry/client.go
++++ b/internal/telemetry/client.go
+@@ -144,6 +144,21 @@
+ 	// Globally registered application configuration sent in the app-started request, along with the locally-defined
+ 	// configuration of the  event.
+ 	globalAppConfig []Configuration
++
++	// syncFlushOnStop indicates that Stop should block until all outstanding
++	// telemetry messages have been flushed, instead of flushing them in the
++	// background.
++	syncFlushOnStop bool
++}
++
++// SyncFlushOnStop returns an Option which configures the telemetry client to
++// synchronously flush all outstanding telemetry messages when Stop is called,
++// rather than flushing them in the background. This is useful for short-lived
++// processes that may exit before a background flush has a chance to complete.
++func SyncFlushOnStop() Option {
++	return func(c *client) {
++		c.syncFlushOnStop = true
++	}
+ }
+ 
+ func log(msg string, args ...interface{}) {
+@@ -280,7 +295,7 @@
+ 	// close request types have no body
+ 	r := c.newRequest(RequestTypeAppClosing)
+ 	c.scheduleSubmit(r)
+-	if internal.BoolEnv("DD_CIVISIBILITY_ENABLED", false) {
++	if c.syncFlushOnStop {
+ 		cnn := make(chan struct{})
+ 		c.flushWithCallback(func() {
+ 			cnn <- struct{}{}

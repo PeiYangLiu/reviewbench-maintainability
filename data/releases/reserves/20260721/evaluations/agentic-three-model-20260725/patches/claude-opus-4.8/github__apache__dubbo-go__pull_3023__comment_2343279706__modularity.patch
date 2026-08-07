@@ -1,0 +1,55 @@
+diff --git a/filter/accesslog/filter.go b/filter/accesslog/filter.go
+index 2758081..df404d5 100644
+--- a/filter/accesslog/filter.go
++++ b/filter/accesslog/filter.go
+@@ -278,13 +278,9 @@ func (f *Filter) getOrOpenLogFile(accessLog string) (*os.File, error) {
+ 	f.fileLock.RLock()
+ 	if logFile, exists := f.fileCache[accessLog]; exists {
+ 		// Check if we need to rotate the log
+-		now := time.Now().Format(FileDateFormat)
+-		if fileInfo, err := logFile.Stat(); err == nil {
+-			last := fileInfo.ModTime().Format(FileDateFormat)
+-			if now == last {
+-				f.fileLock.RUnlock()
+-				return logFile, nil
+-			}
++		if isLogFileCurrent(logFile) {
++			f.fileLock.RUnlock()
++			return logFile, nil
+ 		}
+ 	}
+ 	f.fileLock.RUnlock()
+@@ -295,12 +291,8 @@ func (f *Filter) getOrOpenLogFile(accessLog string) (*os.File, error) {
+ 
+ 	// Double-check after acquiring write lock
+ 	if logFile, exists := f.fileCache[accessLog]; exists {
+-		now := time.Now().Format(FileDateFormat)
+-		if fileInfo, err := logFile.Stat(); err == nil {
+-			last := fileInfo.ModTime().Format(FileDateFormat)
+-			if now == last {
+-				return logFile, nil
+-			}
++		if isLogFileCurrent(logFile) {
++			return logFile, nil
+ 		}
+ 		// Close the old file before rotation
+ 		logFile.Close()
+@@ -316,6 +308,18 @@ func (f *Filter) getOrOpenLogFile(accessLog string) (*os.File, error) {
+ 	return logFile, nil
+ }
+ 
++// isLogFileCurrent reports whether the log file was last modified today,
++// meaning it does not need to be rotated.
++func isLogFileCurrent(logFile *os.File) bool {
++	fileInfo, err := logFile.Stat()
++	if err != nil {
++		return false
++	}
++	now := time.Now().Format(FileDateFormat)
++	last := fileInfo.ModTime().Format(FileDateFormat)
++	return now == last
++}
++
+ // openLogFile will open the log file with append mode.
+ // If the file is not found, it will create the file.
+ // Actually, the accessLog is the filename

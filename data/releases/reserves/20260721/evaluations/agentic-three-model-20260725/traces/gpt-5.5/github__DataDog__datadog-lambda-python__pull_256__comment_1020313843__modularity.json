@@ -1,0 +1,170 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 844,
+      "path": "datadog_lambda/tracing.py",
+      "start_line": 665
+    },
+    "response_chars": 84,
+    "round": 1,
+    "tool_result": {
+      "content": "665: def insert_upstream_authorizer_span(\n666:     kwargs_to_start_span, other_tags_for_span, start_time_ns, finish_time_ns\n667: ):\n668:     \"\"\"Insert the authorizer span.\n669:         Without this:        parent span --child-> inferred span\n670:         With this insertion: parent span --child-> upstreamAuthorizerSpan --child-> inferred span\n671: \n672:     Args:\n673:         kwargs_to_start_span (Dict): the same keyword arguments used for the inferred span\n674:         other_tags_for_span (Dict): the same tag keyword arguments used for the inferred span\n675:         start_time_ns (int): the start time of the span in nanoseconds\n676:         finish_time_ns (int): the finish time of the sapn in nanoseconds\n677:     \"\"\"\n678:     trace_ctx = tracer.current_trace_context()\n679:     upstream_authorizer_span = tracer.trace(\n680:         \"aws.apigateway.authorizer\", **kwargs_to_start_span\n681:     )\n682:     upstream_authorizer_span.set_tags(other_tags_for_span)\n683:     upstream_authorizer_span.set_tag(\"operation_name\", \"aws.apigateway.authorizer\")\n684:     # always sync for the authorizer invocation\n685:     InferredSpanInfo.set_tags_to_span(upstream_authorizer_span, synchronicity=\"sync\")\n686:     upstream_authorizer_span.start_ns = int(start_time_ns)\n687:     upstream_authorizer_span.finish(finish_time_ns / 1e9)\n688:     # trace context needs to be set again as it is reset by finish()\n689:     tracer.context_provider.activate(trace_ctx)\n690:     return upstream_authorizer_span\n691: \n692: \n693: def create_inferred_span_from_api_gateway_websocket_event(\n694:     event, decode_authorizer_context: bool = True\n695: ):\n696:     request_context = event.get(\"requestContext\")\n697:     domain = request_context.get(\"domainName\")\n698:     endpoint = request_context.get(\"routeKey\")\n699:     tags = {\n700:         \"operation_name\": \"aws.apigateway.websocket\",\n701:         \"http.url\": domain + endpoint,\n702:         \"endpoint\": endpoint,\n703:         \"resource_names\": endpoint,\n704:         \"apiid\": request_context.get(\"apiId\"),\n705:         \"apiname\": request_context.get(\"apiId\"),\n706:         \"stage\": request_context.get(\"stage\"),\n707:         \"request_id\": request_context.get(\"requestId\"),\n708:         \"connection_id\": request_context.get(\"connectionId\"),\n709:         \"event_type\": request_context.get(\"eventType\"),\n710:         \"message_direction\": request_context.get(\"messageDirection\"),\n711:     }\n712:     request_time_epoch_ms = int(request_context.get(\"requestTimeEpoch\"))\n713:     if is_api_gateway_invocation_async(event):\n714:         InferredSpanInfo.set_tags(tags, tag_source=\"self\", synchronicity=\"async\")\n715:     else:\n716:         InferredSpanInfo.set_tags(tags, tag_source=\"self\", synchronicity=\"sync\")\n717:     args = {\n718:         \"service\": domain,\n719:         \"resource\": endpoint,\n720:         \"span_type\": \"web\",\n721:     }\n722:     tracer.set_tags({\"_dd.origin\": \"lambda\"})\n723:     upstream_authorizer_span = None\n724:     finish_time_ns = None\n725:     if decode_authorizer_context:\n726:         injected_authorizer_data = get_injected_authorizer_data(\n727:             event, _EventSource(EventTypes.API_GATEWAY, EventSubtypes.WEBSOCKET)\n728:         )\n729:         if injected_authorizer_data:\n730:             try:\n731:                 start_time_ns = int(\n732:                     injected_authorizer_data.get(Headers.Parent_Span_Finish_Time)\n733:                 )\n734:                 finish_time_ns = (\n735:                     request_time_epoch_ms\n736:                     + (\n737:                         int(\n738:                             request_context.get(\"authorizer\", {}).get(\n739:                                 \"integrationLatency\", 0\n740:                             )\n741:                         )\n742:                     )\n743:                 ) * 1e6\n744:                 upstream_authorizer_span = insert_upstream_authorizer_span(\n745:                     args, tags, start_time_ns, finish_time_ns\n746:                 )\n747:             except Exception as e:\n748:                 traceback.print_exc()\n749:                 logger.debug(\n750:                     \"Unable to insert authorizer span. Continue to generate the main span.\\\n751:                      Event %s, Reason: %s\",\n752:                     event,\n753:                     e,\n754:                 )\n755:     span = tracer.trace(\"aws.apigateway.websocket\", **args)\n756:     if span:\n757:         span.set_tags(tags)\n758:         span.start_ns = int(\n759:             finish_time_ns\n760:             if finish_time_ns is not None\n761:             else request_time_epoch_ms * 1e6\n762:         )\n763:         if upstream_authorizer_span:\n764:             span.parent_id = upstream_authorizer_span.span_id\n765:     return span\n766: \n767: \n768: def create_inferred_span_from_api_gateway_event(\n769:     event, decode_authorizer_context: bool = True\n770: ):\n771:     request_context = event.get(\"requestContext\")\n772:     domain = request_context.get(\"domainName\", \"\")\n773:     method = event.get(\"httpMethod\")\n774:     path = event.get(\"path\")\n775:     resource = \"{0} {1}\".format(method, path)\n776:     tags = {\n777:         \"operation_name\": \"aws.apigateway.rest\",\n778:         \"http.url\": domain + path,\n779:         \"endpoint\": path,\n780:         \"http.method\": method,\n781:         \"resource_names\": resource,\n782:         \"apiid\": request_context.get(\"apiId\"),\n783:         \"apiname\": request_context.get(\"apiId\"),\n784:         \"stage\": request_context.get(\"stage\"),\n785:         \"request_id\": request_context.get(\"requestId\"),\n786:     }\n787:     request_time_epoch_ms = int(request_context.get(\"requestTimeEpoch\"))\n788:     if is_api_gateway_invocation_async(event):\n789:         InferredSpanInfo.set_tags(tags, tag_source=\"self\", synchronicity=\"async\")\n790:     else:\n791:         InferredSpanInfo.set_tags(tags, tag_source=\"self\", synchronicity=\"sync\")\n792:     args = {\n793:         \"service\": domain,\n794:         \"resource\": resource,\n795:         \"span_type\": \"http\",\n796:     }\n797:     tracer.set_tags({\"_dd.origin\": \"lambda\"})\n798:     upstream_authorizer_span = None\n799:     finish_time_ns = None\n800:     if decode_authorizer_context:\n801:         injected_authorizer_data = get_injected_authorizer_data(\n802:             event, _EventSource(EventTypes.API_GATEWAY, EventSubtypes.API_GATEWAY)\n803:         )\n804:         if injected_authorizer_data:\n805:             try:\n806:                 start_time_ns = int(\n807:                     injected_authorizer_data.get(Headers.Parent_Span_Finish_Time)\n808:                 )\n809:                 finish_time_ns = (\n810:                     request_time_epoch_ms\n811:                     + (\n812:                         int(\n813:                             request_context.get(\"authorizer\", {}).get(\n814:                                 \"integrationLatency\", 0\n815:                             )\n816:                         )\n817:                     )\n818:                 ) * 1e6\n819:                 upstream_authorizer_span = insert_upstream_authorizer_span(\n820:                     args, tags, start_time_ns, finish_time_ns\n821:                 )\n822:             except Exception as e:\n823:                 traceback.print_exc()\n824:                 logger.debug(\n825:                     \"Unable to insert authorizer span. Continue to generate the main span. \\\n826:                     Event %s, Reason: %s\",\n827:                     event,\n828:                     e,\n829:                 )\n830:     span = tracer.trace(\"aws.apigateway\", **args)\n831:     if span:\n832:         span.set_tags(tags)\n833:         # start time pushed by the inserted authorizer span\n834:         span.start_ns = int(\n835:             finish_time_ns\n836:             if finish_time_ns is not None\n837:             else request_time_epoch_ms * 1e6\n838:         )\n839:         if upstream_authorizer_span:\n840:             span.parent_id = upstream_authorizer_span.span_id\n841:     return span\n842: \n843: \n844: def create_inferred_span_from_http_api_event(",
+      "end_line": 844,
+      "path_lines": 1206,
+      "start_line": 665
+    },
+    "usage": {
+      "input_tokens": 8959,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 230,
+      "output_tokens_details": {
+        "reasoning_tokens": 199
+      },
+      "total_tokens": 9189
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\ndef try_insert_upstream_authorizer_span_from_api_gateway_event(\n    event, request_context, request_time_epoch_ms, args, tags\n):\n    upstream_authorizer_span = None\n    finish_time_ns = None\n    injected_authorizer_data = get_injected_authorizer_data(\n        event, _EventSource(EventTypes.API_GATEWAY, EventSubtypes.API_GATEWAY)\n    )\n    if injected_authorizer_data:\n        try:\n            start_time_ns = int(\n                injected_authorizer_data.get(Headers.Parent_Span_Finish_Time)\n            )\n            finish_time_ns = (\n                request_time_epoch_ms\n                + (\n                    int(\n                        request_context.get(\"authorizer\", {}).get(\n                            \"integrationLatency\", 0\n                        )\n                    )\n                )\n            ) * 1e6\n            upstream_authorizer_span = insert_upstream_authorizer_span(\n                args, tags, start_time_ns, finish_time_ns\n            )\n        except Exception as e:\n            traceback.print_exc()\n            logger.debug(\n                \"Unable to insert authorizer span. Continue to generate the main span. \\\n                Event %s, Reason: %s\",\n                event,\n                e,\n            )\n    return upstream_authorizer_span, finish_time_ns\n",
+          "end_line": 691,
+          "start_line": 692
+        },
+        {
+          "content": "    upstream_authorizer_span = None\n    finish_time_ns = None\n    if decode_authorizer_context:\n        (\n            upstream_authorizer_span,\n            finish_time_ns,\n        ) = try_insert_upstream_authorizer_span_from_api_gateway_event(\n            event, request_context, request_time_epoch_ms, args, tags\n        )",
+          "end_line": 829,
+          "start_line": 798
+        }
+      ]
+    },
+    "response_chars": 3759,
+    "round": 2,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 691,
+          "replacement_lines": 36,
+          "start_line": 692
+        },
+        {
+          "end_line": 829,
+          "replacement_lines": 9,
+          "start_line": 798
+        }
+      ],
+      "current_file_lines": 1219,
+      "updated_excerpt": {
+        "content": "682:     upstream_authorizer_span.set_tags(other_tags_for_span)\n683:     upstream_authorizer_span.set_tag(\"operation_name\", \"aws.apigateway.authorizer\")\n684:     # always sync for the authorizer invocation\n685:     InferredSpanInfo.set_tags_to_span(upstream_authorizer_span, synchronicity=\"sync\")\n686:     upstream_authorizer_span.start_ns = int(start_time_ns)\n687:     upstream_authorizer_span.finish(finish_time_ns / 1e9)\n688:     # trace context needs to be set again as it is reset by finish()\n689:     tracer.context_provider.activate(trace_ctx)\n690:     return upstream_authorizer_span\n691: \n692: \n693: def try_insert_upstream_authorizer_span_from_api_gateway_event(\n694:     event, request_context, request_time_epoch_ms, args, tags\n695: ):\n696:     upstream_authorizer_span = None\n697:     finish_time_ns = None\n698:     injected_authorizer_data = get_injected_authorizer_data(\n699:         event, _EventSource(EventTypes.API_GATEWAY, EventSubtypes.API_GATEWAY)\n700:     )\n701:     if injected_authorizer_data:\n702:         try:\n703:             start_time_ns = int(\n704:                 injected_authorizer_data.get(Headers.Parent_Span_Finish_Time)\n705:             )\n706:             finish_time_ns = (\n707:                 request_time_epoch_ms\n708:                 + (\n709:                     int(\n710:                         request_context.get(\"authorizer\", {}).get(\n711:                             \"integrationLatency\", 0\n712:                         )\n713:                     )\n714:                 )\n715:             ) * 1e6\n716:             upstream_authorizer_span = insert_upstream_authorizer_span(\n717:                 args, tags, start_time_ns, finish_time_ns\n718:             )\n719:         except Exception as e:\n720:             traceback.print_exc()\n721:             logger.debug(\n722:                 \"Unable to insert authorizer span. Continue to generate the main span. \\",
+        "end_line": 722,
+        "path_lines": 1219,
+        "start_line": 682
+      }
+    },
+    "usage": {
+      "input_tokens": 11103,
+      "input_tokens_details": {
+        "cached_tokens": 8448
+      },
+      "output_tokens": 3340,
+      "output_tokens_details": {
+        "reasoning_tokens": 2469
+      },
+      "total_tokens": 14443
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 855,
+      "path": "datadog_lambda/tracing.py",
+      "start_line": 693
+    },
+    "response_chars": 84,
+    "round": 3,
+    "tool_result": {
+      "content": "693: def try_insert_upstream_authorizer_span_from_api_gateway_event(\n694:     event, request_context, request_time_epoch_ms, args, tags\n695: ):\n696:     upstream_authorizer_span = None\n697:     finish_time_ns = None\n698:     injected_authorizer_data = get_injected_authorizer_data(\n699:         event, _EventSource(EventTypes.API_GATEWAY, EventSubtypes.API_GATEWAY)\n700:     )\n701:     if injected_authorizer_data:\n702:         try:\n703:             start_time_ns = int(\n704:                 injected_authorizer_data.get(Headers.Parent_Span_Finish_Time)\n705:             )\n706:             finish_time_ns = (\n707:                 request_time_epoch_ms\n708:                 + (\n709:                     int(\n710:                         request_context.get(\"authorizer\", {}).get(\n711:                             \"integrationLatency\", 0\n712:                         )\n713:                     )\n714:                 )\n715:             ) * 1e6\n716:             upstream_authorizer_span = insert_upstream_authorizer_span(\n717:                 args, tags, start_time_ns, finish_time_ns\n718:             )\n719:         except Exception as e:\n720:             traceback.print_exc()\n721:             logger.debug(\n722:                 \"Unable to insert authorizer span. Continue to generate the main span. \\\n723:                 Event %s, Reason: %s\",\n724:                 event,\n725:                 e,\n726:             )\n727:     return upstream_authorizer_span, finish_time_ns\n728: \n729: def create_inferred_span_from_api_gateway_websocket_event(\n730:     event, decode_authorizer_context: bool = True\n731: ):\n732:     request_context = event.get(\"requestContext\")\n733:     domain = request_context.get(\"domainName\")\n734:     endpoint = request_context.get(\"routeKey\")\n735:     tags = {\n736:         \"operation_name\": \"aws.apigateway.websocket\",\n737:         \"http.url\": domain + endpoint,\n738:         \"endpoint\": endpoint,\n739:         \"resource_names\": endpoint,\n740:         \"apiid\": request_context.get(\"apiId\"),\n741:         \"apiname\": request_context.get(\"apiId\"),\n742:         \"stage\": request_context.get(\"stage\"),\n743:         \"request_id\": request_context.get(\"requestId\"),\n744:         \"connection_id\": request_context.get(\"connectionId\"),\n745:         \"event_type\": request_context.get(\"eventType\"),\n746:         \"message_direction\": request_context.get(\"messageDirection\"),\n747:     }\n748:     request_time_epoch_ms = int(request_context.get(\"requestTimeEpoch\"))\n749:     if is_api_gateway_invocation_async(event):\n750:         InferredSpanInfo.set_tags(tags, tag_source=\"self\", synchronicity=\"async\")\n751:     else:\n752:         InferredSpanInfo.set_tags(tags, tag_source=\"self\", synchronicity=\"sync\")\n753:     args = {\n754:         \"service\": domain,\n755:         \"resource\": endpoint,\n756:         \"span_type\": \"web\",\n757:     }\n758:     tracer.set_tags({\"_dd.origin\": \"lambda\"})\n759:     upstream_authorizer_span = None\n760:     finish_time_ns = None\n761:     if decode_authorizer_context:\n762:         injected_authorizer_data = get_injected_authorizer_data(\n763:             event, _EventSource(EventTypes.API_GATEWAY, EventSubtypes.WEBSOCKET)\n764:         )\n765:         if injected_authorizer_data:\n766:             try:\n767:                 start_time_ns = int(\n768:                     injected_authorizer_data.get(Headers.Parent_Span_Finish_Time)\n769:                 )\n770:                 finish_time_ns = (\n771:                     request_time_epoch_ms\n772:                     + (\n773:                         int(\n774:                             request_context.get(\"authorizer\", {}).get(\n775:                                 \"integrationLatency\", 0\n776:                             )\n777:                         )\n778:                     )\n779:                 ) * 1e6\n780:                 upstream_authorizer_span = insert_upstream_authorizer_span(\n781:                     args, tags, start_time_ns, finish_time_ns\n782:                 )\n783:             except Exception as e:\n784:                 traceback.print_exc()\n785:                 logger.debug(\n786:                     \"Unable to insert authorizer span. Continue to generate the main span.\\\n787:                      Event %s, Reason: %s\",\n788:                     event,\n789:                     e,\n790:                 )\n791:     span = tracer.trace(\"aws.apigateway.websocket\", **args)\n792:     if span:\n793:         span.set_tags(tags)\n794:         span.start_ns = int(\n795:             finish_time_ns\n796:             if finish_time_ns is not None\n797:             else request_time_epoch_ms * 1e6\n798:         )\n799:         if upstream_authorizer_span:\n800:             span.parent_id = upstream_authorizer_span.span_id\n801:     return span\n802: \n803: \n804: def create_inferred_span_from_api_gateway_event(\n805:     event, decode_authorizer_context: bool = True\n806: ):\n807:     request_context = event.get(\"requestContext\")\n808:     domain = request_context.get(\"domainName\", \"\")\n809:     method = event.get(\"httpMethod\")\n810:     path = event.get(\"path\")\n811:     resource = \"{0} {1}\".format(method, path)\n812:     tags = {\n813:         \"operation_name\": \"aws.apigateway.rest\",\n814:         \"http.url\": domain + path,\n815:         \"endpoint\": path,\n816:         \"http.method\": method,\n817:         \"resource_names\": resource,\n818:         \"apiid\": request_context.get(\"apiId\"),\n819:         \"apiname\": request_context.get(\"apiId\"),\n820:         \"stage\": request_context.get(\"stage\"),\n821:         \"request_id\": request_context.get(\"requestId\"),\n822:     }\n823:     request_time_epoch_ms = int(request_context.get(\"requestTimeEpoch\"))\n824:     if is_api_gateway_invocation_async(event):\n825:         InferredSpanInfo.set_tags(tags, tag_source=\"self\", synchronicity=\"async\")\n826:     else:\n827:         InferredSpanInfo.set_tags(tags, tag_source=\"self\", synchronicity=\"sync\")\n828:     args = {\n829:         \"service\": domain,\n830:         \"resource\": resource,\n831:         \"span_type\": \"http\",\n832:     }\n833:     tracer.set_tags({\"_dd.origin\": \"lambda\"})\n834:     upstream_authorizer_span = None\n835:     finish_time_ns = None\n836:     if decode_authorizer_context:\n837:         (\n838:             upstream_authorizer_span,\n839:             finish_time_ns,\n840:         ) = try_insert_upstream_authorizer_span_from_api_gateway_event(\n841:             event, request_context, request_time_epoch_ms, args, tags\n842:         )\n843:     span = tracer.trace(\"aws.apigateway\", **args)\n844:     if span:\n845:         span.set_tags(tags)\n846:         # start time pushed by the inserted authorizer span\n847:         span.start_ns = int(\n848:             finish_time_ns\n849:             if finish_time_ns is not None\n850:             else request_time_epoch_ms * 1e6\n851:         )\n852:         if upstream_authorizer_span:\n853:             span.parent_id = upstream_authorizer_span.span_id\n854:     return span\n855: ",
+      "end_line": 855,
+      "path_lines": 1219,
+      "start_line": 693
+    },
+    "usage": {
+      "input_tokens": 12076,
+      "input_tokens_details": {
+        "cached_tokens": 10496
+      },
+      "output_tokens": 55,
+      "output_tokens_details": {
+        "reasoning_tokens": 24
+      },
+      "total_tokens": 12131
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\n",
+          "end_line": 727,
+          "start_line": 728
+        }
+      ]
+    },
+    "response_chars": 238,
+    "round": 4,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 727,
+          "replacement_lines": 1,
+          "start_line": 728
+        }
+      ],
+      "current_file_lines": 1220,
+      "updated_excerpt": {
+        "content": "718:             )\n719:         except Exception as e:\n720:             traceback.print_exc()\n721:             logger.debug(\n722:                 \"Unable to insert authorizer span. Continue to generate the main span. \\\n723:                 Event %s, Reason: %s\",\n724:                 event,\n725:                 e,\n726:             )\n727:     return upstream_authorizer_span, finish_time_ns\n728: \n729: \n730: def create_inferred_span_from_api_gateway_websocket_event(\n731:     event, decode_authorizer_context: bool = True\n732: ):\n733:     request_context = event.get(\"requestContext\")\n734:     domain = request_context.get(\"domainName\")\n735:     endpoint = request_context.get(\"routeKey\")\n736:     tags = {\n737:         \"operation_name\": \"aws.apigateway.websocket\",\n738:         \"http.url\": domain + endpoint,\n739:         \"endpoint\": endpoint,\n740:         \"resource_names\": endpoint,\n741:         \"apiid\": request_context.get(\"apiId\"),\n742:         \"apiname\": request_context.get(\"apiId\"),\n743:         \"stage\": request_context.get(\"stage\"),\n744:         \"request_id\": request_context.get(\"requestId\"),\n745:         \"connection_id\": request_context.get(\"connectionId\"),\n746:         \"event_type\": request_context.get(\"eventType\"),\n747:         \"message_direction\": request_context.get(\"messageDirection\"),\n748:     }\n749:     request_time_epoch_ms = int(request_context.get(\"requestTimeEpoch\"))\n750:     if is_api_gateway_invocation_async(event):\n751:         InferredSpanInfo.set_tags(tags, tag_source=\"self\", synchronicity=\"async\")\n752:     else:\n753:         InferredSpanInfo.set_tags(tags, tag_source=\"self\", synchronicity=\"sync\")\n754:     args = {\n755:         \"service\": domain,\n756:         \"resource\": endpoint,\n757:         \"span_type\": \"web\",\n758:     }",
+        "end_line": 758,
+        "path_lines": 1220,
+        "start_line": 718
+      }
+    },
+    "usage": {
+      "input_tokens": 13947,
+      "input_tokens_details": {
+        "cached_tokens": 11520
+      },
+      "output_tokens": 877,
+      "output_tokens_details": {
+        "reasoning_tokens": 782
+      },
+      "total_tokens": 14824
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 5,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__DataDog__datadog-lambda-python__pull_256__comment_1020313843__modularity.patch"
+    },
+    "usage": {
+      "input_tokens": 14534,
+      "input_tokens_details": {
+        "cached_tokens": 13568
+      },
+      "output_tokens": 238,
+      "output_tokens_details": {
+        "reasoning_tokens": 227
+      },
+      "total_tokens": 14772
+    }
+  }
+]

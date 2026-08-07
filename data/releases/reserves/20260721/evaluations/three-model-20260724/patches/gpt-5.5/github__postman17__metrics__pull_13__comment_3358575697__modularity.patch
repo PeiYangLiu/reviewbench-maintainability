@@ -1,0 +1,389 @@
+--- a/internal/repository/memory.go
++++ b/internal/repository/memory.go
+@@ -14,6 +14,21 @@
+ 	models "github.com/postman17/metrics/internal/model"
+ )
+ 
++type MetricsRepository interface {
++	AddGauge(name string, value float64)
++	CheckGaugeType(name string) bool
++	AddCounter(name string, value int64)
++	CheckCounterType(name string) bool
++	GetTypeValue(name string) any
++	AddBatch(data models.MetricsList) error
++}
++
++type metricPersistence interface {
++	AddGauge(name string, value float64) error
++	AddCounter(name string, value int64) error
++	AddBatch(data models.MetricsList) error
++}
++
+ type MemStorage struct {
+ 	Data      map[string]any
+ 	StoreSync bool
+@@ -24,27 +39,48 @@
+ 	WithDB    bool
+ }
+ 
++type FileStorage struct {
++	Data      map[string]any
++	StoreSync bool
++	FilePath  string
++	mu        *sync.Mutex
++}
++
++func NewFileStorage(data map[string]any, mu *sync.Mutex, storeSync bool, filePath string) *FileStorage {
++	return &FileStorage{
++		Data:      data,
++		StoreSync: storeSync,
++		FilePath:  filePath,
++		mu:        mu,
++	}
++}
++
++type DBStorage struct {
++	DB  *sql.DB
++	ctx context.Context
++}
++
++func NewDBStorage(ctx context.Context, db *sql.DB) *DBStorage {
++	return &DBStorage{
++		DB:  db,
++		ctx: ctx,
++	}
++}
++
++func (m *MemStorage) persistenceBackend() metricPersistence {
++	if m.WithDB {
++		return NewDBStorage(m.ctx, m.DB)
++	}
++	return NewFileStorage(m.Data, &m.mu, m.StoreSync, m.FilePath)
++}
++
+ func (m *MemStorage) AddGauge(name string, value float64) {
+ 	m.mu.Lock()
+ 	m.Data[name] = value
+-	storeSync := m.StoreSync
+-	filePath := m.FilePath
+ 	m.mu.Unlock()
+ 
+-	if m.WithDB {
+-		err := m.AddGaugeToDB(name, value)
+-		if err != nil {
+-			slog.Error("cant save to db", "err", err)
+-		}
+-		return
+-	}
+-
+-	if storeSync && filePath != "" {
+-		if err := m.SaveToFile(); err != nil {
+-			slog.Error(
+-				"memory save to file failed", "err", err,
+-			)
+-		}
++	if err := m.persistenceBackend().AddGauge(name, value); err != nil {
++		slog.Error("cant save to db", "err", err)
+ 	}
+ }
+ 
+@@ -70,24 +106,10 @@
+ 		newValue = value
+ 	}
+ 	m.Data[name] = newValue
+-	storeSync := m.StoreSync
+-	filePath := m.FilePath
+ 	m.mu.Unlock()
+ 
+-	if m.WithDB {
+-		err := m.AddCounterToDB(name, value)
+-		if err != nil {
+-			slog.Error("cant save to db", "err", err)
+-		}
+-		return
+-	}
+-
+-	if storeSync && filePath != "" {
+-		if err := m.SaveToFile(); err != nil {
+-			slog.Error(
+-				"memory save to file failed", "err", err,
+-			)
+-		}
++	if err := m.persistenceBackend().AddCounter(name, value); err != nil {
++		slog.Error("cant save to db", "err", err)
+ 	}
+ }
+ 
+@@ -113,11 +135,15 @@
+ }
+ 
+ func (m *MemStorage) LoadFromFile() error {
+-	if m.FilePath == "" {
++	return NewFileStorage(m.Data, &m.mu, m.StoreSync, m.FilePath).LoadFromFile()
++}
++
++func (f *FileStorage) LoadFromFile() error {
++	if f.FilePath == "" {
+ 		return fmt.Errorf("path to storage file is empty")
+ 	}
+ 
+-	data, err := os.ReadFile(m.FilePath)
++	data, err := os.ReadFile(f.FilePath)
+ 	if os.IsNotExist(err) {
+ 		return nil
+ 	}
+@@ -125,8 +151,8 @@
+ 		return fmt.Errorf("failed to read file: %w", err)
+ 	}
+ 
+-	m.mu.Lock()
+-	defer m.mu.Unlock()
++	f.mu.Lock()
++	defer f.mu.Unlock()
+ 
+ 	var list models.MetricsList
+ 	if err := easyjson.Unmarshal(data, &list); err != nil {
+@@ -137,11 +163,11 @@
+ 		switch metric.MType {
+ 		case models.Counter:
+ 			if metric.Delta != nil {
+-				m.Data[metric.ID] = *metric.Delta
++				f.Data[metric.ID] = *metric.Delta
+ 			}
+ 		case models.Gauge:
+ 			if metric.Value != nil {
+-				m.Data[metric.ID] = *metric.Value
++				f.Data[metric.ID] = *metric.Value
+ 			}
+ 		}
+ 	}
+@@ -150,10 +176,14 @@
+ }
+ 
+ func (m *MemStorage) SaveToFile() error {
+-	m.mu.Lock()
+-	list := make(models.MetricsList, 0, len(m.Data))
+-
+-	for id, v := range m.Data {
++	return NewFileStorage(m.Data, &m.mu, m.StoreSync, m.FilePath).SaveToFile()
++}
++
++func (f *FileStorage) SaveToFile() error {
++	f.mu.Lock()
++	list := make(models.MetricsList, 0, len(f.Data))
++
++	for id, v := range f.Data {
+ 		switch val := v.(type) {
+ 		case float64:
+ 			value := val
+@@ -171,24 +201,24 @@
+ 			})
+ 		}
+ 	}
+-	m.mu.Unlock()
++	f.mu.Unlock()
+ 
+ 	data, err := easyjson.Marshal(list)
+ 	if err != nil {
+ 		return fmt.Errorf("failed to marshal metrics via easyjson: %w", err)
+ 	}
+ 
+-	dir := filepath.Dir(m.FilePath)
++	dir := filepath.Dir(f.FilePath)
+ 	if err := os.MkdirAll(dir, 0755); err != nil {
+ 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
+ 	}
+ 
+-	tmpPath := m.FilePath + ".tmp"
++	tmpPath := f.FilePath + ".tmp"
+ 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+ 		return fmt.Errorf("failed to write temp file: %w", err)
+ 	}
+ 
+-	if err := os.Rename(tmpPath, m.FilePath); err != nil {
++	if err := os.Rename(tmpPath, f.FilePath); err != nil {
+ 		_ = os.Remove(tmpPath)
+ 		return fmt.Errorf("failed to rename temp file to destination: %w", err)
+ 	}
+@@ -198,14 +228,44 @@
+ 	return nil
+ }
+ 
++func (f *FileStorage) AddGauge(name string, value float64) error {
++	return f.saveIfNeeded()
++}
++
++func (f *FileStorage) AddCounter(name string, value int64) error {
++	return f.saveIfNeeded()
++}
++
++func (f *FileStorage) AddBatch(data models.MetricsList) error {
++	return f.saveIfNeeded()
++}
++
++func (f *FileStorage) saveIfNeeded() error {
++	if !f.StoreSync || f.FilePath == "" {
++		return nil
++	}
++
++	if err := f.SaveToFile(); err != nil {
++		slog.Error(
++			"memory save to file failed", "err", err,
++		)
++	}
++
++	return nil
++}
++
+ func (m *MemStorage) AddGaugeToDB(name string, value float64) error {
++	return NewDBStorage(m.ctx, m.DB).AddGauge(name, value)
++}
++
++func (d *DBStorage) AddGauge(name string, value float64) error {
+ 	var (
+ 		id    int64
+ 		mType string
+ 	)
+-	getCtx, getCancel := context.WithTimeout(m.ctx, 5*time.Second)
++	getCtx, getCancel := context.WithTimeout(d.ctx, 5*time.Second)
+ 	defer getCancel()
+-	row := m.DB.QueryRowContext(
++	row := d.DB.QueryRowContext(
+ 		getCtx, "SELECT id, m_type FROM metrics WHERE name = $1", name,
+ 	)
+ 	err := row.Scan(&id, &mType)
+@@ -213,9 +273,9 @@
+ 		return err
+ 	}
+ 	if err == nil && mType == "gauge" {
+-		updateCtx, updateCancel := context.WithTimeout(m.ctx, 5*time.Second)
++		updateCtx, updateCancel := context.WithTimeout(d.ctx, 5*time.Second)
+ 		defer updateCancel()
+-		_, err := m.DB.ExecContext(
++		_, err := d.DB.ExecContext(
+ 			updateCtx, "UPDATE metrics SET value = $1 WHERE id = $2",
+ 			value, id,
+ 		)
+@@ -224,9 +284,9 @@
+ 		}
+ 		return nil
+ 	} else if err == nil && mType == "counter" {
+-		updateCtx, updateCancel := context.WithTimeout(m.ctx, 5*time.Second)
++		updateCtx, updateCancel := context.WithTimeout(d.ctx, 5*time.Second)
+ 		defer updateCancel()
+-		_, err := m.DB.ExecContext(
++		_, err := d.DB.ExecContext(
+ 			updateCtx, "UPDATE metrics SET value = $1, m_type = $2, delta = $3 WHERE id = $4",
+ 			value, "gauge", 0, id,
+ 		)
+@@ -235,9 +295,9 @@
+ 		}
+ 		return nil
+ 	}
+-	insertCtx, insertCancel := context.WithTimeout(m.ctx, 5*time.Second)
++	insertCtx, insertCancel := context.WithTimeout(d.ctx, 5*time.Second)
+ 	defer insertCancel()
+-	_, err = m.DB.ExecContext(
++	_, err = d.DB.ExecContext(
+ 		insertCtx, "INSERT INTO metrics (name, m_type, value) VALUES ($1, $2, $3)",
+ 		name, "gauge", value,
+ 	)
+@@ -248,14 +308,18 @@
+ }
+ 
+ func (m *MemStorage) AddCounterToDB(name string, value int64) error {
++	return NewDBStorage(m.ctx, m.DB).AddCounter(name, value)
++}
++
++func (d *DBStorage) AddCounter(name string, value int64) error {
+ 	var (
+ 		id    int64
+ 		mType string
+ 		delta int64
+ 	)
+-	getCtx, getCancel := context.WithTimeout(m.ctx, 5*time.Second)
++	getCtx, getCancel := context.WithTimeout(d.ctx, 5*time.Second)
+ 	defer getCancel()
+-	row := m.DB.QueryRowContext(
++	row := d.DB.QueryRowContext(
+ 		getCtx, "SELECT id, m_type, delta FROM metrics WHERE name = $1", name,
+ 	)
+ 	err := row.Scan(&id, &mType, &delta)
+@@ -264,9 +328,9 @@
+ 	}
+ 	if err == nil && mType == "counter" {
+ 		value = delta + value
+-		updateCtx, updateCancel := context.WithTimeout(m.ctx, 5*time.Second)
++		updateCtx, updateCancel := context.WithTimeout(d.ctx, 5*time.Second)
+ 		defer updateCancel()
+-		_, err := m.DB.ExecContext(
++		_, err := d.DB.ExecContext(
+ 			updateCtx, "UPDATE metrics SET delta = $1 WHERE id = $2",
+ 			value, id,
+ 		)
+@@ -275,9 +339,9 @@
+ 		}
+ 		return nil
+ 	} else if err == nil && mType == "gauge" {
+-		updateCtx, updateCancel := context.WithTimeout(m.ctx, 5*time.Second)
++		updateCtx, updateCancel := context.WithTimeout(d.ctx, 5*time.Second)
+ 		defer updateCancel()
+-		_, err := m.DB.ExecContext(
++		_, err := d.DB.ExecContext(
+ 			updateCtx, "UPDATE metrics SET delta = $1, m_type = $2, value = $3 WHERE id = $4",
+ 			value, "counter", 0, id,
+ 		)
+@@ -286,9 +350,9 @@
+ 		}
+ 		return nil
+ 	}
+-	insertCtx, insertCancel := context.WithTimeout(m.ctx, 5*time.Second)
++	insertCtx, insertCancel := context.WithTimeout(d.ctx, 5*time.Second)
+ 	defer insertCancel()
+-	_, err = m.DB.ExecContext(
++	_, err = d.DB.ExecContext(
+ 		insertCtx, "INSERT INTO metrics (name, m_type, delta) VALUES ($1, $2, $3)",
+ 		name, "counter", value,
+ 	)
+@@ -334,34 +398,20 @@
+ 			m.Data[metric.ID] = newValue
+ 		}
+ 	}
+-	storeSync := m.StoreSync
+-	filePath := m.FilePath
+-	withDB := m.WithDB
+ 	m.mu.Unlock()
+ 
+-	if withDB {
+-		if err := m.AddBatchToDB(data); err != nil {
+-			return err
+-		}
+-		return nil
+-	}
+-
+-	if storeSync && filePath != "" {
+-		if err := m.SaveToFile(); err != nil {
+-			slog.Error(
+-				"memory save to file failed", "err", err,
+-			)
+-		}
+-	}
+-
+-	return nil
++	return m.persistenceBackend().AddBatch(data)
+ }
+ 
+ func (m *MemStorage) AddBatchToDB(data models.MetricsList) error {
+-	txCtx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
++	return NewDBStorage(m.ctx, m.DB).AddBatch(data)
++}
++
++func (d *DBStorage) AddBatch(data models.MetricsList) error {
++	txCtx, cancel := context.WithTimeout(d.ctx, 30*time.Second)
+ 	defer cancel()
+ 
+-	tx, err := m.DB.BeginTx(txCtx, nil)
++	tx, err := d.DB.BeginTx(txCtx, nil)
+ 	if err != nil {
+ 		return err
+ 	}

@@ -1,0 +1,107 @@
+--- a/src/array_api_extra/_delegation.py
++++ b/src/array_api_extra/_delegation.py
+@@ -1,6 +1,5 @@
+ """Delegation to existing implementations for Public API Functions."""
+ 
+-import functools
+ from enum import Enum
+ from types import ModuleType
+ from typing import final
+@@ -19,40 +18,27 @@
+ 
+ 
+ @final
+-class IsNamespace(Enum):
+-    """Enum to access is_namespace functions as the backend."""
++class Backend(Enum):
++    """
++    All array library backends explicitly tested by array-api-extra.
+ 
+-    # TODO: when Python 3.10 is dropped, use `enum.member`
+-    # https://stackoverflow.com/a/74302109
+-    CUPY = functools.partial(is_cupy_namespace)
+-    JAX = functools.partial(is_jax_namespace)
+-    NUMPY = functools.partial(is_numpy_namespace)
+-    TORCH = functools.partial(is_torch_namespace)
++    Parameters
++    ----------
++    value : str
++        String describing the backend.
++    """
+ 
+-    def __call__(self, xp: ModuleType) -> bool:
+-        """
+-        Call the is_namespace function.
++    CUPY = "cupy"
++    JAX = "jax.numpy"
++    NUMPY = "numpy"
++    TORCH = "torch"
+ 
+-        Parameters
+-        ----------
+-        xp : array_namespace
+-            Array namespace to check.
+-
+-        Returns
+-        -------
+-        bool
+-            ``True`` if xp matches the namespace, ``False`` otherwise.
+-        """
+-        return self.value(xp)
++    def __str__(self) -> str:  # type: ignore[explicit-override]  # pyright: ignore[reportImplicitOverride]
++        """Pretty-print parameterized test names."""
++        return self.value
+ 
+ 
+-CUPY = IsNamespace.CUPY
+-JAX = IsNamespace.JAX
+-NUMPY = IsNamespace.NUMPY
+-TORCH = IsNamespace.TORCH
+-
+-
+-def _delegate(xp: ModuleType, *backends: IsNamespace) -> bool:
++def _delegate(xp: ModuleType, *backends: Backend) -> bool:
+     """
+     Check whether `xp` is one of the `backends` to delegate to.
+ 
+@@ -60,15 +46,21 @@
+     ----------
+     xp : array_namespace
+         Array namespace to check.
+-    *backends : IsNamespace
+-        Arbitrarily many backends (from the ``IsNamespace`` enum) to check.
++    *backends : Backend
++        Arbitrarily many backends (from the ``Backend`` enum) to check.
+ 
+     Returns
+     -------
+     bool
+         ``True`` if `xp` matches one of the `backends`, ``False`` otherwise.
+     """
+-    return any(is_namespace(xp) for is_namespace in backends)
++    is_namespaces = {
++        Backend.CUPY: is_cupy_namespace,
++        Backend.JAX: is_jax_namespace,
++        Backend.NUMPY: is_numpy_namespace,
++        Backend.TORCH: is_torch_namespace,
++    }
++    return any(is_namespaces[backend](xp) for backend in backends)
+ 
+ 
+ def pad(
+@@ -113,13 +105,13 @@
+         raise NotImplementedError(msg)
+ 
+     # https://github.com/pytorch/pytorch/blob/cf76c05b4dc629ac989d1fb8e789d4fac04a095a/torch/_numpy/_funcs_impl.py#L2045-L2056
+-    if _delegate(xp, TORCH):
++    if _delegate(xp, Backend.TORCH):
+         pad_width = xp.asarray(pad_width)
+         pad_width = xp.broadcast_to(pad_width, (x.ndim, 2))
+         pad_width = xp.flip(pad_width, axis=(0,)).flatten()
+         return xp.nn.functional.pad(x, tuple(pad_width), value=constant_values)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
+ 
+-    if _delegate(xp, NUMPY, JAX, CUPY):
++    if _delegate(xp, Backend.NUMPY, Backend.JAX, Backend.CUPY):
+         return xp.pad(x, pad_width, mode, constant_values=constant_values)
+ 
+     return _funcs.pad(x, pad_width, constant_values=constant_values, xp=xp)

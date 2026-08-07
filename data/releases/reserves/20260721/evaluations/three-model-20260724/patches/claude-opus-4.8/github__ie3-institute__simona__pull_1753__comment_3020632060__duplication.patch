@@ -1,0 +1,49 @@
+--- a/src/main/scala/edu/ie3/simona/service/results/ResultServiceProxy.scala
++++ b/src/main/scala/edu/ie3/simona/service/results/ResultServiceProxy.scala
+@@ -537,6 +537,15 @@
+     threeWindingResults,
+     Seq.empty[Transformer3WResult],
+   ) { case ((allPartialResults, allResults), result) =>
++    // on failure, we just continue with previous results
++    def onFailure(exception: Throwable) = {
++      log.warn(
++        "Failure when handling partial Transformer3w result",
++        exception,
++      )
++      (allPartialResults, allResults)
++    }
++
+     val key = Transformer3wKey(result.input, result.time)
+     // retrieve existing partial result or use empty one
+     val partialResult =
+@@ -550,12 +559,7 @@
+         // if result is complete, we can write it out
+         updatedResult.consolidate match {
+           case Failure(exception) =>
+-            log.warn(
+-              "Failure when handling partial Transformer3w result",
+-              exception,
+-            )
+-            // on failure, we just continue with previous results
+-            (allPartialResults, allResults)
++            onFailure(exception)
+           case Success(res) =>
+             (allPartialResults.removed(key), allResults.appended(res))
+         }
+@@ -565,14 +569,8 @@
+         (allPartialResults + (key -> updatedResult), allResults)
+       }
+     } match {
+-      case Success(results) => results
+-      case Failure(exception) =>
+-        log.warn(
+-          "Failure when handling partial Transformer3w result",
+-          exception,
+-        )
+-        // on failure, we just continue with previous results
+-        (allPartialResults, allResults)
++      case Success(results)   => results
++      case Failure(exception) => onFailure(exception)
+     }
+   }
+ 

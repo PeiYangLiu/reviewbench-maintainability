@@ -1,0 +1,62 @@
+--- a/container.go
++++ b/container.go
+@@ -128,16 +128,16 @@
+ 		row = append(row, ci.MAC)
+ 	}
+ 
+-	checkpointSize, rootFsDiffTarSize, err := getCheckpointAndDiffSizes(input)
++	archiveSizes, err := getCheckpointArchiveSizes(input)
+ 	if err != nil {
+ 		return err
+ 	}
+ 
+ 	header = append(header, "CHKPT Size")
+-	row = append(row, metadata.ByteToString(checkpointSize))
++	row = append(row, metadata.ByteToString(archiveSizes.checkpointSize()))
+ 
+ 	// Display root fs diff size if available
+-	if rootFsDiffTarSize != 0 {
++	if rootFsDiffTarSize := archiveSizes.rootFsDiffTarSize(); rootFsDiffTarSize != 0 {
+ 		header = append(header, "Root Fs Diff Size")
+ 		row = append(row, metadata.ByteToString(rootFsDiffTarSize))
+ 	}
+@@ -209,9 +209,22 @@
+ 	return nil
+ }
+ 
+-// getCheckpointAndDiffSizes retrieves the size of the checkpoint directory and
+-// the size of the rootfs-diff.tar file from an archive file without unpacking the files.
+-func getCheckpointAndDiffSizes(input string) (checkpointSize int64, rootFsDiffTarSize int64, err error) {
++// checkpointArchiveSizes stores size information collected while scanning a checkpoint archive.
++type checkpointArchiveSizes struct {
++	checkpoint    int64
++	rootFsDiffTar int64
++}
++
++func (sizes checkpointArchiveSizes) checkpointSize() int64 {
++	return sizes.checkpoint
++}
++
++func (sizes checkpointArchiveSizes) rootFsDiffTarSize() int64 {
++	return sizes.rootFsDiffTar
++}
++
++// getCheckpointArchiveSizes retrieves checkpoint archive size information without unpacking the files.
++func getCheckpointArchiveSizes(input string) (sizes checkpointArchiveSizes, err error) {
+ 	archiveFile, err := os.Open(input)
+ 	if err != nil {
+ 		return
+@@ -242,11 +255,11 @@
+ 		// Check if it's a regular file
+ 		if !hdr.FileInfo().IsDir() && strings.HasPrefix(hdr.Name, metadata.CheckpointDirectory) {
+ 			// Add the file size to the total checkpoint size
+-			checkpointSize += hdr.Size
++			sizes.checkpoint += hdr.Size
+ 		}
+ 
+ 		if hdr.Name == metadata.RootFsDiffTar {
+-			rootFsDiffTarSize = hdr.Size
++			sizes.rootFsDiffTar = hdr.Size
+ 		}
+ 	}
+ 

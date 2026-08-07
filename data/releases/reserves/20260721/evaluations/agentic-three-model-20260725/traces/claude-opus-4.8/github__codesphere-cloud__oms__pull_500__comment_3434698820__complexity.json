@@ -1,0 +1,59 @@
+[
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "func installArgoCDAndApps(opts *InstallCodesphereOpts, pm installer.PackageManager, stlog *bootstrap.StepLogger) error {\n\tctx := context.Background()\n\tstate := &argoInstallState{opts: opts}\n\n\tif err := stlog.Substep(\"Load vault data\", func() error {\n\t\treturn state.loadVaultData()\n\t}); err != nil {\n\t\treturn err\n\t}\n\n\tif err := stlog.Substep(\"Install ArgoCD\", func() error {\n\t\treturn state.installArgoCD()\n\t}); err != nil {\n\t\treturn err\n\t}\n\n\tif err := stlog.Substep(\"Sync vault secret\", func() error {\n\t\treturn state.syncVaultSecret(ctx)\n\t}); err != nil {\n\t\treturn err\n\t}\n\n\tif err := stlog.Substep(\"Install pc-apps\", func() error {\n\t\treturn state.installPcApps(ctx, pm)\n\t}); err != nil {\n\t\treturn err\n\t}\n\n\treturn nil\n}\n\n// argoInstallState carries the shared state between the ArgoCD pre-step substeps.\ntype argoInstallState struct {\n\topts        *InstallCodesphereOpts\n\tociPassword string\n\targoInstall *argocdinstaller.Installer\n\tkubeClient  ctrlclient.Client\n\tvault       *files.InstallVault\n\tkubeConfig  *rest.Config\n}\n\nfunc (s *argoInstallState) loadVaultData() error {\n\tvar err error\n\ts.vault, err = installer.LoadVaultData(s.opts.Vault, s.opts.PrivKey)\n\tif err != nil {\n\t\treturn fmt.Errorf(\"failed to load vault: %w\", err)\n\t}\n\tif secret := s.vault.GetSecret(files.SecretRegistryPassword); secret != nil && secret.Fields != nil {\n\t\ts.ociPassword = secret.Fields.Password\n\t}\n\tif s.ociPassword == \"\" {\n\t\treturn fmt.Errorf(\"registry password not found in vault (secret %q)\", files.SecretRegistryPassword)\n\t}\n\tkubeConfigContent, err := kubeConfigContentFromVault(s.vault)\n\tif err != nil {\n\t\treturn err\n\t}\n\n\ts.kubeConfig, err = clientcmd.RESTConfigFromKubeConfig([]byte(kubeConfigContent))\n\tif err != nil {\n\t\treturn fmt.Errorf(\"failed to load kubernetes config from vault: %w\", err)\n\t}\n\ts.kubeClient, err = ctrlclient.New(s.kubeConfig, ctrlclient.Options{})\n\tif err != nil {\n\t\treturn fmt.Errorf(\"failed to create kubernetes client: %w\", err)\n\t}\n\treturn nil\n}\n\nfunc (s *argoInstallState) installArgoCD() error {\n\tcfg, err := installer.NewConfig().ParseConfigYaml(s.opts.Config)\n\tif err != nil {\n\t\treturn fmt.Errorf(\"failed to parse config.yaml: %w\", err)\n\t}\n\tociRegistryURL := s.opts.ArgoCDRegistryURL\n\tif ociRegistryURL == \"\" && cfg.Registry != nil {\n\t\tociRegistryURL = cfg.Registry.Server\n\t}\n\ts.argoInstall, err = argocdinstaller.NewInstaller(argocdinstaller.InstallerConfig{\n\t\tVersion:        s.opts.ArgoCDVersion,\n\t\tDatacenterId:   fmt.Sprintf(\"%d\", cfg.Datacenter.ID),\n\t\tOciPassword:    s.ociPassword,\n\t\tOciRegistryURL: ociRegistryURL,\n\t\tGitPassword:    os.Getenv(\"OMS_GIT_PASSWORD\"),\n\t\tFullInstall:    true,\n\t\tForceConflicts: s.opts.ArgoCDForceConflicts,\n\t\tRepoURL:        s.opts.ArgoCDRepoURL,\n\t\tValueFiles:     s.opts.ArgoCDValues,\n\t\tRESTConfig:     s.kubeConfig,\n\t})\n\tif err != nil {\n\t\treturn fmt.Errorf(\"failed to initialize ArgoCD installer: %w\", err)\n\t}\n\tif err := s.argoInstall.Install(); err != nil {\n\t\treturn fmt.Errorf(\"failed to install ArgoCD: %w\", err)\n\t}\n\treturn nil\n}\n\nfunc (s *argoInstallState) syncVaultSecret(ctx context.Context) error {\n\tcreator := installer.NewVaultSecretCreator(s.kubeClient)\n\tif err := creator.CreateSecretFromVault(ctx, s.vault, installer.VaultSecretNamespace, installer.VaultSecretName); err != nil {\n\t\treturn fmt.Errorf(\"failed to sync vault secret: %w\", err)\n\t}\n\treturn nil\n}\n\nfunc (s *argoInstallState) installPcApps(ctx context.Context, pm installer.PackageManager) error {\n\tpcApps, err := installer.NewPcAppsFromBom(s.kubeClient, pm.GetDependencyPath(\"bom.json\"), argocdinstaller.DefaultNamespace)\n\tif err != nil {\n\t\treturn fmt.Errorf(\"failed to initialize pc-apps installer: %w\", err)\n\t}\n\tif err := pcApps.Install(ctx); err != nil {\n\t\treturn fmt.Errorf(\"failed to install pc-apps: %w\", err)\n\t}\n\treturn nil\n}",
+          "end_line": 168,
+          "start_line": 70
+        }
+      ]
+    },
+    "response_chars": 4128,
+    "round": 1,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 168,
+          "replacement_lines": 117,
+          "start_line": 70
+        }
+      ],
+      "current_file_lines": 225,
+      "updated_excerpt": {
+        "content": "60: \t\tAutoApprove:      opts.AutoApprove,\n61: \t}\n62: \tif err := ci.Install(pm, cm, im, runtime.GOOS, runtime.GOARCH); err != nil {\n63: \t\treturn fmt.Errorf(\"failed to install dependencies: %w\", err)\n64: \t}\n65: \treturn nil\n66: }\n67: \n68: // installArgoCDAndApps runs ArgoCD install, vault secret sync, and pc-apps install\n69: // before the main dependency steps.\n70: func installArgoCDAndApps(opts *InstallCodesphereOpts, pm installer.PackageManager, stlog *bootstrap.StepLogger) error {\n71: \tctx := context.Background()\n72: \tstate := &argoInstallState{opts: opts}\n73: \n74: \tif err := stlog.Substep(\"Load vault data\", func() error {\n75: \t\treturn state.loadVaultData()\n76: \t}); err != nil {\n77: \t\treturn err\n78: \t}\n79: \n80: \tif err := stlog.Substep(\"Install ArgoCD\", func() error {\n81: \t\treturn state.installArgoCD()\n82: \t}); err != nil {\n83: \t\treturn err\n84: \t}\n85: \n86: \tif err := stlog.Substep(\"Sync vault secret\", func() error {\n87: \t\treturn state.syncVaultSecret(ctx)\n88: \t}); err != nil {\n89: \t\treturn err\n90: \t}\n91: \n92: \tif err := stlog.Substep(\"Install pc-apps\", func() error {\n93: \t\treturn state.installPcApps(ctx, pm)\n94: \t}); err != nil {\n95: \t\treturn err\n96: \t}\n97: \n98: \treturn nil\n99: }\n100: ",
+        "end_line": 100,
+        "path_lines": 225,
+        "start_line": 60
+      }
+    },
+    "usage": {
+      "completion_tokens": 2353,
+      "prompt_tokens": 4454,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 6807
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 2,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/claude-opus-4.8/patches/github__codesphere-cloud__oms__pull_500__comment_3434698820__complexity.patch"
+    },
+    "usage": {
+      "completion_tokens": 11,
+      "prompt_tokens": 7457,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 7468
+    }
+  }
+]

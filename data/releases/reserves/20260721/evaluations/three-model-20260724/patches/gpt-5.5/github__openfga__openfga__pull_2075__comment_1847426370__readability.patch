@@ -1,0 +1,74 @@
+--- a/internal/graph/check_fast_path.go
++++ b/internal/graph/check_fast_path.go
+@@ -25,10 +25,10 @@
+ }
+ 
+ type iteratorProducer struct {
+-	idx      int
+-	iter     storage.TupleKeyIterator
+-	done     bool
+-	producer chan *iteratorMsg
++	idx     int
++	iter    storage.TupleKeyIterator
++	done    bool
++	msgChan chan *iteratorMsg
+ }
+ 
+ // NOTE: caller should consider running this in a goroutine to not block.
+@@ -37,7 +37,7 @@
+ 		if iterProducer.iter != nil {
+ 			iterProducer.iter.Stop()
+ 		}
+-		for msg := range iterProducer.producer {
++		for msg := range iterProducer.msgChan {
+ 			if msg.iter != nil {
+ 				msg.iter.Stop()
+ 			}
+@@ -46,10 +46,10 @@
+ }
+ 
+ // pollIteratorProducers will return a list of the remaining active producers.
+-// To be considered active your producer channel must still be open.
++// To be considered active the iterator message channel must still be open.
+ func pollIteratorProducers(ctx context.Context, iterProducers []*iteratorProducer) ([]*iteratorProducer, error) {
+-	for _, producer := range iterProducers {
+-		if producer.iter != nil || producer.done {
++	for _, iterProducer := range iterProducers {
++		if iterProducer.iter != nil || iterProducer.done {
+ 			// no need to poll further
+ 			continue
+ 		}
+@@ -57,16 +57,16 @@
+ 		select {
+ 		case <-ctx.Done():
+ 			return nil, ctx.Err()
+-		case i, ok := <-producer.producer:
++		case i, ok := <-iterProducer.msgChan:
+ 			if !ok {
+-				producer.done = true
++				iterProducer.done = true
+ 				break
+ 			}
+ 			if i.err != nil {
+ 				// NOTE: how do we want to handle missing iterators? full error out?
+ 				return nil, i.err
+ 			}
+-			producer.iter = i.iter
++			iterProducer.iter = i.iter
+ 		}
+ 	}
+ 	// TODO: in go1.23 compare performance vs slices.Collect
+@@ -471,11 +471,11 @@
+ func (c *LocalChecker) fastPathOperationSetup(ctx context.Context, req *ResolveCheckRequest, op setOperatorType, children ...*openfgav1.Userset) (chan *iteratorMsg, error) {
+ 	iterProducers := make([]*iteratorProducer, 0, len(children))
+ 	for idx, child := range children {
+-		producerChan, err := c.fastPathRewrite(ctx, req, child)
++		iterChan, err := c.fastPathRewrite(ctx, req, child)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+-		iterProducers = append(iterProducers, &iteratorProducer{idx: idx, producer: producerChan})
++		iterProducers = append(iterProducers, &iteratorProducer{idx: idx, msgChan: iterChan})
+ 	}
+ 	var resolver fastPathSetHandler
+ 	switch op {

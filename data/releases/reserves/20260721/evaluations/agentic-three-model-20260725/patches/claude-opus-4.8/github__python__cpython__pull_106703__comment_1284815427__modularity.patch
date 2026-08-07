@@ -1,0 +1,224 @@
+diff --git a/Lib/fnmatch.py b/Lib/fnmatch.py
+index a08b8d7..6be8003 100644
+--- a/Lib/fnmatch.py
++++ b/Lib/fnmatch.py
+@@ -81,14 +81,76 @@ def translate(pat, sep=None):
+ 
+     There is no way to quote meta-characters.
+     """
+-
+-    STAR = object()
+     if sep:
+-        SEP = re.escape(sep)
+-        DOT = f'[^{SEP}]'
++        res = _translate_path(pat, sep)
+     else:
+-        SEP = None
+-        DOT = '.'
++        res = _translate(pat)
++    return fr'(?s:{res})\Z'
++
++
++def _translate_bracket(pat, i, n, DOT):
++    """Translate a '[...]' character set starting at index *i* (just after the
++    opening '['). Returns the regular expression fragment and the index of the
++    first character after the set.
++    """
++    j = i
++    if j < n and pat[j] == '!':
++        j = j+1
++    if j < n and pat[j] == ']':
++        j = j+1
++    while j < n and pat[j] != ']':
++        j = j+1
++    if j >= n:
++        return '\\[', i
++    stuff = pat[i:j]
++    if '-' not in stuff:
++        stuff = stuff.replace('\\', r'\\')
++    else:
++        chunks = []
++        k = i+2 if pat[i] == '!' else i+1
++        while True:
++            k = pat.find('-', k, j)
++            if k < 0:
++                break
++            chunks.append(pat[i:k])
++            i = k+1
++            k = k+3
++        chunk = pat[i:j]
++        if chunk:
++            chunks.append(chunk)
++        else:
++            chunks[-1] += '-'
++        # Remove empty ranges -- invalid in RE.
++        for k in range(len(chunks)-1, 0, -1):
++            if chunks[k-1][-1] > chunks[k][0]:
++                chunks[k-1] = chunks[k-1][:-1] + chunks[k][1:]
++                del chunks[k]
++        # Escape backslashes and hyphens for set difference (--).
++        # Hyphens that create ranges shouldn't be escaped.
++        stuff = '-'.join(s.replace('\\', r'\\').replace('-', r'\-')
++                         for s in chunks)
++    # Escape set operations (&&, ~~ and ||).
++    stuff = re.sub(r'([&~|])', r'\\\1', stuff)
++    i = j+1
++    if not stuff:
++        # Empty range: never match.
++        return '(?!)', i
++    elif stuff == '!':
++        # Negated empty range: match any character.
++        return DOT, i
++    else:
++        if stuff[0] == '!':
++            stuff = '^' + stuff[1:]
++        elif stuff[0] in ('^', '['):
++            stuff = '\\' + stuff
++        return f'[{stuff}]', i
++
++
++def _translate(pat):
++    """Translate a shell PATTERN to a regular expression body (without the
++    surrounding group). Separators are not treated specially.
++    """
++    STAR = object()
+     res = []
+     add = res.append
+     i, n = 0, len(pat)
+@@ -97,82 +159,14 @@ def translate(pat, sep=None):
+         i = i+1
+         if c == '*':
+             # compress consecutive `*` into one
+-            h = i-1
+             while i < n and pat[i] == '*':
+                 i = i+1
+-            if sep:
+-                star_count = i-h
+-                is_segment = (h == 0 or pat[h-1] == sep) and (i == n or pat[i] == sep)
+-                if star_count == 1:
+-                    if is_segment:
+-                        add(f'{DOT}+')
+-                    else:
+-                        add(f'{DOT}*')
+-                elif star_count == 2 and is_segment:
+-                    if i == n:
+-                        add('.*')
+-                    else:
+-                        add(f'(.*{SEP})?')
+-                        i = i+1
+-                else:
+-                    raise ValueError("Invalid pattern: '**' can only be an entire path component")
+-            else:
+-                add(STAR)
++            add(STAR)
+         elif c == '?':
+-            add(DOT)
++            add('.')
+         elif c == '[':
+-            j = i
+-            if j < n and pat[j] == '!':
+-                j = j+1
+-            if j < n and pat[j] == ']':
+-                j = j+1
+-            while j < n and pat[j] != ']':
+-                j = j+1
+-            if j >= n:
+-                add('\\[')
+-            else:
+-                stuff = pat[i:j]
+-                if '-' not in stuff:
+-                    stuff = stuff.replace('\\', r'\\')
+-                else:
+-                    chunks = []
+-                    k = i+2 if pat[i] == '!' else i+1
+-                    while True:
+-                        k = pat.find('-', k, j)
+-                        if k < 0:
+-                            break
+-                        chunks.append(pat[i:k])
+-                        i = k+1
+-                        k = k+3
+-                    chunk = pat[i:j]
+-                    if chunk:
+-                        chunks.append(chunk)
+-                    else:
+-                        chunks[-1] += '-'
+-                    # Remove empty ranges -- invalid in RE.
+-                    for k in range(len(chunks)-1, 0, -1):
+-                        if chunks[k-1][-1] > chunks[k][0]:
+-                            chunks[k-1] = chunks[k-1][:-1] + chunks[k][1:]
+-                            del chunks[k]
+-                    # Escape backslashes and hyphens for set difference (--).
+-                    # Hyphens that create ranges shouldn't be escaped.
+-                    stuff = '-'.join(s.replace('\\', r'\\').replace('-', r'\-')
+-                                     for s in chunks)
+-                # Escape set operations (&&, ~~ and ||).
+-                stuff = re.sub(r'([&~|])', r'\\\1', stuff)
+-                i = j+1
+-                if not stuff:
+-                    # Empty range: never match.
+-                    add('(?!)')
+-                elif stuff == '!':
+-                    # Negated empty range: match any character.
+-                    add(DOT)
+-                else:
+-                    if stuff[0] == '!':
+-                        stuff = '^' + stuff[1:]
+-                    elif stuff[0] in ('^', '['):
+-                        stuff = '\\' + stuff
+-                    add(f'[{stuff}]')
++            piece, i = _translate_bracket(pat, i, n, '.')
++            add(piece)
+         else:
+             add(re.escape(c))
+     assert i == n
+@@ -211,5 +205,47 @@ def translate(pat, sep=None):
+         else:
+             add(f"(?>.*?{fixed})")
+     assert i == n
+-    res = "".join(res)
+-    return fr'(?s:{res})\Z'
++    return "".join(res)
++
++
++def _translate_path(pat, sep):
++    """Translate a shell PATTERN to a regular expression body (without the
++    surrounding group), treating *sep* as a path separator.
++    """
++    SEP = re.escape(sep)
++    DOT = f'[^{SEP}]'
++    res = []
++    add = res.append
++    i, n = 0, len(pat)
++    while i < n:
++        c = pat[i]
++        i = i+1
++        if c == '*':
++            # compress consecutive `*` into one
++            h = i-1
++            while i < n and pat[i] == '*':
++                i = i+1
++            star_count = i-h
++            is_segment = (h == 0 or pat[h-1] == sep) and (i == n or pat[i] == sep)
++            if star_count == 1:
++                if is_segment:
++                    add(f'{DOT}+')
++                else:
++                    add(f'{DOT}*')
++            elif star_count == 2 and is_segment:
++                if i == n:
++                    add('.*')
++                else:
++                    add(f'(.*{SEP})?')
++                    i = i+1
++            else:
++                raise ValueError("Invalid pattern: '**' can only be an entire path component")
++        elif c == '?':
++            add(DOT)
++        elif c == '[':
++            piece, i = _translate_bracket(pat, i, n, DOT)
++            add(piece)
++        else:
++            add(re.escape(c))
++    assert i == n
++    return "".join(res)

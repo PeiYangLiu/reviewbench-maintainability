@@ -1,0 +1,91 @@
+--- a/instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo/mongo.go
++++ b/instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo/mongo.go
+@@ -7,7 +7,6 @@
+ 	"context"
+ 	"errors"
+ 	"fmt"
+-	"net"
+ 	"strconv"
+ 	"strings"
+ 	"sync"
+@@ -32,27 +31,66 @@
+ 	cfg   config
+ }
+ 
++type eventAttributes struct {
++	CommandName              string
++	DatabaseName             string
++	Hostname                 string
++	Port                     int
++	Command                  bson.Raw
++	CommandAttributeDisabled bool
++	Collection               string
++}
++
++func (e eventAttributes) Attributes() []attribute.KeyValue {
++	attrs := make([]attribute.KeyValue, 0, 8)
++	attrs = append(attrs, semconv.DBSystemMongoDB)
++
++	if e.CommandName != "" {
++		attrs = append(attrs, semconv.DBOperationNameKey.String(e.CommandName))
++	}
++	if e.DatabaseName != "" {
++		attrs = append(attrs, semconv.DBNamespaceKey.String(e.DatabaseName))
++	}
++	if e.Port > 0 {
++		attrs = append(attrs, semconv.NetworkPeerPortKey.Int(e.Port))
++	}
++	if e.Hostname != "" {
++		attrs = append(attrs, semconv.NetworkPeerAddressKey.String(e.Hostname))
++	}
++	attrs = append(attrs, semconv.NetworkTransportTCP)
++
++	if !e.CommandAttributeDisabled {
++		attrs = append(attrs, semconv.DBQueryTextKey.String(sanitizeCommand(e.Command)))
++	}
++
++	if e.Collection != "" {
++		attrs = append(attrs, semconv.DBCollectionNameKey.String(e.Collection))
++	}
++
++	return attrs
++}
++
+ func (m *monitor) Started(ctx context.Context, evt *event.CommandStartedEvent) {
+ 	hostname, port := peerInfo(evt)
+ 
+-	attrs := []attribute.KeyValue{semconv.DBSystemMongoDB}
+-
+-	attrs = appendOpNameAttrs(attrs, evt.CommandName)
+-	attrs = appendDBNamespace(attrs, evt.DatabaseName)
+-	attrs = appendNetworkPort(attrs, port)
+-	attrs = appendNetworkHost(attrs, hostname)
+-	attrs = appendNetworkAddress(attrs, net.JoinHostPort(hostname, strconv.Itoa(port)))
+-	attrs = appendNetworkTransport(attrs)
+-
+-	if !m.cfg.CommandAttributeDisabled {
+-		attrs = appendDBStatement(attrs, sanitizeCommand(evt.Command))
++	var collection string
++	if col, err := extractCollection(evt); err == nil && col != "" {
++		collection = col
+ 	}
+ 
++	attrs := eventAttributes{
++		CommandName:              evt.CommandName,
++		DatabaseName:             evt.DatabaseName,
++		Hostname:                 hostname,
++		Port:                     port,
++		Command:                  evt.Command,
++		CommandAttributeDisabled: m.cfg.CommandAttributeDisabled,
++		Collection:               collection,
++	}.Attributes()
++
+ 	var spanName string
+-	if collection, err := extractCollection(evt); err == nil && collection != "" {
++	if collection != "" {
+ 		spanName = collection + "."
+-
+-		attrs = appendCollection(attrs, collection)
+ 	}
+ 
+ 	spanName += evt.CommandName

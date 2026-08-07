@@ -1,0 +1,292 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 110,
+      "path": "altair/utils/_vegafusion_data.py",
+      "start_line": 1
+    },
+    "response_chars": 475,
+    "round": 1,
+    "tool_result": {
+      "content": "1: from __future__ import annotations\n2: \n3: import uuid\n4: from importlib.metadata import version as importlib_version\n5: from typing import TYPE_CHECKING, Any, Callable, Final, TypedDict, Union, overload\n6: from weakref import WeakValueDictionary\n7: \n8: import narwhals.stable.v1 as nw\n9: from packaging.version import Version\n10: \n11: from altair.utils._importers import import_vegafusion\n12: from altair.utils.core import DataFrameLike\n13: from altair.utils.data import (\n14:     DataType,\n15:     MaxRowsError,\n16:     SupportsGeoInterface,\n17:     ToValuesReturnType,\n18: )\n19: from altair.vegalite.data import default_data_transformer\n20: \n21: if TYPE_CHECKING:\n22:     from collections.abc import MutableMapping\n23: \n24:     from narwhals.typing import IntoDataFrame\n25: \n26:     from vegafusion.runtime import ChartState\n27: \n28: # Temporary storage for dataframes that have been extracted\n29: # from charts by the vegafusion data transformer. Use a WeakValueDictionary\n30: # rather than a dict so that the Python interpreter is free to garbage\n31: # collect the stored DataFrames.\n32: extracted_inline_tables: MutableMapping[str, Any] = WeakValueDictionary()\n33: \n34: # Special URL prefix that VegaFusion uses to denote that a\n35: # dataset in a Vega spec corresponds to an entry in the `inline_datasets`\n36: # kwarg of vf.runtime.pre_transform_spec().\n37: VEGAFUSION_PREFIX: Final = \"vegafusion+dataset://\"\n38: \n39: \n40: class _ToVegaFusionReturnUrlDict(TypedDict):\n41:     url: str\n42: \n43: \n44: _VegaFusionReturnType = Union[_ToVegaFusionReturnUrlDict, ToValuesReturnType]\n45: \n46: \n47: @overload\n48: def vegafusion_data_transformer(\n49:     data: None = ..., max_rows: int = ...\n50: ) -> Callable[..., Any]: ...\n51: \n52: \n53: @overload\n54: def vegafusion_data_transformer(\n55:     data: DataFrameLike, max_rows: int = ...\n56: ) -> ToValuesReturnType: ...\n57: \n58: \n59: @overload\n60: def vegafusion_data_transformer(\n61:     data: dict | IntoDataFrame | SupportsGeoInterface, max_rows: int = ...\n62: ) -> _VegaFusionReturnType: ...\n63: \n64: \n65: def vegafusion_data_transformer(\n66:     data: DataType | None = None, max_rows: int = 100000\n67: ) -> Callable[..., Any] | _VegaFusionReturnType:\n68:     \"\"\"VegaFusion Data Transformer.\"\"\"\n69:     if data is None:\n70:         return vegafusion_data_transformer\n71: \n72:     # Test whether VegaFusion supports the data type\n73:     is_v2 = (\n74:         Version(version) >= Version(\"2.0.0a0\")\n75:         if (version := importlib_version(\"vegafusion\"))\n76:         else False\n77:     )\n78:     if is_v2:\n79:         # VegaFusion v2 support narwhals-compatible DataFrames\n80:         supported_by_vf = isinstance(data, DataFrameLike) or isinstance(\n81:             nw.from_native(data, pass_through=True), (nw.DataFrame, nw.LazyFrame)\n82:         )\n83:     else:\n84:         supported_by_vf = isinstance(data, DataFrameLike)\n85: \n86:     if supported_by_vf and not isinstance(data, SupportsGeoInterface):\n87:         table_name = f\"table_{uuid.uuid4()}\".replace(\"-\", \"_\")\n88:         extracted_inline_tables[table_name] = data\n89:         return {\"url\": VEGAFUSION_PREFIX + table_name}\n90:     else:\n91:         # Use default transformer for geo interface objects\n92:         # # (e.g. a geopandas GeoDataFrame)\n93:         # Or if we don't recognize data type\n94:         return default_data_transformer(data)\n95: \n96: \n97: def get_inline_table_names(vega_spec: dict[str, Any]) -> set[str]:\n98:     \"\"\"\n99:     Get a set of the inline datasets names in the provided Vega spec.\n100: \n101:     Inline datasets are encoded as URLs that start with the table://\n102:     prefix.\n103: \n104:     Parameters\n105:     ----------\n106:     vega_spec: dict\n107:         A Vega specification dict\n108: \n109:     Returns\n110:     -------",
+      "end_line": 110,
+      "path_lines": 293,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 3340,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 907,
+      "output_tokens_details": {
+        "reasoning_tokens": 728
+      },
+      "total_tokens": 4247
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 120,
+      "path": "altair/utils/core.py",
+      "start_line": 1
+    },
+    "response_chars": 233,
+    "round": 2,
+    "tool_result": {
+      "content": "1: \"\"\"Utility routines.\"\"\"\n2: \n3: from __future__ import annotations\n4: \n5: import itertools\n6: import json\n7: import re\n8: import sys\n9: import traceback\n10: import warnings\n11: from collections.abc import Iterator, Mapping, MutableMapping\n12: from copy import deepcopy\n13: from itertools import groupby\n14: from operator import itemgetter\n15: from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar, cast, overload\n16: \n17: import jsonschema\n18: import narwhals.stable.v1 as nw\n19: from narwhals.dependencies import get_polars, is_pandas_dataframe\n20: from narwhals.typing import IntoDataFrame\n21: \n22: from altair.utils.schemapi import SchemaBase, SchemaLike, Undefined\n23: \n24: if sys.version_info >= (3, 12):\n25:     from typing import Protocol, TypeAliasType, runtime_checkable\n26: else:\n27:     from typing_extensions import Protocol, TypeAliasType, runtime_checkable\n28: if sys.version_info >= (3, 10):\n29:     from typing import Concatenate, ParamSpec\n30: else:\n31:     from typing_extensions import Concatenate, ParamSpec\n32: \n33: \n34: if TYPE_CHECKING:\n35:     import typing as t\n36: \n37:     import pandas as pd\n38:     from narwhals.typing import IntoExpr\n39: \n40:     from altair.utils._dfi_types import DataFrame as DfiDataFrame\n41:     from altair.vegalite.v5.schema._typing import StandardType_T as InferredVegaLiteType\n42: \n43: TIntoDataFrame = TypeVar(\"TIntoDataFrame\", bound=IntoDataFrame)\n44: T = TypeVar(\"T\")\n45: P = ParamSpec(\"P\")\n46: R = TypeVar(\"R\")\n47: \n48: WrapsFunc = TypeAliasType(\"WrapsFunc\", Callable[..., R], type_params=(R,))\n49: WrappedFunc = TypeAliasType(\"WrappedFunc\", Callable[P, R], type_params=(P, R))\n50: # NOTE: Requires stringized form to avoid `< (3, 11)` issues\n51: # See: https://github.com/vega/altair/actions/runs/10667859416/job/29567290871?pr=3565\n52: WrapsMethod = TypeAliasType(\n53:     \"WrapsMethod\", \"Callable[Concatenate[T, ...], R]\", type_params=(T, R)\n54: )\n55: WrappedMethod = TypeAliasType(\n56:     \"WrappedMethod\", Callable[Concatenate[T, P], R], type_params=(T, P, R)\n57: )\n58: \n59: \n60: @runtime_checkable\n61: class DataFrameLike(Protocol):\n62:     def __dataframe__(\n63:         self, nan_as_null: bool = False, allow_copy: bool = True\n64:     ) -> DfiDataFrame: ...\n65: \n66: \n67: TYPECODE_MAP = {\n68:     \"ordinal\": \"O\",\n69:     \"nominal\": \"N\",\n70:     \"quantitative\": \"Q\",\n71:     \"temporal\": \"T\",\n72:     \"geojson\": \"G\",\n73: }\n74: \n75: INV_TYPECODE_MAP = {v: k for k, v in TYPECODE_MAP.items()}\n76: \n77: \n78: # aggregates from vega-lite version 4.6.0\n79: AGGREGATES = [\n80:     \"argmax\",\n81:     \"argmin\",\n82:     \"average\",\n83:     \"count\",\n84:     \"distinct\",\n85:     \"max\",\n86:     \"mean\",\n87:     \"median\",\n88:     \"min\",\n89:     \"missing\",\n90:     \"product\",\n91:     \"q1\",\n92:     \"q3\",\n93:     \"ci0\",\n94:     \"ci1\",\n95:     \"stderr\",\n96:     \"stdev\",\n97:     \"stdevp\",\n98:     \"sum\",\n99:     \"valid\",\n100:     \"values\",\n101:     \"variance\",\n102:     \"variancep\",\n103:     \"exponential\",\n104:     \"exponentialb\",\n105: ]\n106: \n107: # window aggregates from vega-lite version 4.6.0\n108: WINDOW_AGGREGATES = [\n109:     \"row_number\",\n110:     \"rank\",\n111:     \"dense_rank\",\n112:     \"percent_rank\",\n113:     \"cume_dist\",\n114:     \"ntile\",\n115:     \"lag\",\n116:     \"lead\",\n117:     \"first_value\",\n118:     \"last_value\",\n119:     \"nth_value\",\n120: ]",
+      "end_line": 120,
+      "path_lines": 980,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 4566,
+      "input_tokens_details": {
+        "cached_tokens": 2816
+      },
+      "output_tokens": 386,
+      "output_tokens_details": {
+        "reasoning_tokens": 297
+      },
+      "total_tokens": 4952
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 120,
+      "path": "altair/utils/data.py",
+      "start_line": 1
+    },
+    "response_chars": 155,
+    "round": 3,
+    "tool_result": {
+      "content": "1: from __future__ import annotations\n2: \n3: import hashlib\n4: import json\n5: import random\n6: import sys\n7: from collections.abc import MutableMapping, Sequence\n8: from functools import partial\n9: from pathlib import Path\n10: from typing import (\n11:     TYPE_CHECKING,\n12:     Any,\n13:     Callable,\n14:     Literal,\n15:     Protocol,\n16:     TypedDict,\n17:     TypeVar,\n18:     Union,\n19:     overload,\n20:     runtime_checkable,\n21: )\n22: from typing_extensions import Concatenate, ParamSpec, TypeAlias\n23: \n24: import narwhals.stable.v1 as nw\n25: from narwhals.dependencies import is_pandas_dataframe as _is_pandas_dataframe\n26: from narwhals.typing import IntoDataFrame\n27: \n28: from ._importers import import_pyarrow_interchange\n29: from .core import (\n30:     DataFrameLike,\n31:     sanitize_geo_interface,\n32:     sanitize_narwhals_dataframe,\n33:     sanitize_pandas_dataframe,\n34:     to_eager_narwhals_dataframe,\n35: )\n36: from .plugin_registry import PluginRegistry\n37: \n38: if sys.version_info >= (3, 13):\n39:     from typing import TypeIs\n40: else:\n41:     from typing_extensions import TypeIs\n42: \n43: if TYPE_CHECKING:\n44:     import pandas as pd\n45:     import pyarrow as pa\n46: \n47: \n48: @runtime_checkable\n49: class SupportsGeoInterface(Protocol):\n50:     __geo_interface__: MutableMapping\n51: \n52: \n53: DataType: TypeAlias = Union[\n54:     dict[Any, Any], IntoDataFrame, SupportsGeoInterface, DataFrameLike\n55: ]\n56: \n57: TDataType = TypeVar(\"TDataType\", bound=DataType)\n58: TIntoDataFrame = TypeVar(\"TIntoDataFrame\", bound=IntoDataFrame)\n59: \n60: VegaLiteDataDict: TypeAlias = dict[\n61:     str, Union[str, dict[Any, Any], list[dict[Any, Any]]]\n62: ]\n63: ToValuesReturnType: TypeAlias = dict[str, Union[dict[Any, Any], list[dict[Any, Any]]]]\n64: SampleReturnType = Union[IntoDataFrame, dict[str, Sequence], None]\n65: \n66: \n67: def is_data_type(obj: Any) -> TypeIs[DataType]:\n68:     return isinstance(obj, (dict, SupportsGeoInterface)) or isinstance(\n69:         nw.from_native(obj, eager_or_interchange_only=True, strict=False),\n70:         nw.DataFrame,\n71:     )\n72: \n73: \n74: # ==============================================================================\n75: # Data transformer registry\n76: #\n77: # A data transformer is a callable that takes a supported data type and returns\n78: # a transformed dictionary version of it which is compatible with the VegaLite schema.\n79: # The dict objects will be the Data portion of the VegaLite schema.\n80: #\n81: # Renderers only deal with the dict form of a\n82: # VegaLite spec, after the Data model has been put into a schema compliant\n83: # form.\n84: # ==============================================================================\n85: \n86: P = ParamSpec(\"P\")\n87: # NOTE: `Any` required due to the complexity of existing signatures imported in `altair.vegalite.v5.data.py`\n88: R = TypeVar(\"R\", VegaLiteDataDict, Any)\n89: DataTransformerType = Callable[Concatenate[DataType, P], R]\n90: \n91: \n92: class DataTransformerRegistry(PluginRegistry[DataTransformerType, R]):\n93:     _global_settings = {\"consolidate_datasets\": True}\n94: \n95:     @property\n96:     def consolidate_datasets(self) -> bool:\n97:         return self._global_settings[\"consolidate_datasets\"]\n98: \n99:     @consolidate_datasets.setter\n100:     def consolidate_datasets(self, value: bool) -> None:\n101:         self._global_settings[\"consolidate_datasets\"] = value\n102: \n103: \n104: # ==============================================================================\n105: class MaxRowsError(Exception):\n106:     \"\"\"Raised when a data model has too many rows.\"\"\"\n107: \n108: \n109: @overload\n110: def limit_rows(data: None = ..., max_rows: int | None = ...) -> partial: ...\n111: @overload\n112: def limit_rows(data: DataType, max_rows: int | None = ...) -> DataType: ...\n113: def limit_rows(\n114:     data: DataType | None = None, max_rows: int | None = 5000\n115: ) -> partial | DataType:\n116:     \"\"\"\n117:     Raise MaxRowsError if the data model has more than max_rows.\n118: \n119:     If max_rows is None, then do not perform any check.\n120:     \"\"\"",
+      "end_line": 120,
+      "path_lines": 432,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 5797,
+      "input_tokens_details": {
+        "cached_tokens": 4352
+      },
+      "output_tokens": 307,
+      "output_tokens_details": {
+        "reasoning_tokens": 248
+      },
+      "total_tokens": 6104
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "altair/utils/_vegafusion_data.py",
+      "query": "TypeIs"
+    },
+    "response_chars": 1577,
+    "round": 4,
+    "tool_result": {
+      "matches": [],
+      "query": "TypeIs",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 7072,
+      "input_tokens_details": {
+        "cached_tokens": 5376
+      },
+      "output_tokens": 3785,
+      "output_tokens_details": {
+        "reasoning_tokens": 3314
+      },
+      "total_tokens": 10857
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 480,
+      "path": "tools/schemapi/schemapi.py",
+      "start_line": 430
+    },
+    "response_chars": 3098,
+    "round": 5,
+    "tool_result": {
+      "content": "430:     \"\"\"\n431:     Deduplicate enum errors by removing the errors where the allowed values are a subset of another error.\n432: \n433:     For example, if `enum` contains two errors and one has `validator_value` (i.e. accepted values) [\"A\", \"B\"] and the\n434:     other one [\"A\", \"B\", \"C\"] then the first one is removed and the final\n435:     `enum` list only contains the error with [\"A\", \"B\", \"C\"].\n436:     \"\"\"\n437:     if len(errors) > 1:\n438:         # Values (and therefore `validator_value`) of an enum are always arrays,\n439:         # see https://json-schema.org/understanding-json-schema/reference/generic.html#enumerated-values\n440:         # which is why we can use join below\n441:         value_strings = [\",\".join(err.validator_value) for err in errors]  # type: ignore\n442:         longest_enums: ValidationErrorList = []\n443:         for value_str, err in zip(value_strings, errors):\n444:             if not _contained_at_start_of_one_of_other_values(value_str, value_strings):\n445:                 longest_enums.append(err)\n446:         errors = longest_enums\n447:     return errors\n448: \n449: \n450: def _deduplicate_additional_properties_errors(\n451:     errors: ValidationErrorList,\n452: ) -> ValidationErrorList:\n453:     \"\"\"\n454:     If there are multiple additional property errors it usually means that the offending element was validated against multiple schemas and its parent is a common anyOf validator.\n455: \n456:     The error messages produced from these cases are usually\n457:     very similar and we just take the shortest one. For example,\n458:     the following 3 errors are raised for the `unknown` channel option in\n459:     `alt.X(\"variety\", unknown=2)`:\n460:     - \"Additional properties are not allowed ('unknown' was unexpected)\"\n461:     - \"Additional properties are not allowed ('field', 'unknown' were unexpected)\"\n462:     - \"Additional properties are not allowed ('field', 'type', 'unknown' were unexpected)\".\n463:     \"\"\"\n464:     if len(errors) > 1:\n465:         # Test if all parent errors are the same anyOf error and only do\n466:         # the prioritization in these cases. Can't think of a chart spec where this\n467:         # would not be the case but still allow for it below to not break anything.\n468:         parent = errors[0].parent\n469:         if (\n470:             parent is not None\n471:             and parent.validator == \"anyOf\"\n472:             # Use [1:] as don't have to check for first error as it was used\n473:             # above to define `parent`\n474:             and all(err.parent is parent for err in errors[1:])\n475:         ):\n476:             errors = [min(errors, key=lambda x: len(x.message))]\n477:     return errors\n478: \n479: \n480: def _deduplicate_by_message(errors: ValidationErrorList) -> ValidationErrorList:",
+      "end_line": 480,
+      "path_lines": 1614,
+      "start_line": 430
+    },
+    "usage": {
+      "input_tokens": 7124,
+      "input_tokens_details": {
+        "cached_tokens": 6912
+      },
+      "output_tokens": 6602,
+      "output_tokens_details": {
+        "reasoning_tokens": 5742
+      },
+      "total_tokens": 13726
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "    from narwhals.typing import IntoDataFrame\n    from typing_extensions import TypeIs\n\n    from vegafusion.runtime import ChartState",
+          "end_line": 26,
+          "start_line": 24
+        },
+        {
+          "content": "extracted_inline_tables: MutableMapping[str, DataFrameLike | IntoDataFrame] = WeakValueDictionary()",
+          "end_line": 32,
+          "start_line": 32
+        },
+        {
+          "content": "if TYPE_CHECKING:\n    def _supported_by_vf(\n        data: DataType, is_v2: bool\n    ) -> TypeIs[DataFrameLike | IntoDataFrame]: ...\n\nelse:\n    def _supported_by_vf(data: DataType, is_v2: bool) -> bool:\n        if is_v2:\n            # VegaFusion v2 supports narwhals-compatible DataFrames\n            return isinstance(data, DataFrameLike) or isinstance(\n                nw.from_native(data, pass_through=True), (nw.DataFrame, nw.LazyFrame)\n            )\n        else:\n            return isinstance(data, DataFrameLike)\n\n\n",
+          "end_line": 46,
+          "start_line": 47
+        },
+        {
+          "content": "    if _supported_by_vf(data, is_v2) and not isinstance(data, SupportsGeoInterface):",
+          "end_line": 86,
+          "start_line": 78
+        },
+        {
+          "content": "def get_inline_tables(vega_spec: dict[str, Any]) -> dict[str, DataFrameLike | IntoDataFrame]:",
+          "end_line": 142,
+          "start_line": 142
+        }
+      ]
+    },
+    "response_chars": 2769,
+    "round": 6,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 26,
+          "replacement_lines": 4,
+          "start_line": 24
+        },
+        {
+          "end_line": 32,
+          "replacement_lines": 1,
+          "start_line": 32
+        },
+        {
+          "end_line": 46,
+          "replacement_lines": 16,
+          "start_line": 47
+        },
+        {
+          "end_line": 86,
+          "replacement_lines": 1,
+          "start_line": 78
+        },
+        {
+          "end_line": 142,
+          "replacement_lines": 1,
+          "start_line": 142
+        }
+      ],
+      "current_file_lines": 302,
+      "updated_excerpt": {
+        "content": "14:     DataType,\n15:     MaxRowsError,\n16:     SupportsGeoInterface,\n17:     ToValuesReturnType,\n18: )\n19: from altair.vegalite.data import default_data_transformer\n20: \n21: if TYPE_CHECKING:\n22:     from collections.abc import MutableMapping\n23: \n24:     from narwhals.typing import IntoDataFrame\n25:     from typing_extensions import TypeIs\n26: \n27:     from vegafusion.runtime import ChartState\n28: \n29: # Temporary storage for dataframes that have been extracted\n30: # from charts by the vegafusion data transformer. Use a WeakValueDictionary\n31: # rather than a dict so that the Python interpreter is free to garbage\n32: # collect the stored DataFrames.\n33: extracted_inline_tables: MutableMapping[str, DataFrameLike | IntoDataFrame] = WeakValueDictionary()\n34: \n35: # Special URL prefix that VegaFusion uses to denote that a\n36: # dataset in a Vega spec corresponds to an entry in the `inline_datasets`\n37: # kwarg of vf.runtime.pre_transform_spec().\n38: VEGAFUSION_PREFIX: Final = \"vegafusion+dataset://\"\n39: \n40: \n41: class _ToVegaFusionReturnUrlDict(TypedDict):\n42:     url: str\n43: \n44: \n45: _VegaFusionReturnType = Union[_ToVegaFusionReturnUrlDict, ToValuesReturnType]\n46: \n47: \n48: if TYPE_CHECKING:\n49:     def _supported_by_vf(\n50:         data: DataType, is_v2: bool\n51:     ) -> TypeIs[DataFrameLike | IntoDataFrame]: ...\n52: \n53: else:\n54:     def _supported_by_vf(data: DataType, is_v2: bool) -> bool:",
+        "end_line": 54,
+        "path_lines": 302,
+        "start_line": 14
+      }
+    },
+    "usage": {
+      "input_tokens": 7928,
+      "input_tokens_details": {
+        "cached_tokens": 6912
+      },
+      "output_tokens": 5998,
+      "output_tokens_details": {
+        "reasoning_tokens": 5206
+      },
+      "total_tokens": 13926
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 120,
+      "path": "altair/utils/_vegafusion_data.py",
+      "start_line": 1
+    },
+    "response_chars": 89,
+    "round": 7,
+    "tool_result": {
+      "content": "1: from __future__ import annotations\n2: \n3: import uuid\n4: from importlib.metadata import version as importlib_version\n5: from typing import TYPE_CHECKING, Any, Callable, Final, TypedDict, Union, overload\n6: from weakref import WeakValueDictionary\n7: \n8: import narwhals.stable.v1 as nw\n9: from packaging.version import Version\n10: \n11: from altair.utils._importers import import_vegafusion\n12: from altair.utils.core import DataFrameLike\n13: from altair.utils.data import (\n14:     DataType,\n15:     MaxRowsError,\n16:     SupportsGeoInterface,\n17:     ToValuesReturnType,\n18: )\n19: from altair.vegalite.data import default_data_transformer\n20: \n21: if TYPE_CHECKING:\n22:     from collections.abc import MutableMapping\n23: \n24:     from narwhals.typing import IntoDataFrame\n25:     from typing_extensions import TypeIs\n26: \n27:     from vegafusion.runtime import ChartState\n28: \n29: # Temporary storage for dataframes that have been extracted\n30: # from charts by the vegafusion data transformer. Use a WeakValueDictionary\n31: # rather than a dict so that the Python interpreter is free to garbage\n32: # collect the stored DataFrames.\n33: extracted_inline_tables: MutableMapping[str, DataFrameLike | IntoDataFrame] = WeakValueDictionary()\n34: \n35: # Special URL prefix that VegaFusion uses to denote that a\n36: # dataset in a Vega spec corresponds to an entry in the `inline_datasets`\n37: # kwarg of vf.runtime.pre_transform_spec().\n38: VEGAFUSION_PREFIX: Final = \"vegafusion+dataset://\"\n39: \n40: \n41: class _ToVegaFusionReturnUrlDict(TypedDict):\n42:     url: str\n43: \n44: \n45: _VegaFusionReturnType = Union[_ToVegaFusionReturnUrlDict, ToValuesReturnType]\n46: \n47: \n48: if TYPE_CHECKING:\n49:     def _supported_by_vf(\n50:         data: DataType, is_v2: bool\n51:     ) -> TypeIs[DataFrameLike | IntoDataFrame]: ...\n52: \n53: else:\n54:     def _supported_by_vf(data: DataType, is_v2: bool) -> bool:\n55:         if is_v2:\n56:             # VegaFusion v2 supports narwhals-compatible DataFrames\n57:             return isinstance(data, DataFrameLike) or isinstance(\n58:                 nw.from_native(data, pass_through=True), (nw.DataFrame, nw.LazyFrame)\n59:             )\n60:         else:\n61:             return isinstance(data, DataFrameLike)\n62: \n63: \n64: @overload\n65: def vegafusion_data_transformer(\n66:     data: None = ..., max_rows: int = ...\n67: ) -> Callable[..., Any]: ...\n68: \n69: \n70: @overload\n71: def vegafusion_data_transformer(\n72:     data: DataFrameLike, max_rows: int = ...\n73: ) -> ToValuesReturnType: ...\n74: \n75: \n76: @overload\n77: def vegafusion_data_transformer(\n78:     data: dict | IntoDataFrame | SupportsGeoInterface, max_rows: int = ...\n79: ) -> _VegaFusionReturnType: ...\n80: \n81: \n82: def vegafusion_data_transformer(\n83:     data: DataType | None = None, max_rows: int = 100000\n84: ) -> Callable[..., Any] | _VegaFusionReturnType:\n85:     \"\"\"VegaFusion Data Transformer.\"\"\"\n86:     if data is None:\n87:         return vegafusion_data_transformer\n88: \n89:     # Test whether VegaFusion supports the data type\n90:     is_v2 = (\n91:         Version(version) >= Version(\"2.0.0a0\")\n92:         if (version := importlib_version(\"vegafusion\"))\n93:         else False\n94:     )\n95:     if _supported_by_vf(data, is_v2) and not isinstance(data, SupportsGeoInterface):\n96:         table_name = f\"table_{uuid.uuid4()}\".replace(\"-\", \"_\")\n97:         extracted_inline_tables[table_name] = data\n98:         return {\"url\": VEGAFUSION_PREFIX + table_name}\n99:     else:\n100:         # Use default transformer for geo interface objects\n101:         # # (e.g. a geopandas GeoDataFrame)\n102:         # Or if we don't recognize data type\n103:         return default_data_transformer(data)\n104: \n105: \n106: def get_inline_table_names(vega_spec: dict[str, Any]) -> set[str]:\n107:     \"\"\"\n108:     Get a set of the inline datasets names in the provided Vega spec.\n109: \n110:     Inline datasets are encoded as URLs that start with the table://\n111:     prefix.\n112: \n113:     Parameters\n114:     ----------\n115:     vega_spec: dict\n116:         A Vega specification dict\n117: \n118:     Returns\n119:     -------\n120:     set of str",
+      "end_line": 120,
+      "path_lines": 302,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 8869,
+      "input_tokens_details": {
+        "cached_tokens": 7424
+      },
+      "output_tokens": 49,
+      "output_tokens_details": {
+        "reasoning_tokens": 16
+      },
+      "total_tokens": 8918
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 175,
+      "path": "altair/utils/_vegafusion_data.py",
+      "start_line": 135
+    },
+    "response_chars": 275,
+    "round": 8,
+    "tool_result": {
+      "content": "135:     table_names = set()\n136: \n137:     # Process datasets\n138:     for data in vega_spec.get(\"data\", []):\n139:         url = data.get(\"url\", \"\")\n140:         if url.startswith(VEGAFUSION_PREFIX):\n141:             name = url[len(VEGAFUSION_PREFIX) :]\n142:             table_names.add(name)\n143: \n144:     # Recursively process child marks, which may have their own datasets\n145:     for mark in vega_spec.get(\"marks\", []):\n146:         table_names.update(get_inline_table_names(mark))\n147: \n148:     return table_names\n149: \n150: \n151: def get_inline_tables(vega_spec: dict[str, Any]) -> dict[str, DataFrameLike | IntoDataFrame]:\n152:     \"\"\"\n153:     Get the inline tables referenced by a Vega specification.\n154: \n155:     Note: This function should only be called on a Vega spec that corresponds\n156:     to a chart that was processed by the vegafusion_data_transformer.\n157:     Furthermore, this function may only be called once per spec because\n158:     the returned dataframes are deleted from internal storage.\n159: \n160:     Parameters\n161:     ----------\n162:     vega_spec: dict\n163:         A Vega specification dict\n164: \n165:     Returns\n166:     -------\n167:     dict from str to dataframe\n168:         dict from inline dataset name to dataframe object\n169:     \"\"\"\n170:     inline_names = get_inline_table_names(vega_spec)\n171:     # exclude named dataset that was provided by the user,\n172:     # or dataframes that have been deleted.\n173:     table_names = inline_names.intersection(extracted_inline_tables)\n174:     return {k: extracted_inline_tables.pop(k) for k in table_names}\n175: ",
+      "end_line": 175,
+      "path_lines": 302,
+      "start_line": 135
+    },
+    "usage": {
+      "input_tokens": 10202,
+      "input_tokens_details": {
+        "cached_tokens": 8448
+      },
+      "output_tokens": 894,
+      "output_tokens_details": {
+        "reasoning_tokens": 793
+      },
+      "total_tokens": 11096
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 9,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__vega__altair__pull_3682__comment_1843373761__modularity.patch"
+    },
+    "usage": {
+      "input_tokens": 10712,
+      "input_tokens_details": {
+        "cached_tokens": 9984
+      },
+      "output_tokens": 527,
+      "output_tokens_details": {
+        "reasoning_tokens": 516
+      },
+      "total_tokens": 11239
+    }
+  }
+]

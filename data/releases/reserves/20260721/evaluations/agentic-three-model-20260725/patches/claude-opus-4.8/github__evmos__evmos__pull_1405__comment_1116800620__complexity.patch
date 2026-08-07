@@ -1,0 +1,45 @@
+diff --git a/app/ante/cosmos/fees.go b/app/ante/cosmos/fees.go
+index b52e5c8..e216bc5 100644
+--- a/app/ante/cosmos/fees.go
++++ b/app/ante/cosmos/fees.go
+@@ -191,23 +191,24 @@ func checkTxFeeWithValidatorMinGasPrices(ctx sdk.Context, tx sdk.Tx) (sdk.Coins,
+ 	// Ensure that the provided fees meets a minimum threshold for the validator,
+ 	// if this is a CheckTx. This is only for local mempool purposes, and thus
+ 	// is only ran on CheckTx.
+-	if ctx.IsCheckTx() {
+-		minGasPrices := ctx.MinGasPrices()
+-		if !minGasPrices.IsZero() {
+-			requiredFees := make(sdk.Coins, len(minGasPrices))
+-
+-			// Determine the required fees by multiplying each required minimum gas
+-			// price by the gas limit, where fee = ceil(minGasPrice * gasLimit).
+-			glDec := sdk.NewDec(int64(gas)) //#nosec G701 -- gosec warning about integer overflow is not relevant here
+-			for i, gp := range minGasPrices {
+-				fee := gp.Amount.Mul(glDec)
+-				requiredFees[i] = sdk.NewCoin(gp.Denom, fee.Ceil().RoundInt())
+-			}
++	minGasPrices := ctx.MinGasPrices()
++	if !ctx.IsCheckTx() || minGasPrices.IsZero() {
++		priority := getTxPriority(feeCoins, int64(gas)) //#nosec G701 -- gosec warning about integer overflow is not relevant here
++		return feeCoins, priority, nil
++	}
+ 
+-			if !feeCoins.IsAnyGTE(requiredFees) {
+-				return nil, 0, errorsmod.Wrapf(errortypes.ErrInsufficientFee, "insufficient fees; got: %s required: %s", feeCoins, requiredFees)
+-			}
+-		}
++	requiredFees := make(sdk.Coins, len(minGasPrices))
++
++	// Determine the required fees by multiplying each required minimum gas
++	// price by the gas limit, where fee = ceil(minGasPrice * gasLimit).
++	glDec := sdk.NewDec(int64(gas)) //#nosec G701 -- gosec warning about integer overflow is not relevant here
++	for i, gp := range minGasPrices {
++		fee := gp.Amount.Mul(glDec)
++		requiredFees[i] = sdk.NewCoin(gp.Denom, fee.Ceil().RoundInt())
++	}
++
++	if !feeCoins.IsAnyGTE(requiredFees) {
++		return nil, 0, errorsmod.Wrapf(errortypes.ErrInsufficientFee, "insufficient fees; got: %s required: %s", feeCoins, requiredFees)
+ 	}
+ 
+ 	priority := getTxPriority(feeCoins, int64(gas)) //#nosec G701 -- gosec warning about integer overflow is not relevant here

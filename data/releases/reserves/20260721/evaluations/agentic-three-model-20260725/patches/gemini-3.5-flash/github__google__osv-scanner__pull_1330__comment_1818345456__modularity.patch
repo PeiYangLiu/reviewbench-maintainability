@@ -1,0 +1,115 @@
+diff --git a/internal/lockfilescalibr/translation.go b/internal/lockfilescalibr/translation.go
+index 6c0597b..fb6f0f6 100644
+--- a/internal/lockfilescalibr/translation.go
++++ b/internal/lockfilescalibr/translation.go
+@@ -83,19 +83,11 @@ func ExtractWithExtractor(ctx context.Context, localPath string, ext filesystem.
+ 		return nil, err
+ 	}
+ 
+-	si, err := createScanInput(localPath, info)
+-	if err != nil {
+-		return nil, err
+-	}
+-	inv, err := ext.Extract(ctx, si)
++	inv, err := extract(ctx, localPath, info, ext)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("(extracting as %s) %w", ext.Name(), err)
+ 	}
+ 
+-	for i := range inv {
+-		inv[i].Extractor = ext
+-	}
+-
+ 	return inv, nil
+ }
+ 
+@@ -120,27 +112,7 @@ func Extract(ctx context.Context, localPath string, extractAs string) ([]*extrac
+ 	}
+ 
+ 	if extractAs != "" {
+-		for _, ext := range lockfileExtractors {
+-			if lockfileExtractorMapping[extractAs] == ext.Name() {
+-				si, err := createScanInput(localPath, info)
+-				if err != nil {
+-					return nil, err
+-				}
+-
+-				inv, err := ext.Extract(ctx, si)
+-				if err != nil {
+-					return nil, fmt.Errorf("(extracting as %s) %w", extractAs, err)
+-				}
+-
+-				for i := range inv {
+-					inv[i].Extractor = ext
+-				}
+-
+-				return inv, nil
+-			}
+-		}
+-
+-		return nil, fmt.Errorf("%w, requested %s", ErrExtractorNotFound, extractAs)
++		return extractSpecific(ctx, localPath, info, extractAs)
+ 	}
+ 
+ 	output := []*extractor.Inventory{}
+@@ -149,19 +121,10 @@ func Extract(ctx context.Context, localPath string, extractAs string) ([]*extrac
+ 	for _, ext := range lockfileExtractors {
+ 		if ext.FileRequired(localPath, info) {
+ 			extractorFound = true
+-			si, err := createScanInput(localPath, info)
+-			if err != nil {
+-				return nil, err
+-			}
+-
+-			inv, err := ext.Extract(ctx, si)
++			inv, err := extract(ctx, localPath, info, ext)
+ 			if err != nil {
+ 				return nil, fmt.Errorf("(extracting as %s) %w", ext.Name(), err)
+ 			}
+-
+-			for i := range inv {
+-				inv[i].Extractor = ext
+-			}
+ 			output = append(output, inv...)
+ 		}
+ 	}
+@@ -181,6 +144,39 @@ func Extract(ctx context.Context, localPath string, extractAs string) ([]*extrac
+ 	return output, nil
+ }
+ 
++func extract(ctx context.Context, localPath string, info fs.FileInfo, ext filesystem.Extractor) ([]*extractor.Inventory, error) {
++	si, err := createScanInput(localPath, info)
++	if err != nil {
++		return nil, err
++	}
++
++	inv, err := ext.Extract(ctx, si)
++	if err != nil {
++		return nil, err
++	}
++
++	for i := range inv {
++		inv[i].Extractor = ext
++	}
++
++	return inv, nil
++}
++
++func extractSpecific(ctx context.Context, localPath string, info fs.FileInfo, extractAs string) ([]*extractor.Inventory, error) {
++	for _, ext := range lockfileExtractors {
++		if lockfileExtractorMapping[extractAs] == ext.Name() {
++			inv, err := extract(ctx, localPath, info, ext)
++			if err != nil {
++				return nil, fmt.Errorf("(extracting as %s) %w", extractAs, err)
++			}
++
++			return inv, nil
++		}
++	}
++
++	return nil, fmt.Errorf("%w, requested %s", ErrExtractorNotFound, extractAs)
++}
++
+ func createScanInput(path string, fileInfo fs.FileInfo) (*filesystem.ScanInput, error) {
+ 	reader, err := os.Open(path)
+ 	if err != nil {

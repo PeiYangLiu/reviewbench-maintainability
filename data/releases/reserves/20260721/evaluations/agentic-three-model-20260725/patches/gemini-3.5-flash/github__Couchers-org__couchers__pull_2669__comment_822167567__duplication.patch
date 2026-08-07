@@ -1,0 +1,91 @@
+diff --git a/app/web/features/auth/useAuthStore.ts b/app/web/features/auth/useAuthStore.ts
+index d4e6e20..94c33e2 100644
+--- a/app/web/features/auth/useAuthStore.ts
++++ b/app/web/features/auth/useAuthStore.ts
+@@ -8,13 +8,14 @@ import { useQueryClient } from "react-query";
+ import { service } from "service";
+ import isGrpcError from "utils/isGrpcError";
+ 
+-export function usePersistedState<T>(
++function useStorageState<T>(
+   key: string,
+-  defaultValue: T
+-): [T, (value: T) => void] {
++  defaultValue: T,
++  storageType: "localStorage" | "sessionStorage" = "localStorage"
++): [T, (value: T) => void, () => void, (value: T) => void] {
+   //in ssr, window doesn't exist, just use default
+   const saved =
+-    typeof window !== "undefined" ? window.localStorage.getItem(key) : null;
++    typeof window !== "undefined" ? window[storageType].getItem(key) : null;
+   const [_state, _setState] = useState<T>(
+     saved !== null ? JSON.parse(saved) : defaultValue
+   );
+@@ -24,40 +25,44 @@ export function usePersistedState<T>(
+         console.warn(`${key} can't be stored as undefined, casting to null.`);
+       }
+       const v = value === undefined ? null : value;
+-      window.localStorage.setItem(key, JSON.stringify(v));
++      if (typeof window !== "undefined") {
++        window[storageType].setItem(key, JSON.stringify(v));
++      }
+       _setState(value);
+     },
+-    [key]
++    [key, storageType]
+   );
+-  return [_state, setState];
++  const clearState = useCallback(() => {
++    if (typeof window !== "undefined") {
++      window[storageType].removeItem(key);
++    }
++  }, [key, storageType]);
++  return [_state, setState, clearState, _setState];
++}
++
++export function usePersistedState<T>(
++  key: string,
++  defaultValue: T,
++  storageType: "localStorage" | "sessionStorage" = "localStorage"
++): [T, (value: T) => void] {
++  const [state, setState] = useStorageState<T>(key, defaultValue, storageType);
++  return [state, setState];
+ }
+ 
+ export function useSessionStorage<T>(
+   key: string,
+   defaultValue: T
+ ): [T | undefined, (value: T) => void, () => void] {
+-  //in ssr, window doesn't exist, just use default
+-  const saved =
+-    typeof window !== "undefined" ? window.sessionStorage.getItem(key) : null;
+-  const [_state, _setState] = useState<T | undefined>(
+-    saved !== null ? JSON.parse(saved) : defaultValue
+-  );
+-  const setState = useCallback(
+-    (value: T) => {
+-      if (value === undefined) {
+-        console.warn(`${key} can't be stored as undefined, casting to null.`);
+-      }
+-      const v = value === undefined ? null : value;
+-      window.sessionStorage.setItem(key, JSON.stringify(v));
+-      _setState(value);
+-    },
+-    [key]
++  const [state, setState, clear, rawSet] = useStorageState<T | undefined>(
++    key,
++    defaultValue,
++    "sessionStorage"
+   );
+   const clearState = useCallback(() => {
+-    window.sessionStorage.removeItem(key);
+-    _setState(undefined);
+-  }, [key]);
+-  return [_state, setState, clearState];
++    clear();
++    rawSet(undefined);
++  }, [clear, rawSet]);
++  return [state, setState, clearState];
+ }
+ 
+ export default function useAuthStore() {

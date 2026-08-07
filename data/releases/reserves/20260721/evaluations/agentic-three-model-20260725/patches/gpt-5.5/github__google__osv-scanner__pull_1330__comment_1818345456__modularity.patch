@@ -1,0 +1,67 @@
+diff --git a/internal/lockfilescalibr/translation.go b/internal/lockfilescalibr/translation.go
+index 6c0597b..9432447 100644
+--- a/internal/lockfilescalibr/translation.go
++++ b/internal/lockfilescalibr/translation.go
+@@ -76,6 +76,16 @@ var lockfileExtractorMapping = map[string]string{
+ 	"Gemfile.lock": "ruby/gemfilelock",
+ }
+ 
++func extractorForLockfile(lockfileName string) (filesystem.Extractor, bool) {
++	for _, ext := range lockfileExtractors {
++		if lockfileExtractorMapping[lockfileName] == ext.Name() {
++			return ext, true
++		}
++	}
++
++	return nil, false
++}
++
+ // ExtractWithExtractor attempts to extract the file at the given path with the extractor passed in
+ func ExtractWithExtractor(ctx context.Context, localPath string, ext filesystem.Extractor) ([]*extractor.Inventory, error) {
+ 	info, err := os.Stat(localPath)
+@@ -120,27 +130,26 @@ func Extract(ctx context.Context, localPath string, extractAs string) ([]*extrac
+ 	}
+ 
+ 	if extractAs != "" {
+-		for _, ext := range lockfileExtractors {
+-			if lockfileExtractorMapping[extractAs] == ext.Name() {
+-				si, err := createScanInput(localPath, info)
+-				if err != nil {
+-					return nil, err
+-				}
+-
+-				inv, err := ext.Extract(ctx, si)
+-				if err != nil {
+-					return nil, fmt.Errorf("(extracting as %s) %w", extractAs, err)
+-				}
+-
+-				for i := range inv {
+-					inv[i].Extractor = ext
+-				}
+-
+-				return inv, nil
+-			}
++		ext, ok := extractorForLockfile(extractAs)
++		if !ok {
++			return nil, fmt.Errorf("%w, requested %s", ErrExtractorNotFound, extractAs)
++		}
++
++		si, err := createScanInput(localPath, info)
++		if err != nil {
++			return nil, err
++		}
++
++		inv, err := ext.Extract(ctx, si)
++		if err != nil {
++			return nil, fmt.Errorf("(extracting as %s) %w", extractAs, err)
++		}
++
++		for i := range inv {
++			inv[i].Extractor = ext
+ 		}
+ 
+-		return nil, fmt.Errorf("%w, requested %s", ErrExtractorNotFound, extractAs)
++		return inv, nil
+ 	}
+ 
+ 	output := []*extractor.Inventory{}

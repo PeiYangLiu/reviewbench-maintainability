@@ -1,0 +1,104 @@
+--- a/commons/src/main/java/org/dhis2/commons/bindings/TEICardExtensions.kt
++++ b/commons/src/main/java/org/dhis2/commons/bindings/TEICardExtensions.kt
+@@ -53,13 +53,50 @@
+     } ?: false
+ }
+ 
++sealed class EnrollmentIconData {
++    data class Data(val color: Int, val imageResource: Int) : EnrollmentIconData()
++    data class Remaining(val remainingEnrollments: Int) : EnrollmentIconData()
++}
++
++fun List<Program>.getEnrollmentIconsData(
++    context: Context,
++    currentProgram: String?
++): List<EnrollmentIconData> {
++    val enrollmentIconsData = mutableListOf<EnrollmentIconData>()
++    val listSize = this.size
++    var programCount = 0
++    for (program in filter { it.uid() != currentProgram }) {
++        val color = ColorUtils.getColorFrom(
++            program.style().color(),
++            ColorUtils.getPrimaryColor(
++                context,
++                ColorUtils.ColorType.PRIMARY
++            )
++        )
++        programCount++
++        if (programCount >= ENROLLMENT_ICONS_TO_SHOW && listSize > ENROLLMENT_ICONS_TO_SHOW) {
++            enrollmentIconsData.add(
++                EnrollmentIconData.Remaining(getOtherEnrollmentsForTei(listSize))
++            )
++            break
++        } else {
++            val imageResource = ResourceManager(context)
++                .getObjectStyleDrawableResource(
++                    program.style().icon(),
++                    R.drawable.ic_default_icon
++                )
++            enrollmentIconsData.add(EnrollmentIconData.Data(color, imageResource))
++        }
++    }
++    return enrollmentIconsData
++}
++
+ fun List<Program>.addEnrollmentIcons(
+     context: Context,
+     parent: ComposeView,
+     currentProgram: String?
+ ) {
+-    val listSize = this.size
+-    var programCount = 0
++    val enrollmentIconsData = getEnrollmentIconsData(context, currentProgram)
+     parent.apply {
+         setContent {
+             MdcTheme {
+@@ -67,37 +104,19 @@
+                     horizontalArrangement = spacedBy(Dp(4f)),
+                     verticalAlignment = Alignment.CenterVertically
+                 ) {
+-                    run outer@{
+-                        filter { it.uid() != currentProgram }
+-                            .forEach inner@{ program ->
+-                                val color = ColorUtils.getColorFrom(
+-                                    program.style().color(),
+-                                    ColorUtils.getPrimaryColor(
+-                                        context,
+-                                        ColorUtils.ColorType.PRIMARY
++                    enrollmentIconsData.forEach { iconData ->
++                        when (iconData) {
++                            is EnrollmentIconData.Remaining ->
++                                SquareWithNumber(iconData.remainingEnrollments)
++                            is EnrollmentIconData.Data ->
++                                MetadataIcon(
++                                    metadataIconData = MetadataIconData(
++                                        programColor = iconData.color,
++                                        iconResource = iconData.imageResource,
++                                        sizeInDp = 24
+                                     )
+                                 )
+-                                programCount++
+-                                if (programCount >= 4 && listSize > 4) {
+-                                    val otherEnrollmentsCount = getOtherEnrollmentsForTei(listSize)
+-                                    SquareWithNumber(otherEnrollmentsCount)
+-                                    return@outer
+-                                } else {
+-                                    val imageResource =
+-                                        ResourceManager(context)
+-                                            .getObjectStyleDrawableResource(
+-                                                program.style().icon(),
+-                                                R.drawable.ic_default_icon
+-                                            )
+-                                    MetadataIcon(
+-                                        metadataIconData = MetadataIconData(
+-                                            programColor = color,
+-                                            iconResource = imageResource,
+-                                            sizeInDp = 24
+-                                        )
+-                                    )
+-                                }
+-                            }
++                        }
+                     }
+                 }
+             }

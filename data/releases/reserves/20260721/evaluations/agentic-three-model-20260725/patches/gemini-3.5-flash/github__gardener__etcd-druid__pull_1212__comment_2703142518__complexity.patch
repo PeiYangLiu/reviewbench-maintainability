@@ -1,0 +1,67 @@
+diff --git a/druidctl/cmd/listresources/listresources.go b/druidctl/cmd/listresources/listresources.go
+index e670855..b2b45bc 100644
+--- a/druidctl/cmd/listresources/listresources.go
++++ b/druidctl/cmd/listresources/listresources.go
+@@ -15,8 +15,10 @@ import (
+ 	"github.com/gardener/etcd-druid/druidctl/internal/log"
+ 	"github.com/gardener/etcd-druid/druidctl/internal/printer"
+ 
++	"k8s.io/apimachinery/pkg/api/meta"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
++	"k8s.io/apimachinery/pkg/runtime/schema"
+ )
+ 
+ // ResourceKey identifies a Kubernetes resource kind by group/version/resource/Kind.
+@@ -104,10 +106,47 @@ func (l *listResourcesCmdCtx) execute(ctx context.Context) error {
+ 	if len(tokens) == 0 || (len(tokens) == 1 && tokens[0] == "all") {
+ 		tokens = defaultResourceTokens()
+ 	}
+-	resolver := newRESTMapperResolver(genClient.RESTMapper())
+-	metas, err := resolver.resolve(tokens)
+-	if err != nil {
+-		return err
++
++	mapper := genClient.RESTMapper()
++	type resourceMeta struct {
++		GVR        schema.GroupVersionResource
++		Kind       string
++		Namespaced bool
++	}
++	var metas []resourceMeta
++	seen := map[schema.GroupVersionResource]struct{}{}
++	var unknown []string
++
++	for _, token := range tokens {
++		gvk, err := mapper.KindFor(schema.GroupVersionResource{Resource: token})
++		if err != nil {
++			unknown = append(unknown, token)
++			continue
++		}
++		mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
++		if err != nil {
++			unknown = append(unknown, token)
++			continue
++		}
++		if _, dup := seen[mapping.Resource]; dup {
++			continue
++		}
++		seen[mapping.Resource] = struct{}{}
++		metas = append(metas, resourceMeta{
++			GVR:        mapping.Resource,
++			Kind:       mapping.GroupVersionKind.Kind,
++			Namespaced: mapping.Scope.Name() == meta.RESTScopeNameNamespace,
++		})
++	}
++
++	if len(unknown) > 0 {
++		knownExamples := []string{
++			"po", "pods", "svc", "services", "cm", "configmaps",
++			"sts", "statefulsets", "pvc", "persistentvolumeclaims",
++			"secrets", "sa", "serviceaccounts", "lease", "leases",
++			"pdb", "poddisruptionbudgets", "role", "rolebinding",
++		}
++		return fmt.Errorf("unknown resource tokens: %v; known examples: %v", unknown, knownExamples)
+ 	}
+ 
+ 	// Identify etcds to operate on

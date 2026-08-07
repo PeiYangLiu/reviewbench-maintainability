@@ -1,0 +1,85 @@
+--- a/pkg/sources/gitlab/gitlab.go
++++ b/pkg/sources/gitlab/gitlab.go
+@@ -269,18 +269,8 @@
+ 			},
+ 		}
+ 
+-		if len(s.groupIds) > 0 {
+-			if err := s.getAllProjectReposInGroup(ctx, apiClient, s.groupIds, ignoreRepo, reporter); err != nil {
+-				return err
+-			}
+-		} else if feature.UseSimplifiedGitlabEnumeration.Load() {
+-			if err := s.getAllProjectReposV2(ctx, apiClient, ignoreRepo, reporter); err != nil {
+-				return err
+-			}
+-		} else {
+-			if err := s.getAllProjectRepos(ctx, apiClient, ignoreRepo, reporter); err != nil {
+-				return err
+-			}
++		if err := s.enumerateProjectRepos(ctx, apiClient, ignoreRepo, reporter); err != nil {
++			return err
+ 		}
+ 
+ 	} else {
+@@ -408,21 +398,9 @@
+ 		},
+ 	}
+ 
+-	if len(s.groupIds) > 0 {
+-		if err := s.getAllProjectReposInGroup(ctx, apiClient, s.groupIds, ignoreProject, visitor); err != nil {
+-			errs = append(errs, err)
+-			return errs
+-		}
+-	} else if feature.UseSimplifiedGitlabEnumeration.Load() {
+-		if err := s.getAllProjectReposV2(ctx, apiClient, ignoreProject, visitor); err != nil {
+-			errs = append(errs, err)
+-			return errs
+-		}
+-	} else {
+-		if err := s.getAllProjectRepos(ctx, apiClient, ignoreProject, visitor); err != nil {
+-			errs = append(errs, err)
+-			return errs
+-		}
++	if err := s.enumerateProjectRepos(ctx, apiClient, ignoreProject, visitor); err != nil {
++		errs = append(errs, err)
++		return errs
+ 	}
+ 
+ 	if len(repos) == 0 {
+@@ -479,6 +457,21 @@
+ 		return true
+ 	}
+ 	return false
++}
++
++func (s *Source) enumerateProjectRepos(
++	ctx context.Context,
++	apiClient *gitlab.Client,
++	ignoreRepo func(string) bool,
++	reporter sources.UnitReporter,
++) error {
++	if len(s.groupIds) > 0 {
++		return s.getAllProjectReposInGroup(ctx, apiClient, s.groupIds, ignoreRepo, reporter)
++	}
++	if feature.UseSimplifiedGitlabEnumeration.Load() {
++		return s.getAllProjectReposV2(ctx, apiClient, ignoreRepo, reporter)
++	}
++	return s.getAllProjectRepos(ctx, apiClient, ignoreRepo, reporter)
+ }
+ 
+ // getAllProjectRepos enumerates all GitLab projects using the provided API client.
+@@ -1059,13 +1052,7 @@
+ 		_ = reporter.UnitErr(ctx, fmt.Errorf("could not compile include/exclude repo glob: %w", err))
+ 	})
+ 
+-	if len(s.groupIds) > 0 {
+-		return s.getAllProjectReposInGroup(ctx, apiClient, s.groupIds, ignoreRepo, reporter)
+-	} else if feature.UseSimplifiedGitlabEnumeration.Load() {
+-		return s.getAllProjectReposV2(ctx, apiClient, ignoreRepo, reporter)
+-	} else {
+-		return s.getAllProjectRepos(ctx, apiClient, ignoreRepo, reporter)
+-	}
++	return s.enumerateProjectRepos(ctx, apiClient, ignoreRepo, reporter)
+ }
+ 
+ // ChunkUnit downloads and reports chunks for the given GitLab repository unit.

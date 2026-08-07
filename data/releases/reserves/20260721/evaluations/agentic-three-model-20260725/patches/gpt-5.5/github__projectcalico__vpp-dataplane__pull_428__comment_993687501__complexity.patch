@@ -1,0 +1,118 @@
+diff --git a/calico-vpp-agent/common/common.go b/calico-vpp-agent/common/common.go
+index 07229e6..f192668 100644
+--- a/calico-vpp-agent/common/common.go
++++ b/calico-vpp-agent/common/common.go
+@@ -72,6 +72,51 @@ type LocalNodeSpec struct {
+ 	WireguardPublicKey string
+ }
+ 
++func parseNodeCIDR(address string) (net.IP, *net.IPNet) {
++	if address == "" {
++		return nil, nil
++	}
++	addr, ipNet, err := net.ParseCIDR(address)
++	if err != nil {
++		return nil, nil
++	}
++	return addr, ipNet
++}
++
++func (node *LocalNodeSpec) IPv4IPNet() *net.IPNet {
++	_, ipNet := parseNodeCIDR(node.IPv4Address)
++	return ipNet
++}
++
++func (node *LocalNodeSpec) IPv6IPNet() *net.IPNet {
++	_, ipNet := parseNodeCIDR(node.IPv6Address)
++	return ipNet
++}
++
++func (node *LocalNodeSpec) IPNets() (*net.IPNet, *net.IPNet) {
++	return node.IPv4IPNet(), node.IPv6IPNet()
++}
++
++func (node *LocalNodeSpec) IPv4IP() *net.IP {
++	addr, _ := parseNodeCIDR(node.IPv4Address)
++	if addr == nil {
++		return nil
++	}
++	return &addr
++}
++
++func (node *LocalNodeSpec) IPv6IP() *net.IP {
++	addr, _ := parseNodeCIDR(node.IPv6Address)
++	if addr == nil {
++		return nil
++	}
++	return &addr
++}
++
++func (node *LocalNodeSpec) IPs() (*net.IP, *net.IP) {
++	return node.IPv4IP(), node.IPv6IP()
++}
++
+ // CreateVppLink creates new link to VPP and waits for VPP to be up and running (by using simple VPP API call)
+ func CreateVppLink(socket string, log *logrus.Entry) (vpp *vpplink.VppLink, err error) {
+ 	return CreateVppLinkInRetryLoop(socket, log, 20*time.Second, 2*time.Second)
+@@ -471,53 +516,22 @@ type SRv6Tunnel struct {
+ }
+ 
+ func GetBGPSpecAddresses(nodeBGPSpec *LocalNodeSpec) (*net.IP, *net.IP) {
+-	var ip4 *net.IP
+-	var ip6 *net.IP
+-	if nodeBGPSpec.IPv4Address != "" {
+-		addr, _, err := net.ParseCIDR(nodeBGPSpec.IPv4Address)
+-		if err == nil {
+-			ip4 = &addr
+-		}
+-	}
+-	if nodeBGPSpec.IPv6Address != "" {
+-		addr, _, err := net.ParseCIDR(nodeBGPSpec.IPv6Address)
+-		if err == nil {
+-			ip6 = &addr
+-		}
+-	}
+-	return ip4, ip6
++	return nodeBGPSpec.IPs()
+ }
+ 
+-func GetBGPSpecIPNet(nodeBGPSpec *LocalNodeSpec) (ip4 *net.IPNet, ip6 *net.IPNet) {
+-	if nodeBGPSpec.IPv4Address != "" {
+-		_, ipNet, err := net.ParseCIDR(nodeBGPSpec.IPv4Address)
+-		if err == nil {
+-			ip4 = ipNet
+-		}
+-	}
+-	if nodeBGPSpec.IPv6Address != "" {
+-		_, ipNet, err := net.ParseCIDR(nodeBGPSpec.IPv6Address)
+-		if err == nil {
+-			ip6 = ipNet
+-		}
+-	}
+-	return ip4, ip6
++func GetBGPSpecIPNet(nodeBGPSpec *LocalNodeSpec) (*net.IPNet, *net.IPNet) {
++	return nodeBGPSpec.IPNets()
+ }
+ 
+ func GetNodeSpecAddresses(node *LocalNodeSpec) (string, string) {
+ 	nodeIP4 := ""
+ 	nodeIP6 := ""
+-	if node.IPv4Address != "" {
+-		addr, _, err := net.ParseCIDR(node.IPv4Address)
+-		if err == nil {
+-			nodeIP4 = addr.String()
+-		}
++	ip4, ip6 := node.IPs()
++	if ip4 != nil {
++		nodeIP4 = ip4.String()
+ 	}
+-	if node.IPv6Address != "" {
+-		addr, _, err := net.ParseCIDR(node.IPv6Address)
+-		if err == nil {
+-			nodeIP6 = addr.String()
+-		}
++	if ip6 != nil {
++		nodeIP6 = ip6.String()
+ 	}
+ 	return nodeIP4, nodeIP6
+ }

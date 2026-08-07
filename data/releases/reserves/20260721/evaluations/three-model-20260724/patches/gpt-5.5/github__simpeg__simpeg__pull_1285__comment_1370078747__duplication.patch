@@ -1,0 +1,96 @@
+--- a/SimPEG/potential_fields/gravity/_numba_functions.py
++++ b/SimPEG/potential_fields/gravity/_numba_functions.py
+@@ -13,6 +13,36 @@
+     choclo = None
+ else:
+     from numba import jit, prange
++
++
++@jit(nopython=True)
++def _evaluate_kernel_on_nodes(receiver, nodes, kernels, kernel_func):
++    """
++    Evaluate a gravity kernel on every node for a single receiver.
++    """
++    for j in range(nodes.shape[0]):
++        dx = nodes[j, 0] - receiver[0]
++        dy = nodes[j, 1] - receiver[1]
++        dz = nodes[j, 2] - receiver[2]
++        distance = np.sqrt(dx**2 + dy**2 + dz**2)
++        kernels[j] = kernel_func(dx, dy, dz, distance)
++
++
++@jit(nopython=True)
++def _evaluate_kernel_on_cell(kernels, cell_nodes, cell_index):
++    """
++    Evaluate the prism node combination for a single cell.
++    """
++    return (
++        -kernels[cell_nodes[cell_index, 0]]
++        + kernels[cell_nodes[cell_index, 1]]
++        + kernels[cell_nodes[cell_index, 2]]
++        - kernels[cell_nodes[cell_index, 3]]
++        + kernels[cell_nodes[cell_index, 4]]
++        - kernels[cell_nodes[cell_index, 5]]
++        - kernels[cell_nodes[cell_index, 6]]
++        + kernels[cell_nodes[cell_index, 7]]
++    )
+ 
+ 
+ def _forward_gravity(
+@@ -72,27 +102,13 @@
+     for i in prange(n_receivers):
+         # Allocate vector for kernels evaluated on mesh nodes
+         kernels = np.empty(n_nodes)
+-        for j in range(n_nodes):
+-            dx = nodes[j, 0] - receivers[i, 0]
+-            dy = nodes[j, 1] - receivers[i, 1]
+-            dz = nodes[j, 2] - receivers[i, 2]
+-            distance = np.sqrt(dx**2 + dy**2 + dz**2)
+-            kernels[j] = kernel_func(dx, dy, dz, distance)
++        _evaluate_kernel_on_nodes(receivers[i], nodes, kernels, kernel_func)
+         # Compute fields from the kernel values
+         for k in range(n_cells):
+             fields[i] += (
+                 constant_factor
+                 * densities[k]
+-                * (
+-                    -kernels[cell_nodes[k, 0]]
+-                    + kernels[cell_nodes[k, 1]]
+-                    + kernels[cell_nodes[k, 2]]
+-                    - kernels[cell_nodes[k, 3]]
+-                    + kernels[cell_nodes[k, 4]]
+-                    - kernels[cell_nodes[k, 5]]
+-                    - kernels[cell_nodes[k, 6]]
+-                    + kernels[cell_nodes[k, 7]]
+-                )
++                * _evaluate_kernel_on_cell(kernels, cell_nodes, k)
+             )
+ 
+ 
+@@ -150,23 +166,11 @@
+     for i in prange(n_receivers):
+         # Allocate vector for kernels evaluated on mesh nodes
+         kernels = np.empty(n_nodes)
+-        for j in range(n_nodes):
+-            dx = nodes[j, 0] - receivers[i, 0]
+-            dy = nodes[j, 1] - receivers[i, 1]
+-            dz = nodes[j, 2] - receivers[i, 2]
+-            distance = np.sqrt(dx**2 + dy**2 + dz**2)
+-            kernels[j] = kernel_func(dx, dy, dz, distance)
++        _evaluate_kernel_on_nodes(receivers[i], nodes, kernels, kernel_func)
+         # Compute sensitivity matrix elements from the kernel values
+         for k in range(n_cells):
+-            sensitivity_matrix[i, k] = constant_factor * (
+-                -kernels[cell_nodes[k, 0]]
+-                + kernels[cell_nodes[k, 1]]
+-                + kernels[cell_nodes[k, 2]]
+-                - kernels[cell_nodes[k, 3]]
+-                + kernels[cell_nodes[k, 4]]
+-                - kernels[cell_nodes[k, 5]]
+-                - kernels[cell_nodes[k, 6]]
+-                + kernels[cell_nodes[k, 7]]
++            sensitivity_matrix[i, k] = (
++                constant_factor * _evaluate_kernel_on_cell(kernels, cell_nodes, k)
+             )
+ 
+ 

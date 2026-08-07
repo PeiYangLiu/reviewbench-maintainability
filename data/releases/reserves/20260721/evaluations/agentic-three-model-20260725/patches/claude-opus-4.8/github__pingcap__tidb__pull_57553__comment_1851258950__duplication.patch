@@ -1,0 +1,94 @@
+diff --git a/pkg/parser/ast/ddl.go b/pkg/parser/ast/ddl.go
+index 5d51b02..75de8ee 100644
+--- a/pkg/parser/ast/ddl.go
++++ b/pkg/parser/ast/ddl.go
+@@ -851,29 +851,8 @@ func (n *IndexOption) Accept(v Visitor) (Node, bool) {
+ 	}
+ 	n = newNode.(*IndexOption)
+ 	if n.SplitOpt != nil {
+-		for i, val := range n.SplitOpt.Lower {
+-			node, ok := val.Accept(v)
+-			if !ok {
+-				return n, false
+-			}
+-			n.SplitOpt.Lower[i] = node.(ExprNode)
+-		}
+-		for i, val := range n.SplitOpt.Upper {
+-			node, ok := val.Accept(v)
+-			if !ok {
+-				return n, false
+-			}
+-			n.SplitOpt.Upper[i] = node.(ExprNode)
+-		}
+-
+-		for i, list := range n.SplitOpt.ValueLists {
+-			for j, val := range list {
+-				node, ok := val.Accept(v)
+-				if !ok {
+-					return n, false
+-				}
+-				n.SplitOpt.ValueLists[i][j] = node.(ExprNode)
+-			}
++		if !n.SplitOpt.acceptInPlace(v) {
++			return n, false
+ 		}
+ 	}
+ 	return v.Leave(n)
+@@ -3920,30 +3899,39 @@ func (n *AlterTableStmt) HaveOnlyPlacementOptions() bool {
+ 		}
+ 		if !n.IsAllPlacementRule() {
+ 			return false
+-		}
++	if !n.SplitOpt.acceptInPlace(v) {
++		return n, false
+ 	}
+-	return true
++	return v.Leave(n)
+ }
+ 
+-// Restore implements Node interface.
+-func (n *AlterTableStmt) Restore(ctx *format.RestoreCtx) error {
+-	if ctx.Flags.HasSkipPlacementRuleForRestoreFlag() && n.HaveOnlyPlacementOptions() {
+-		return nil
+-	}
+-	ctx.WriteKeyWord("ALTER TABLE ")
+-	if err := n.Table.Restore(ctx); err != nil {
+-		return errors.Annotate(err, "An error occurred while restore AlterTableStmt.Table")
++// acceptInPlace visits the child expressions of SplitOption in place.
++func (n *SplitOption) acceptInPlace(v Visitor) bool {
++	for i, val := range n.Lower {
++		node, ok := val.Accept(v)
++		if !ok {
++			return false
++		}
++		n.Lower[i] = node.(ExprNode)
+ 	}
+-	specs := make([]*AlterTableSpec, 0, len(n.Specs))
+-	for _, spec := range n.Specs {
+-		if spec.IsAllPlacementRule() && ctx.Flags.HasSkipPlacementRuleForRestoreFlag() {
+-			continue
++	for i, val := range n.Upper {
++		node, ok := val.Accept(v)
++		if !ok {
++			return false
+ 		}
+-		if spec.Tp == AlterTableOption {
+-			newOptions := tableOptionsWithRestoreTTLFlag(ctx.Flags, spec.Options)
+-			if len(newOptions) == 0 {
+-				continue
++		n.Upper[i] = node.(ExprNode)
++	}
++
++	for i, list := range n.ValueLists {
++		for j, val := range list {
++			node, ok := val.Accept(v)
++			if !ok {
++				return false
+ 			}
++			n.ValueLists[i][j] = node.(ExprNode)
++		}
++	}
++	return true
+ 			newSpec := *spec
+ 			newSpec.Options = newOptions
+ 			spec = &newSpec

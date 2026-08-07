@@ -1,0 +1,305 @@
+[
+  {
+    "action": {
+      "action": "find",
+      "path": "redis/cluster.py",
+      "query": "CacheConfiguration"
+    },
+    "response_chars": 72,
+    "round": 1,
+    "tool_result": {
+      "matches": [],
+      "query": "CacheConfiguration",
+      "truncated": false
+    },
+    "usage": {
+      "completion_tokens": 205,
+      "prompt_tokens": 13900,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 14105
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "redis/cluster.py",
+      "query": "cache_eviction"
+    },
+    "response_chars": 68,
+    "round": 2,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 508,
+          "text": "        cache_eviction: Optional[EvictionPolicy] = None,"
+        },
+        {
+          "line": 652,
+          "text": "            cache_eviction=cache_eviction,"
+        },
+        {
+          "line": 1336,
+          "text": "        cache_eviction: Optional[EvictionPolicy] = None,"
+        },
+        {
+          "line": 1353,
+          "text": "        self.cache_eviction = cache_eviction"
+        },
+        {
+          "line": 1501,
+          "text": "            kwargs.update({\"cache_eviction\": self.cache_eviction})"
+        },
+        {
+          "line": 1511,
+          "text": "                cache_eviction=self.cache_eviction,"
+        }
+      ],
+      "query": "cache_eviction",
+      "truncated": false
+    },
+    "usage": {
+      "completion_tokens": 109,
+      "prompt_tokens": 13993,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 14102
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 1540,
+      "path": "redis/cluster.py",
+      "start_line": 1320
+    },
+    "response_chars": 77,
+    "round": 3,
+    "tool_result": {
+      "content": "1320:     def reset(self) -> None:\n1321:         self.primary_to_idx.clear()\n1322: \n1323: \n1324: class NodesManager:\n1325:     def __init__(\n1326:         self,\n1327:         startup_nodes,\n1328:         from_url=False,\n1329:         require_full_coverage=False,\n1330:         lock=None,\n1331:         dynamic_startup_nodes=True,\n1332:         connection_pool_class=ConnectionPool,\n1333:         address_remap: Optional[Callable[[Tuple[str, int]], Tuple[str, int]]] = None,\n1334:         use_cache: bool = False,\n1335:         cache: Optional[Cache] = None,\n1336:         cache_eviction: Optional[EvictionPolicy] = None,\n1337:         cache_size: int = 128,\n1338:         cache_ttl: int = 300,\n1339:         **kwargs,\n1340:     ):\n1341:         self.nodes_cache = {}\n1342:         self.slots_cache = {}\n1343:         self.startup_nodes = {}\n1344:         self.default_node = None\n1345:         self.populate_startup_nodes(startup_nodes)\n1346:         self.from_url = from_url\n1347:         self._require_full_coverage = require_full_coverage\n1348:         self._dynamic_startup_nodes = dynamic_startup_nodes\n1349:         self.connection_pool_class = connection_pool_class\n1350:         self.address_remap = address_remap\n1351:         self.use_cache = use_cache\n1352:         self.cache = cache\n1353:         self.cache_eviction = cache_eviction\n1354:         self.cache_size = cache_size\n1355:         self.cache_ttl = cache_ttl\n1356:         self._moved_exception = None\n1357:         self.connection_kwargs = kwargs\n1358:         self.read_load_balancer = LoadBalancer()\n1359:         if lock is None:\n1360:             lock = threading.Lock()\n1361:         self._lock = lock\n1362:         self.initialize()\n1363: \n1364:     def get_node(self, host=None, port=None, node_name=None):\n1365:         \"\"\"\n1366:         Get the requested node from the cluster's nodes.\n1367:         nodes.\n1368:         :return: ClusterNode if the node exists, else None\n1369:         \"\"\"\n1370:         if host and port:\n1371:             # the user passed host and port\n1372:             if host == \"localhost\":\n1373:                 host = socket.gethostbyname(host)\n1374:             return self.nodes_cache.get(get_node_name(host=host, port=port))\n1375:         elif node_name:\n1376:             return self.nodes_cache.get(node_name)\n1377:         else:\n1378:             return None\n1379: \n1380:     def update_moved_exception(self, exception):\n1381:         self._moved_exception = exception\n1382: \n1383:     def _update_moved_slots(self):\n1384:         \"\"\"\n1385:         Update the slot's node with the redirected one\n1386:         \"\"\"\n1387:         e = self._moved_exception\n1388:         redirected_node = self.get_node(host=e.host, port=e.port)\n1389:         if redirected_node is not None:\n1390:             # The node already exists\n1391:             if redirected_node.server_type is not PRIMARY:\n1392:                 # Update the node's server type\n1393:                 redirected_node.server_type = PRIMARY\n1394:         else:\n1395:             # This is a new node, we will add it to the nodes cache\n1396:             redirected_node = ClusterNode(e.host, e.port, PRIMARY)\n1397:             self.nodes_cache[redirected_node.name] = redirected_node\n1398:         if redirected_node in self.slots_cache[e.slot_id]:\n1399:             # The MOVED error resulted from a failover, and the new slot owner\n1400:             # had previously been a replica.\n1401:             old_primary = self.slots_cache[e.slot_id][0]\n1402:             # Update the old primary to be a replica and add it to the end of\n1403:             # the slot's node list\n1404:             old_primary.server_type = REPLICA\n1405:             self.slots_cache[e.slot_id].append(old_primary)\n1406:             # Remove the old replica, which is now a primary, from the slot's\n1407:             # node list\n1408:             self.slots_cache[e.slot_id].remove(redirected_node)\n1409:             # Override the old primary with the new one\n1410:             self.slots_cache[e.slot_id][0] = redirected_node\n1411:             if self.default_node == old_primary:\n1412:                 # Update the default node with the new primary\n1413:                 self.default_node = redirected_node\n1414:         else:\n1415:             # The new slot owner is a new server, or a server from a different\n1416:             # shard. We need to remove all current nodes from the slot's list\n1417:             # (including replications) and add just the new node.\n1418:             self.slots_cache[e.slot_id] = [redirected_node]\n1419:         # Reset moved_exception\n1420:         self._moved_exception = None\n1421: \n1422:     def get_node_from_slot(self, slot, read_from_replicas=False, server_type=None):\n1423:         \"\"\"\n1424:         Gets a node that servers this hash slot\n1425:         \"\"\"\n1426:         if self._moved_exception:\n1427:             with self._lock:\n1428:                 if self._moved_exception:\n1429:                     self._update_moved_slots()\n1430: \n1431:         if self.slots_cache.get(slot) is None or len(self.slots_cache[slot]) == 0:\n1432:             raise SlotNotCoveredError(\n1433:                 f'Slot \"{slot}\" not covered by the cluster. '\n1434:                 f'\"require_full_coverage={self._require_full_coverage}\"'\n1435:             )\n1436: \n1437:         if read_from_replicas is True:\n1438:             # get the server index in a Round-Robin manner\n1439:             primary_name = self.slots_cache[slot][0].name\n1440:             node_idx = self.read_load_balancer.get_server_index(\n1441:                 primary_name, len(self.slots_cache[slot])\n1442:             )\n1443:         elif (\n1444:             server_type is None\n1445:             or server_type == PRIMARY\n1446:             or len(self.slots_cache[slot]) == 1\n1447:         ):\n1448:             # return a primary\n1449:             node_idx = 0\n1450:         else:\n1451:             # return a replica\n1452:             # randomly choose one of the replicas\n1453:             node_idx = random.randint(1, len(self.slots_cache[slot]) - 1)\n1454: \n1455:         return self.slots_cache[slot][node_idx]\n1456: \n1457:     def get_nodes_by_server_type(self, server_type):\n1458:         \"\"\"\n1459:         Get all nodes with the specified server type\n1460:         :param server_type: 'primary' or 'replica'\n1461:         :return: list of ClusterNode\n1462:         \"\"\"\n1463:         return [\n1464:             node\n1465:             for node in self.nodes_cache.values()\n1466:             if node.server_type == server_type\n1467:         ]\n1468: \n1469:     def populate_startup_nodes(self, nodes):\n1470:         \"\"\"\n1471:         Populate all startup nodes and filters out any duplicates\n1472:         \"\"\"\n1473:         for n in nodes:\n1474:             self.startup_nodes[n.name] = n\n1475: \n1476:     def check_slots_coverage(self, slots_cache):\n1477:         # Validate if all slots are covered or if we should try next\n1478:         # startup node\n1479:         for i in range(0, REDIS_CLUSTER_HASH_SLOTS):\n1480:             if i not in slots_cache:\n1481:                 return False\n1482:         return True\n1483: \n1484:     def create_redis_connections(self, nodes):\n1485:         \"\"\"\n1486:         This function will create a redis connection to all nodes in :nodes:\n1487:         \"\"\"\n1488:         for node in nodes:\n1489:             if node.redis_connection is None:\n1490:                 node.redis_connection = self.create_redis_node(\n1491:                     host=node.host, port=node.port, **self.connection_kwargs\n1492:                 )\n1493: \n1494:     def create_redis_node(self, host, port, **kwargs):\n1495:         if self.from_url:\n1496:             # Create a redis node with a costumed connection pool\n1497:             kwargs.update({\"host\": host})\n1498:             kwargs.update({\"port\": port})\n1499:             kwargs.update({\"use_cache\": self.use_cache})\n1500:             kwargs.update({\"cache\": self.cache})\n1501:             kwargs.update({\"cache_eviction\": self.cache_eviction})\n1502:             kwargs.update({\"cache_size\": self.cache_size})\n1503:             kwargs.update({\"cache_ttl\": self.cache_ttl})\n1504:             r = Redis(connection_pool=self.connection_pool_class(**kwargs))\n1505:         else:\n1506:             r = Redis(\n1507:                 host=host,\n1508:                 port=port,\n1509:                 use_cache=self.use_cache,\n1510:                 cache=self.cache,\n1511:                 cache_eviction=self.cache_eviction,\n1512:                 cache_size=self.cache_size,\n1513:                 cache_ttl=self.cache_ttl,\n1514:                 **kwargs,\n1515:             )\n1516:         return r\n1517: \n1518:     def _get_or_create_cluster_node(self, host, port, role, tmp_nodes_cache):\n1519:         node_name = get_node_name(host, port)\n1520:         # check if we already have this node in the tmp_nodes_cache\n1521:         target_node = tmp_nodes_cache.get(node_name)\n1522:         if target_node is None:\n1523:             # before creating a new cluster node, check if the cluster node already\n1524:             # exists in the current nodes cache and has a valid connection so we can\n1525:             # reuse it\n1526:             target_node = self.nodes_cache.get(node_name)\n1527:             if target_node is None or target_node.redis_connection is None:\n1528:                 # create new cluster node for this cluster\n1529:                 target_node = ClusterNode(host, port, role)\n1530:             if target_node.server_type != role:\n1531:                 target_node.server_type = role\n1532:             # add this node to the nodes cache\n1533:             tmp_nodes_cache[target_node.name] = target_node\n1534: \n1535:         return target_node\n1536: \n1537:     def initialize(self):\n1538:         \"\"\"\n1539:         Initializes the nodes cache, slots cache and redis connections.\n1540:         :startup_nodes:",
+      "end_line": 1540,
+      "path_lines": 2531,
+      "start_line": 1320
+    },
+    "usage": {
+      "completion_tokens": 111,
+      "prompt_tokens": 14277,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 14388
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 60,
+      "path": "redis/cache.py",
+      "start_line": 1
+    },
+    "response_chars": 77,
+    "round": 4,
+    "tool_result": {
+      "content": "1: from abc import ABC, abstractmethod\n2: from enum import Enum\n3: \n4: from cachetools import Cache, LFUCache, LRUCache, RRCache, TTLCache\n5: \n6: \n7: class EvictionPolicy(Enum):\n8:     LRU = \"LRU\"\n9:     LFU = \"LFU\"\n10:     RANDOM = \"RANDOM\"\n11:     TTL = \"TTL\"\n12: \n13: \n14: class CacheConfiguration:\n15:     DEFAULT_EVICTION_POLICY = EvictionPolicy.LRU\n16: \n17:     DEFAULT_ALLOW_LIST = [\n18:         \"BITCOUNT\",\n19:         \"BITFIELD_RO\",\n20:         \"BITPOS\",\n21:         \"EXISTS\",\n22:         \"GEODIST\",\n23:         \"GEOHASH\",\n24:         \"GEOPOS\",\n25:         \"GEORADIUSBYMEMBER_RO\",\n26:         \"GEORADIUS_RO\",\n27:         \"GEOSEARCH\",\n28:         \"GET\",\n29:         \"GETBIT\",\n30:         \"GETRANGE\",\n31:         \"HEXISTS\",\n32:         \"HGET\",\n33:         \"HGETALL\",\n34:         \"HKEYS\",\n35:         \"HLEN\",\n36:         \"HMGET\",\n37:         \"HSTRLEN\",\n38:         \"HVALS\",\n39:         \"JSON.ARRINDEX\",\n40:         \"JSON.ARRLEN\",\n41:         \"JSON.GET\",\n42:         \"JSON.MGET\",\n43:         \"JSON.OBJKEYS\",\n44:         \"JSON.OBJLEN\",\n45:         \"JSON.RESP\",\n46:         \"JSON.STRLEN\",\n47:         \"JSON.TYPE\",\n48:         \"LCS\",\n49:         \"LINDEX\",\n50:         \"LLEN\",\n51:         \"LPOS\",\n52:         \"LRANGE\",\n53:         \"MGET\",\n54:         \"SCARD\",\n55:         \"SDIFF\",\n56:         \"SINTER\",\n57:         \"SINTERCARD\",\n58:         \"SISMEMBER\",\n59:         \"SMEMBERS\",\n60:         \"SMISMEMBER\",",
+      "end_line": 60,
+      "path_lines": 151,
+      "start_line": 1
+    },
+    "usage": {
+      "completion_tokens": 340,
+      "prompt_tokens": 18256,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 18596
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "redis/connection.py",
+      "query": "cache_eviction"
+    },
+    "response_chars": 71,
+    "round": 5,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 1288,
+          "text": "        connection_kwargs.pop(\"cache_eviction\", None)"
+        }
+      ],
+      "query": "cache_eviction",
+      "truncated": false
+    },
+    "usage": {
+      "completion_tokens": 382,
+      "prompt_tokens": 19245,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 19627
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "redis/connection.py",
+      "query": "class CacheProxyConnection"
+    },
+    "response_chars": 83,
+    "round": 6,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 727,
+          "text": "class CacheProxyConnection(ConnectionInterface):"
+        }
+      ],
+      "query": "class CacheProxyConnection",
+      "truncated": false
+    },
+    "usage": {
+      "completion_tokens": 264,
+      "prompt_tokens": 19356,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 19620
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 1320,
+      "path": "redis/connection.py",
+      "start_line": 1240
+    },
+    "response_chars": 80,
+    "round": 7,
+    "tool_result": {
+      "content": "1240:             url_options[\"connection_class\"] = kwargs[\"connection_class\"]\n1241: \n1242:         kwargs.update(url_options)\n1243:         return cls(**kwargs)\n1244: \n1245:     def __init__(\n1246:         self,\n1247:         connection_class=Connection,\n1248:         max_connections: Optional[int] = None,\n1249:         **connection_kwargs,\n1250:     ):\n1251:         max_connections = max_connections or 2**31\n1252:         if not isinstance(max_connections, int) or max_connections < 0:\n1253:             raise ValueError('\"max_connections\" must be a positive integer')\n1254: \n1255:         self.connection_class = connection_class\n1256:         self.connection_kwargs = connection_kwargs\n1257:         self.max_connections = max_connections\n1258:         self.cache = None\n1259:         self._cache_conf = None\n1260:         self._cache_factory = None\n1261:         self.cache_lock = None\n1262:         self.scheduler = None\n1263: \n1264:         if connection_kwargs.get(\"use_cache\"):\n1265:             if connection_kwargs.get(\"protocol\") not in [3, \"3\"]:\n1266:                 raise RedisError(\"Client caching is only supported with RESP version 3\")\n1267: \n1268:             self._cache_conf = CacheConfiguration(**self.connection_kwargs)\n1269:             self._cache_lock = threading.Lock()\n1270: \n1271:             cache = self.connection_kwargs.get(\"cache\")\n1272:             if cache is not None:\n1273:                 self.cache = cache\n1274:             else:\n1275:                 cache_factory = CacheFactory(self._cache_conf)\n1276:                 self.cache = cache_factory.get_cache()\n1277: \n1278:             self.scheduler = BackgroundScheduler()\n1279:             self.scheduler.add_job(\n1280:                 self._perform_health_check,\n1281:                 \"interval\",\n1282:                 seconds=2,\n1283:                 id=\"cache_health_check\",\n1284:             )\n1285:             self.scheduler.start()\n1286: \n1287:         connection_kwargs.pop(\"use_cache\", None)\n1288:         connection_kwargs.pop(\"cache_eviction\", None)\n1289:         connection_kwargs.pop(\"cache_size\", None)\n1290:         connection_kwargs.pop(\"cache_ttl\", None)\n1291:         connection_kwargs.pop(\"cache\", None)\n1292: \n1293:         # a lock to protect the critical section in _checkpid().\n1294:         # this lock is acquired when the process id changes, such as\n1295:         # after a fork. during this time, multiple threads in the child\n1296:         # process could attempt to acquire this lock. the first thread\n1297:         # to acquire the lock will reset the data structures and lock\n1298:         # object of this pool. subsequent threads acquiring this lock\n1299:         # will notice the first thread already did the work and simply\n1300:         # release the lock.\n1301:         self._fork_lock = threading.Lock()\n1302:         self.reset()\n1303: \n1304:     def __repr__(self) -> (str, str):\n1305:         return (\n1306:             f\"<{type(self).__module__}.{type(self).__name__}\"\n1307:             f\"({repr(self.connection_class(**self.connection_kwargs))})>\"\n1308:         )\n1309: \n1310:     def get_protocol(self):\n1311:         \"\"\"\n1312:         Returns:\n1313:             The RESP protocol version, or ``None`` if the protocol is not specified,\n1314:             in which case the server default will be used.\n1315:         \"\"\"\n1316:         return self.connection_kwargs.get(\"protocol\", None)\n1317: \n1318:     def reset(self) -> None:\n1319:         self._lock = threading.Lock()\n1320:         self._created_connections = 0",
+      "end_line": 1320,
+      "path_lines": 1669,
+      "start_line": 1240
+    },
+    "usage": {
+      "completion_tokens": 213,
+      "prompt_tokens": 19470,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 19683
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "redis/cluster.py",
+      "query": "from redis.cache import"
+    },
+    "response_chars": 341,
+    "round": 8,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 13,
+          "text": "from redis.cache import EvictionPolicy"
+        }
+      ],
+      "query": "from redis.cache import",
+      "truncated": false
+    },
+    "usage": {
+      "completion_tokens": 714,
+      "prompt_tokens": 20974,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 21688
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 1516,
+      "path": "redis/cluster.py",
+      "start_line": 1484
+    },
+    "response_chars": 77,
+    "round": 9,
+    "tool_result": {
+      "content": "1484:     def create_redis_connections(self, nodes):\n1485:         \"\"\"\n1486:         This function will create a redis connection to all nodes in :nodes:\n1487:         \"\"\"\n1488:         for node in nodes:\n1489:             if node.redis_connection is None:\n1490:                 node.redis_connection = self.create_redis_node(\n1491:                     host=node.host, port=node.port, **self.connection_kwargs\n1492:                 )\n1493: \n1494:     def create_redis_node(self, host, port, **kwargs):\n1495:         if self.from_url:\n1496:             # Create a redis node with a costumed connection pool\n1497:             kwargs.update({\"host\": host})\n1498:             kwargs.update({\"port\": port})\n1499:             kwargs.update({\"use_cache\": self.use_cache})\n1500:             kwargs.update({\"cache\": self.cache})\n1501:             kwargs.update({\"cache_eviction\": self.cache_eviction})\n1502:             kwargs.update({\"cache_size\": self.cache_size})\n1503:             kwargs.update({\"cache_ttl\": self.cache_ttl})\n1504:             r = Redis(connection_pool=self.connection_pool_class(**kwargs))\n1505:         else:\n1506:             r = Redis(\n1507:                 host=host,\n1508:                 port=port,\n1509:                 use_cache=self.use_cache,\n1510:                 cache=self.cache,\n1511:                 cache_eviction=self.cache_eviction,\n1512:                 cache_size=self.cache_size,\n1513:                 cache_ttl=self.cache_ttl,\n1514:                 **kwargs,\n1515:             )\n1516:         return r",
+      "end_line": 1516,
+      "path_lines": 2531,
+      "start_line": 1484
+    },
+    "usage": {
+      "completion_tokens": 582,
+      "prompt_tokens": 21078,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 21660
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "    def create_redis_node(self, host, port, **kwargs):\n        # Configure the connection with the cache settings shared by all nodes\n        kwargs.update(\n            {\n                \"use_cache\": self.use_cache,\n                \"cache\": self.cache,\n                \"cache_eviction\": self.cache_eviction,\n                \"cache_size\": self.cache_size,\n                \"cache_ttl\": self.cache_ttl,\n            }\n        )\n        if self.from_url:\n            # Create a redis node with a costumed connection pool\n            kwargs.update({\"host\": host})\n            kwargs.update({\"port\": port})\n            r = Redis(connection_pool=self.connection_pool_class(**kwargs))\n        else:\n            r = Redis(host=host, port=port, **kwargs)\n        return r",
+          "end_line": 1516,
+          "start_line": 1494
+        }
+      ]
+    },
+    "response_chars": 980,
+    "round": 10,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 1516,
+          "replacement_lines": 19,
+          "start_line": 1494
+        }
+      ],
+      "current_file_lines": 2527,
+      "updated_excerpt": {
+        "content": "1484:     def create_redis_connections(self, nodes):\n1485:         \"\"\"\n1486:         This function will create a redis connection to all nodes in :nodes:\n1487:         \"\"\"\n1488:         for node in nodes:\n1489:             if node.redis_connection is None:\n1490:                 node.redis_connection = self.create_redis_node(\n1491:                     host=node.host, port=node.port, **self.connection_kwargs\n1492:                 )\n1493: \n1494:     def create_redis_node(self, host, port, **kwargs):\n1495:         # Configure the connection with the cache settings shared by all nodes\n1496:         kwargs.update(\n1497:             {\n1498:                 \"use_cache\": self.use_cache,\n1499:                 \"cache\": self.cache,\n1500:                 \"cache_eviction\": self.cache_eviction,\n1501:                 \"cache_size\": self.cache_size,\n1502:                 \"cache_ttl\": self.cache_ttl,\n1503:             }\n1504:         )\n1505:         if self.from_url:\n1506:             # Create a redis node with a costumed connection pool\n1507:             kwargs.update({\"host\": host})\n1508:             kwargs.update({\"port\": port})\n1509:             r = Redis(connection_pool=self.connection_pool_class(**kwargs))\n1510:         else:\n1511:             r = Redis(host=host, port=port, **kwargs)\n1512:         return r\n1513: \n1514:     def _get_or_create_cluster_node(self, host, port, role, tmp_nodes_cache):\n1515:         node_name = get_node_name(host, port)\n1516:         # check if we already have this node in the tmp_nodes_cache\n1517:         target_node = tmp_nodes_cache.get(node_name)\n1518:         if target_node is None:\n1519:             # before creating a new cluster node, check if the cluster node already\n1520:             # exists in the current nodes cache and has a valid connection so we can\n1521:             # reuse it\n1522:             target_node = self.nodes_cache.get(node_name)\n1523:             if target_node is None or target_node.redis_connection is None:\n1524:                 # create new cluster node for this cluster",
+        "end_line": 1524,
+        "path_lines": 2527,
+        "start_line": 1484
+      }
+    },
+    "usage": {
+      "completion_tokens": 615,
+      "prompt_tokens": 21780,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 22395
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 11,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/claude-opus-4.8/patches/github__redis__redis-py__pull_3350__comment_1723391627__api_design.patch"
+    },
+    "usage": {
+      "completion_tokens": 141,
+      "prompt_tokens": 22994,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 23135
+    }
+  }
+]

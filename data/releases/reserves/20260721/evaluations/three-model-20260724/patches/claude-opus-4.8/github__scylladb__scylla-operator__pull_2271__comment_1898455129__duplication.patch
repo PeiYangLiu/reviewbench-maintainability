@@ -1,0 +1,165 @@
+--- a/pkg/api/scylla/validation/scylladbcluster_validation.go
++++ b/pkg/api/scylla/validation/scylladbcluster_validation.go
+@@ -241,6 +241,59 @@
+ 
+ 	allErrs = append(allErrs, apimachineryvalidation.ValidateImmutableField(new.Spec.ClusterName, old.Spec.ClusterName, fldPath.Child("clusterName"))...)
+ 
++	allErrs = append(allErrs, validateScyllaDBClusterDatacenterRemoval(new, old, fldPath)...)
++	allErrs = append(allErrs, validateScyllaDBClusterRackRemoval(new, old, fldPath)...)
++	allErrs = append(allErrs, validateScyllaDBClusterStorageImmutability(new, old, fldPath)...)
++	allErrs = append(allErrs, validateScyllaDBClusterExposeOptionsImmutability(new, old, fldPath)...)
++
++	return allErrs
++}
++
++// scyllaDBClusterDCRackProperties holds the properties of a datacenter's rack that are relevant for update validation.
++type scyllaDBClusterDCRackProperties struct {
++	datacenter string
++	rack       string
++	storage    *scyllav1alpha1.StorageOptions
++	fieldPath  *field.Path
++}
++
++// collectScyllaDBClusterRacks collects the racks of all datacenters, including the ones defined in the datacenter template.
++func collectScyllaDBClusterRacks(sc *scyllav1alpha1.ScyllaDBCluster, fldPath *field.Path) []scyllaDBClusterDCRackProperties {
++	var racks []scyllaDBClusterDCRackProperties
++	for dcIdx, dc := range sc.Spec.Datacenters {
++		if sc.Spec.DatacenterTemplate != nil {
++			for rackIdx, rack := range sc.Spec.DatacenterTemplate.Racks {
++				dcr := scyllaDBClusterDCRackProperties{
++					datacenter: dc.Name,
++					rack:       rack.Name,
++					fieldPath:  fldPath.Child("datacenterTemplate", "racks").Index(rackIdx),
++				}
++				if rack.ScyllaDB != nil {
++					dcr.storage = rack.ScyllaDB.Storage
++				}
++
++				racks = append(racks, dcr)
++			}
++		}
++		for rackIdx, rack := range dc.Racks {
++			dcr := scyllaDBClusterDCRackProperties{
++				datacenter: dc.Name,
++				rack:       rack.Name,
++				fieldPath:  fldPath.Child("datacenters").Index(dcIdx).Child("racks").Index(rackIdx),
++			}
++			if rack.ScyllaDB != nil {
++				dcr.storage = rack.ScyllaDB.Storage
++			}
++
++			racks = append(racks, dcr)
++		}
++	}
++	return racks
++}
++
++func validateScyllaDBClusterDatacenterRemoval(new, old *scyllav1alpha1.ScyllaDBCluster, fldPath *field.Path) field.ErrorList {
++	allErrs := field.ErrorList{}
++
+ 	oldDatacenterNames := slices.ConvertSlice(old.Spec.Datacenters, func(dc scyllav1alpha1.ScyllaDBClusterDatacenter) string {
+ 		return dc.Name
+ 	})
+@@ -286,51 +339,17 @@
+ 		}
+ 	}
+ 
+-	type dcRackProperties struct {
+-		datacenter string
+-		rack       string
+-		storage    *scyllav1alpha1.StorageOptions
+-		fieldPath  *field.Path
+-	}
+-
+-	collectRacks := func(sc *scyllav1alpha1.ScyllaDBCluster) []dcRackProperties {
+-		var racks []dcRackProperties
+-		for dcIdx, dc := range sc.Spec.Datacenters {
+-			if sc.Spec.DatacenterTemplate != nil {
+-				for rackIdx, rack := range sc.Spec.DatacenterTemplate.Racks {
+-					dcr := dcRackProperties{
+-						datacenter: dc.Name,
+-						rack:       rack.Name,
+-						fieldPath:  fldPath.Child("datacenterTemplate", "racks").Index(rackIdx),
+-					}
+-					if rack.ScyllaDB != nil {
+-						dcr.storage = rack.ScyllaDB.Storage
+-					}
+-
+-					racks = append(racks, dcr)
+-				}
+-			}
+-			for rackIdx, rack := range dc.Racks {
+-				dcr := dcRackProperties{
+-					datacenter: dc.Name,
+-					rack:       rack.Name,
+-					fieldPath:  fldPath.Child("datacenters").Index(dcIdx).Child("racks").Index(rackIdx),
+-				}
+-				if rack.ScyllaDB != nil {
+-					dcr.storage = rack.ScyllaDB.Storage
+-				}
+-
+-				racks = append(racks, dcr)
+-			}
+-		}
+-		return racks
+-	}
+-
+-	newRacks := collectRacks(new)
+-	oldRacks := collectRacks(old)
+-
+-	removedRacks := slices.Filter(oldRacks, func(odr dcRackProperties) bool {
+-		_, _, ok := slices.Find(newRacks, func(ndr dcRackProperties) bool {
++	return allErrs
++}
++
++func validateScyllaDBClusterRackRemoval(new, old *scyllav1alpha1.ScyllaDBCluster, fldPath *field.Path) field.ErrorList {
++	allErrs := field.ErrorList{}
++
++	newRacks := collectScyllaDBClusterRacks(new, fldPath)
++	oldRacks := collectScyllaDBClusterRacks(old, fldPath)
++
++	removedRacks := slices.Filter(oldRacks, func(odr scyllaDBClusterDCRackProperties) bool {
++		_, _, ok := slices.Find(newRacks, func(ndr scyllaDBClusterDCRackProperties) bool {
+ 			return ndr.rack == odr.rack && ndr.datacenter == odr.datacenter
+ 		})
+ 		return !ok
+@@ -362,6 +381,12 @@
+ 		}
+ 	}
+ 
++	return allErrs
++}
++
++func validateScyllaDBClusterStorageImmutability(new, old *scyllav1alpha1.ScyllaDBCluster, fldPath *field.Path) field.ErrorList {
++	allErrs := field.ErrorList{}
++
+ 	var oldDatacenterTemplateStorage, newDatacenterTemplateStorage *scyllav1alpha1.StorageOptions
+ 	if old.Spec.DatacenterTemplate != nil && old.Spec.DatacenterTemplate.ScyllaDB != nil {
+ 		oldDatacenterTemplateStorage = old.Spec.DatacenterTemplate.ScyllaDB.Storage
+@@ -380,9 +405,12 @@
+ 	}
+ 	allErrs = append(allErrs, apimachineryvalidation.ValidateImmutableField(newDatacenterTemplateRackTemplateStorage, oldDatacenterTemplateRackTemplateStorage, fldPath.Child("datacenterTemplate", "rackTemplate", "scyllaDB", "storage"))...)
+ 
++	newRacks := collectScyllaDBClusterRacks(new, fldPath)
++	oldRacks := collectScyllaDBClusterRacks(old, fldPath)
++
+ 	for _, newRack := range newRacks {
+ 		var oldRackStorage *scyllav1alpha1.StorageOptions
+-		oldRack, _, ok := slices.Find(oldRacks, func(oldRack dcRackProperties) bool {
++		oldRack, _, ok := slices.Find(oldRacks, func(oldRack scyllaDBClusterDCRackProperties) bool {
+ 			return oldRack.datacenter == newRack.datacenter && oldRack.rack == newRack.rack
+ 		})
+ 		if ok {
+@@ -419,6 +447,12 @@
+ 		allErrs = append(allErrs, apimachineryvalidation.ValidateImmutableField(newDatacenterRackTemplateStorage, oldDatacenterRackTemplateStorage, fldPath.Child("datacenters").Index(dcIdx).Child("rackTemplate", "scyllaDB", "storage"))...)
+ 	}
+ 
++	return allErrs
++}
++
++func validateScyllaDBClusterExposeOptionsImmutability(new, old *scyllav1alpha1.ScyllaDBCluster, fldPath *field.Path) field.ErrorList {
++	allErrs := field.ErrorList{}
++
+ 	var oldClientBroadcastAddressType, newClientBroadcastAddressType *scyllav1alpha1.BroadcastAddressType
+ 	if old.Spec.ExposeOptions != nil && old.Spec.ExposeOptions.BroadcastOptions != nil {
+ 		oldClientBroadcastAddressType = pointer.Ptr(old.Spec.ExposeOptions.BroadcastOptions.Clients.Type)

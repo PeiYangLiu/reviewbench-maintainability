@@ -1,0 +1,535 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 182,
+      "path": "src/psyclone/psyad/domain/lfric/lfric_adjoint_harness.py",
+      "start_line": 1
+    },
+    "response_chars": 443,
+    "round": 1,
+    "tool_result": {
+      "content": "1: # -----------------------------------------------------------------------------\n2: # BSD 3-Clause License\n3: #\n4: # Copyright (c) 2022-2023, Science and Technology Facilities Council.\n5: # All rights reserved.\n6: #\n7: # Redistribution and use in source and binary forms, with or without\n8: # modification, are permitted provided that the following conditions are met:\n9: #\n10: # * Redistributions of source code must retain the above copyright notice, this\n11: #   list of conditions and the following disclaimer.\n12: #\n13: # * Redistributions in binary form must reproduce the above copyright notice,\n14: #   this list of conditions and the following disclaimer in the documentation\n15: #   and/or other materials provided with the distribution.\n16: #\n17: # * Neither the name of the copyright holder nor the names of its\n18: #   contributors may be used to endorse or promote products derived from\n19: #   this software without specific prior written permission.\n20: #\n21: # THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS\n22: # \"AS IS\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT\n23: # LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS\n24: # FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE\n25: # COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,\n26: # INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,\n27: # BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;\n28: # LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER\n29: # CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT\n30: # LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN\n31: # ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE\n32: # POSSIBILITY OF SUCH DAMAGE.\n33: # -----------------------------------------------------------------------------\n34: # Authors R. W. Ford and A. R. Porter, STFC Daresbury Lab\n35: # Modified by J. Henrichs, Bureau of Meteorology\n36: # Modified by L. Turner, Met Office\n37: \n38: ''' Provides LFRic-specific PSyclone adjoint test-harness functionality. '''\n39: \n40: from fparser import api as fpapi\n41: \n42: from psyclone.core import AccessType\n43: from psyclone.domain.lfric import (\n44:     LFRicConstants, LFRicTypes, ArgIndexToMetadataIndex)\n45: from psyclone.domain.lfric.algorithm.lfric_alg import LFRicAlg\n46: from psyclone.domain.lfric.algorithm.psyir import (\n47:     LFRicAlgorithmInvokeCall, LFRicBuiltinFunctorFactory, LFRicKernelFunctor)\n48: from psyclone.domain.lfric.transformations import RaisePSyIR2LFRicKernTrans\n49: from psyclone.errors import InternalError, GenerationError\n50: from psyclone.psyad.domain.common.adjoint_utils import (create_adjoint_name,\n51:                                                         find_container)\n52: from psyclone.psyir.frontend.fortran import FortranReader\n53: from psyclone.psyir.nodes import (\n54:     IntrinsicCall, Reference, ArrayReference, Assignment,\n55:     Literal, BinaryOperation, Routine, IfBlock)\n56: from psyclone.psyir.symbols import (\n57:     ImportInterface, ContainerSymbol, ScalarType, ArrayType, RoutineSymbol,\n58:     DataTypeSymbol, DataSymbol, DeferredType)\n59: \n60: #: The tolerance applied to the comparison of the inner product values in\n61: #: the generated test-harness code.\n62: #: TODO #1346 this tolerance should be user configurable.\n63: INNER_PRODUCT_TOLERANCE = 1500.0\n64: \n65: \n66: def _compute_lfric_inner_products(prog, scalars, field_sums, sum_sym):\n67:     '''\n68:     Adds PSyIR to a supplied Routine to compute the sum of the inner products\n69:     of the supplied scalars and fields.\n70: \n71:     :param prog: the Routine to which to add PSyIR.\n72:     :type prog: :py:class:`psyclone.psyir.nodes.Routine`\n73:     :param scalars: list of pairs of scalars to multiply and sum.\n74:     :type scalars: List[Tuple[:py:class:`psyclone.psyir.symbols.DataSymbol`,\n75:                               :py:class:`psyclone.psyir.symbols.DataSymbol`]]\n76:     :param field_sums: the results of all of the inner products of the \\\n77:                        various field arguments.\n78:     :type field_sums: List[:py:class:`psyclone.psyir.symbols.DataSymbol`]\n79:     :param sum_sym: the symbol into which to accumulate the final sum.\n80:     :type sum_sym: :py:class:`psyclone.psyir.symbols.DataSymbol`\n81: \n82:     '''\n83:     table = prog.symbol_table\n84:     idef_sym = table.add_lfric_precision_symbol(\"i_def\")\n85:     idef_type = ScalarType(ScalarType.Intrinsic.REAL, idef_sym)\n86: \n87:     # Initialise the sum to zero: sum = 0.0\n88:     prog.addchild(Assignment.create(Reference(sum_sym),\n89:                                     Literal(\"0.0\", sum_sym.datatype)))\n90:     for scalar in scalars:\n91:         # Compute the product of the pair of scalars: scalar[0]*scalar[1]\n92:         # (unless they are boolean).\n93:         if scalar[0].datatype.intrinsic == ScalarType.Intrinsic.BOOLEAN:\n94:             continue\n95:         prod = BinaryOperation.create(BinaryOperation.Operator.MUL,\n96:                                       Reference(scalar[0]),\n97:                                       Reference(scalar[1]))\n98:         # Add this product to the sum:\n99:         #     sum = sum + scalar[0]*scalar[1]\n100:         prog.addchild(\n101:                 Assignment.create(\n102:                     Reference(sum_sym),\n103:                     BinaryOperation.create(BinaryOperation.Operator.ADD,\n104:                                            Reference(sum_sym), prod)))\n105:     for sym in field_sums:\n106:         if sym.is_scalar:\n107:             # Add this result of a field inner product to the sum:\n108:             #     sum = sum + field_sum\n109:             prog.addchild(\n110:                     Assignment.create(\n111:                         Reference(sum_sym),\n112:                         BinaryOperation.create(BinaryOperation.Operator.ADD,\n113:                                                Reference(sum_sym),\n114:                                                Reference(sym))))\n115:         else:\n116:             # For a field vector we have an array of inner-product values that\n117:             # must be summed.\n118:             for dim in range(int(sym.datatype.shape[0].lower.value),\n119:                              int(sym.datatype.shape[0].upper.value)+1):\n120:                 # sum = sum + field_sum(dim)\n121:                 add_op = BinaryOperation.create(\n122:                     BinaryOperation.Operator.ADD,\n123:                     Reference(sum_sym),\n124:                     ArrayReference.create(sym,\n125:                                           [Literal(str(dim), idef_type)]))\n126:                 prog.addchild(Assignment.create(Reference(sum_sym), add_op))\n127: \n128: \n129: def _compute_field_inner_products(routine, field_pairs):\n130:     '''\n131:     Constructs the assignments and kernel functors needed to compute the\n132:     inner products of the supplied list of fields.\n133: \n134:     :param routine: the routine to which to add the assignments.\n135:     :type routine: :py:class:`psyclone.psyir.nodes.Routine`\n136:     :param field_pairs: the pairs of fields for which we need to compute the \\\n137:                         inner products.\n138:     :type field_pairs: List[ \\\n139:                Tuple[:py:class:`psyclone.psyir.symbols.DataSymbol`, \\\n140:                      :py:class:`psyclone.psyir.symbols.DataSymbol`]]\n141: \n142:     :returns: the symbols containing the inner products and the list of \\\n143:               kernel functors that computes them.\n144:     :rtype: Tuple[List[:py:class:`psyclone.psyir.symbols.DataSymbol`], \\\n145:               List[:py:class:`psyclone.domain.lfric.algorithm.KernelFunctor`]]\n146: \n147:     :raises TypeError: if any of the supplied symbols are not DataSymbols.\n148:     :raises InternalError: if any of the supplied pairs of symbols do not \\\n149:                            have matching types.\n150:     :raises InternalError: if any of the supplied symbols are not of the \\\n151:                            correct type for an LFRic field.\n152: \n153:     '''\n154:     # pylint: disable=too-many-branches, too-many-locals\n155:     table = routine.symbol_table\n156:     rdef_sym = table.add_lfric_precision_symbol(\"r_def\")\n157:     rdef_type = ScalarType(ScalarType.Intrinsic.REAL, rdef_sym)\n158:     idef_sym = table.add_lfric_precision_symbol(\"i_def\")\n159:     idef_type = ScalarType(ScalarType.Intrinsic.REAL, idef_sym)\n160: \n161:     builtin_factory = LFRicBuiltinFunctorFactory.get()\n162: \n163:     field_ip_symbols = []\n164:     kernel_list = []\n165:     for sym1, sym2 in field_pairs:\n166: \n167:         if not (isinstance(sym1, DataSymbol) and isinstance(sym2, DataSymbol)):\n168:             raise TypeError(\n169:                 f\"Each pair of fields/field-vectors must be supplied as \"\n170:                 f\"DataSymbols but got: {type(sym1)}, {type(sym2)}\")\n171: \n172:         if sym1.datatype != sym2.datatype:\n173:             raise InternalError(\n174:                 f\"Cannot compute the inner product of fields '{sym1.name}' \"\n175:                 f\"and '{sym2.name}' because they are of different types: \"\n176:                 f\"{sym1.datatype} and {sym2.datatype}\")\n177: \n178:         if sym1 is sym2:\n179:             inner_prod_name = f\"{sym1.name}_inner_prod\"\n180:         else:\n181:             inner_prod_name = f\"{sym1.name}_{sym2.name}_inner_prod\"\n182: ",
+      "end_line": 182,
+      "path_lines": 810,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 8128,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 428,
+      "output_tokens_details": {
+        "reasoning_tokens": 259
+      },
+      "total_tokens": 8556
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 260,
+      "path": "src/psyclone/psyad/domain/common/adjoint_utils.py",
+      "start_line": 1
+    },
+    "response_chars": 322,
+    "round": 2,
+    "tool_result": {
+      "content": "1: # -----------------------------------------------------------------------------\n2: # BSD 3-Clause License\n3: #\n4: # Copyright (c) 2022-2023, Science and Technology Facilities Council.\n5: # All rights reserved.\n6: #\n7: # Redistribution and use in source and binary forms, with or without\n8: # modification, are permitted provided that the following conditions are met:\n9: #\n10: # * Redistributions of source code must retain the above copyright notice, this\n11: #   list of conditions and the following disclaimer.\n12: #\n13: # * Redistributions in binary form must reproduce the above copyright notice,\n14: #   this list of conditions and the following disclaimer in the documentation\n15: #   and/or other materials provided with the distribution.\n16: #\n17: # * Neither the name of the copyright holder nor the names of its\n18: #   contributors may be used to endorse or promote products derived from\n19: #   this software without specific prior written permission.\n20: #\n21: # THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS\n22: # \"AS IS\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT\n23: # LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS\n24: # FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE\n25: # COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,\n26: # INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,\n27: # BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;\n28: # LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER\n29: # CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT\n30: # LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN\n31: # ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE\n32: # POSSIBILITY OF SUCH DAMAGE.\n33: # -----------------------------------------------------------------------------\n34: # Authors R. W. Ford, A. R. Porter and S. Siso, STFC Daresbury Lab\n35: \n36: ''' Provides various utilities in support of the PSyAD adjoint\n37:     functionality. '''\n38: \n39: from psyclone.errors import InternalError\n40: from psyclone.psyir.frontend.fortran import FortranReader\n41: from psyclone.psyir.nodes import (IntrinsicCall, BinaryOperation,\n42:                                   Reference, Assignment, IfBlock,\n43:                                   Container, FileContainer, Node)\n44: from psyclone.psyir.symbols import DataSymbol\n45: \n46: \n47: #: The prefix we will prepend to routine, container and metadata\n48: #: names when generating the adjoint. If the original name contains\n49: #: the tl prefix, then this is removed.\n50: ADJOINT_NAME_PREFIX = \"adj_\"\n51: TL_NAME_PREFIX = \"tl_\"\n52: #: The tolerance applied to the comparison of the inner product values in\n53: #: the generated test-harness code.\n54: #: TODO #1346 this tolerance should be user configurable.\n55: INNER_PRODUCT_TOLERANCE = 1500.0\n56: \n57: \n58: def create_adjoint_name(tl_name):\n59:     '''Create an adjoint name from the supplied tangent linear name. This\n60:     is done by stripping the TL_NAME_PREFIX from the name if it exists\n61:     and then adding the ADJOINT_NAME_PREFIX. The adjoint name is also\n62:     lower-cased.\n63: \n64:     :param str: the tangent-linear name.\n65: \n66:     :returns: the adjoint name.\n67:     :rtype: str\n68: \n69:     '''\n70:     adj_name = tl_name.lower()\n71:     if adj_name.startswith(TL_NAME_PREFIX):\n72:         adj_name = adj_name[len(TL_NAME_PREFIX):]\n73:     return ADJOINT_NAME_PREFIX + adj_name\n74: \n75: \n76: def create_real_comparison(sym_table, kernel, var1, var2):\n77:     '''\n78:     Creates PSyIR that checks the values held by Symbols var1 and var2 for\n79:     equality, allowing for machine precision.\n80: \n81:     :param sym_table: the SymbolTable in which to put new Symbols.\n82:     :type sym_table: :py:class:`psyclone.psyir.symbols.SymbolTable`\n83:     :param kernel: the routine for which this adjoint test is being performed.\n84:     :type kernel: :py:class:`psyclone.psyir.nodes.Routine`\n85:     :param var1: the symbol holding the first value for the comparison.\n86:     :type var1: :py:class:`psyclone.psyir.symbols.DataSymbol`\n87:     :param var2: the symbol holding the second value for the comparison.\n88:     :type var2: :py:class:`psyclone.psyir.symbols.DataSymbol`\n89: \n90:     :returns: the PSyIR nodes that perform the check.\n91:     :rtype: list of :py:class:`psyclone.psyir.nodes.Node`\n92: \n93:     '''\n94:     freader = FortranReader()\n95:     statements = []\n96:     mtol = sym_table.new_symbol(\"MachineTol\", symbol_type=DataSymbol,\n97:                                 datatype=var1.datatype)\n98:     rel_diff = sym_table.new_symbol(\"relative_diff\", symbol_type=DataSymbol,\n99:                                     datatype=var1.datatype)\n100:     overall_tol = sym_table.new_symbol(\"overall_tolerance\",\n101:                                        symbol_type=DataSymbol,\n102:                                        datatype=var1.datatype,\n103:                                        is_constant=True,\n104:                                        initial_value=INNER_PRODUCT_TOLERANCE)\n105:     assign = freader.psyir_from_statement(\n106:         f\"MachineTol = SPACING ( MAX( ABS({var1.name}), ABS({var2.name}) ) )\",\n107:         sym_table)\n108:     statements.append(assign)\n109:     statements[-1].preceding_comment = (\n110:         \"Test the inner-product values for equality, allowing for the \"\n111:         \"precision of the active variables\")\n112:     sub_op = BinaryOperation.create(BinaryOperation.Operator.SUB,\n113:                                     Reference(var1), Reference(var2))\n114:     abs_op = IntrinsicCall.create(IntrinsicCall.Intrinsic.ABS, [sub_op])\n115:     div_op = BinaryOperation.create(BinaryOperation.Operator.DIV,\n116:                                     abs_op, Reference(mtol))\n117:     statements.append(Assignment.create(Reference(rel_diff), div_op))\n118: \n119:     # TODO #1345 make this code language agnostic.\n120:     write1 = freader.psyir_from_statement(\n121:         f\"write(*,*) 'Test of adjoint of ''{kernel.name}'' PASSED: ', \"\n122:         f\"{var1.name}, {var2.name}, {rel_diff.name}\", sym_table)\n123:     write2 = freader.psyir_from_statement(\n124:         f\"write(*,*) 'Test of adjoint of ''{kernel.name}'' FAILED: ', \"\n125:         f\"{var1.name}, {var2.name}, {rel_diff.name}\", sym_table)\n126: \n127:     statements.append(\n128:         IfBlock.create(BinaryOperation.create(BinaryOperation.Operator.LT,\n129:                                               Reference(rel_diff),\n130:                                               Reference(overall_tol)),\n131:                        [write1], [write2]))\n132: \n133:     return statements\n134: \n135: \n136: def find_container(psyir):\n137:     ''' Finds the first Container in the supplied PSyIR that is not a\n138:     FileContainer. Also validates that the PSyIR contains at most one\n139:     FileContainer which, if present, contains a Container.\n140: \n141:     :param psyir: the PSyIR to search for a Container.\n142:     :type psyir: :py:class:`psyclone.psyir.nodes.Node`\n143: \n144:     :returns: the first Container that is not a FileContainer or None if \\\n145:               there is none.\n146:     :rtype: :py:class:`psyclone.psyir.nodes.Container` or NoneType\n147: \n148:     :raises InternalError: if there are two Containers and the second is a \\\n149:                            FileContainer.\n150:     :raises NotImplementedError: if there are two Containers and the first is \\\n151:                                  not a FileContainer.\n152:     :raises NotImplementedError: if there are more than two Containers.\n153: \n154:     '''\n155:     if not isinstance(psyir, Node):\n156:         raise TypeError(\n157:             f\"Expected a PSyIR Node but got '{type(psyir).__name__}'\")\n158: \n159:     containers = psyir.walk(Container)\n160:     if not containers:\n161:         return None\n162: \n163:     if len(containers) == 1:\n164:         if isinstance(containers[0], FileContainer):\n165:             return None\n166:         return containers[0]\n167: \n168:     if len(containers) == 2:\n169:         if isinstance(containers[1], FileContainer):\n170:             raise InternalError(\n171:                 \"The supplied PSyIR contains two Containers but the innermost \"\n172:                 \"is a FileContainer. This should not be possible.\")\n173:         if not isinstance(containers[0], FileContainer):\n174:             raise NotImplementedError(\n175:                 \"The supplied PSyIR contains two Containers and the outermost \"\n176:                 \"one is not a FileContainer. This is not supported.\")\n177:         return containers[1]\n178: \n179:     raise NotImplementedError(\"The supplied PSyIR contains more than two \"\n180:                               \"Containers. This is not supported.\")\n181: \n182: \n183: __all__ = [\"create_adjoint_name\", \"create_real_comparison\", \"find_container\"]",
+      "end_line": 183,
+      "path_lines": 183,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 10685,
+      "input_tokens_details": {
+        "cached_tokens": 7936
+      },
+      "output_tokens": 251,
+      "output_tokens_details": {
+        "reasoning_tokens": 132
+      },
+      "total_tokens": 10936
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/psyclone/psyad/domain/lfric/lfric_adjoint_harness.py",
+      "query": "FortranReader"
+    },
+    "response_chars": 325,
+    "round": 3,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 52,
+          "text": "from psyclone.psyir.frontend.fortran import FortranReader"
+        },
+        {
+          "line": 459,
+          "text": "    freader = FortranReader()"
+        }
+      ],
+      "query": "FortranReader",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 13121,
+      "input_tokens_details": {
+        "cached_tokens": 10496
+      },
+      "output_tokens": 511,
+      "output_tokens_details": {
+        "reasoning_tokens": 386
+      },
+      "total_tokens": 13632
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/psyclone/psyad/domain/lfric/lfric_adjoint_harness.py",
+      "query": "INNER_PRODUCT_TOLERANCE"
+    },
+    "response_chars": 471,
+    "round": 4,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 63,
+          "text": "INNER_PRODUCT_TOLERANCE = 1500.0"
+        },
+        {
+          "line": 469,
+          "text": "                                       initial_value=INNER_PRODUCT_TOLERANCE)"
+        }
+      ],
+      "query": "INNER_PRODUCT_TOLERANCE",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 13230,
+      "input_tokens_details": {
+        "cached_tokens": 12544
+      },
+      "output_tokens": 671,
+      "output_tokens_details": {
+        "reasoning_tokens": 496
+      },
+      "total_tokens": 13901
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/psyclone/psyad/domain/lfric/lfric_adjoint_harness.py",
+      "query": "_lfric_create_real_comparison"
+    },
+    "response_chars": 355,
+    "round": 5,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 440,
+          "text": "def _lfric_create_real_comparison(sym_table, kernel, var1, var2):"
+        },
+        {
+          "line": 806,
+          "text": "    stmts = _lfric_create_real_comparison(table, kern, inner1_sym, inner2_sym)"
+        }
+      ],
+      "query": "_lfric_create_real_comparison",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 13346,
+      "input_tokens_details": {
+        "cached_tokens": 13056
+      },
+      "output_tokens": 403,
+      "output_tokens_details": {
+        "reasoning_tokens": 268
+      },
+      "total_tokens": 13749
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "from psyclone.psyad.domain.common.adjoint_utils import (\n    create_adjoint_name, create_real_comparison, find_container)",
+          "end_line": 51,
+          "start_line": 50
+        },
+        {
+          "content": "    statements = create_real_comparison(sym_table, kernel, var1, var2)\n    comparison = statements.pop()\n    rel_diff = statements[-1].lhs.symbol\n    overall_tol = comparison.children[0].children[1].symbol\n    freader = FortranReader()",
+          "end_line": 482,
+          "start_line": 459
+        }
+      ]
+    },
+    "response_chars": 1191,
+    "round": 6,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 51,
+          "replacement_lines": 2,
+          "start_line": 50
+        },
+        {
+          "end_line": 482,
+          "replacement_lines": 5,
+          "start_line": 459
+        }
+      ],
+      "current_file_lines": 791,
+      "updated_excerpt": {
+        "content": "40: from fparser import api as fpapi\n41: \n42: from psyclone.core import AccessType\n43: from psyclone.domain.lfric import (\n44:     LFRicConstants, LFRicTypes, ArgIndexToMetadataIndex)\n45: from psyclone.domain.lfric.algorithm.lfric_alg import LFRicAlg\n46: from psyclone.domain.lfric.algorithm.psyir import (\n47:     LFRicAlgorithmInvokeCall, LFRicBuiltinFunctorFactory, LFRicKernelFunctor)\n48: from psyclone.domain.lfric.transformations import RaisePSyIR2LFRicKernTrans\n49: from psyclone.errors import InternalError, GenerationError\n50: from psyclone.psyad.domain.common.adjoint_utils import (\n51:     create_adjoint_name, create_real_comparison, find_container)\n52: from psyclone.psyir.frontend.fortran import FortranReader\n53: from psyclone.psyir.nodes import (\n54:     IntrinsicCall, Reference, ArrayReference, Assignment,\n55:     Literal, BinaryOperation, Routine, IfBlock)\n56: from psyclone.psyir.symbols import (\n57:     ImportInterface, ContainerSymbol, ScalarType, ArrayType, RoutineSymbol,\n58:     DataTypeSymbol, DataSymbol, DeferredType)\n59: \n60: #: The tolerance applied to the comparison of the inner product values in\n61: #: the generated test-harness code.\n62: #: TODO #1346 this tolerance should be user configurable.\n63: INNER_PRODUCT_TOLERANCE = 1500.0\n64: \n65: \n66: def _compute_lfric_inner_products(prog, scalars, field_sums, sum_sym):\n67:     '''\n68:     Adds PSyIR to a supplied Routine to compute the sum of the inner products\n69:     of the supplied scalars and fields.\n70: \n71:     :param prog: the Routine to which to add PSyIR.\n72:     :type prog: :py:class:`psyclone.psyir.nodes.Routine`\n73:     :param scalars: list of pairs of scalars to multiply and sum.\n74:     :type scalars: List[Tuple[:py:class:`psyclone.psyir.symbols.DataSymbol`,\n75:                               :py:class:`psyclone.psyir.symbols.DataSymbol`]]\n76:     :param field_sums: the results of all of the inner products of the \\\n77:                        various field arguments.\n78:     :type field_sums: List[:py:class:`psyclone.psyir.symbols.DataSymbol`]\n79:     :param sum_sym: the symbol into which to accumulate the final sum.\n80:     :type sum_sym: :py:class:`psyclone.psyir.symbols.DataSymbol`",
+        "end_line": 80,
+        "path_lines": 791,
+        "start_line": 40
+      }
+    },
+    "usage": {
+      "input_tokens": 13485,
+      "input_tokens_details": {
+        "cached_tokens": 13056
+      },
+      "output_tokens": 1789,
+      "output_tokens_details": {
+        "reasoning_tokens": 1438
+      },
+      "total_tokens": 15274
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 530,
+      "path": "src/psyclone/psyad/domain/lfric/lfric_adjoint_harness.py",
+      "start_line": 430
+    },
+    "response_chars": 115,
+    "round": 7,
+    "tool_result": {
+      "content": "430:                 f\"expected to be a field vector of length {vec_len} but the \"\n431:                 f\"argument at the specified position ({arg_idx}) has a length \"\n432:                 f\"of {descriptor.vector_size}.\")\n433:         raise ValueError(\n434:             f\"The '{name}' field argument to kernel '{kern.name}' is expected \"\n435:             f\"to be a field but the argument at the specified position \"\n436:             f\"({arg_idx}) is a field vector of length \"\n437:             f\"{descriptor.vector_size}.\")\n438: \n439: \n440: def _lfric_create_real_comparison(sym_table, kernel, var1, var2):\n441:     '''Creates PSyIR that checks the values held by Symbols var1 and var2\n442:     for equality, allowing for machine precision. This is an\n443:     LFRic-specific version as it includes LFRic logging. The common\n444:     version is in psyad/domain/common/adjoint_utils.py\n445: \n446:     :param sym_table: the SymbolTable in which to put new Symbols.\n447:     :type sym_table: :py:class:`psyclone.psyir.symbols.SymbolTable`\n448:     :param kernel: the routine for which this adjoint test is being performed.\n449:     :type kernel: :py:class:`psyclone.psyir.nodes.Routine`\n450:     :param var1: the symbol holding the first value for the comparison.\n451:     :type var1: :py:class:`psyclone.psyir.symbols.DataSymbol`\n452:     :param var2: the symbol holding the second value for the comparison.\n453:     :type var2: :py:class:`psyclone.psyir.symbols.DataSymbol`\n454: \n455:     :returns: the PSyIR nodes that perform the check.\n456:     :rtype: list of :py:class:`psyclone.psyir.nodes.Node`\n457: \n458:     '''\n459:     statements = create_real_comparison(sym_table, kernel, var1, var2)\n460:     comparison = statements.pop()\n461:     rel_diff = statements[-1].lhs.symbol\n462:     overall_tol = comparison.children[0].children[1].symbol\n463:     freader = FortranReader()\n464: \n465:     log_mod = sym_table.find_or_create(\"log_mod\", symbol_type=ContainerSymbol)\n466:     log_scratch = sym_table.find_or_create(\n467:         \"log_scratch_space\", symbol_type=DataSymbol, datatype=DeferredType(),\n468:         interface=ImportInterface(log_mod))\n469:     log_level_info = sym_table.new_symbol(\n470:         \"log_level_info\", symbol_type=DataSymbol, datatype=DeferredType(),\n471:         interface=ImportInterface(log_mod))\n472:     log_level_error = sym_table.new_symbol(\n473:         \"log_level_error\", symbol_type=DataSymbol, datatype=DeferredType(),\n474:         interface=ImportInterface(log_mod))\n475:     log_event = sym_table.new_symbol(\n476:         \"log_event\", symbol_type=RoutineSymbol,\n477:         interface=ImportInterface(log_mod))\n478:     write_pass = freader.psyir_from_statement(\n479:         f\"WRITE({log_scratch.name}, *) \\\"PASSED {kernel.name}:\\\", \"\n480:         f\"{var1.name}, {var2.name}, {rel_diff.name}\", sym_table)\n481:     write_fail = freader.psyir_from_statement(\n482:         f\"WRITE({log_scratch.name}, *) \\\"FAILED {kernel.name}:\\\", \"\n483:         f\"{var1.name}, {var2.name}, {rel_diff.name}\", sym_table)\n484:     log_pass = freader.psyir_from_statement(\n485:         f\"call {log_event.name}( {log_scratch.name}, {log_level_info.name} )\",\n486:         sym_table)\n487:     log_fail = freader.psyir_from_statement(\n488:         f\"call {log_event.name}( {log_scratch.name}, {log_level_error.name} )\",\n489:         sym_table)\n490: \n491:     statements.append(\n492:         IfBlock.create(BinaryOperation.create(BinaryOperation.Operator.LT,\n493:                                               Reference(rel_diff),\n494:                                               Reference(overall_tol)),\n495:                        [write_pass, log_pass], [write_fail, log_fail]))\n496: \n497:     return statements\n498: \n499: \n500: def generate_lfric_adjoint_harness(tl_psyir, coord_arg_idx=None,\n501:                                    panel_id_arg_idx=None):\n502:     '''\n503:     Constructs and returns the PSyIR for a Container and Routine that\n504:     implements a test harness for the adjoint of the supplied tangent-linear\n505:     kernel.\n506: \n507:     :param tl_psyir: the PSyIR of an LFRic module defining a \\\n508:                      tangent-linear kernel.\n509:     :type tl_psyir: :py:class:`psyclone.psyir.nodes.Container`\n510:     :param Optional[int] coord_arg_idx: 1-indexed position of the coordinate \\\n511:         field in the list of arguments in the kernel metadata (if present).\n512:     :param Optional[int] panel_id_arg_idx: 1-indexed position of the panel-id \\\n513:         field in the list of arguments in the kernel metadata (if present).\n514: \n515:     :returns: PSyIR of an Algorithm that tests the adjoint of the supplied \\\n516:               LFRic TL kernel.\n517:     :rtype: :py:class:`psyclone.psyir.nodes.Container`\n518: \n519:     :raises ValueError: if the supplied PSyIR does not have a Container (that \\\n520:         is *not* a FileContainer).\n521:     :raises ValueError: if the name of the Container (module) in the supplied \\\n522:         PSyIR does not follow the LFRic naming convention of ending in '_mod'.\n523: \n524:     '''\n525:     # pylint: disable=too-many-statements, too-many-locals, too-many-branches\n526:     tl_container = find_container(tl_psyir)\n527:     if not tl_container:\n528:         raise ValueError(\n529:             f\"Test harness code can only be generated if the supplied TL \"\n530:             f\"kernel is within a module (Container) but the supplied PSyIR \"",
+      "end_line": 530,
+      "path_lines": 791,
+      "start_line": 430
+    },
+    "usage": {
+      "input_tokens": 14353,
+      "input_tokens_details": {
+        "cached_tokens": 13056
+      },
+      "output_tokens": 57,
+      "output_tokens_details": {
+        "reasoning_tokens": 13
+      },
+      "total_tokens": 14410
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "",
+          "end_line": 63,
+          "start_line": 60
+        }
+      ]
+    },
+    "response_chars": 259,
+    "round": 8,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 63,
+          "replacement_lines": 0,
+          "start_line": 60
+        }
+      ],
+      "current_file_lines": 787,
+      "updated_excerpt": {
+        "content": "50: from psyclone.psyad.domain.common.adjoint_utils import (\n51:     create_adjoint_name, create_real_comparison, find_container)\n52: from psyclone.psyir.frontend.fortran import FortranReader\n53: from psyclone.psyir.nodes import (\n54:     IntrinsicCall, Reference, ArrayReference, Assignment,\n55:     Literal, BinaryOperation, Routine, IfBlock)\n56: from psyclone.psyir.symbols import (\n57:     ImportInterface, ContainerSymbol, ScalarType, ArrayType, RoutineSymbol,\n58:     DataTypeSymbol, DataSymbol, DeferredType)\n59: \n60: \n61: \n62: def _compute_lfric_inner_products(prog, scalars, field_sums, sum_sym):\n63:     '''\n64:     Adds PSyIR to a supplied Routine to compute the sum of the inner products\n65:     of the supplied scalars and fields.\n66: \n67:     :param prog: the Routine to which to add PSyIR.\n68:     :type prog: :py:class:`psyclone.psyir.nodes.Routine`\n69:     :param scalars: list of pairs of scalars to multiply and sum.\n70:     :type scalars: List[Tuple[:py:class:`psyclone.psyir.symbols.DataSymbol`,\n71:                               :py:class:`psyclone.psyir.symbols.DataSymbol`]]\n72:     :param field_sums: the results of all of the inner products of the \\\n73:                        various field arguments.\n74:     :type field_sums: List[:py:class:`psyclone.psyir.symbols.DataSymbol`]\n75:     :param sum_sym: the symbol into which to accumulate the final sum.\n76:     :type sum_sym: :py:class:`psyclone.psyir.symbols.DataSymbol`\n77: \n78:     '''\n79:     table = prog.symbol_table\n80:     idef_sym = table.add_lfric_precision_symbol(\"i_def\")\n81:     idef_type = ScalarType(ScalarType.Intrinsic.REAL, idef_sym)\n82: \n83:     # Initialise the sum to zero: sum = 0.0\n84:     prog.addchild(Assignment.create(Reference(sum_sym),\n85:                                     Literal(\"0.0\", sum_sym.datatype)))\n86:     for scalar in scalars:\n87:         # Compute the product of the pair of scalars: scalar[0]*scalar[1]\n88:         # (unless they are boolean).\n89:         if scalar[0].datatype.intrinsic == ScalarType.Intrinsic.BOOLEAN:\n90:             continue",
+        "end_line": 90,
+        "path_lines": 787,
+        "start_line": 50
+      }
+    },
+    "usage": {
+      "input_tokens": 15966,
+      "input_tokens_details": {
+        "cached_tokens": 14080
+      },
+      "output_tokens": 846,
+      "output_tokens_details": {
+        "reasoning_tokens": 740
+      },
+      "total_tokens": 16812
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 787,
+      "path": "src/psyclone/psyad/domain/lfric/lfric_adjoint_harness.py",
+      "start_line": 780
+    },
+    "response_chars": 135,
+    "round": 9,
+    "tool_result": {
+      "content": "780:                                   inner2_sym)\n781: \n782:     # Finally, compare the two inner products with an LFRic-specific routine.\n783:     stmts = _lfric_create_real_comparison(table, kern, inner1_sym, inner2_sym)\n784:     for stmt in stmts:\n785:         routine.addchild(stmt)\n786: \n787:     return container",
+      "end_line": 787,
+      "path_lines": 787,
+      "start_line": 780
+    },
+    "usage": {
+      "input_tokens": 16682,
+      "input_tokens_details": {
+        "cached_tokens": 15616
+      },
+      "output_tokens": 1090,
+      "output_tokens_details": {
+        "reasoning_tokens": 1034
+      },
+      "total_tokens": 17772
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/psyclone/psyad/domain/lfric/lfric_adjoint_harness.py",
+      "query": "IfBlock"
+    },
+    "response_chars": 223,
+    "round": 10,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 55,
+          "text": "    Literal, BinaryOperation, Routine, IfBlock)"
+        },
+        {
+          "line": 488,
+          "text": "        IfBlock.create(BinaryOperation.create(BinaryOperation.Operator.LT,"
+        }
+      ],
+      "query": "IfBlock",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 16848,
+      "input_tokens_details": {
+        "cached_tokens": 16128
+      },
+      "output_tokens": 841,
+      "output_tokens_details": {
+        "reasoning_tokens": 750
+      },
+      "total_tokens": 17689
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 70,
+      "path": "src/psyclone/psyad/domain/lfric/lfric_adjoint_harness.py",
+      "start_line": 50
+    },
+    "response_chars": 290,
+    "round": 11,
+    "tool_result": {
+      "content": "50: from psyclone.psyad.domain.common.adjoint_utils import (\n51:     create_adjoint_name, create_real_comparison, find_container)\n52: from psyclone.psyir.frontend.fortran import FortranReader\n53: from psyclone.psyir.nodes import (\n54:     IntrinsicCall, Reference, ArrayReference, Assignment,\n55:     Literal, BinaryOperation, Routine, IfBlock)\n56: from psyclone.psyir.symbols import (\n57:     ImportInterface, ContainerSymbol, ScalarType, ArrayType, RoutineSymbol,\n58:     DataTypeSymbol, DataSymbol, DeferredType)\n59: \n60: \n61: \n62: def _compute_lfric_inner_products(prog, scalars, field_sums, sum_sym):\n63:     '''\n64:     Adds PSyIR to a supplied Routine to compute the sum of the inner products\n65:     of the supplied scalars and fields.\n66: \n67:     :param prog: the Routine to which to add PSyIR.\n68:     :type prog: :py:class:`psyclone.psyir.nodes.Routine`\n69:     :param scalars: list of pairs of scalars to multiply and sum.\n70:     :type scalars: List[Tuple[:py:class:`psyclone.psyir.symbols.DataSymbol`,",
+      "end_line": 70,
+      "path_lines": 787,
+      "start_line": 50
+    },
+    "usage": {
+      "input_tokens": 16956,
+      "input_tokens_details": {
+        "cached_tokens": 16640
+      },
+      "output_tokens": 2464,
+      "output_tokens_details": {
+        "reasoning_tokens": 2350
+      },
+      "total_tokens": 19420
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\n",
+          "end_line": 61,
+          "start_line": 59
+        }
+      ]
+    },
+    "response_chars": 302,
+    "round": 12,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 61,
+          "replacement_lines": 1,
+          "start_line": 59
+        }
+      ],
+      "current_file_lines": 785,
+      "updated_excerpt": {
+        "content": "49: from psyclone.errors import InternalError, GenerationError\n50: from psyclone.psyad.domain.common.adjoint_utils import (\n51:     create_adjoint_name, create_real_comparison, find_container)\n52: from psyclone.psyir.frontend.fortran import FortranReader\n53: from psyclone.psyir.nodes import (\n54:     IntrinsicCall, Reference, ArrayReference, Assignment,\n55:     Literal, BinaryOperation, Routine, IfBlock)\n56: from psyclone.psyir.symbols import (\n57:     ImportInterface, ContainerSymbol, ScalarType, ArrayType, RoutineSymbol,\n58:     DataTypeSymbol, DataSymbol, DeferredType)\n59: \n60: def _compute_lfric_inner_products(prog, scalars, field_sums, sum_sym):\n61:     '''\n62:     Adds PSyIR to a supplied Routine to compute the sum of the inner products\n63:     of the supplied scalars and fields.\n64: \n65:     :param prog: the Routine to which to add PSyIR.\n66:     :type prog: :py:class:`psyclone.psyir.nodes.Routine`\n67:     :param scalars: list of pairs of scalars to multiply and sum.\n68:     :type scalars: List[Tuple[:py:class:`psyclone.psyir.symbols.DataSymbol`,\n69:                               :py:class:`psyclone.psyir.symbols.DataSymbol`]]\n70:     :param field_sums: the results of all of the inner products of the \\\n71:                        various field arguments.\n72:     :type field_sums: List[:py:class:`psyclone.psyir.symbols.DataSymbol`]\n73:     :param sum_sym: the symbol into which to accumulate the final sum.\n74:     :type sum_sym: :py:class:`psyclone.psyir.symbols.DataSymbol`\n75: \n76:     '''\n77:     table = prog.symbol_table\n78:     idef_sym = table.add_lfric_precision_symbol(\"i_def\")\n79:     idef_type = ScalarType(ScalarType.Intrinsic.REAL, idef_sym)\n80: \n81:     # Initialise the sum to zero: sum = 0.0\n82:     prog.addchild(Assignment.create(Reference(sum_sym),\n83:                                     Literal(\"0.0\", sum_sym.datatype)))\n84:     for scalar in scalars:\n85:         # Compute the product of the pair of scalars: scalar[0]*scalar[1]\n86:         # (unless they are boolean).\n87:         if scalar[0].datatype.intrinsic == ScalarType.Intrinsic.BOOLEAN:\n88:             continue\n89:         prod = BinaryOperation.create(BinaryOperation.Operator.MUL,",
+        "end_line": 89,
+        "path_lines": 785,
+        "start_line": 49
+      }
+    },
+    "usage": {
+      "input_tokens": 17339,
+      "input_tokens_details": {
+        "cached_tokens": 16640
+      },
+      "output_tokens": 910,
+      "output_tokens_details": {
+        "reasoning_tokens": 789
+      },
+      "total_tokens": 18249
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\n",
+          "end_line": 59,
+          "start_line": 59
+        }
+      ]
+    },
+    "response_chars": 263,
+    "round": 13,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 59,
+          "replacement_lines": 1,
+          "start_line": 59
+        }
+      ],
+      "current_file_lines": 785,
+      "updated_excerpt": {
+        "content": "49: from psyclone.errors import InternalError, GenerationError\n50: from psyclone.psyad.domain.common.adjoint_utils import (\n51:     create_adjoint_name, create_real_comparison, find_container)\n52: from psyclone.psyir.frontend.fortran import FortranReader\n53: from psyclone.psyir.nodes import (\n54:     IntrinsicCall, Reference, ArrayReference, Assignment,\n55:     Literal, BinaryOperation, Routine, IfBlock)\n56: from psyclone.psyir.symbols import (\n57:     ImportInterface, ContainerSymbol, ScalarType, ArrayType, RoutineSymbol,\n58:     DataTypeSymbol, DataSymbol, DeferredType)\n59: \n60: def _compute_lfric_inner_products(prog, scalars, field_sums, sum_sym):\n61:     '''\n62:     Adds PSyIR to a supplied Routine to compute the sum of the inner products\n63:     of the supplied scalars and fields.\n64: \n65:     :param prog: the Routine to which to add PSyIR.\n66:     :type prog: :py:class:`psyclone.psyir.nodes.Routine`\n67:     :param scalars: list of pairs of scalars to multiply and sum.\n68:     :type scalars: List[Tuple[:py:class:`psyclone.psyir.symbols.DataSymbol`,\n69:                               :py:class:`psyclone.psyir.symbols.DataSymbol`]]\n70:     :param field_sums: the results of all of the inner products of the \\\n71:                        various field arguments.\n72:     :type field_sums: List[:py:class:`psyclone.psyir.symbols.DataSymbol`]\n73:     :param sum_sym: the symbol into which to accumulate the final sum.\n74:     :type sum_sym: :py:class:`psyclone.psyir.symbols.DataSymbol`\n75: \n76:     '''\n77:     table = prog.symbol_table\n78:     idef_sym = table.add_lfric_precision_symbol(\"i_def\")\n79:     idef_type = ScalarType(ScalarType.Intrinsic.REAL, idef_sym)\n80: \n81:     # Initialise the sum to zero: sum = 0.0\n82:     prog.addchild(Assignment.create(Reference(sum_sym),\n83:                                     Literal(\"0.0\", sum_sym.datatype)))\n84:     for scalar in scalars:\n85:         # Compute the product of the pair of scalars: scalar[0]*scalar[1]\n86:         # (unless they are boolean).\n87:         if scalar[0].datatype.intrinsic == ScalarType.Intrinsic.BOOLEAN:\n88:             continue\n89:         prod = BinaryOperation.create(BinaryOperation.Operator.MUL,",
+        "end_line": 89,
+        "path_lines": 785,
+        "start_line": 49
+      }
+    },
+    "usage": {
+      "input_tokens": 18076,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 1412,
+      "output_tokens_details": {
+        "reasoning_tokens": 1304
+      },
+      "total_tokens": 19488
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\n",
+          "end_line": 59,
+          "start_line": 60
+        }
+      ]
+    },
+    "response_chars": 377,
+    "round": 14,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 59,
+          "replacement_lines": 1,
+          "start_line": 60
+        }
+      ],
+      "current_file_lines": 786,
+      "updated_excerpt": {
+        "content": "50: from psyclone.psyad.domain.common.adjoint_utils import (\n51:     create_adjoint_name, create_real_comparison, find_container)\n52: from psyclone.psyir.frontend.fortran import FortranReader\n53: from psyclone.psyir.nodes import (\n54:     IntrinsicCall, Reference, ArrayReference, Assignment,\n55:     Literal, BinaryOperation, Routine, IfBlock)\n56: from psyclone.psyir.symbols import (\n57:     ImportInterface, ContainerSymbol, ScalarType, ArrayType, RoutineSymbol,\n58:     DataTypeSymbol, DataSymbol, DeferredType)\n59: \n60: \n61: def _compute_lfric_inner_products(prog, scalars, field_sums, sum_sym):\n62:     '''\n63:     Adds PSyIR to a supplied Routine to compute the sum of the inner products\n64:     of the supplied scalars and fields.\n65: \n66:     :param prog: the Routine to which to add PSyIR.\n67:     :type prog: :py:class:`psyclone.psyir.nodes.Routine`\n68:     :param scalars: list of pairs of scalars to multiply and sum.\n69:     :type scalars: List[Tuple[:py:class:`psyclone.psyir.symbols.DataSymbol`,\n70:                               :py:class:`psyclone.psyir.symbols.DataSymbol`]]\n71:     :param field_sums: the results of all of the inner products of the \\\n72:                        various field arguments.\n73:     :type field_sums: List[:py:class:`psyclone.psyir.symbols.DataSymbol`]\n74:     :param sum_sym: the symbol into which to accumulate the final sum.\n75:     :type sum_sym: :py:class:`psyclone.psyir.symbols.DataSymbol`\n76: \n77:     '''\n78:     table = prog.symbol_table\n79:     idef_sym = table.add_lfric_precision_symbol(\"i_def\")\n80:     idef_type = ScalarType(ScalarType.Intrinsic.REAL, idef_sym)\n81: \n82:     # Initialise the sum to zero: sum = 0.0\n83:     prog.addchild(Assignment.create(Reference(sum_sym),\n84:                                     Literal(\"0.0\", sum_sym.datatype)))\n85:     for scalar in scalars:\n86:         # Compute the product of the pair of scalars: scalar[0]*scalar[1]\n87:         # (unless they are boolean).\n88:         if scalar[0].datatype.intrinsic == ScalarType.Intrinsic.BOOLEAN:\n89:             continue\n90:         prod = BinaryOperation.create(BinaryOperation.Operator.MUL,",
+        "end_line": 90,
+        "path_lines": 786,
+        "start_line": 50
+      }
+    },
+    "usage": {
+      "input_tokens": 18813,
+      "input_tokens_details": {
+        "cached_tokens": 17664
+      },
+      "output_tokens": 1218,
+      "output_tokens_details": {
+        "reasoning_tokens": 1065
+      },
+      "total_tokens": 20031
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/psyclone",
+      "query": "IfBlock.create(comparison.condition"
+    },
+    "response_chars": 273,
+    "round": 15,
+    "tool_result": {
+      "matches": [],
+      "query": "IfBlock.create(comparison.condition",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 19541,
+      "input_tokens_details": {
+        "cached_tokens": 18688
+      },
+      "output_tokens": 1144,
+      "output_tokens_details": {
+        "reasoning_tokens": 1038
+      },
+      "total_tokens": 20685
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 16,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__stfc__PSyclone__pull_2426__comment_1425254321__duplication.patch"
+    },
+    "usage": {
+      "input_tokens": 19597,
+      "input_tokens_details": {
+        "cached_tokens": 19200
+      },
+      "output_tokens": 527,
+      "output_tokens_details": {
+        "reasoning_tokens": 516
+      },
+      "total_tokens": 20124
+    }
+  }
+]

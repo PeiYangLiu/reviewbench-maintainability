@@ -1,0 +1,130 @@
+--- a/pkg/readerclient/input.go
++++ b/pkg/readerclient/input.go
+@@ -29,6 +29,38 @@
+ 	Payload hexutil.Bytes `json:"payload"`
+ }
+ 
++func convertInput(
++	index int,
++	status CompletionStatus,
++	msgSender string,
++	timestampStr string,
++	blockNumberStr string,
++	payloadStr string,
++) (*Input, error) {
++	timestamp, err := strconv.ParseUint(timestampStr, 0, 64)
++	if err != nil {
++		return nil, fmt.Errorf("failed to parse timestamp: %v", err)
++	}
++
++	blocknumber, err := strconv.ParseUint(blockNumberStr, 0, 64)
++	if err != nil {
++		return nil, fmt.Errorf("failed to parse block number: %v", err)
++	}
++	payload, err := hexutil.Decode(payloadStr)
++	if err != nil {
++		return nil, fmt.Errorf("failed to decode payload to bytes: %v", err)
++	}
++
++	return &Input{
++		Index:       index,
++		Status:      status,
++		MsgSender:   common.HexToAddress(msgSender),
++		Timestamp:   time.Duration(timestamp),
++		BlockNumber: blocknumber,
++		Payload:     payload,
++	}, nil
++}
++
+ func GetInput(
+ 	ctx context.Context,
+ 	client graphql.Client,
+@@ -39,30 +71,14 @@
+ 		return nil, err
+ 	}
+ 
+-	timestamp, err := strconv.ParseUint(resp.Input.Timestamp, 0, 64)
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to parse timestamp: %v", err)
+-	}
+-
+-	blocknumber, err := strconv.ParseUint(resp.Input.BlockNumber, 0, 64)
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to parse block number: %v", err)
+-	}
+-	payload, err := hexutil.Decode(resp.Input.Payload)
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to decode payload to bytes: %v", err)
+-	}
+-
+-	input := Input{
++	return convertInput(
+ 		resp.Input.Index,
+ 		resp.Input.Status,
+-		common.HexToAddress(resp.Input.MsgSender),
+-		time.Duration(timestamp),
+-		blocknumber,
+-		payload,
+-	}
+-
+-	return &input, err
++		resp.Input.MsgSender,
++		resp.Input.Timestamp,
++		resp.Input.BlockNumber,
++		resp.Input.Payload,
++	)
+ }
+ 
+ func GetInputs(
+@@ -70,40 +86,26 @@
+ 	client graphql.Client,
+ 	first int,
+ ) ([]Input, error) {
+-
+-	var inputs []Input
+-
+ 	resp, err := getInputs(ctx, client, int(first))
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 
++	var inputs []Input
+ 	for _, edge := range resp.Inputs.Edges {
+-
+-		timestamp, err := strconv.ParseUint(edge.Node.Timestamp, 0, 64)
+-		if err != nil {
+-			return nil, fmt.Errorf("failed to parse timestamp: %v", err)
+-		}
+-		blocknumber, err := strconv.ParseUint(edge.Node.BlockNumber, 0, 64)
+-		if err != nil {
+-			return nil, fmt.Errorf("failed to parse block number: %v", err)
+-		}
+-		payload, err := hexutil.Decode(edge.Node.Payload)
+-		if err != nil {
+-			return nil, fmt.Errorf("failed to decode payload to bytes: %v", err)
+-		}
+-
+-		input := Input{
++		input, err := convertInput(
+ 			edge.Node.Index,
+ 			edge.Node.Status,
+-			common.HexToAddress(edge.Node.MsgSender),
+-			time.Duration(timestamp),
+-			blocknumber,
+-			payload,
++			edge.Node.MsgSender,
++			edge.Node.Timestamp,
++			edge.Node.BlockNumber,
++			edge.Node.Payload,
++		)
++		if err != nil {
++			return nil, err
+ 		}
+-
+-		inputs = append(inputs, input)
++		inputs = append(inputs, *input)
+ 	}
+ 
+-	return inputs, err
++	return inputs, nil
+ }

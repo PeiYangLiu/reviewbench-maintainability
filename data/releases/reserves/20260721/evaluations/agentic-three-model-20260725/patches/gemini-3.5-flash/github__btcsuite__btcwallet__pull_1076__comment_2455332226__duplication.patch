@@ -1,0 +1,57 @@
+diff --git a/wallet/tx_creator.go b/wallet/tx_creator.go
+index f6ae837..362dd30 100644
+--- a/wallet/tx_creator.go
++++ b/wallet/tx_creator.go
+@@ -243,15 +243,15 @@ type InputsPolicy struct {
+ // isInputs marks InputsManual as an implementation of the Inputs interface.
+ func (*InputsManual) isInputs() {}
+ 
+-// validate performs validation on the manual inputs.
+-func (i *InputsManual) validate() error {
+-	if len(i.UTXOs) == 0 {
++// validateUTXOs ensures that the list of UTXOs is not empty and does not
++// contain duplicates.
++func validateUTXOs(utxos []wire.OutPoint) error {
++	if len(utxos) == 0 {
+ 		return ErrManualInputsEmpty
+ 	}
+ 
+-	// Make sure there are no duplicates in the specified UTXO list.
+ 	seenUTXOs := make(map[wire.OutPoint]struct{})
+-	for _, utxo := range i.UTXOs {
++	for _, utxo := range utxos {
+ 		if _, ok := seenUTXOs[utxo]; ok {
+ 			return ErrDuplicatedUtxo
+ 		}
+@@ -262,6 +262,11 @@ func (i *InputsManual) validate() error {
+ 	return nil
+ }
+ 
++// validate performs validation on the manual inputs.
++func (i *InputsManual) validate() error {
++	return validateUTXOs(i.UTXOs)
++}
++
+ // isInputs marks InputsPolicy as an implementation of the Inputs
+ // interface.
+ func (*InputsPolicy) isInputs() {}
+@@ -283,18 +288,7 @@ func (i *InputsPolicy) validate() error {
+ 	// If the source is a list of UTXOs, it must not be empty and
+ 	// must not contain duplicates.
+ 	case *CoinSourceUTXOs:
+-		if len(source.UTXOs) == 0 {
+-			return ErrManualInputsEmpty
+-		}
+-
+-		seenUTXOs := make(map[wire.OutPoint]struct{})
+-		for _, utxo := range source.UTXOs {
+-			if _, ok := seenUTXOs[utxo]; ok {
+-				return ErrDuplicatedUtxo
+-			}
+-
+-			seenUTXOs[utxo] = struct{}{}
+-		}
++		return validateUTXOs(source.UTXOs)
+ 	// Any other source type is unsupported.
+ 	default:
+ 		return fmt.Errorf("%w: %T",

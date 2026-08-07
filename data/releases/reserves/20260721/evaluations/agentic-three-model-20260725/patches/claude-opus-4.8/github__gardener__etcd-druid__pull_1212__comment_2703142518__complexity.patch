@@ -1,0 +1,97 @@
+diff --git a/druidctl/cmd/listresources/listresources.go b/druidctl/cmd/listresources/listresources.go
+index e670855..315f365 100644
+--- a/druidctl/cmd/listresources/listresources.go
++++ b/druidctl/cmd/listresources/listresources.go
+@@ -15,8 +15,10 @@ import (
+ 	"github.com/gardener/etcd-druid/druidctl/internal/log"
+ 	"github.com/gardener/etcd-druid/druidctl/internal/printer"
+ 
++	"k8s.io/apimachinery/pkg/api/meta"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
++	"k8s.io/apimachinery/pkg/runtime/schema"
+ )
+ 
+ // ResourceKey identifies a Kubernetes resource kind by group/version/resource/Kind.
+@@ -104,8 +106,8 @@ func (l *listResourcesCmdCtx) execute(ctx context.Context) error {
+ 	if len(tokens) == 0 || (len(tokens) == 1 && tokens[0] == "all") {
+ 		tokens = defaultResourceTokens()
+ 	}
+-	resolver := newRESTMapperResolver(genClient.RESTMapper())
+-	metas, err := resolver.resolve(tokens)
++	mapper := genClient.RESTMapper()
++	metas, err := resolveResourceMetas(mapper, tokens)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -225,6 +227,70 @@ func defaultResourceTokens() []string {
+ 	return []string{"po", "sts", "svc", "cm", "secret", "pvc", "lease", "pdb", "role", "rolebinding", "sa"}
+ }
+ 
++// resolveResourceMetas converts user-provided tokens (short names, plural/singular
++// resource names, or kinds) into resource metadata using the RESTMapper. The
++// RESTMapper implicitly handles all the naming variations, so no hardcoded
++// mapping is required.
++func resolveResourceMetas(mapper meta.RESTMapper, tokens []string) ([]resourceMeta, error) {
++	if len(tokens) == 0 {
++		return nil, fmt.Errorf("no resource tokens provided")
++	}
++
++	out := make([]resourceMeta, 0, len(tokens))
++	seen := map[schema.GroupVersionResource]struct{}{}
++	var unknown []string
++
++	for _, t := range tokens {
++		tok := strings.TrimSpace(strings.ToLower(t))
++		if tok == "" {
++			continue
++		}
++
++		m, err := resolveResourceMeta(mapper, tok)
++		if err != nil {
++			unknown = append(unknown, t)
++			continue
++		}
++
++		if _, dup := seen[m.GVR]; dup {
++			continue
++		}
++		seen[m.GVR] = struct{}{}
++		out = append(out, m)
++	}
++
++	if len(unknown) > 0 {
++		return nil, fmt.Errorf("unknown resource tokens: %v", unknown)
++	}
++
++	return out, nil
++}
++
++// resolveResourceMeta resolves a single token to resource metadata by letting the
++// RESTMapper resolve the resource and its kind/scope.
++func resolveResourceMeta(mapper meta.RESTMapper, token string) (resourceMeta, error) {
++	gvr, err := mapper.ResourceFor(schema.GroupVersionResource{Resource: token})
++	if err != nil {
++		return resourceMeta{}, err
++	}
++
++	gvk, err := mapper.KindFor(gvr)
++	if err != nil {
++		return resourceMeta{}, err
++	}
++
++	mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
++	if err != nil {
++		return resourceMeta{}, err
++	}
++
++	return resourceMeta{
++		GVR:        mapping.Resource,
++		Kind:       mapping.GroupVersionKind.Kind,
++		Namespaced: mapping.Scope.Name() == meta.RESTScopeNameNamespace,
++	}, nil
++}
++
+ func toResourceRef(u *unstructured.Unstructured) ResourceRef {
+ 	age := time.Since(u.GetCreationTimestamp().Time)
+ 	return ResourceRef{

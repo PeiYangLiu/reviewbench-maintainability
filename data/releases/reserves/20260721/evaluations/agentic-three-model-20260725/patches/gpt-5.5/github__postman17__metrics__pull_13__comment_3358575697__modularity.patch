@@ -1,0 +1,61 @@
+diff --git a/internal/repository/memory.go b/internal/repository/memory.go
+index 64efa84..d66c6dc 100644
+--- a/internal/repository/memory.go
++++ b/internal/repository/memory.go
+@@ -14,6 +14,23 @@ import (
+ 	models "github.com/postman17/metrics/internal/model"
+ )
+ 
++type MetricsRepository interface {
++	AddGauge(name string, value float64)
++	AddCounter(name string, value int64)
++	CheckGaugeType(name string) bool
++	CheckCounterType(name string) bool
++	GetTypeValue(name string) any
++	AddBatch(data models.MetricsList) error
++}
++
++type FileStorage struct {
++	*MemStorage
++}
++
++type DBStorage struct {
++	*MemStorage
++}
++
+ type MemStorage struct {
+ 	Data      map[string]any
+ 	StoreSync bool
+@@ -24,6 +41,32 @@ type MemStorage struct {
+ 	WithDB    bool
+ }
+ 
++var _ MetricsRepository = (*MemStorage)(nil)
++var _ MetricsRepository = (*FileStorage)(nil)
++var _ MetricsRepository = (*DBStorage)(nil)
++
++func NewFileStorage(ctx context.Context, storeSync bool, filePath string, restore bool) *FileStorage {
++	return &FileStorage{
++		MemStorage: NewMemStorage(ctx, storeSync, filePath, restore, nil, false),
++	}
++}
++
++func NewDBStorage(ctx context.Context, db *sql.DB) *DBStorage {
++	return &DBStorage{
++		MemStorage: NewMemStorage(ctx, false, "", false, db, true),
++	}
++}
++
++func NewMetricsRepository(ctx context.Context, storeSync bool, filePath string, restore bool, db *sql.DB, withDB bool) MetricsRepository {
++	if withDB {
++		return NewDBStorage(ctx, db)
++	}
++	if filePath != "" || storeSync || restore {
++		return NewFileStorage(ctx, storeSync, filePath, restore)
++	}
++	return NewMemStorage(ctx, storeSync, filePath, restore, nil, false)
++}
++
+ func (m *MemStorage) AddGauge(name string, value float64) {
+ 	m.mu.Lock()
+ 	m.Data[name] = value

@@ -1,0 +1,41 @@
+--- a/server/liveblog/client_modules/client_modules.py
++++ b/server/liveblog/client_modules/client_modules.py
+@@ -129,6 +129,17 @@
+         self.complete_posts_info([post])
+         return post
+ 
++    def update_content_date_for_association(self, blog_id, association_id):
++        for post in self.find({"blog": blog_id, "particular_type": "post"}):
++            for assoc in post_utils.get_associations(post):
++                if assoc.get("residRef") == association_id:
++                    updated_post = post.copy()
++                    updated_post["content_updated_date"] = utcnow()
++                    get_resource_service("posts").update(
++                        post.get("_id"), updated_post, post
++                    )
++                    app.blog_cache.invalidate(blog_id)
++
+ 
+ class ClientCollectionsResource(CollectionsResource):
+     datasource = {"source": "collections", "default_sort": [("name", 1)]}
+@@ -558,17 +569,9 @@
+         return api_error("Error: Unable to update poll votes", 500)
+ 
+     blog_id = poll.get("blog")
+-    for post in get_resource_service("client_posts").find(
+-        {"blog": blog_id, "particular_type": "post"}
+-    ):
+-        for assoc in post_utils.get_associations(post):
+-            if assoc.get("residRef") == poll_id:
+-                updated_post = post.copy()
+-                updated_post["content_updated_date"] = utcnow()
+-                get_resource_service("posts").update(
+-                    post.get("_id"), updated_post, post
+-                )
+-                app.blog_cache.invalidate(blog_id)
++    get_resource_service("client_posts").update_content_date_for_association(
++        blog_id, poll_id
++    )
+ 
+     return api_response({"_status": "OK", "message": "Vote placed successfully"}, 201)
+ 

@@ -1,0 +1,219 @@
+--- a/linker/shared/src/main/scala/org/scalajs/linker/frontend/optimizer/OptimizerCore.scala
++++ b/linker/shared/src/main/scala/org/scalajs/linker/frontend/optimizer/OptimizerCore.scala
+@@ -3229,9 +3229,13 @@
+     }
+   }
+ 
+-  private def constantFoldBinaryOp_except_String_+(op: BinaryOp.Code,
+-      lhs: Literal, rhs: Literal)(implicit pos: Position): Literal = {
++  private def foldConstantBinaryOp(op: BinaryOp.Code, lhs: Literal,
++      rhs: Literal)(nonConstant: => PreTransform)(
++      implicit pos: Position): PreTransform = {
+     import BinaryOp._
++
++    @inline def constant(lit: Literal): PreTransform =
++      PreTransLit(lit)
+ 
+     @inline def int(lit: Literal): Int = (lit: @unchecked) match {
+       case IntLiteral(value) => value
+@@ -3258,78 +3262,90 @@
+     }
+ 
+     (op: @switch) match {
+-      case === => BooleanLiteral(literal_===(lhs, rhs, isJSStrictEq = false))
+-      case !== => BooleanLiteral(!literal_===(lhs, rhs, isJSStrictEq = false))
+-
+-      case String_+ =>
+-        throw new IllegalArgumentException(
+-            "constFoldBinaryOp_except_String_+ must not be called for String_+")
+-
+-      case Int_+ => IntLiteral(int(lhs) + int(rhs))
+-      case Int_- => IntLiteral(int(lhs) - int(rhs))
+-      case Int_* => IntLiteral(int(lhs) * int(rhs))
+-      case Int_/ => IntLiteral(int(lhs) / int(rhs))
+-      case Int_% => IntLiteral(int(lhs) % int(rhs))
+-
+-      case Int_|   => IntLiteral(int(lhs) | int(rhs))
+-      case Int_&   => IntLiteral(int(lhs) & int(rhs))
+-      case Int_^   => IntLiteral(int(lhs) ^ int(rhs))
+-      case Int_<<  => IntLiteral(int(lhs) << int(rhs))
+-      case Int_>>> => IntLiteral(int(lhs) >>> int(rhs))
+-      case Int_>>  => IntLiteral(int(lhs) >> int(rhs))
+-
+-      case Int_== => BooleanLiteral(int(lhs) == int(rhs))
+-      case Int_!= => BooleanLiteral(int(lhs) != int(rhs))
+-      case Int_<  => BooleanLiteral(int(lhs) < int(rhs))
+-      case Int_<= => BooleanLiteral(int(lhs) <= int(rhs))
+-      case Int_>  => BooleanLiteral(int(lhs) > int(rhs))
+-      case Int_>= => BooleanLiteral(int(lhs) >= int(rhs))
+-
+-      case Long_+ => LongLiteral(long(lhs) + long(rhs))
+-      case Long_- => LongLiteral(long(lhs) - long(rhs))
+-      case Long_* => LongLiteral(long(lhs) * long(rhs))
+-      case Long_/ => LongLiteral(long(lhs) / long(rhs))
+-      case Long_% => LongLiteral(long(lhs) % long(rhs))
+-
+-      case Long_|   => LongLiteral(long(lhs) | long(rhs))
+-      case Long_&   => LongLiteral(long(lhs) & long(rhs))
+-      case Long_^   => LongLiteral(long(lhs) ^ long(rhs))
+-      case Long_<<  => LongLiteral(long(lhs) << int(rhs))
+-      case Long_>>> => LongLiteral(long(lhs) >>> int(rhs))
+-      case Long_>>  => LongLiteral(long(lhs) >> int(rhs))
+-
+-      case Long_== => BooleanLiteral(long(lhs) == long(rhs))
+-      case Long_!= => BooleanLiteral(long(lhs) != long(rhs))
+-      case Long_<  => BooleanLiteral(long(lhs) < long(rhs))
+-      case Long_<= => BooleanLiteral(long(lhs) <= long(rhs))
+-      case Long_>  => BooleanLiteral(long(lhs) > long(rhs))
+-      case Long_>= => BooleanLiteral(long(lhs) >= long(rhs))
+-
+-      case Float_+ => FloatLiteral(float(lhs) + float(rhs))
+-      case Float_- => FloatLiteral(float(lhs) - float(rhs))
+-      case Float_* => FloatLiteral(float(lhs) * float(rhs))
+-      case Float_/ => FloatLiteral(float(lhs) / float(rhs))
+-      case Float_% => FloatLiteral(float(lhs) % float(rhs))
+-
+-      case Double_+ => DoubleLiteral(double(lhs) + double(rhs))
+-      case Double_- => DoubleLiteral(double(lhs) - double(rhs))
+-      case Double_* => DoubleLiteral(double(lhs) * double(rhs))
+-      case Double_/ => DoubleLiteral(double(lhs) / double(rhs))
+-      case Double_% => DoubleLiteral(double(lhs) % double(rhs))
+-
+-      case Double_== => BooleanLiteral(double(lhs) == double(rhs))
+-      case Double_!= => BooleanLiteral(double(lhs) != double(rhs))
+-      case Double_<  => BooleanLiteral(double(lhs) < double(rhs))
+-      case Double_<= => BooleanLiteral(double(lhs) <= double(rhs))
+-      case Double_>  => BooleanLiteral(double(lhs) > double(rhs))
+-      case Double_>= => BooleanLiteral(double(lhs) >= double(rhs))
+-
+-      case Boolean_== => BooleanLiteral(boolean(lhs) == boolean(rhs))
+-      case Boolean_!= => BooleanLiteral(boolean(lhs) != boolean(rhs))
+-      case Boolean_|  => BooleanLiteral(boolean(lhs) | boolean(rhs))
+-      case Boolean_&  => BooleanLiteral(boolean(lhs) & boolean(rhs))
+-
+-      case String_charAt => CharLiteral(string(lhs).charAt(int(rhs)))
++      case === => constant(BooleanLiteral(literal_===(lhs, rhs, isJSStrictEq = false)))
++      case !== => constant(BooleanLiteral(!literal_===(lhs, rhs, isJSStrictEq = false)))
++
++      case String_+ => nonConstant
++
++      case Int_+ => constant(IntLiteral(int(lhs) + int(rhs)))
++      case Int_- => constant(IntLiteral(int(lhs) - int(rhs)))
++      case Int_* => constant(IntLiteral(int(lhs) * int(rhs)))
++      case Int_/ =>
++        if (int(rhs) == 0) nonConstant
++        else constant(IntLiteral(int(lhs) / int(rhs)))
++      case Int_% =>
++        if (int(rhs) == 0) nonConstant
++        else constant(IntLiteral(int(lhs) % int(rhs)))
++
++      case Int_|   => constant(IntLiteral(int(lhs) | int(rhs)))
++      case Int_&   => constant(IntLiteral(int(lhs) & int(rhs)))
++      case Int_^   => constant(IntLiteral(int(lhs) ^ int(rhs)))
++      case Int_<<  => constant(IntLiteral(int(lhs) << int(rhs)))
++      case Int_>>> => constant(IntLiteral(int(lhs) >>> int(rhs)))
++      case Int_>>  => constant(IntLiteral(int(lhs) >> int(rhs)))
++
++      case Int_== => constant(BooleanLiteral(int(lhs) == int(rhs)))
++      case Int_!= => constant(BooleanLiteral(int(lhs) != int(rhs)))
++      case Int_<  => constant(BooleanLiteral(int(lhs) < int(rhs)))
++      case Int_<= => constant(BooleanLiteral(int(lhs) <= int(rhs)))
++      case Int_>  => constant(BooleanLiteral(int(lhs) > int(rhs)))
++      case Int_>= => constant(BooleanLiteral(int(lhs) >= int(rhs)))
++
++      case Long_+ => constant(LongLiteral(long(lhs) + long(rhs)))
++      case Long_- => constant(LongLiteral(long(lhs) - long(rhs)))
++      case Long_* => constant(LongLiteral(long(lhs) * long(rhs)))
++      case Long_/ =>
++        if (long(rhs) == 0L) nonConstant
++        else constant(LongLiteral(long(lhs) / long(rhs)))
++      case Long_% =>
++        if (long(rhs) == 0L) nonConstant
++        else constant(LongLiteral(long(lhs) % long(rhs)))
++
++      case Long_|   => constant(LongLiteral(long(lhs) | long(rhs)))
++      case Long_&   => constant(LongLiteral(long(lhs) & long(rhs)))
++      case Long_^   => constant(LongLiteral(long(lhs) ^ long(rhs)))
++      case Long_<<  => constant(LongLiteral(long(lhs) << int(rhs)))
++      case Long_>>> => constant(LongLiteral(long(lhs) >>> int(rhs)))
++      case Long_>>  => constant(LongLiteral(long(lhs) >> int(rhs)))
++
++      case Long_== => constant(BooleanLiteral(long(lhs) == long(rhs)))
++      case Long_!= => constant(BooleanLiteral(long(lhs) != long(rhs)))
++      case Long_<  => constant(BooleanLiteral(long(lhs) < long(rhs)))
++      case Long_<= => constant(BooleanLiteral(long(lhs) <= long(rhs)))
++      case Long_>  => constant(BooleanLiteral(long(lhs) > long(rhs)))
++      case Long_>= => constant(BooleanLiteral(long(lhs) >= long(rhs)))
++
++      case Float_+ => constant(FloatLiteral(float(lhs) + float(rhs)))
++      case Float_- => constant(FloatLiteral(float(lhs) - float(rhs)))
++      case Float_* => constant(FloatLiteral(float(lhs) * float(rhs)))
++      case Float_/ => constant(FloatLiteral(float(lhs) / float(rhs)))
++      case Float_% => constant(FloatLiteral(float(lhs) % float(rhs)))
++
++      case Double_+ => constant(DoubleLiteral(double(lhs) + double(rhs)))
++      case Double_- => constant(DoubleLiteral(double(lhs) - double(rhs)))
++      case Double_* => constant(DoubleLiteral(double(lhs) * double(rhs)))
++      case Double_/ => constant(DoubleLiteral(double(lhs) / double(rhs)))
++      case Double_% => constant(DoubleLiteral(double(lhs) % double(rhs)))
++
++      case Double_== => constant(BooleanLiteral(double(lhs) == double(rhs)))
++      case Double_!= => constant(BooleanLiteral(double(lhs) != double(rhs)))
++      case Double_<  => constant(BooleanLiteral(double(lhs) < double(rhs)))
++      case Double_<= => constant(BooleanLiteral(double(lhs) <= double(rhs)))
++      case Double_>  => constant(BooleanLiteral(double(lhs) > double(rhs)))
++      case Double_>= => constant(BooleanLiteral(double(lhs) >= double(rhs)))
++
++      case Boolean_== => constant(BooleanLiteral(boolean(lhs) == boolean(rhs)))
++      case Boolean_!= => constant(BooleanLiteral(boolean(lhs) != boolean(rhs)))
++      case Boolean_|  => constant(BooleanLiteral(boolean(lhs) | boolean(rhs)))
++      case Boolean_&  => constant(BooleanLiteral(boolean(lhs) & boolean(rhs)))
++
++      case String_charAt =>
++        val lhsStr = string(lhs)
++        val rhsInt = int(rhs)
++        if (rhsInt < 0 || rhsInt >= lhsStr.length())
++          nonConstant
++        else
++          constant(CharLiteral(lhsStr.charAt(rhsInt)))
+     }
+   }
+ 
+@@ -3383,36 +3399,11 @@
+       implicit pos: Position): PreTransform = {
+     import BinaryOp._
+ 
+-    def constant(lhsLit: Literal, rhsLit: Literal): PreTransform =
+-      PreTransLit(constantFoldBinaryOp_except_String_+(op, lhsLit, rhsLit))
+-
+     def nonConstant(): PreTransform = foldBinaryOpNonConstant(op, lhs, rhs)
+ 
+     (lhs, rhs) match {
+       case (PreTransLit(lhsLit), PreTransLit(rhsLit)) =>
+-        op match {
+-          case String_+ =>
+-            nonConstant()
+-          case Int_/ | Int_% =>
+-            rhsLit match {
+-              case IntLiteral(0) => nonConstant()
+-              case _             => constant(lhsLit, rhsLit)
+-            }
+-          case Long_/ | Long_% =>
+-            rhsLit match {
+-              case LongLiteral(0) => nonConstant()
+-              case _              => constant(lhsLit, rhsLit)
+-            }
+-          case String_charAt =>
+-            (lhsLit, rhsLit) match {
+-              case (StringLiteral(lhsStr), IntLiteral(rhsInt)) if rhsInt < 0 || rhsInt >= lhsStr.length() =>
+-                nonConstant()
+-              case _ =>
+-                constant(lhsLit, rhsLit)
+-            }
+-          case _ =>
+-            constant(lhsLit, rhsLit)
+-        }
++        foldConstantBinaryOp(op, lhsLit, rhsLit)(nonConstant())
+ 
+       case _ =>
+         nonConstant()

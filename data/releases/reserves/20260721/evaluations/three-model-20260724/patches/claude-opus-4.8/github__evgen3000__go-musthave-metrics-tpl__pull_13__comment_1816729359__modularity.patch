@@ -1,0 +1,88 @@
+--- a/cmd/server/storage/storage.go
++++ b/cmd/server/storage/storage.go
+@@ -34,45 +34,50 @@
+ 	return os.WriteFile(filePath, fileData, 0644)
+ }
+ 
+-func NewMemStorage(config MemStorageConfig) *MemStorage {
+-	if config.Restore {
+-		file, err := os.OpenFile(config.FileStoragePath, os.O_RDONLY|os.O_CREATE, 0666)
+-		defer func() {
+-			err := file.Close()
+-			if err != nil {
+-				logger.GetLogger().Fatal("Failed to close file", zap.Error(err))
+-			}
+-		}()
+-
+-		if err != nil {
+-			logger.GetLogger().Fatal("Can't open file.", zap.Error(err))
+-		}
+-
+-		fileData, err := io.ReadAll(file)
+-		if err != nil {
+-			logger.GetLogger().Fatal("Can't read file.", zap.Error(err))
+-		}
+-		if len(fileData) == 0 {
+-			logger.GetLogger().Info("Storage file is empty, nothing to load.", zap.String("file", config.FileStoragePath))
+-			return &MemStorage{
+-				Gauges:   make(map[string]float64),
+-				Counters: make(map[string]int64),
+-			}
+-		}
+-
+-		var storage MemStorage
+-
+-		err = json.Unmarshal(fileData, &storage)
+-		if err != nil {
+-			logger.GetLogger().Fatal("Can't read json.", zap.Error(err))
+-		}
+-		return &storage
+-	}
+-
++func newEmptyMemStorage() *MemStorage {
+ 	return &MemStorage{
+ 		Gauges:   make(map[string]float64),
+ 		Counters: make(map[string]int64),
+ 	}
++}
++
++func loadMemStorage(filePath string) *MemStorage {
++	file, err := os.OpenFile(filePath, os.O_RDONLY|os.O_CREATE, 0666)
++	defer func() {
++		err := file.Close()
++		if err != nil {
++			logger.GetLogger().Fatal("Failed to close file", zap.Error(err))
++		}
++	}()
++
++	if err != nil {
++		logger.GetLogger().Fatal("Can't open file.", zap.Error(err))
++	}
++
++	fileData, err := io.ReadAll(file)
++	if err != nil {
++		logger.GetLogger().Fatal("Can't read file.", zap.Error(err))
++	}
++	if len(fileData) == 0 {
++		logger.GetLogger().Info("Storage file is empty, nothing to load.", zap.String("file", filePath))
++		return newEmptyMemStorage()
++	}
++
++	var storage MemStorage
++
++	err = json.Unmarshal(fileData, &storage)
++	if err != nil {
++		logger.GetLogger().Fatal("Can't read json.", zap.Error(err))
++	}
++	return &storage
++}
++
++func NewMemStorage(config MemStorageConfig) *MemStorage {
++	if config.Restore {
++		return loadMemStorage(config.FileStoragePath)
++	}
++
++	return newEmptyMemStorage()
+ }
+ 
+ func (m *MemStorage) SetGauge(metricName string, value float64) {

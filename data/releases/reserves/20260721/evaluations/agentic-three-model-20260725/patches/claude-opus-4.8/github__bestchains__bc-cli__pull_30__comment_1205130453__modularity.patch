@@ -1,0 +1,77 @@
+diff --git a/pkg/proposal/get.go b/pkg/proposal/get.go
+index 2a2accf..c9c6a35 100644
+--- a/pkg/proposal/get.go
++++ b/pkg/proposal/get.go
+@@ -62,34 +62,12 @@ func NewProposalGetCmd(option common.Options) *cobra.Command {
+ 			var obj runtime.Object
+ 			if len(args) == 0 {
+ 				username := viper.GetString("auth.username")
+-				organizations, err := cli.Resource(schema.GroupVersionResource{Group: common.IBPGroup, Version: common.IBPVersion, Resource: common.OrganizationResource}).List(context.TODO(), v1.ListOptions{
+-					LabelSelector: fmt.Sprintf("bestchains.organization.admin=%s", username),
+-				})
++				items, err := listProposalsByAdmin(cli, username)
+ 				if err != nil {
+ 					fmt.Fprintln(option.ErrOut, err)
+ 					return
+ 				}
+-				var proposalNames []string
+-				for _, org := range organizations.Items {
+-					namespace := org.GetName()
+-					votes, err := cli.Resource(schema.GroupVersionResource{Group: common.IBPGroup, Version: common.IBPVersion, Resource: common.Vote}).Namespace(namespace).List(context.TODO(), v1.ListOptions{})
+-					if err != nil {
+-						fmt.Fprintln(option.ErrOut, err)
+-						continue
+-					}
+-					for _, vote := range votes.Items {
+-						proposalName := utils.GetNestedString(vote.Object, "spec", "proposalName")
+-						proposalNames = append(proposalNames, proposalName)
+-					}
+-				}
+-				for _, proposalName := range utils.RemoveDuplicateForStringSlice(proposalNames) {
+-					proposal, err := cli.Resource(schema.GroupVersionResource{Group: common.IBPGroup, Version: common.IBPVersion, Resource: common.Proposal}).Get(context.TODO(), proposalName, v1.GetOptions{})
+-					if err != nil {
+-						fmt.Fprintln(option.ErrOut, err)
+-						continue
+-					}
+-					list.Items = append(list.Items, runtime.RawExtension{Object: proposal})
+-				}
++				list.Items = append(list.Items, items...)
+ 			} else {
+ 				for _, arg := range args {
+ 					proposal, err := cli.Resource(schema.GroupVersionResource{Group: common.IBPGroup, Version: common.IBPVersion, Resource: common.Proposal}).Get(context.TODO(), arg, v1.GetOptions{})
+@@ -129,3 +107,35 @@ func NewProposalGetCmd(option common.Options) *cobra.Command {
+ 
+ 	return cmd
+ }
++
++// listProposalsByAdmin returns the proposals related to the organizations
++// administrated by the given username.
++func listProposalsByAdmin(cli dynamic.Interface, username string) ([]runtime.RawExtension, error) {
++	organizations, err := cli.Resource(schema.GroupVersionResource{Group: common.IBPGroup, Version: common.IBPVersion, Resource: common.OrganizationResource}).List(context.TODO(), v1.ListOptions{
++		LabelSelector: fmt.Sprintf("bestchains.organization.admin=%s", username),
++	})
++	if err != nil {
++		return nil, err
++	}
++	var proposalNames []string
++	for _, org := range organizations.Items {
++		namespace := org.GetName()
++		votes, err := cli.Resource(schema.GroupVersionResource{Group: common.IBPGroup, Version: common.IBPVersion, Resource: common.Vote}).Namespace(namespace).List(context.TODO(), v1.ListOptions{})
++		if err != nil {
++			continue
++		}
++		for _, vote := range votes.Items {
++			proposalName := utils.GetNestedString(vote.Object, "spec", "proposalName")
++			proposalNames = append(proposalNames, proposalName)
++		}
++	}
++	var items []runtime.RawExtension
++	for _, proposalName := range utils.RemoveDuplicateForStringSlice(proposalNames) {
++		proposal, err := cli.Resource(schema.GroupVersionResource{Group: common.IBPGroup, Version: common.IBPVersion, Resource: common.Proposal}).Get(context.TODO(), proposalName, v1.GetOptions{})
++		if err != nil {
++			continue
++		}
++		items = append(items, runtime.RawExtension{Object: proposal})
++	}
++	return items, nil
++}

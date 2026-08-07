@@ -1,0 +1,101 @@
+--- a/annotated.go
++++ b/annotated.go
+@@ -1129,50 +1129,14 @@
+ 			}
+ 			fields = append(fields, field)
+ 		}
+-		resType := reflect.StructOf(fields)
+-		var outTypes []reflect.Type
+-		if hasError {
+-			outTypes = append(types[0:len(types)-1], resType, types[len(types)-1])
+-		} else {
+-			outTypes = append(types, resType)
+-		}
+-		return outTypes, func(results []reflect.Value) []reflect.Value {
+-			var (
+-				outErr     error
+-				outResults []reflect.Value
+-			)
+-			newOutResult := reflect.New(resType).Elem()
+-
+-			for i, r := range results {
+-				if i == len(results)-1 && hasError {
+-					// If hasError and this is the last item,
+-					// we are guaranteed that this is an error
+-					// object.
+-					if err, _ := r.Interface().(error); err != nil {
+-						outErr = err
+-					}
+-					continue
++		outTypes, remap := buildAsResult(types, fields, hasError, func(newOutResult reflect.Value, i int, r reflect.Value) {
++			if i == 0 {
++				for j := 1; j < newOutResult.NumField(); j++ {
++					newOutResult.Field(j).Set(r.Field(j))
+ 				}
+-				outResults = append(outResults, r)
+-				if i == 0 {
+-					for j := 1; j < resType.NumField(); j++ {
+-						newOutResult.Field(j).Set(r.Field(j))
+-					}
+-				}
+-			}
+-
+-			outResults = append(outResults, newOutResult)
+-
+-			if hasError {
+-				if outErr != nil {
+-					outResults = append(outResults, reflect.ValueOf(outErr))
+-				} else {
+-					outResults = append(outResults, _nilError)
+-				}
+-			}
+-
+-			return outResults
+-		}, nil
++			}
++		})
++		return outTypes, remap, nil
+ 	}
+ 	// not yet went through a ResultTags annotation
+ 	for i, t := range types {
+@@ -1193,6 +1157,20 @@
+ 		}
+ 		fields = append(fields, field)
+ 	}
++	outTypes, remap := buildAsResult(types, fields, hasError, func(newOutResult reflect.Value, i int, r reflect.Value) {
++		if !isOut(r.Type()) && newOutResult.NumField() > i+1 {
++			newOutResult.Field(i + 1).Set(r)
++		}
++	})
++	return outTypes, remap, nil
++}
++
++func buildAsResult(
++	types []reflect.Type,
++	fields []reflect.StructField,
++	hasError bool,
++	remapResult func(reflect.Value, int, reflect.Value),
++) ([]reflect.Type, func([]reflect.Value) []reflect.Value) {
+ 	resType := reflect.StructOf(fields)
+ 	var outTypes []reflect.Type
+ 	if hasError {
+@@ -1218,9 +1196,7 @@
+ 				continue
+ 			}
+ 			outResults = append(outResults, r)
+-			if !isOut(r.Type()) && newOutResult.NumField() > i+1 {
+-				newOutResult.Field(i + 1).Set(r)
+-			}
++			remapResult(newOutResult, i, r)
+ 		}
+ 
+ 		outResults = append(outResults, newOutResult)
+@@ -1234,7 +1210,7 @@
+ 		}
+ 
+ 		return outResults
+-	}, nil
++	}
+ }
+ 
+ type annotated struct {

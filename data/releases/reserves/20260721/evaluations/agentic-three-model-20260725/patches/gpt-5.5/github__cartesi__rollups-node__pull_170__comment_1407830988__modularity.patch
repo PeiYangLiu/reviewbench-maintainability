@@ -1,0 +1,111 @@
+diff --git a/pkg/readerclient/input.go b/pkg/readerclient/input.go
+index fca0ce9..bc80eae 100644
+--- a/pkg/readerclient/input.go
++++ b/pkg/readerclient/input.go
+@@ -29,40 +29,56 @@ type Input struct {
+ 	Payload hexutil.Bytes `json:"payload"`
+ }
+ 
+-func GetInput(
+-	ctx context.Context,
+-	client graphql.Client,
+-	index int,
+-) (*Input, error) {
+-	resp, err := getInput(ctx, client, int(index))
+-	if err != nil {
+-		return nil, err
+-	}
++type genqlientInput interface {
++	GetIndex() int
++	GetStatus() CompletionStatus
++	GetMsgSender() string
++	GetTimestamp() string
++	GetBlockNumber() string
++	GetPayload() string
++}
+ 
+-	timestamp, err := strconv.ParseUint(resp.Input.Timestamp, 0, 64)
++func inputFromGenqlient(input genqlientInput) (Input, error) {
++	timestamp, err := strconv.ParseUint(input.GetTimestamp(), 0, 64)
+ 	if err != nil {
+-		return nil, fmt.Errorf("failed to parse timestamp: %v", err)
++		return Input{}, fmt.Errorf("failed to parse timestamp: %v", err)
+ 	}
+ 
+-	blocknumber, err := strconv.ParseUint(resp.Input.BlockNumber, 0, 64)
++	blocknumber, err := strconv.ParseUint(input.GetBlockNumber(), 0, 64)
+ 	if err != nil {
+-		return nil, fmt.Errorf("failed to parse block number: %v", err)
++		return Input{}, fmt.Errorf("failed to parse block number: %v", err)
+ 	}
+-	payload, err := hexutil.Decode(resp.Input.Payload)
++	payload, err := hexutil.Decode(input.GetPayload())
+ 	if err != nil {
+-		return nil, fmt.Errorf("failed to decode payload to bytes: %v", err)
++		return Input{}, fmt.Errorf("failed to decode payload to bytes: %v", err)
+ 	}
+ 
+-	input := Input{
+-		resp.Input.Index,
+-		resp.Input.Status,
+-		common.HexToAddress(resp.Input.MsgSender),
++	return Input{
++		input.GetIndex(),
++		input.GetStatus(),
++		common.HexToAddress(input.GetMsgSender()),
+ 		time.Duration(timestamp),
+ 		blocknumber,
+ 		payload,
++	}, nil
++}
++
++func GetInput(
++	ctx context.Context,
++	client graphql.Client,
++	index int,
++) (*Input, error) {
++	resp, err := getInput(ctx, client, int(index))
++	if err != nil {
++		return nil, err
++	}
++
++	input, err := inputFromGenqlient(&resp.Input)
++	if err != nil {
++		return nil, err
+ 	}
+ 
+-	return &input, err
++	return &input, nil
+ }
+ 
+ func GetInputs(
+@@ -79,27 +95,9 @@ func GetInputs(
+ 	}
+ 
+ 	for _, edge := range resp.Inputs.Edges {
+-
+-		timestamp, err := strconv.ParseUint(edge.Node.Timestamp, 0, 64)
+-		if err != nil {
+-			return nil, fmt.Errorf("failed to parse timestamp: %v", err)
+-		}
+-		blocknumber, err := strconv.ParseUint(edge.Node.BlockNumber, 0, 64)
++		input, err := inputFromGenqlient(&edge.Node)
+ 		if err != nil {
+-			return nil, fmt.Errorf("failed to parse block number: %v", err)
+-		}
+-		payload, err := hexutil.Decode(edge.Node.Payload)
+-		if err != nil {
+-			return nil, fmt.Errorf("failed to decode payload to bytes: %v", err)
+-		}
+-
+-		input := Input{
+-			edge.Node.Index,
+-			edge.Node.Status,
+-			common.HexToAddress(edge.Node.MsgSender),
+-			time.Duration(timestamp),
+-			blocknumber,
+-			payload,
++			return nil, err
+ 		}
+ 
+ 		inputs = append(inputs, input)

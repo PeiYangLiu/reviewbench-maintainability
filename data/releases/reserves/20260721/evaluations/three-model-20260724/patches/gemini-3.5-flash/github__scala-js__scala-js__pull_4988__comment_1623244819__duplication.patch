@@ -1,0 +1,188 @@
+--- a/linker/shared/src/main/scala/org/scalajs/linker/backend/webassembly/FunctionBuilder.scala
++++ b/linker/shared/src/main/scala/org/scalajs/linker/backend/webassembly/FunctionBuilder.scala
+@@ -21,6 +21,51 @@
+ import Modules._
+ import Types._
+ 
++private sealed trait ToBlockType[-T] {
++  def toBlockType(builder: FunctionBuilder, value: T): BlockType
++}
++
++private object ToBlockType {
++  implicit val blockTypeInstance: ToBlockType[BlockType] =
++    new ToBlockType[BlockType] {
++      def toBlockType(builder: FunctionBuilder, value: BlockType): BlockType = value
++    }
++
++  implicit val typeInstance: ToBlockType[Type] =
++    new ToBlockType[Type] {
++      def toBlockType(builder: FunctionBuilder, value: Type): BlockType =
++        BlockType.ValueType(value)
++    }
++
++  implicit val functionTypeInstance: ToBlockType[FunctionType] =
++    new ToBlockType[FunctionType] {
++      def toBlockType(builder: FunctionBuilder, value: FunctionType): BlockType =
++        builder.sigToBlockType(value)
++    }
++
++  implicit val listTypeInstance: ToBlockType[List[Type]] =
++    new ToBlockType[List[Type]] {
++      def toBlockType(builder: FunctionBuilder, value: List[Type]): BlockType =
++        builder.sigToBlockType(FunctionType(Nil, value))
++    }
++}
++
++private sealed trait ToFunctionType[-T] {
++  def toFunctionType(value: T): FunctionType
++}
++
++private object ToFunctionType {
++  implicit val functionTypeInstance: ToFunctionType[FunctionType] =
++    new ToFunctionType[FunctionType] {
++      def toFunctionType(value: FunctionType): FunctionType = value
++    }
++
++  implicit val typeInstance: ToFunctionType[Type] =
++    new ToFunctionType[Type] {
++      def toFunctionType(value: Type): FunctionType = FunctionType(Nil, List(value))
++    }
++}
++
+ final class FunctionBuilder(
+     moduleBuilder: ModuleBuilder,
+     val functionID: FunctionID,
+@@ -98,80 +143,47 @@
+       BlockType.FunctionType(moduleBuilder.functionTypeToTypeID(sig))
+   }
+ 
+-  def ifThenElse(blockType: BlockType)(thenp: => Unit)(elsep: => Unit): Unit = {
+-    instrs += If(blockType)
++  def ifThenElse[T](blockTypeable: T)(thenp: => Unit)(elsep: => Unit)(implicit ev: ToBlockType[T]): Unit = {
++    instrs += If(ev.toBlockType(this, blockTypeable))
+     thenp
+     instrs += Else
+     elsep
+     instrs += End
+   }
+ 
+-  def ifThenElse(resultType: Type)(thenp: => Unit)(elsep: => Unit): Unit =
+-    ifThenElse(BlockType.ValueType(resultType))(thenp)(elsep)
+-
+-  def ifThenElse(sig: FunctionType)(thenp: => Unit)(elsep: => Unit): Unit =
+-    ifThenElse(sigToBlockType(sig))(thenp)(elsep)
+-
+-  def ifThenElse(resultTypes: List[Type])(thenp: => Unit)(elsep: => Unit): Unit =
+-    ifThenElse(FunctionType(Nil, resultTypes))(thenp)(elsep)
+-
+   def ifThenElse()(thenp: => Unit)(elsep: => Unit): Unit =
+     ifThenElse(BlockType.ValueType())(thenp)(elsep)
+ 
+-  def ifThen(blockType: BlockType)(thenp: => Unit): Unit = {
+-    instrs += If(blockType)
++  def ifThen[T](blockTypeable: T)(thenp: => Unit)(implicit ev: ToBlockType[T]): Unit = {
++    instrs += If(ev.toBlockType(this, blockTypeable))
+     thenp
+     instrs += End
+   }
+ 
+-  def ifThen(sig: FunctionType)(thenp: => Unit): Unit =
+-    ifThen(sigToBlockType(sig))(thenp)
+-
+-  def ifThen(resultTypes: List[Type])(thenp: => Unit): Unit =
+-    ifThen(FunctionType(Nil, resultTypes))(thenp)
+-
+   def ifThen()(thenp: => Unit): Unit =
+     ifThen(BlockType.ValueType())(thenp)
+ 
+-  def block[A](blockType: BlockType)(body: LabelID => A): A = {
++  def block[A, T](blockTypeable: T)(body: LabelID => A)(implicit ev: ToBlockType[T]): A = {
+     val label = genLabel()
+-    instrs += Block(blockType, Some(label))
++    instrs += Block(ev.toBlockType(this, blockTypeable), Some(label))
+     val result = body(label)
+     instrs += End
+     result
+   }
+ 
+-  def block[A](resultType: Type)(body: LabelID => A): A =
+-    block(BlockType.ValueType(resultType))(body)
+-
+   def block[A]()(body: LabelID => A): A =
+     block(BlockType.ValueType())(body)
+ 
+-  def block[A](sig: FunctionType)(body: LabelID => A): A =
+-    block(sigToBlockType(sig))(body)
+-
+-  def block[A](resultTypes: List[Type])(body: LabelID => A): A =
+-    block(FunctionType(Nil, resultTypes))(body)
+-
+-  def loop[A](blockType: BlockType)(body: LabelID => A): A = {
++  def loop[A, T](blockTypeable: T)(body: LabelID => A)(implicit ev: ToBlockType[T]): A = {
+     val label = genLabel()
+-    instrs += Loop(blockType, Some(label))
++    instrs += Loop(ev.toBlockType(this, blockTypeable), Some(label))
+     val result = body(label)
+     instrs += End
+     result
+   }
+ 
+-  def loop[A](resultType: Type)(body: LabelID => A): A =
+-    loop(BlockType.ValueType(resultType))(body)
+-
+   def loop[A]()(body: LabelID => A): A =
+     loop(BlockType.ValueType())(body)
+-
+-  def loop[A](sig: FunctionType)(body: LabelID => A): A =
+-    loop(sigToBlockType(sig))(body)
+-
+-  def loop[A](resultTypes: List[Type])(body: LabelID => A): A =
+-    loop(FunctionType(Nil, resultTypes))(body)
+ 
+   def whileLoop()(cond: => Unit)(body: => Unit): Unit = {
+     loop() { loopLabel =>
+@@ -183,24 +195,15 @@
+     }
+   }
+ 
+-  def tryTable[A](blockType: BlockType)(clauses: List[CatchClause])(body: => A): A = {
+-    instrs += TryTable(blockType, clauses)
++  def tryTable[A, T](blockTypeable: T)(clauses: List[CatchClause])(body: => A)(implicit ev: ToBlockType[T]): A = {
++    instrs += TryTable(ev.toBlockType(this, blockTypeable), clauses)
+     val result = body
+     instrs += End
+     result
+   }
+ 
+-  def tryTable[A](resultType: Type)(clauses: List[CatchClause])(body: => A): A =
+-    tryTable(BlockType.ValueType(resultType))(clauses)(body)
+-
+   def tryTable[A]()(clauses: List[CatchClause])(body: => A): A =
+     tryTable(BlockType.ValueType())(clauses)(body)
+-
+-  def tryTable[A](sig: FunctionType)(clauses: List[CatchClause])(body: => A): A =
+-    tryTable(sigToBlockType(sig))(clauses)(body)
+-
+-  def tryTable[A](resultTypes: List[Type])(clauses: List[CatchClause])(body: => A): A =
+-    tryTable(FunctionType(Nil, resultTypes))(clauses)(body)
+ 
+   /** Builds a `switch` over a scrutinee using a `br_table` instruction.
+    *
+@@ -289,14 +292,9 @@
+     }
+   }
+ 
+-  def switch(clauseSig: FunctionType)(scrutinee: () => Unit)(
+-      clauses: (List[Int], () => Unit)*)(default: () => Unit): Unit = {
+-    switch(FunctionType.NilToNil, clauseSig)(scrutinee)(clauses: _*)(default)
+-  }
+-
+-  def switch(resultType: Type)(scrutinee: () => Unit)(
+-      clauses: (List[Int], () => Unit)*)(default: () => Unit): Unit = {
+-    switch(FunctionType(Nil, List(resultType)))(scrutinee)(clauses: _*)(default)
++  def switch[T](clauseSigLike: T)(scrutinee: () => Unit)(
++      clauses: (List[Int], () => Unit)*)(default: () => Unit)(implicit ev: ToFunctionType[T]): Unit = {
++    switch(FunctionType.NilToNil, ev.toFunctionType(clauseSigLike))(scrutinee)(clauses: _*)(default)
+   }
+ 
+   def switch()(scrutinee: () => Unit)(

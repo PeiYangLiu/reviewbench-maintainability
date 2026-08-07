@@ -1,0 +1,207 @@
+--- a/shared/bundle_analysis/parser.py
++++ b/shared/bundle_analysis/parser.py
+@@ -2,6 +2,102 @@
+ from sqlalchemy.orm import Session as DbSession
+ 
+ from .models import SCHEMA, Asset, Chunk, Module, Session, assets_chunks, chunks_modules
++
++
++def _parse_asset_event(db_session, session, asset_index, asset, prefix, event, value):
++    if (prefix, event) == ("assets.item", "start_map"):
++        # new asset
++        assert asset is None
++        asset = Asset(session=session)
++    elif prefix == "assets.item.name":
++        asset.name = value
++    elif prefix == "assets.item.size":
++        asset.size = value
++    elif (prefix, event) == ("assets.item", "end_map"):
++        # save asset
++        db_session.add(asset)
++        db_session.flush()
++        asset_index[asset.name] = asset.id
++        asset = None
++
++    return asset
++
++
++def _parse_chunk_event(
++    db_session,
++    chunk_index,
++    chunk_asset_names_index,
++    chunk,
++    chunk_asset_names,
++    prefix,
++    event,
++    value,
++):
++    if (prefix, event) == ("chunks.item", "start_map"):
++        # new chunk
++        assert chunk is None
++        chunk = Chunk()
++    elif prefix == "chunks.item.id":
++        chunk.external_id = value
++    elif prefix == "chunks.item.initial":
++        chunk.initial = value
++    elif prefix == "chunks.item.entry":
++        chunk.entry = value
++    elif prefix == "chunks.item.files.item":
++        chunk_asset_names.append(value)
++    elif (prefix, event) == ("chunks.item", "end_map"):
++        # save chunk
++        db_session.add(chunk)
++        db_session.flush()
++        chunk_index[chunk.external_id] = chunk.id
++        chunk_asset_names_index[chunk.id] = chunk_asset_names
++        chunk = None
++        chunk_asset_names = []
++
++    return chunk, chunk_asset_names
++
++
++def _parse_module_event(
++    db_session,
++    module_chunk_external_ids_index,
++    module,
++    module_chunk_external_ids,
++    prefix,
++    event,
++    value,
++):
++    if (prefix, event) == ("modules.item", "start_map"):
++        # new module
++        assert module is None
++        module = Module()
++    elif prefix == "modules.item.name":
++        module.name = value
++    elif prefix == "modules.item.size":
++        module.size = value
++    elif prefix == "modules.item.chunks.item":
++        module_chunk_external_ids.append(value)
++    elif (prefix, event) == ("modules.item", "end_map"):
++        # save module
++        db_session.add(module)
++        db_session.flush()
++        module_chunk_external_ids_index[module.id] = module_chunk_external_ids
++        module = None
++        module_chunk_external_ids = []
++
++    return module, module_chunk_external_ids
++
++
++def _parse_session_info_event(info, prefix, value):
++    if prefix == "version":
++        info["version"] = value
++    elif prefix == "outputPath":
++        info["output_path"] = value
++    elif prefix == "bundler.name":
++        info["bundler_name"] = value
++    elif prefix == "bundler.version":
++        info["bundler_version"] = value
++    elif prefix == "builtAt":
++        info["built_at"] = value
+ 
+ 
+ def parse(db_session: DbSession, path: str):
+@@ -41,74 +137,33 @@
+         module_chunk_external_ids = []
+ 
+         for (prefix, event, value) in events:
+-            # assets
+-            if (prefix, event) == ("assets.item", "start_map"):
+-                # new asset
+-                assert asset is None
+-                asset = Asset(session=session)
+-            elif prefix == "assets.item.name":
+-                asset.name = value
+-            elif prefix == "assets.item.size":
+-                asset.size = value
+-            elif (prefix, event) == ("assets.item", "end_map"):
+-                # save asset
+-                db_session.add(asset)
+-                db_session.flush()
+-                asset_index[asset.name] = asset.id
+-                asset = None
+-
+-            # chunks
+-            elif (prefix, event) == ("chunks.item", "start_map"):
+-                # new chunk
+-                assert chunk is None
+-                chunk = Chunk()
+-            elif prefix == "chunks.item.id":
+-                chunk.external_id = value
+-            elif prefix == "chunks.item.initial":
+-                chunk.initial = value
+-            elif prefix == "chunks.item.entry":
+-                chunk.entry = value
+-            elif prefix == "chunks.item.files.item":
+-                chunk_asset_names.append(value)
+-            elif (prefix, event) == ("chunks.item", "end_map"):
+-                # save chunk
+-                db_session.add(chunk)
+-                db_session.flush()
+-                chunk_index[chunk.external_id] = chunk.id
+-                chunk_asset_names_index[chunk.id] = chunk_asset_names
+-                chunk = None
+-                chunk_asset_names = []
+-
+-            # modules
+-            elif (prefix, event) == ("modules.item", "start_map"):
+-                # new module
+-                assert module is None
+-                module = Module()
+-            elif prefix == "modules.item.name":
+-                module.name = value
+-            elif prefix == "modules.item.size":
+-                module.size = value
+-            elif prefix == "modules.item.chunks.item":
+-                module_chunk_external_ids.append(value)
+-            elif (prefix, event) == ("modules.item", "end_map"):
+-                # save module
+-                db_session.add(module)
+-                db_session.flush()
+-                module_chunk_external_ids_index[module.id] = module_chunk_external_ids
+-                module = None
+-                module_chunk_external_ids = []
+-
+-            # session info
+-            elif prefix == "version":
+-                info["version"] = value
+-            elif prefix == "outputPath":
+-                info["output_path"] = value
+-            elif prefix == "bundler.name":
+-                info["bundler_name"] = value
+-            elif prefix == "bundler.version":
+-                info["bundler_version"] = value
+-            elif prefix == "builtAt":
+-                info["built_at"] = value
++            if prefix.startswith("assets."):
++                asset = _parse_asset_event(
++                    db_session, session, asset_index, asset, prefix, event, value
++                )
++            elif prefix.startswith("chunks."):
++                chunk, chunk_asset_names = _parse_chunk_event(
++                    db_session,
++                    chunk_index,
++                    chunk_asset_names_index,
++                    chunk,
++                    chunk_asset_names,
++                    prefix,
++                    event,
++                    value,
++                )
++            elif prefix.startswith("modules."):
++                module, module_chunk_external_ids = _parse_module_event(
++                    db_session,
++                    module_chunk_external_ids_index,
++                    module,
++                    module_chunk_external_ids,
++                    prefix,
++                    event,
++                    value,
++                )
++            else:
++                _parse_session_info_event(info, prefix, value)
+ 
+         session.info = info
+ 

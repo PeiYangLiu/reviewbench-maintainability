@@ -1,0 +1,183 @@
+--- a/src/seedcase_sprout/core/map_data_types.py
++++ b/src/seedcase_sprout/core/map_data_types.py
+@@ -1,61 +1,15 @@
+-from collections import OrderedDict
+-from typing import Callable
+-
+ import polars as pl
+ 
+ from seedcase_sprout.core.properties import FieldType
+ 
+ """
+-Mapping between Frictionless types and Polars types.
++Map and compare Frictionless and Polars data types.
+ 
+-Each Frictionless type maps to a function that checks if a given Polars type is an
+-allowed representation of that Frictionless type. There are often multiple allowed
+-Polars types for a single Frictionless type.
+-
+-To allow reverse lookups, i.e. mapping a Polars type to a single Frictionless type,
+-entries are listed in order of precedence. The Polars type should be compared against
+-Frictionless types in the order they are listed. The first entry with a passing check
+-should determine the Frictionless type. Use `polars_to_frictionless()` to do the reverse
+-lookup.
++Inferring a Frictionless type from a Polars type is kept separate from checking whether
++a Polars type is allowed for a given Frictionless type. A single Polars type can be a
++valid representation of several Frictionless types, while resource property extraction
++needs one canonical Frictionless type for each Polars type.
+ """
+-_FRICTIONLESS_TO_POLARS: OrderedDict[FieldType, Callable[[pl.DataType], bool]] = (
+-    OrderedDict(
+-        {
+-            # Primary types: reverse lookup always gives back Frictionless type
+-            "number": lambda dtype: dtype.is_float() or dtype.is_decimal(),
+-            "integer": lambda dtype: (
+-                dtype.is_integer() or isinstance(dtype, pl.Duration)
+-            ),
+-            "string": lambda dtype: isinstance(
+-                dtype, (pl.String, pl.Categorical, pl.Enum, pl.Binary)
+-            ),
+-            "date": lambda dtype: isinstance(dtype, pl.Date),
+-            "datetime": lambda dtype: isinstance(dtype, pl.Datetime),
+-            "time": lambda dtype: dtype == pl.Time,  # Polars stores Time as a class
+-            "boolean": lambda dtype: isinstance(dtype, pl.Boolean),
+-            # Secondary types: reverse lookup gives back Frictionless type only if
+-            # primary type doesn't take precedence
+-            "array": lambda dtype: isinstance(dtype, (pl.String, pl.Array, pl.List)),
+-            "object": lambda dtype: isinstance(
+-                dtype, (pl.String, pl.Struct, pl.Object)
+-            ),
+-            # Tertiary types: reverse lookup never gives back Frictionless type
+-            "geopoint": lambda dtype: (
+-                isinstance(dtype, pl.Array)
+-                and dtype.size == 2
+-                and dtype.inner.is_numeric()
+-            ),
+-            "geojson": lambda dtype: isinstance(
+-                dtype, (pl.String, pl.Struct, pl.Object)
+-            ),
+-            "year": lambda dtype: dtype.is_integer(),
+-            "yearmonth": lambda dtype: isinstance(dtype, pl.Date),
+-            "duration": lambda dtype: isinstance(dtype, pl.String),
+-            # Fallback type
+-            "any": lambda _: True,
+-        }
+-    )
+-)
+ 
+ # Mapping from Frictionless types to descriptions of allowed Polars types
+ _FRICTIONLESS_TO_POLARS_DESCRIPTION: dict[FieldType, str] = {
+@@ -79,11 +33,97 @@
+ }
+ 
+ 
++def _get_matching_type(dtype: pl.DataType) -> FieldType:
++    """Return the canonical Frictionless type for a Polars type.
++
++    When a Polars type can represent multiple Frictionless types, this function returns
++    the primary Frictionless type used when extracting resource properties.
++    """
++    if dtype.is_float() or dtype.is_decimal():
++        return "number"
++
++    if dtype.is_integer() or isinstance(dtype, pl.Duration):
++        return "integer"
++
++    if isinstance(dtype, (pl.String, pl.Categorical, pl.Enum, pl.Binary)):
++        return "string"
++
++    if isinstance(dtype, pl.Date):
++        return "date"
++
++    if isinstance(dtype, pl.Datetime):
++        return "datetime"
++
++    if dtype == pl.Time:  # Polars stores Time as a class
++        return "time"
++
++    if isinstance(dtype, pl.Boolean):
++        return "boolean"
++
++    if isinstance(dtype, (pl.Array, pl.List)):
++        return "array"
++
++    if isinstance(dtype, (pl.Struct, pl.Object)):
++        return "object"
++
++    return "any"
++
++
++def _frictionless_type_matches_polars(
++    frictionless_type: FieldType,
++    dtype: pl.DataType,
++) -> bool:
++    """Return whether a Polars type is allowed for a Frictionless type."""
++    if frictionless_type == "number":
++        return dtype.is_float() or dtype.is_decimal()
++
++    if frictionless_type == "integer":
++        return dtype.is_integer() or isinstance(dtype, pl.Duration)
++
++    if frictionless_type == "string":
++        return isinstance(dtype, (pl.String, pl.Categorical, pl.Enum, pl.Binary))
++
++    if frictionless_type == "date":
++        return isinstance(dtype, pl.Date)
++
++    if frictionless_type == "datetime":
++        return isinstance(dtype, pl.Datetime)
++
++    if frictionless_type == "time":
++        return dtype == pl.Time  # Polars stores Time as a class
++
++    if frictionless_type == "boolean":
++        return isinstance(dtype, pl.Boolean)
++
++    if frictionless_type == "array":
++        return isinstance(dtype, (pl.String, pl.Array, pl.List))
++
++    if frictionless_type == "object":
++        return isinstance(dtype, (pl.String, pl.Struct, pl.Object))
++
++    if frictionless_type == "geopoint":
++        return isinstance(dtype, pl.Array) and dtype.size == 2 and dtype.inner.is_numeric()
++
++    if frictionless_type == "geojson":
++        return isinstance(dtype, (pl.String, pl.Struct, pl.Object))
++
++    if frictionless_type == "year":
++        return dtype.is_integer()
++
++    if frictionless_type == "yearmonth":
++        return isinstance(dtype, pl.Date)
++
++    if frictionless_type == "duration":
++        return isinstance(dtype, pl.String)
++
++    if frictionless_type == "any":
++        return True
++
++    return False
++
++
+ def _polars_to_frictionless(dtype: pl.DataType) -> FieldType:
+     """Map a Polars type to the corresponding Frictionless type.
+-
+-    Frictionless types are matched against the Polars type in the order set out in
+-    `_FRICTIONLESS_TO_POLARS`. The first successful match is returned.
+ 
+     Args:
+         dtype: The Polars type.
+@@ -91,11 +131,4 @@
+     Returns:
+         The corresponding Frictionless type.
+     """
+-    return next(
+-        (
+-            frictionless_type
+-            for frictionless_type, is_type in _FRICTIONLESS_TO_POLARS.items()
+-            if is_type(dtype)
+-        ),
+-        "any",
+-    )
++    return _get_matching_type(dtype)

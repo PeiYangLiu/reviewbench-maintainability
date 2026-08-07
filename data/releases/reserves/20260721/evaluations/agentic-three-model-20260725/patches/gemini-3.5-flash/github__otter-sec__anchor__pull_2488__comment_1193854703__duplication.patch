@@ -1,0 +1,92 @@
+diff --git a/client/src/nonblocking.rs b/client/src/nonblocking.rs
+index 8a95b76..9dc09ea 100644
+--- a/client/src/nonblocking.rs
++++ b/client/src/nonblocking.rs
+@@ -78,40 +78,7 @@ impl EventHandler {
+                         signature: logs.value.signature.parse().unwrap(),
+                         slot: logs.context.slot,
+                     };
+-                    let mut logs = &logs.value.logs[..];
+-                    if !logs.is_empty() {
+-                        if let Ok(mut execution) = Execution::new(&mut logs) {
+-                            for l in logs {
+-                                // Parse the log.
+-                                let (event, new_program, did_pop) = {
+-                                    if self_program_str == execution.program() {
+-                                        handle_program_log(&self_program_str, l).unwrap_or_else(
+-                                            |e| {
+-                                                println!("Unable to parse log: {e}");
+-                                                std::process::exit(1);
+-                                            },
+-                                        )
+-                                    } else {
+-                                        let (program, did_pop) =
+-                                            handle_system_log(&self_program_str, l);
+-                                        (None, program, did_pop)
+-                                    }
+-                                };
+-                                // Emit the event.
+-                                if let Some(e) = event {
+-                                    f(&ctx, e);
+-                                }
+-                                // Switch program context on CPI.
+-                                if let Some(new_program) = new_program {
+-                                    execution.push(new_program);
+-                                }
+-                                // Program returned.
+-                                if did_pop {
+-                                    execution.pop();
+-                                }
+-                            }
+-                        }
+-                    }
++                    handle_logs(&self_program_str, &logs.value.logs[..], &ctx, &f);
+                 }
+                 Ok::<(), ClientError>(())
+             }
+@@ -133,6 +100,45 @@ impl EventHandler {
+     }
+ }
+ 
++fn handle_logs<T: anchor_lang::Event + anchor_lang::AnchorDeserialize>(
++    self_program_str: &str,
++    logs: &[String],
++    ctx: &EventContext,
++    f: &impl Fn(&EventContext, T),
++) {
++    let mut logs = logs;
++    if !logs.is_empty() {
++        if let Ok(mut execution) = Execution::new(&mut logs) {
++            for l in logs {
++                // Parse the log.
++                let (event, new_program, did_pop) = {
++                    if self_program_str == execution.program() {
++                        handle_program_log(self_program_str, l).unwrap_or_else(|e| {
++                            println!("Unable to parse log: {e}");
++                            std::process::exit(1);
++                        })
++                    } else {
++                        let (program, did_pop) = handle_system_log(self_program_str, l);
++                        (None, program, did_pop)
++                    }
++                };
++                // Emit the event.
++                if let Some(e) = event {
++                    f(ctx, e);
++                }
++                // Switch program context on CPI.
++                if let Some(new_program) = new_program {
++                    execution.push(new_program);
++                }
++                // Program returned.
++                if did_pop {
++                    execution.pop();
++                }
++            }
++        }
++    }
++}
++
+ impl<C: Deref<Target = impl Signer> + Clone> Program<C> {
+     /// Returns the account at the given address.
+     pub async fn account<T: AccountDeserialize>(&self, address: Pubkey) -> Result<T, ClientError> {

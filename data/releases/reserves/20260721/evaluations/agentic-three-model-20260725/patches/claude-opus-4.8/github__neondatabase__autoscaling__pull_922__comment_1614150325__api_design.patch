@@ -1,0 +1,79 @@
+diff --git a/pkg/util/taskgroup/taskgroup.go b/pkg/util/taskgroup/taskgroup.go
+index d4c5015..46129c6 100644
+--- a/pkg/util/taskgroup/taskgroup.go
++++ b/pkg/util/taskgroup/taskgroup.go
+@@ -16,13 +16,13 @@ import (
+ // Group manages goroutines and collect all the errors.
+ // See https://pkg.go.dev/golang.org/x/sync/errgroup#group for more information
+ type Group interface {
+-	WithContext(ctx context.Context) context.Context
+-	WithPanicHandler(f func(any))
++	Ctx() context.Context
+ 	Wait() error
+ 	Go(name string, f func(logger *zap.Logger) error)
+ }
+ 
+ type group struct {
++	ctx          context.Context
+ 	cancel       context.CancelFunc
+ 	logger       *zap.Logger
+ 	panicHandler func(any)
+@@ -33,9 +33,29 @@ type group struct {
+ 	err      error
+ }
+ 
++// GroupOption customizes a Group during construction with NewGroup.
++type GroupOption func(*group)
++
++// WithContext associates a Context with the Group.
++// The context will be canceled if any goroutine returns an error.
++// See https://pkg.go.dev/golang.org/x/sync/errgroup#WithContext
++func WithContext(ctx context.Context) GroupOption {
++	return func(g *group) {
++		g.ctx, g.cancel = context.WithCancel(ctx)
++	}
++}
++
++// WithPanicHandler sets a panic handler for the group.
++func WithPanicHandler(f func(any)) GroupOption {
++	return func(g *group) {
++		g.panicHandler = f
++	}
++}
++
+ // NewGroup returns a new Group.
+-func NewGroup(logger *zap.Logger) Group {
+-	return &group{
++func NewGroup(logger *zap.Logger, opts ...GroupOption) Group {
++	g := &group{
++		ctx:          context.Background(),
+ 		cancel:       nil, // Set separately by WithContext
+ 		panicHandler: nil, // Set separately by WithPanicHandler
+ 		logger:       logger,
+@@ -44,19 +64,15 @@ func NewGroup(logger *zap.Logger) Group {
+ 		errMutex: sync.Mutex{},
+ 		err:      nil,
+ 	}
++	for _, opt := range opts {
++		opt(g)
++	}
++	return g
+ }
+ 
+-// WithContext updates the current Group with a associated Context.
+-// The context will be canceled if any goroutine returns an error.
+-// See https://pkg.go.dev/golang.org/x/sync/errgroup#WithContext
+-func (g *group) WithContext(ctx context.Context) context.Context {
+-	ctx, g.cancel = context.WithCancel(ctx)
+-	return ctx
+-}
+-
+-// WithPanicHandler sets a panic handler for the group.
+-func (g *group) WithPanicHandler(f func(any)) {
+-	g.panicHandler = f
++// Ctx returns the Context associated with the Group.
++func (g *group) Ctx() context.Context {
++	return g.ctx
+ }
+ 
+ // Wait blocks until all goroutines have completed.

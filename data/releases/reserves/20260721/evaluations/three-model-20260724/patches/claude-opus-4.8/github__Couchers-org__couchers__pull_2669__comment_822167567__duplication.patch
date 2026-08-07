@@ -1,0 +1,76 @@
+--- a/app/web/features/auth/useAuthStore.ts
++++ b/app/web/features/auth/useAuthStore.ts
+@@ -8,14 +8,19 @@
+ import { service } from "service";
+ import isGrpcError from "utils/isGrpcError";
+ 
++type StorageType = "localStorage" | "sessionStorage";
++
+ export function usePersistedState<T>(
+   key: string,
+-  defaultValue: T
+-): [T, (value: T) => void] {
++  defaultValue: T,
++  storageType: StorageType = "localStorage"
++): [T | undefined, (value: T) => void, () => void] {
+   //in ssr, window doesn't exist, just use default
+   const saved =
+-    typeof window !== "undefined" ? window.localStorage.getItem(key) : null;
+-  const [_state, _setState] = useState<T>(
++    typeof window !== "undefined"
++      ? window[storageType].getItem(key)
++      : null;
++  const [_state, _setState] = useState<T | undefined>(
+     saved !== null ? JSON.parse(saved) : defaultValue
+   );
+   const setState = useCallback(
+@@ -24,40 +29,23 @@
+         console.warn(`${key} can't be stored as undefined, casting to null.`);
+       }
+       const v = value === undefined ? null : value;
+-      window.localStorage.setItem(key, JSON.stringify(v));
++      window[storageType].setItem(key, JSON.stringify(v));
+       _setState(value);
+     },
+-    [key]
+-  );
+-  return [_state, setState];
++    [key, storageType]
++  );
++  const clearState = useCallback(() => {
++    window[storageType].removeItem(key);
++    _setState(undefined);
++  }, [key, storageType]);
++  return [_state, setState, clearState];
+ }
+ 
+ export function useSessionStorage<T>(
+   key: string,
+   defaultValue: T
+ ): [T | undefined, (value: T) => void, () => void] {
+-  //in ssr, window doesn't exist, just use default
+-  const saved =
+-    typeof window !== "undefined" ? window.sessionStorage.getItem(key) : null;
+-  const [_state, _setState] = useState<T | undefined>(
+-    saved !== null ? JSON.parse(saved) : defaultValue
+-  );
+-  const setState = useCallback(
+-    (value: T) => {
+-      if (value === undefined) {
+-        console.warn(`${key} can't be stored as undefined, casting to null.`);
+-      }
+-      const v = value === undefined ? null : value;
+-      window.sessionStorage.setItem(key, JSON.stringify(v));
+-      _setState(value);
+-    },
+-    [key]
+-  );
+-  const clearState = useCallback(() => {
+-    window.sessionStorage.removeItem(key);
+-    _setState(undefined);
+-  }, [key]);
+-  return [_state, setState, clearState];
++  return usePersistedState<T>(key, defaultValue, "sessionStorage");
+ }
+ 
+ export default function useAuthStore() {

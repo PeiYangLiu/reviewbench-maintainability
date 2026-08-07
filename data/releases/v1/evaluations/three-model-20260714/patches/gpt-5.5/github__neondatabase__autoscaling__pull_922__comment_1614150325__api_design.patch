@@ -1,0 +1,73 @@
+--- a/pkg/util/taskgroup/taskgroup.go
++++ b/pkg/util/taskgroup/taskgroup.go
+@@ -16,6 +16,8 @@
+ // Group manages goroutines and collect all the errors.
+ // See https://pkg.go.dev/golang.org/x/sync/errgroup#group for more information
+ type Group interface {
++	Context() context.Context
++	SetContext(ctx context.Context) context.Context
+ 	WithContext(ctx context.Context) context.Context
+ 	WithPanicHandler(f func(any))
+ 	Wait() error
+@@ -23,6 +25,7 @@
+ }
+ 
+ type group struct {
++	ctx           context.Context
+ 	cancel       context.CancelFunc
+ 	logger       *zap.Logger
+ 	panicHandler func(any)
+@@ -34,9 +37,12 @@
+ }
+ 
+ // NewGroup returns a new Group.
+-func NewGroup(logger *zap.Logger) Group {
+-	return &group{
+-		cancel:       nil, // Set separately by WithContext
++//
++// If a context is provided, it will be canceled if any goroutine returns an error.
++func NewGroup(logger *zap.Logger, ctx ...context.Context) Group {
++	g := &group{
++		ctx:           nil,
++		cancel:       nil,
+ 		panicHandler: nil, // Set separately by WithPanicHandler
+ 		logger:       logger,
+ 		wg:           sync.WaitGroup{},
+@@ -44,14 +50,34 @@
+ 		errMutex: sync.Mutex{},
+ 		err:      nil,
+ 	}
++	if len(ctx) > 0 {
++		g.SetContext(ctx[0])
++	}
++	return g
+ }
+ 
+-// WithContext updates the current Group with a associated Context.
++// Context returns the Context associated with the current Group.
++func (g *group) Context() context.Context {
++	if g.ctx == nil {
++		return context.Background()
++	}
++	return g.ctx
++}
++
++// SetContext updates the current Group with an associated Context.
++// The context will be canceled if any goroutine returns an error.
++func (g *group) SetContext(ctx context.Context) context.Context {
++	g.ctx, g.cancel = context.WithCancel(ctx)
++	return g.ctx
++}
++
++// WithContext updates the current Group with an associated Context.
+ // The context will be canceled if any goroutine returns an error.
+ // See https://pkg.go.dev/golang.org/x/sync/errgroup#WithContext
++//
++// Deprecated: pass the context to NewGroup and use Context to retrieve it.
+ func (g *group) WithContext(ctx context.Context) context.Context {
+-	ctx, g.cancel = context.WithCancel(ctx)
+-	return ctx
++	return g.SetContext(ctx)
+ }
+ 
+ // WithPanicHandler sets a panic handler for the group.

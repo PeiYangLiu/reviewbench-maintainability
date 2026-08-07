@@ -1,0 +1,57 @@
+--- a/internal/rbd/controllerserver.go
++++ b/internal/rbd/controllerserver.go
+@@ -231,32 +231,40 @@
+ 		return nil, status.Error(codes.InvalidArgument, err.Error())
+ 	}
+ 
+-	// Get QosParameters from SC if qos configuration existing in SC
++	err = rbdVol.setQosParameters(ctx, req.GetParameters())
++	if err != nil {
++		return nil, status.Error(codes.InvalidArgument, err.Error())
++	}
++
++	err = rbdVol.Connect(cr)
++	if err != nil {
++		log.ErrorLog(ctx, "failed to connect to volume %v: %v", rbdVol.RbdImageName, err)
++
++		return nil, status.Error(codes.Internal, err.Error())
++	}
++
++	// NOTE: rbdVol does not contain VolID and RbdImageName populated, everything
++	// else is populated post create request parsing
++	return rbdVol, nil
++}
++
++func (rbdVol *rbdVolume) setQosParameters(ctx context.Context, params map[string]string) error {
+ 	baseQosVolSize := ""
+-	params := req.GetParameters()
+ 	if v, ok := params[baseVolSizeBytes]; ok && v != "" {
+ 		baseQosVolSize = v
+ 	}
++
+ 	rbdQosParameters := parseQosParams(params)
+ 	for _, param := range rbdQosParameters {
+ 		if param.provide {
+-			err = calcQosBasedOnCapacity(ctx, rbdVol, *param, baseQosVolSize)
++			err := calcQosBasedOnCapacity(ctx, rbdVol, *param, baseQosVolSize)
+ 			if err != nil {
+-				return nil, status.Error(codes.InvalidArgument, err.Error())
++				return err
+ 			}
+ 		}
+ 	}
+ 
+-	err = rbdVol.Connect(cr)
+-	if err != nil {
+-		log.ErrorLog(ctx, "failed to connect to volume %v: %v", rbdVol.RbdImageName, err)
+-
+-		return nil, status.Error(codes.Internal, err.Error())
+-	}
+-
+-	// NOTE: rbdVol does not contain VolID and RbdImageName populated, everything
+-	// else is populated post create request parsing
+-	return rbdVol, nil
++	return nil
+ }
+ 
+ func parseQosParams(

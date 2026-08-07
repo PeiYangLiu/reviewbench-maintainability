@@ -1,0 +1,31 @@
+diff --git a/internal/dispatch/singleflight/singleflight.go b/internal/dispatch/singleflight/singleflight.go
+index 47c13aa..dca8c71 100644
+--- a/internal/dispatch/singleflight/singleflight.go
++++ b/internal/dispatch/singleflight/singleflight.go
+@@ -57,7 +57,7 @@ func (d *Dispatcher) DispatchCheck(ctx context.Context, req *v1.DispatchCheckReq
+ 	// likely recursive call, so we dispatch it to the delegate to avoid the singleflight from blocking it.
+ 	// If the bloom filter presents a false positive, a dispatch will happen, which is a small inefficiency
+ 	// traded-off to prevent a recursive-call deadlock
+-	serializedBloom, err := validateTraversalRecursion(keyString, req.Metadata)
++	serializedBloom, err := validateTraversalRecursion(req.Metadata, keyString)
+ 	if errors.Is(err, ErrLoopDetect) {
+ 		singleFlightCount.WithLabelValues("DispatchCheck", "loop").Inc()
+ 		return d.delegate.DispatchCheck(ctx, req)
+@@ -89,7 +89,7 @@ func (d *Dispatcher) DispatchExpand(ctx context.Context, req *v1.DispatchExpandR
+ 	}
+ 
+ 	keyString := hex.EncodeToString(key)
+-	serializedBloom, err := validateTraversalRecursion(keyString, req.Metadata)
++	serializedBloom, err := validateTraversalRecursion(req.Metadata, keyString)
+ 	if errors.Is(err, ErrLoopDetect) {
+ 		singleFlightCount.WithLabelValues("DispatchExpand", "loop").Inc()
+ 		return d.delegate.DispatchExpand(ctx, req)
+@@ -117,7 +117,7 @@ var ErrLoopDetect = errors.New("traversal recursion loop detected")
+ // validateTraversalRecursion determines from the ResolverMeta.TraversalBloom value if a traversal loop has happened
+ // based on the argument key. As a bloom filter, this may lead to false positives,
+ // so clients should take that into account.
+-func validateTraversalRecursion(key string, meta *v1.ResolverMeta) ([]byte, error) {
++func validateTraversalRecursion(meta *v1.ResolverMeta, key string) ([]byte, error) {
+ 	if len(meta.TraversalBloom) == 0 {
+ 		return nil, status.Error(codes.Internal, fmt.Errorf("required traversal bloom filter is missing").Error())
+ 	}

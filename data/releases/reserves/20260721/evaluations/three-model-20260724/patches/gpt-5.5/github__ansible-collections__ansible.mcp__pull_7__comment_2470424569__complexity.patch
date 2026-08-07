@@ -1,0 +1,158 @@
+--- a/plugins/plugin_utils/mcp.py
++++ b/plugins/plugin_utils/mcp.py
+@@ -269,78 +269,105 @@
+             ValueError: If the tool is not found
+             ValueError: If validation fails (missing required parameters, etc.)
+         """
+-        # Get tool definition and schema
+         tool_definition = self.get_tool(tool)
+         schema = tool_definition.get("inputSchema", {})
+-
+-        # Extract schema components
+-        schema_type = schema.get("type")
+         parameters_from_schema_properties = schema.get("properties", {})
+-        required_parameters = schema.get("required", [])
+-
+-        # Validate schema supports object type
++
++        self._validate_schema_type(tool, schema.get("type"))
++        self._validate_required_parameters(tool, schema.get("required", []), kwargs)
++        self._validate_unknown_parameters(tool, parameters_from_schema_properties, kwargs)
++        self._validate_parameter_types(tool, parameters_from_schema_properties, kwargs)
++
++    def _validate_schema_type(self, tool: str, schema_type: Optional[str]) -> None:
+         if schema_type and schema_type != "object":
+             raise ValueError(
+                 f"Tool '{tool}' has unsupported schema type '{schema_type}', expected 'object'"
+             )
+ 
+-        # Check for missing required parameters
+-        missing_required = [param for param in required_parameters if param not in kwargs]
++    def _validate_required_parameters(
++        self, tool: str, required_parameters: list, parameters: Dict[str, Any]
++    ) -> None:
++        missing_required = [
++            param for param in required_parameters if param not in parameters
++        ]
+         if missing_required:
+             raise ValueError(
+                 f"Tool '{tool}' missing required parameters: {', '.join(missing_required)}"
+             )
+ 
+-        # Check for unknown parameters
++    def _validate_unknown_parameters(
++        self,
++        tool: str,
++        parameters_from_schema_properties: Dict[str, Any],
++        parameters: Dict[str, Any],
++    ) -> None:
+         if parameters_from_schema_properties:
+             unknown_parameters = [
+-                param for param in kwargs if param not in parameters_from_schema_properties
++                param
++                for param in parameters
++                if param not in parameters_from_schema_properties
+             ]
+             if unknown_parameters:
+                 raise ValueError(
+                     f"Tool '{tool}' received unknown parameters: {', '.join(unknown_parameters)}"
+                 )
+ 
+-        # Validate parameter types
+-        for parameter_name, parameter_value in kwargs.items():
++    def _validate_parameter_types(
++        self,
++        tool: str,
++        parameters_from_schema_properties: Dict[str, Any],
++        parameters: Dict[str, Any],
++    ) -> None:
++        for parameter_name, parameter_value in parameters.items():
+             if parameter_name in parameters_from_schema_properties:
+-                parameter_schema = parameters_from_schema_properties[parameter_name]
+-                parameter_type_in_schema = parameter_schema.get("type")
+-
+-                if parameter_type_in_schema:
+-                    # Handle None values first
+-                    if parameter_value is None:
+-                        if parameter_type_in_schema != "null":
+-                            raise ValueError(
+-                                f"Parameter '{parameter_name}' for tool '{tool}' cannot be None (expected type '{parameter_type_in_schema}')"
+-                            )
+-                        # None is valid for null type, continue to next parameter
+-                        continue
+-
+-                    # Map JSON Schema types to their corresponding Python types
+-                    schema_type_to_python_type = {
+-                        "string": str,
+-                        "number": (int, float),
+-                        "integer": int,
+-                        "boolean": bool,
+-                        "array": list,
+-                        "object": dict,
+-                        "null": type(None),
+-                    }
+-
+-                    expected_type = schema_type_to_python_type.get(parameter_type_in_schema)
+-                    if expected_type is None:
+-                        raise ValueError(
+-                            f"Tool '{tool}' has unsupported parameter type '{parameter_type_in_schema}' for parameter '{parameter_name}'"
+-                        )
+-
+-                    if not isinstance(parameter_value, expected_type):  # type: ignore[arg-type]
+-                        raise ValueError(
+-                            (
+-                                f"Parameter '{parameter_name}' for tool '{tool}' should be of type "
+-                                f"'{parameter_type_in_schema}', but got '{type(parameter_value).__name__}'"
+-                            )
+-                        )
++                self._validate_parameter_type(
++                    tool,
++                    parameter_name,
++                    parameter_value,
++                    parameters_from_schema_properties[parameter_name],
++                )
++
++    def _validate_parameter_type(
++        self,
++        tool: str,
++        parameter_name: str,
++        parameter_value: Any,
++        parameter_schema: Dict[str, Any],
++    ) -> None:
++        parameter_type_in_schema = parameter_schema.get("type")
++        if not parameter_type_in_schema:
++            return
++
++        if parameter_value is None:
++            if parameter_type_in_schema != "null":
++                raise ValueError(
++                    f"Parameter '{parameter_name}' for tool '{tool}' cannot be None (expected type '{parameter_type_in_schema}')"
++                )
++            return
++
++        schema_type_to_python_type = {
++            "string": str,
++            "number": (int, float),
++            "integer": int,
++            "boolean": bool,
++            "array": list,
++            "object": dict,
++            "null": type(None),
++        }
++
++        expected_type = schema_type_to_python_type.get(parameter_type_in_schema)
++        if expected_type is None:
++            raise ValueError(
++                f"Tool '{tool}' has unsupported parameter type '{parameter_type_in_schema}' for parameter '{parameter_name}'"
++            )
++
++        if not isinstance(parameter_value, expected_type):  # type: ignore[arg-type]
++            raise ValueError(
++                (
++                    f"Parameter '{parameter_name}' for tool '{tool}' should be of type "
++                    f"'{parameter_type_in_schema}', but got '{type(parameter_value).__name__}'"
++                )
++            )
+ 
+     def close(self) -> None:
+         """Close the connection to the MCP server."""

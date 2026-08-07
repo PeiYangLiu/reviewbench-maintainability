@@ -1,0 +1,102 @@
+[
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\t// Extract tenant's external labels from hashring configs.\n\t// If one tenant appears in multiple hashring configs,\n\t// only the external label set from the first hashring config is applied.\n\tif externalLabels, ok := t.externalLabelsForTenant(tenantID); ok {\n\t\tvar err error\n\t\tlset, err = parseAndExtendSortedLabels(lset, externalLabels, t.logger)\n\t\tif err != nil {\n\t\t\treturn errors.Wrap(err, \"failed to parse external labels for tenant \"+tenantID)\n\t\t}\n\t}\n",
+          "end_line": 566,
+          "start_line": 548
+        },
+        {
+          "content": "func (t *MultiTSDB) externalLabelsForTenant(tenantID string) ([]string, bool) {\n\tfor _, hc := range t.hashringConfigs {\n\t\tif slices.Contains(hc.Tenants, tenantID) {\n\t\t\treturn hc.ExternalLabels, true\n\t\t}\n\t}\n\treturn nil, false\n}\n\n",
+          "end_line": 603,
+          "start_line": 604
+        }
+      ]
+    },
+    "response_chars": 956,
+    "round": 1,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 566,
+          "replacement_lines": 10,
+          "start_line": 548
+        },
+        {
+          "end_line": 603,
+          "replacement_lines": 9,
+          "start_line": 604
+        }
+      ],
+      "current_file_lines": 878,
+      "updated_excerpt": {
+        "content": "538: \t})\n539: \treturn result\n540: }\n541: \n542: func (t *MultiTSDB) startTSDB(logger log.Logger, tenantID string, tenant *tenant) error {\n543: \treg := prometheus.WrapRegistererWith(prometheus.Labels{\"tenant\": tenantID}, t.reg)\n544: \treg = NewUnRegisterer(reg)\n545: \n546: \tlset := labelpb.ExtendSortedLabels(t.labels, labels.FromStrings(t.tenantLabelName, tenantID))\n547: \n548: \t// Extract tenant's external labels from hashring configs.\n549: \t// If one tenant appears in multiple hashring configs,\n550: \t// only the external label set from the first hashring config is applied.\n551: \tif externalLabels, ok := t.externalLabelsForTenant(tenantID); ok {\n552: \t\tvar err error\n553: \t\tlset, err = parseAndExtendSortedLabels(lset, externalLabels, t.logger)\n554: \t\tif err != nil {\n555: \t\t\treturn errors.Wrap(err, \"failed to parse external labels for tenant \"+tenantID)\n556: \t\t}\n557: \t}\n558: \n559: \tdataDir := t.defaultTenantDataDir(tenantID)\n560: \n561: \tlevel.Info(logger).Log(\"msg\", \"opening TSDB\")\n562: \topts := *t.tsdbOpts\n563: \ts, err := tsdb.Open(\n564: \t\tdataDir,\n565: \t\tlogger,\n566: \t\treg,\n567: \t\t&opts,\n568: \t\tnil,\n569: \t)\n570: \tif err != nil {\n571: \t\tt.mtx.Lock()\n572: \t\tdelete(t.tenants, tenantID)\n573: \t\tt.mtx.Unlock()\n574: \t\treturn err\n575: \t}\n576: \tvar ship *shipper.Shipper\n577: \tif t.bucket != nil {\n578: \t\tship = shipper.New(",
+        "end_line": 578,
+        "path_lines": 878,
+        "start_line": 538
+      }
+    },
+    "usage": {
+      "input_tokens": 8869,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 848,
+      "output_tokens_details": {
+        "reasoning_tokens": 546
+      },
+      "total_tokens": 9717
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 625,
+      "path": "pkg/receive/multitsdb.go",
+      "start_line": 590
+    },
+    "response_chars": 83,
+    "round": 2,
+    "tool_result": {
+      "content": "590: \ttenant.set(store.NewTSDBStore(logger, s, component.Receive, lset), s, ship, exemplars.NewTSDB(s, lset))\n591: \tlevel.Info(logger).Log(\"msg\", \"TSDB is now ready\")\n592: \treturn nil\n593: }\n594: \n595: func (t *MultiTSDB) externalLabelsForTenant(tenantID string) ([]string, bool) {\n596: \tfor _, hc := range t.hashringConfigs {\n597: \t\tif slices.Contains(hc.Tenants, tenantID) {\n598: \t\t\treturn hc.ExternalLabels, true\n599: \t\t}\n600: \t}\n601: \treturn nil, false\n602: }\n603: \n604: func (t *MultiTSDB) defaultTenantDataDir(tenantID string) string {\n605: \treturn path.Join(t.dataDir, tenantID)\n606: }\n607: \n608: func (t *MultiTSDB) getOrLoadTenant(tenantID string, blockingStart bool) (*tenant, error) {\n609: \t// Fast path, as creating tenants is a very rare operation.\n610: \tt.mtx.RLock()\n611: \ttenant, exist := t.tenants[tenantID]\n612: \tt.mtx.RUnlock()\n613: \tif exist {\n614: \t\treturn tenant, nil\n615: \t}\n616: \n617: \t// Slow path needs to lock fully and attempt to read again to prevent race\n618: \t// conditions, where since the fast path was tried, there may have actually\n619: \t// been the same tenant inserted in the map.\n620: \tt.mtx.Lock()\n621: \ttenant, exist = t.tenants[tenantID]\n622: \tif exist {\n623: \t\tt.mtx.Unlock()\n624: \t\treturn tenant, nil\n625: \t}",
+      "end_line": 625,
+      "path_lines": 878,
+      "start_line": 590
+    },
+    "usage": {
+      "input_tokens": 9720,
+      "input_tokens_details": {
+        "cached_tokens": 8448
+      },
+      "output_tokens": 81,
+      "output_tokens_details": {
+        "reasoning_tokens": 49
+      },
+      "total_tokens": 9801
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 3,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__thanos-io__thanos__pull_5777__comment_1192164311__complexity.patch"
+    },
+    "usage": {
+      "input_tokens": 10232,
+      "input_tokens_details": {
+        "cached_tokens": 9472
+      },
+      "output_tokens": 115,
+      "output_tokens_details": {
+        "reasoning_tokens": 104
+      },
+      "total_tokens": 10347
+    }
+  }
+]

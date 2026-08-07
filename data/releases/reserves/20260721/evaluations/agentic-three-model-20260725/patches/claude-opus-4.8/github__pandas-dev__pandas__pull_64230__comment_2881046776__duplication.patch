@@ -1,0 +1,48 @@
+diff --git a/pandas/core/indexing.py b/pandas/core/indexing.py
+index a9f7fc4..a0d76a1 100644
+--- a/pandas/core/indexing.py
++++ b/pandas/core/indexing.py
+@@ -2578,25 +2578,29 @@ class _iLocIndexer(_LocationIndexer):
+         if isinstance(value, list):
+             # Extract columns directly from the list-of-lists instead of
+             # converting to an object array and back (list → array → .tolist()).
+-            if len(ilocs) != len(value[0]):
+-                raise ValueError(
+-                    "Must have equal len keys and value when setting with an ndarray"
+-                )
+-            for i, loc in enumerate(ilocs):
+-                value_col = [row[i] for row in value]
+-                self._setitem_single_column(loc, value_col, pi)
++            n_cols = len(value[0])
++
++            def get_col(i: int):
++                return [row[i] for row in value]
++
+         else:
+             if not is_array_like(value):
+                 value = np.asarray(value)
+-            if len(ilocs) != value.shape[1]:
+-                raise ValueError(
+-                    "Must have equal len keys and value when setting with an ndarray"
+-                )
+-            for i, loc in enumerate(ilocs):
++            n_cols = value.shape[1]
++            is_object = is_object_dtype(value.dtype)
++
++            def get_col(i: int):
+                 value_col = value[:, i]
+-                if is_object_dtype(value_col.dtype):
++                if is_object:
+                     value_col = value_col.tolist()
+-                self._setitem_single_column(loc, value_col, pi)
++                return value_col
++
++        if len(ilocs) != n_cols:
++            raise ValueError(
++                "Must have equal len keys and value when setting with an ndarray"
++            )
++        for i, loc in enumerate(ilocs):
++            self._setitem_single_column(loc, get_col(i), pi)
+ 
+     def _setitem_with_indexer_frame_value(
+         self, indexer, value: DataFrame, name: str

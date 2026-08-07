@@ -1,0 +1,65 @@
+--- a/cli/lsp/npm.rs
++++ b/cli/lsp/npm.rs
+@@ -16,17 +16,17 @@
+ 
+ use super::search::PackageSearchApi;
+ 
+-#[derive(Debug, Clone)]
++#[derive(Debug)]
+ pub struct CliNpmSearchApi {
+   file_fetcher: FileFetcher,
+-  resolver: Arc<NpmFetchResolver>,
+-  search_cache: Arc<DashMap<String, Arc<Vec<String>>>>,
+-  versions_cache: Arc<DashMap<String, Arc<Vec<Version>>>>,
++  resolver: NpmFetchResolver,
++  search_cache: DashMap<String, Vec<String>>,
++  versions_cache: DashMap<String, Vec<Version>>,
+ }
+ 
+ impl CliNpmSearchApi {
+   pub fn new(file_fetcher: FileFetcher) -> Self {
+-    let resolver = Arc::new(NpmFetchResolver::new(file_fetcher.clone()));
++    let resolver = NpmFetchResolver::new(file_fetcher.clone());
+     Self {
+       file_fetcher,
+       resolver,
+@@ -40,7 +40,7 @@
+ impl PackageSearchApi for CliNpmSearchApi {
+   async fn search(&self, query: &str) -> Result<Arc<Vec<String>>, AnyError> {
+     if let Some(names) = self.search_cache.get(query) {
+-      return Ok(names.clone());
++      return Ok(Arc::new(names.value().clone()));
+     }
+     let mut search_url = npm_registry_url().join("-/v1/search")?;
+     search_url
+@@ -51,14 +51,14 @@
+       .fetch(&search_url, PermissionsContainer::allow_all())
+       .await?
+       .into_text_decoded()?;
+-    let names = Arc::new(parse_npm_search_response(&file.source)?);
++    let names = parse_npm_search_response(&file.source)?;
+     self.search_cache.insert(query.to_string(), names.clone());
+-    Ok(names)
++    Ok(Arc::new(names))
+   }
+ 
+   async fn versions(&self, name: &str) -> Result<Arc<Vec<Version>>, AnyError> {
+     if let Some(versions) = self.versions_cache.get(name) {
+-      return Ok(versions.clone());
++      return Ok(Arc::new(versions.value().clone()));
+     }
+     let info = self
+       .resolver
+@@ -68,11 +68,10 @@
+     let mut versions = info.versions.keys().cloned().collect::<Vec<_>>();
+     versions.sort();
+     versions.reverse();
+-    let versions = Arc::new(versions);
+     self
+       .versions_cache
+       .insert(name.to_string(), versions.clone());
+-    Ok(versions)
++    Ok(Arc::new(versions))
+   }
+ 
+   async fn exports(

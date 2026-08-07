@@ -1,0 +1,252 @@
+[
+  {
+    "action": {
+      "action": "find",
+      "path": "Snowflake.Data/Core/CredentialManager/Infrastructure/SFCredentialManagerFileImpl.cs",
+      "query": "ValidateLogFilePermissions"
+    },
+    "response_chars": 343,
+    "round": 1,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 281,
+          "text": "        internal void ValidateLogFilePermissions(UnixStream stream)"
+        }
+      ],
+      "query": "ValidateLogFilePermissions",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 3271,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 499,
+      "output_tokens_details": {
+        "reasoning_tokens": 390
+      },
+      "total_tokens": 3770
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "",
+          "end_line": 286,
+          "start_line": 281
+        }
+      ]
+    },
+    "response_chars": 74,
+    "round": 2,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 286,
+          "replacement_lines": 0,
+          "start_line": 281
+        }
+      ],
+      "current_file_lines": 296,
+      "updated_excerpt": {
+        "content": "271:         {\n272:             ValidateUserAndGroupPermissions(stream);\n273:             var allowedPermissions = new[]\n274:             {\n275:                 FileAccessPermissions.UserRead | FileAccessPermissions.UserWrite\n276:             };\n277:             if (!(allowedPermissions.Any(a => stream.FileAccessPermissions == a)))\n278:                 ThrowSecurityException(\"Attempting to read or write a file with too broad permissions assigned\");\n279:         }\n280: \n281: \n282:         internal void ValidateUserAndGroupPermissions(UnixStream stream)\n283:         {\n284:             if (stream.OwnerUser.UserId != _unixOperations.GetCurrentUserId())\n285:                 ThrowSecurityException(\"Attempting to read or write a file not owned by the effective user of the current process\");\n286:             if (stream.OwnerGroup.GroupId != _unixOperations.GetCurrentGroupId())\n287:                 ThrowSecurityException(\"Attempting to read or write a file not owned by the effective group of the current process\");\n288:         }\n289: \n290:         private void ThrowSecurityException(string errorMessage)\n291:         {\n292:             s_logger.Error(errorMessage);\n293:             throw new SecurityException(errorMessage);\n294:         }\n295:     }\n296: }",
+        "end_line": 296,
+        "path_lines": 296,
+        "start_line": 271
+      }
+    },
+    "usage": {
+      "input_tokens": 3364,
+      "input_tokens_details": {
+        "cached_tokens": 2816
+      },
+      "output_tokens": 553,
+      "output_tokens_details": {
+        "reasoning_tokens": 516
+      },
+      "total_tokens": 3917
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 302,
+      "path": "Snowflake.Data/Core/CredentialManager/Infrastructure/SFCredentialManagerFileImpl.cs",
+      "start_line": 1
+    },
+    "response_chars": 215,
+    "round": 3,
+    "tool_result": {
+      "content": "1: using Mono.Unix;\n2: using Newtonsoft.Json;\n3: using Snowflake.Data.Client;\n4: using Snowflake.Data.Core.Tools;\n5: using Snowflake.Data.Log;\n6: using System;\n7: using System.IO;\n8: using System.Linq;\n9: using System.Security;\n10: using System.Threading;\n11: using KeyTokenDict = System.Collections.Generic.Dictionary<string, string>;\n12: \n13: namespace Snowflake.Data.Core.CredentialManager.Infrastructure\n14: {\n15:     internal class SFCredentialManagerFileImpl : ISnowflakeCredentialManager\n16:     {\n17:         internal const int CredentialCacheLockDurationSeconds = 60;\n18: \n19:         internal const FileAccessPermissions CredentialCacheLockDirPermissions = FileAccessPermissions.UserRead;\n20: \n21:         private static readonly SFLogger s_logger = SFLoggerFactory.GetLogger<SFCredentialManagerFileImpl>();\n22: \n23:         private static readonly object s_lock = new object();\n24: \n25:         internal SFCredentialManagerFileStorage _fileStorage = null;\n26: \n27:         private readonly FileOperations _fileOperations;\n28: \n29:         private readonly DirectoryOperations _directoryOperations;\n30: \n31:         private readonly UnixOperations _unixOperations;\n32: \n33:         private readonly EnvironmentOperations _environmentOperations;\n34: \n35:         public static readonly SFCredentialManagerFileImpl Instance = new SFCredentialManagerFileImpl(FileOperations.Instance, DirectoryOperations.Instance, UnixOperations.Instance, EnvironmentOperations.Instance);\n36: \n37:         internal SFCredentialManagerFileImpl(FileOperations fileOperations, DirectoryOperations directoryOperations, UnixOperations unixOperations, EnvironmentOperations environmentOperations)\n38:         {\n39:             _fileOperations = fileOperations;\n40:             _directoryOperations = directoryOperations;\n41:             _unixOperations = unixOperations;\n42:             _environmentOperations = environmentOperations;\n43:         }\n44: \n45:         public string GetCredentials(string key)\n46:         {\n47:             s_logger.Debug($\"Getting credentials for key: {key}\");\n48:             lock (s_lock)\n49:             {\n50:                 InitializeFileStorageIfNeeded();\n51:                 s_logger.Debug($\"Getting credentials from json file in {_fileStorage.JsonCacheFilePath} for key: {key}\");\n52:                 var lockAcquired = AcquireLockWithRetries(); // additional fs level locking is to synchronize file access across many applications\n53:                 if (!lockAcquired)\n54:                 {\n55:                     s_logger.Error(\"Failed to acquire lock for reading credentials\");\n56:                     return string.Empty;\n57:                 }\n58:                 try\n59:                 {\n60:                     if (_fileOperations.Exists(_fileStorage.JsonCacheFilePath))\n61:                     {\n62:                         var keyTokenPairs = ReadJsonFile();\n63:                         if (keyTokenPairs.TryGetValue(key, out string token))\n64:                         {\n65:                             return token;\n66:                         }\n67:                     }\n68:                 }\n69:                 catch (Exception exception)\n70:                 {\n71:                     s_logger.Error(\"Failed to get credentials\", exception);\n72:                     throw;\n73:                 }\n74:                 finally\n75:                 {\n76:                     ReleaseLock();\n77:                 }\n78:             }\n79:             s_logger.Debug(\"Unable to get credentials for the specified key\");\n80:             return string.Empty;\n81:         }\n82: \n83:         public void RemoveCredentials(string key)\n84:         {\n85:             s_logger.Debug($\"Removing credentials for key: {key}\");\n86:             lock (s_lock)\n87:             {\n88:                 InitializeFileStorageIfNeeded();\n89:                 s_logger.Debug($\"Removing credentials from json file in {_fileStorage.JsonCacheFilePath} for key: {key}\");\n90:                 var lockAcquired = AcquireLockWithRetries(); // additional fs level locking is to synchronize file access across many applications\n91:                 if (!lockAcquired)\n92:                 {\n93:                     s_logger.Error(\"Failed to acquire lock for removing credentials\");\n94:                     return;\n95:                 }\n96:                 try\n97:                 {\n98:                     if (_fileOperations.Exists(_fileStorage.JsonCacheFilePath))\n99:                     {\n100:                         var keyTokenPairs = ReadJsonFile();\n101:                         keyTokenPairs.Remove(key);\n102:                         WriteToJsonFile(keyTokenPairs);\n103:                     }\n104:                 }\n105:                 catch (Exception exception)\n106:                 {\n107:                     s_logger.Error(\"Failed to remove credentials\", exception);\n108:                     throw;\n109:                 }\n110:                 finally\n111:                 {\n112:                     ReleaseLock();\n113:                 }\n114:             }\n115:         }\n116: \n117:         public void SaveCredentials(string key, string token)\n118:         {\n119:             s_logger.Debug($\"Saving credentials for key: {key}\");\n120:             lock (s_lock)\n121:             {\n122:                 InitializeFileStorageIfNeeded();\n123:                 s_logger.Debug($\"Saving credentials to json file in {_fileStorage.JsonCacheFilePath} for key: {key}\");\n124:                 var lockAcquired = AcquireLockWithRetries(); // additional fs level locking is to synchronize file access across many applications\n125:                 if (!lockAcquired)\n126:                 {\n127:                     s_logger.Error(\"Failed to acquire lock for saving credentials\");\n128:                     return;\n129:                 }\n130:                 try\n131:                 {\n132:                     KeyTokenDict keyTokenPairs = _fileOperations.Exists(_fileStorage.JsonCacheFilePath) ? ReadJsonFile() : new KeyTokenDict();\n133:                     keyTokenPairs[key] = token;\n134:                     WriteToJsonFile(keyTokenPairs);\n135:                 }\n136:                 catch (Exception exception)\n137:                 {\n138:                     s_logger.Error(\"Failed to save credentials\", exception);\n139:                     throw;\n140:                 }\n141:                 finally\n142:                 {\n143:                     ReleaseLock();\n144:                 }\n145:             }\n146:         }\n147: \n148:         private void WriteToJsonFile(KeyTokenDict keyTokenPairs)\n149:         {\n150:             var credentials = new CredentialsFileContent { Tokens = keyTokenPairs };\n151:             var jsonString = JsonConvert.SerializeObject(credentials);\n152:             WriteContentToJsonFile(jsonString);\n153:         }\n154: \n155:         private void WriteContentToJsonFile(string content)\n156:         {\n157:             s_logger.Debug($\"Writing credentials to json file in {_fileStorage.JsonCacheFilePath}\");\n158:             if (!_directoryOperations.Exists(_fileStorage.JsonCacheDirectory))\n159:             {\n160:                 _directoryOperations.CreateDirectory(_fileStorage.JsonCacheDirectory);\n161:             }\n162:             if (_fileOperations.Exists(_fileStorage.JsonCacheFilePath))\n163:             {\n164:                 s_logger.Info($\"The existing json file for credential cache in {_fileStorage.JsonCacheFilePath} will be overwritten\");\n165:             }\n166:             else\n167:             {\n168:                 s_logger.Info($\"Creating the json file for credential cache in {_fileStorage.JsonCacheFilePath}\");\n169:                 try\n170:                 {\n171:                     _unixOperations.CreateFileWithPermissions(_fileStorage.JsonCacheFilePath,\n172:                         FileAccessPermissions.UserRead | FileAccessPermissions.UserWrite);\n173:                 }\n174:                 catch (Exception e)\n175:                 {\n176:                     var errorMessage = \"Failed to create the JSON token cache file\";\n177:                     s_logger.Error(errorMessage);\n178:                     throw new Exception(errorMessage, e);\n179:                 }\n180:             }\n181:             _fileOperations.Write(_fileStorage.JsonCacheFilePath, content, ValidateFilePermissions);\n182:         }\n183: \n184:         private KeyTokenDict ReadJsonFile()\n185:         {\n186:             string contentFile;\n187:             try\n188:             {\n189:                 contentFile = _fileOperations.ReadAllText(_fileStorage.JsonCacheFilePath, ValidateFilePermissions);\n190:             }\n191:             catch (FileNotFoundException)\n192:             {\n193:                 s_logger.Error(\"Failed to read the file with cached credentials because it does not exist\");\n194:                 return new KeyTokenDict();\n195:             }\n196:             try\n197:             {\n198:                 var fileContent = JsonConvert.DeserializeObject<CredentialsFileContent>(contentFile);\n199:                 return (fileContent == null || fileContent.Tokens == null) ? new KeyTokenDict() : fileContent.Tokens;\n200:             }\n201:             catch (Exception)\n202:             {\n203:                 s_logger.Error(\"Failed to parse the file with cached credentials\");\n204:                 return new KeyTokenDict();\n205:             }\n206:         }\n207: \n208:         private void InitializeFileStorageIfNeeded()\n209:         {\n210:             if (_fileStorage != null)\n211:                 return;\n212:             var fileStorage = new SFCredentialManagerFileStorage(_environmentOperations);\n213:             _directoryOperations.CreateDirectory(fileStorage.JsonCacheDirectory);\n214:             CheckIfDirectoryIsSecure(fileStorage.JsonCacheDirectory);\n215:             _fileStorage = fileStorage;\n216:         }\n217: \n218:         private void CheckIfDirectoryIsSecure(string directory)\n219:         {\n220:             var unixDirectoryInfo = _unixOperations.GetDirectoryInfo(directory);\n221:             if (!unixDirectoryInfo.Exists) return;\n222: \n223:             var userId = _unixOperations.GetCurrentUserId();\n224:             if (!unixDirectoryInfo.IsSafeExactly(userId))\n225:             {\n226:                 s_logger.Warn($\"Cache directory {directory} permissions or ownership is set to insecure values\");\n227:             }\n228:         }\n229: \n230:         private bool AcquireLockWithRetries() => AcquireLock(5, TimeSpan.FromMilliseconds(50));\n231: \n232:         private bool AcquireLock(int numberOfAttempts, TimeSpan delayTime)\n233:         {\n234:             for (var i = 0; i < numberOfAttempts; i++)\n235:             {\n236:                 if (AcquireLock())\n237:                     return true;\n238:                 if (i + 1 < numberOfAttempts)\n239:                     Thread.Sleep(delayTime);\n240:             }\n241:             return false;\n242:         }\n243: \n244:         private bool AcquireLock()\n245:         {\n246:             if (!_directoryOperations.Exists(_fileStorage.JsonCacheDirectory))\n247:             {\n248:                 _directoryOperations.CreateDirectory(_fileStorage.JsonCacheDirectory);\n249:             }\n250:             var lockDirectoryInfo = _directoryOperations.GetDirectoryInfo(_fileStorage.JsonCacheLockPath);\n251:             if (lockDirectoryInfo.IsCreatedEarlierThanSeconds(CredentialCacheLockDurationSeconds, DateTime.UtcNow))\n252:             {\n253:                 s_logger.Warn($\"File cache lock directory {_fileStorage.JsonCacheLockPath} created more than {CredentialCacheLockDurationSeconds} seconds ago. Removing the lock directory.\");\n254:                 ReleaseLock();\n255:             }\n256:             else if (lockDirectoryInfo.Exists)\n257:             {\n258:                 return false;\n259:             }\n260: \n261:             var result = _unixOperations.CreateDirectoryWithPermissionsMkdir(_fileStorage.JsonCacheLockPath, CredentialCacheLockDirPermissions);\n262:             return result == 0;\n263:         }\n264: \n265:         private void ReleaseLock()\n266:         {\n267:             _directoryOperations.Delete(_fileStorage.JsonCacheLockPath, false);\n268:         }\n269: \n270:         internal void ValidateFilePermissions(UnixStream stream)\n271:         {\n272:             ValidateUserAndGroupPermissions(stream);\n273:             var allowedPermissions = new[]\n274:             {\n275:                 FileAccessPermissions.UserRead | FileAccessPermissions.UserWrite\n276:             };\n277:             if (!(allowedPermissions.Any(a => stream.FileAccessPermissions == a)))\n278:                 ThrowSecurityException(\"Attempting to read or write a file with too broad permissions assigned\");\n279:         }\n280: \n281: \n282:         internal void ValidateUserAndGroupPermissions(UnixStream stream)\n283:         {\n284:             if (stream.OwnerUser.UserId != _unixOperations.GetCurrentUserId())\n285:                 ThrowSecurityException(\"Attempting to read or write a file not owned by the effective user of the current process\");\n286:             if (stream.OwnerGroup.GroupId != _unixOperations.GetCurrentGroupId())\n287:                 ThrowSecurityException(\"Attempting to read or write a file not owned by the effective group of the current process\");\n288:         }\n289: \n290:         private void ThrowSecurityException(string errorMessage)\n291:         {\n292:             s_logger.Error(errorMessage);\n293:             throw new SecurityException(errorMessage);\n294:         }\n295:     }\n296: }",
+      "end_line": 296,
+      "path_lines": 296,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 3756,
+      "input_tokens_details": {
+        "cached_tokens": 2816
+      },
+      "output_tokens": 831,
+      "output_tokens_details": {
+        "reasoning_tokens": 758
+      },
+      "total_tokens": 4587
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "Snowflake.Data/Core/CredentialManager/Infrastructure/SFCredentialManagerFileImpl.cs",
+      "query": "EasyLoggingStarter"
+    },
+    "response_chars": 139,
+    "round": 4,
+    "tool_result": {
+      "matches": [],
+      "query": "EasyLoggingStarter",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 6898,
+      "input_tokens_details": {
+        "cached_tokens": 3328
+      },
+      "output_tokens": 287,
+      "output_tokens_details": {
+        "reasoning_tokens": 242
+      },
+      "total_tokens": 7185
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 260,
+      "path": "Snowflake.Data/Log/EasyLoggingStarter.cs",
+      "start_line": 1
+    },
+    "error": "file unavailable at start_sha: Snowflake.Data/Log/EasyLoggingStarter.cs",
+    "raw_response": "{\"action\":\"read\",\"path\":\"Snowflake.Data/Log/EasyLoggingStarter.cs\",\"start_line\":1,\"end_line\":260}\n{\"action\":\"read\",\"path\":\"Snowflake.Data/Log/EasyLoggingStarter.cs\",\"start_line\":1,\"end_line\":260}",
+    "response_chars": 195,
+    "round": 5,
+    "usage": {
+      "input_tokens": 6961,
+      "input_tokens_details": {
+        "cached_tokens": 6400
+      },
+      "output_tokens": 470,
+      "output_tokens_details": {
+        "reasoning_tokens": 401
+      },
+      "total_tokens": 7431
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "",
+          "end_line": 281,
+          "start_line": 280
+        }
+      ]
+    },
+    "response_chars": 94,
+    "round": 6,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 281,
+          "replacement_lines": 0,
+          "start_line": 280
+        }
+      ],
+      "current_file_lines": 294,
+      "updated_excerpt": {
+        "content": "270:         internal void ValidateFilePermissions(UnixStream stream)\n271:         {\n272:             ValidateUserAndGroupPermissions(stream);\n273:             var allowedPermissions = new[]\n274:             {\n275:                 FileAccessPermissions.UserRead | FileAccessPermissions.UserWrite\n276:             };\n277:             if (!(allowedPermissions.Any(a => stream.FileAccessPermissions == a)))\n278:                 ThrowSecurityException(\"Attempting to read or write a file with too broad permissions assigned\");\n279:         }\n280:         internal void ValidateUserAndGroupPermissions(UnixStream stream)\n281:         {\n282:             if (stream.OwnerUser.UserId != _unixOperations.GetCurrentUserId())\n283:                 ThrowSecurityException(\"Attempting to read or write a file not owned by the effective user of the current process\");\n284:             if (stream.OwnerGroup.GroupId != _unixOperations.GetCurrentGroupId())\n285:                 ThrowSecurityException(\"Attempting to read or write a file not owned by the effective group of the current process\");\n286:         }\n287: \n288:         private void ThrowSecurityException(string errorMessage)\n289:         {\n290:             s_logger.Error(errorMessage);\n291:             throw new SecurityException(errorMessage);\n292:         }\n293:     }\n294: }",
+        "end_line": 294,
+        "path_lines": 294,
+        "start_line": 270
+      }
+    },
+    "usage": {
+      "input_tokens": 6983,
+      "input_tokens_details": {
+        "cached_tokens": 6400
+      },
+      "output_tokens": 581,
+      "output_tokens_details": {
+        "reasoning_tokens": 539
+      },
+      "total_tokens": 7564
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\n",
+          "end_line": 279,
+          "start_line": 280
+        }
+      ]
+    },
+    "response_chars": 296,
+    "round": 7,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 279,
+          "replacement_lines": 1,
+          "start_line": 280
+        }
+      ],
+      "current_file_lines": 295,
+      "updated_excerpt": {
+        "content": "270:         internal void ValidateFilePermissions(UnixStream stream)\n271:         {\n272:             ValidateUserAndGroupPermissions(stream);\n273:             var allowedPermissions = new[]\n274:             {\n275:                 FileAccessPermissions.UserRead | FileAccessPermissions.UserWrite\n276:             };\n277:             if (!(allowedPermissions.Any(a => stream.FileAccessPermissions == a)))\n278:                 ThrowSecurityException(\"Attempting to read or write a file with too broad permissions assigned\");\n279:         }\n280: \n281:         internal void ValidateUserAndGroupPermissions(UnixStream stream)\n282:         {\n283:             if (stream.OwnerUser.UserId != _unixOperations.GetCurrentUserId())\n284:                 ThrowSecurityException(\"Attempting to read or write a file not owned by the effective user of the current process\");\n285:             if (stream.OwnerGroup.GroupId != _unixOperations.GetCurrentGroupId())\n286:                 ThrowSecurityException(\"Attempting to read or write a file not owned by the effective group of the current process\");\n287:         }\n288: \n289:         private void ThrowSecurityException(string errorMessage)\n290:         {\n291:             s_logger.Error(errorMessage);\n292:             throw new SecurityException(errorMessage);\n293:         }\n294:     }\n295: }",
+        "end_line": 295,
+        "path_lines": 295,
+        "start_line": 270
+      }
+    },
+    "usage": {
+      "input_tokens": 7381,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 910,
+      "output_tokens_details": {
+        "reasoning_tokens": 804
+      },
+      "total_tokens": 8291
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 8,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__snowflakedb__snowflake-connector-net__pull_1057__comment_2362344766__duplication.patch"
+    },
+    "usage": {
+      "input_tokens": 7785,
+      "input_tokens_details": {
+        "cached_tokens": 6912
+      },
+      "output_tokens": 406,
+      "output_tokens_details": {
+        "reasoning_tokens": 395
+      },
+      "total_tokens": 8191
+    }
+  }
+]

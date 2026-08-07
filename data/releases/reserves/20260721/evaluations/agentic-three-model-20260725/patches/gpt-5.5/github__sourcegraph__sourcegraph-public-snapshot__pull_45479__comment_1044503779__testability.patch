@@ -1,0 +1,42 @@
+diff --git a/cmd/frontend/internal/auth/userpasswd/lockout.go b/cmd/frontend/internal/auth/userpasswd/lockout.go
+index c42fa63..86a2ef2 100644
+--- a/cmd/frontend/internal/auth/userpasswd/lockout.go
++++ b/cmd/frontend/internal/auth/userpasswd/lockout.go
+@@ -18,8 +18,6 @@ import (
+ 	"github.com/sourcegraph/sourcegraph/lib/errors"
+ )
+ 
+-var MockSendEmail func(context.Context, string, txemail.Message) (err error)
+-
+ // LockoutStore provides semantics for account lockout management.
+ type LockoutStore interface {
+ 	// IsLockedOut returns true if the given user has been locked along with the
+@@ -47,6 +45,7 @@ type lockoutStore struct {
+ 	failedAttempts  *rcache.Cache
+ 	unlockToken     *rcache.Cache
+ 	unlockEmailSent *rcache.Cache
++	sendEmail       func(context.Context, string, txemail.Message) (err error)
+ }
+ 
+ // NewLockoutStore returns a new LockoutStore with given durations using the
+@@ -58,6 +57,7 @@ func NewLockoutStore(failedThreshold int, lockoutPeriod, consecutivePeriod time.
+ 		failedAttempts:  rcache.NewWithTTL("account_failed_attempts", int(consecutivePeriod.Seconds())),
+ 		unlockToken:     rcache.NewWithTTL("account_unlock_token", int(lockoutPeriod.Seconds())),
+ 		unlockEmailSent: rcache.NewWithTTL("account_lockout_email_sent", int(lockoutPeriod.Seconds())),
++		sendEmail:       txemail.Send,
+ 	}
+ }
+ 
+@@ -154,9 +154,9 @@ func (s *lockoutStore) SendUnlockAccountEmail(ctx context.Context, userID int32,
+ 		return err
+ 	}
+ 
+-	emailF := txemail.Send
+-	if MockSendEmail != nil {
+-		emailF = MockSendEmail
++	emailF := s.sendEmail
++	if emailF == nil {
++		emailF = txemail.Send
+ 	}
+ 	err = emailF(ctx, "account_unlock", txemail.Message{
+ 		To:       []string{recipientEmail},

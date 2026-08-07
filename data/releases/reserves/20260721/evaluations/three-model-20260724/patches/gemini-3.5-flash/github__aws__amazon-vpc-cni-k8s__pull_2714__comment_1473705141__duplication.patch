@@ -1,0 +1,57 @@
+--- a/pkg/awsutils/awsutils.go
++++ b/pkg/awsutils/awsutils.go
+@@ -858,17 +858,11 @@
+ 		input = createEniUsingCustomCfg(sg, customSubnet, input)
+ 		log.Infof("Creating ENI with security groups: %v in subnet: %s", aws.StringValueSlice(input.Groups), aws.StringValue(input.SubnetId))
+ 
+-		start := time.Now()
+-		result, err = cache.ec2SVC.CreateNetworkInterfaceWithContext(context.Background(), input)
+-		prometheusmetrics.Ec2ApiReq.WithLabelValues("CreateNetworkInterface").Inc()
+-		prometheusmetrics.AwsAPILatency.WithLabelValues("CreateNetworkInterface", fmt.Sprint(err != nil), awsReqStatus(err)).Observe(msSince(start))
++		result, err = cache.createNetworkInterfaceWithMetrics(input)
+ 		if err == nil {
+ 			log.Infof("Created a new ENI: %s", aws.StringValue(result.NetworkInterface.NetworkInterfaceId))
+ 			return *result.NetworkInterface.NetworkInterfaceId, nil
+ 		}
+-		checkAPIErrorAndBroadcastEvent(err, "ec2:CreateNetworkInterface")
+-		awsAPIErrInc("CreateNetworkInterface", err)
+-		prometheusmetrics.Ec2ApiErr.WithLabelValues("CreateNetworkInterface").Inc()
+ 		log.Errorf("Failed to CreateNetworkInterface %v for subnet %s", err, customSubnet)
+ 	} else {
+ 		subnetResult, vpcErr := cache.getVpcSubnets()
+@@ -885,21 +879,28 @@
+ 			log.Infof("Creating ENI with security groups: %v in subnet: %s", aws.StringValueSlice(input.Groups), aws.StringValue(input.SubnetId))
+ 
+ 			input.SubnetId = subnet.SubnetId
+-			start := time.Now()
+-			result, err = cache.ec2SVC.CreateNetworkInterfaceWithContext(context.Background(), input)
+-			prometheusmetrics.Ec2ApiReq.WithLabelValues("CreateNetworkInterface").Inc()
+-			prometheusmetrics.AwsAPILatency.WithLabelValues("CreateNetworkInterface", fmt.Sprint(err != nil), awsReqStatus(err)).Observe(msSince(start))
++			result, err = cache.createNetworkInterfaceWithMetrics(input)
+ 			if err == nil {
+ 				log.Infof("Created a new ENI: %s", aws.StringValue(result.NetworkInterface.NetworkInterfaceId))
+ 				return *result.NetworkInterface.NetworkInterfaceId, nil
+ 			}
+-			checkAPIErrorAndBroadcastEvent(err, "ec2:CreateNetworkInterface")
+-			awsAPIErrInc("CreateNetworkInterface", err)
+-			prometheusmetrics.Ec2ApiErr.WithLabelValues("CreateNetworkInterface").Inc()
+ 			log.Errorf("Failed to CreateNetworkInterface %v for subnet %s", err, *subnet.SubnetId)
+ 		}
+ 	}
+ 	return "", errors.Wrap(err, "failed to create network interface")
++}
++
++func (cache *EC2InstanceMetadataCache) createNetworkInterfaceWithMetrics(input *ec2.CreateNetworkInterfaceInput) (*ec2.CreateNetworkInterfaceOutput, error) {
++	start := time.Now()
++	result, err := cache.ec2SVC.CreateNetworkInterfaceWithContext(context.Background(), input)
++	prometheusmetrics.Ec2ApiReq.WithLabelValues("CreateNetworkInterface").Inc()
++	prometheusmetrics.AwsAPILatency.WithLabelValues("CreateNetworkInterface", fmt.Sprint(err != nil), awsReqStatus(err)).Observe(msSince(start))
++	if err != nil {
++		checkAPIErrorAndBroadcastEvent(err, "ec2:CreateNetworkInterface")
++		awsAPIErrInc("CreateNetworkInterface", err)
++		prometheusmetrics.Ec2ApiErr.WithLabelValues("CreateNetworkInterface").Inc()
++	}
++	return result, err
+ }
+ 
+ func (cache *EC2InstanceMetadataCache) getVpcSubnets() ([]*ec2.Subnet, error) {

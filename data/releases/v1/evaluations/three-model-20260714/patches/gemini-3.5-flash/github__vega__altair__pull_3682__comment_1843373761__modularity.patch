@@ -1,0 +1,60 @@
+--- a/altair/utils/_vegafusion_data.py
++++ b/altair/utils/_vegafusion_data.py
+@@ -20,6 +20,7 @@
+ 
+ if TYPE_CHECKING:
+     from collections.abc import MutableMapping
++    from typing_extensions import TypeGuard
+ 
+     from narwhals.typing import IntoDataFrame
+ 
+@@ -29,7 +30,7 @@
+ # from charts by the vegafusion data transformer. Use a WeakValueDictionary
+ # rather than a dict so that the Python interpreter is free to garbage
+ # collect the stored DataFrames.
+-extracted_inline_tables: MutableMapping[str, Any] = WeakValueDictionary()
++extracted_inline_tables: MutableMapping[str, DataFrameLike] = WeakValueDictionary()
+ 
+ # Special URL prefix that VegaFusion uses to denote that a
+ # dataset in a Vega spec corresponds to an entry in the `inline_datasets`
+@@ -62,13 +63,7 @@
+ ) -> _VegaFusionReturnType: ...
+ 
+ 
+-def vegafusion_data_transformer(
+-    data: DataType | None = None, max_rows: int = 100000
+-) -> Callable[..., Any] | _VegaFusionReturnType:
+-    """VegaFusion Data Transformer."""
+-    if data is None:
+-        return vegafusion_data_transformer
+-
++def _is_supported_by_vf(data: Any) -> TypeGuard[DataFrameLike]:
+     # Test whether VegaFusion supports the data type
+     is_v2 = (
+         Version(version) >= Version("2.0.0a0")
+@@ -77,13 +72,21 @@
+     )
+     if is_v2:
+         # VegaFusion v2 support narwhals-compatible DataFrames
+-        supported_by_vf = isinstance(data, DataFrameLike) or isinstance(
++        return isinstance(data, DataFrameLike) or isinstance(
+             nw.from_native(data, pass_through=True), (nw.DataFrame, nw.LazyFrame)
+         )
+     else:
+-        supported_by_vf = isinstance(data, DataFrameLike)
+-
+-    if supported_by_vf and not isinstance(data, SupportsGeoInterface):
++        return isinstance(data, DataFrameLike)
++
++
++def vegafusion_data_transformer(
++    data: DataType | None = None, max_rows: int = 100000
++) -> Callable[..., Any] | _VegaFusionReturnType:
++    """VegaFusion Data Transformer."""
++    if data is None:
++        return vegafusion_data_transformer
++
++    if _is_supported_by_vf(data) and not isinstance(data, SupportsGeoInterface):
+         table_name = f"table_{uuid.uuid4()}".replace("-", "_")
+         extracted_inline_tables[table_name] = data
+         return {"url": VEGAFUSION_PREFIX + table_name}

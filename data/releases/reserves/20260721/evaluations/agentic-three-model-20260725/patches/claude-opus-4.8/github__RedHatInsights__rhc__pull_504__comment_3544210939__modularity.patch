@@ -1,0 +1,197 @@
+diff --git a/scripts/its_select_tests.py b/scripts/its_select_tests.py
+index a17273f..1acb69c 100644
+--- a/scripts/its_select_tests.py
++++ b/scripts/its_select_tests.py
+@@ -88,7 +88,7 @@ def write_github_outputs(path: str, selection: dict[str, Any]) -> None:
+             file.write(f"{key}={value}\n")
+ 
+ 
+-def main() -> int:
++def parse_args() -> argparse.Namespace:
+     parser = argparse.ArgumentParser(
+         description="Select test targets based on changed files."
+     )
+@@ -109,16 +109,19 @@ def main() -> int:
+         default="",
+         help="Optional path to GitHub output file ($GITHUB_OUTPUT).",
+     )
+-    args = parser.parse_args()
++    return parser.parse_args()
+ 
+-    with open(args.map_file, "r", encoding="utf-8") as file:
+-        config = yaml.safe_load(file)
+ 
+-    changed_files = git_changed_files(args.base, args.head)
++def load_config(map_file: str) -> dict[str, Any]:
++    with open(map_file, "r", encoding="utf-8") as file:
++        return yaml.safe_load(file)
++
++
++def select_considered_files(
++    changed_files: list[str], config: dict[str, Any]
++) -> tuple[list[str], bool]:
+     ignore_patterns = compile_patterns(config.get("ignore_patterns", []))
+     docs_patterns = compile_patterns(config.get("docs_only_patterns", []))
+-    fallback_patterns = compile_patterns(config.get("fallback_patterns", []))
+-    go_package_roots = load_go_package_roots(config)
+ 
+     considered_files = [
+         path for path in changed_files if not matches_any(path, ignore_patterns)
+@@ -126,16 +129,17 @@ def main() -> int:
+     docs_only_change = bool(considered_files) and all(
+         matches_any(path, docs_patterns) for path in considered_files
+     )
++    return considered_files, docs_only_change
++
+ 
++def apply_rules(
++    considered_files: list[str], config: dict[str, Any]
++) -> tuple[set[str], set[str], list[str], list[str], dict[str, list[str]]]:
+     selected_go_packages: set[str] = set()
+     selected_pytest_files: set[str] = set()
+     matched_rules: list[str] = []
+     reasons: list[str] = []
+ 
+-    smoke = config.get("smoke", {})
+-    smoke_go = set(smoke.get("go_packages", []))
+-    smoke_pytest = set(smoke.get("pytest_files", []))
+-
+     rule_match_by_file: dict[str, list[str]] = {path: [] for path in considered_files}
+     for rule in config.get("rules", []):
+         compiled_rule_patterns = compile_patterns(rule.get("patterns", []))
+@@ -151,6 +155,23 @@ def main() -> int:
+         for path in matched:
+             rule_match_by_file[path].append(rule["id"])
+ 
++    return (
++        selected_go_packages,
++        selected_pytest_files,
++        matched_rules,
++        reasons,
++        rule_match_by_file,
++    )
++
++
++def apply_direct_and_derived(
++    considered_files: list[str],
++    go_package_roots: set[str],
++    rule_match_by_file: dict[str, list[str]],
++    selected_go_packages: set[str],
++    selected_pytest_files: set[str],
++    reasons: list[str],
++) -> None:
+     for path in considered_files:
+         if path.startswith("integration-tests/test_") and path.endswith(".py"):
+             selected_pytest_files.add(path)
+@@ -160,6 +181,20 @@ def main() -> int:
+             selected_go_packages.add(package)
+             reasons.append(f"derived-go-package:{package}")
+ 
++
++def resolve_full_run(
++    considered_files: list[str],
++    config: dict[str, Any],
++    docs_only_change: bool,
++    selected_go_packages: set[str],
++    selected_pytest_files: set[str],
++    reasons: list[str],
++) -> tuple[bool, str]:
++    fallback_patterns = compile_patterns(config.get("fallback_patterns", []))
++    smoke = config.get("smoke", {})
++    smoke_go = set(smoke.get("go_packages", []))
++    smoke_pytest = set(smoke.get("pytest_files", []))
++
+     full_run_triggers = [
+         path for path in considered_files if matches_any(path, fallback_patterns)
+     ]
+@@ -185,7 +220,22 @@ def main() -> int:
+     else:
+         risk_level = "medium"
+ 
+-    selection = {
++    return run_full_integration, risk_level
++
++
++def build_selection(
++    args: argparse.Namespace,
++    changed_files: list[str],
++    considered_files: list[str],
++    docs_only_change: bool,
++    matched_rules: list[str],
++    selected_go_packages: set[str],
++    selected_pytest_files: set[str],
++    run_full_integration: bool,
++    risk_level: str,
++    reasons: list[str],
++) -> dict[str, Any]:
++    return {
+         "base": args.base,
+         "head": args.head,
+         "changed_files": changed_files,
+@@ -215,6 +265,8 @@ def main() -> int:
+         },
+     }
+ 
++
++def write_selection(args: argparse.Namespace, selection: dict[str, Any]) -> None:
+     with open(args.output_json, "w", encoding="utf-8") as file:
+         json.dump(selection, file, indent=2, sort_keys=True)
+         file.write("\n")
+@@ -223,6 +275,57 @@ def main() -> int:
+         write_github_outputs(args.github_output, selection)
+ 
+     print(json.dumps(selection, indent=2, sort_keys=True))
++
++
++def main() -> int:
++    args = parse_args()
++    config = load_config(args.map_file)
++
++    changed_files = git_changed_files(args.base, args.head)
++    go_package_roots = load_go_package_roots(config)
++
++    considered_files, docs_only_change = select_considered_files(changed_files, config)
++
++    (
++        selected_go_packages,
++        selected_pytest_files,
++        matched_rules,
++        reasons,
++        rule_match_by_file,
++    ) = apply_rules(considered_files, config)
++
++    apply_direct_and_derived(
++        considered_files,
++        go_package_roots,
++        rule_match_by_file,
++        selected_go_packages,
++        selected_pytest_files,
++        reasons,
++    )
++
++    run_full_integration, risk_level = resolve_full_run(
++        considered_files,
++        config,
++        docs_only_change,
++        selected_go_packages,
++        selected_pytest_files,
++        reasons,
++    )
++
++    selection = build_selection(
++        args,
++        changed_files,
++        considered_files,
++        docs_only_change,
++        matched_rules,
++        selected_go_packages,
++        selected_pytest_files,
++        run_full_integration,
++        risk_level,
++        reasons,
++    )
++
++    write_selection(args, selection)
+     return 0
+ 
+ 

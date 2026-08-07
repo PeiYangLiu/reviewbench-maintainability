@@ -1,0 +1,65 @@
+diff --git a/cli/running/process_controller.go b/cli/running/process_controller.go
+index aa081cc..6a93177 100644
+--- a/cli/running/process_controller.go
++++ b/cli/running/process_controller.go
+@@ -79,41 +79,15 @@ func (pc *processController) IsAlive() bool {
+ // timeout - the time that was provided to the process
+ // to terminate correctly before the "SIGKILL" signal is used.
+ func (pc *processController) Stop(waitTimeout time.Duration) error {
+-	if !pc.IsAlive() {
+-		return nil
+-	}
+-
+-	// Сreate a channel to receive an indication of the termination
+-	// of the Instance.
+-	waitDone := make(chan error, 1)
+-	go func() {
+-		waitDone <- pc.Wait()
+-	}()
+-
+-	// Trying to terminate the process by using a "SIGINT" signal.
+-	// In case of failure a "SIGKILL" signal will be used.
+-	if err := pc.SendSignal(os.Interrupt); err != nil {
+-		return fmt.Errorf("failed to send SIGINT to instance: %s", err)
+-	}
+-
+-	// Terminate the process at any cost.
+-	select {
+-	case <-time.After(waitTimeout):
+-		// Send "SIGKILL" signal
+-		if err := pc.cmd.Process.Kill(); err != nil {
+-			return fmt.Errorf("failed to send SIGKILL to instance: %s", err)
+-		} else {
+-			// Wait for the process to terminate.
+-			<-waitDone
+-			return nil
+-		}
+-	case err := <-waitDone:
+-		return err
+-	}
++	return pc.terminate(waitTimeout, os.Interrupt, "SIGINT")
+ }
+ 
+ // Quit terminates the process.
+ func (pc *processController) Quit(waitTimeout time.Duration) error {
++	return pc.terminate(waitTimeout, syscall.SIGQUIT, "SIGINT")
++}
++
++func (pc *processController) terminate(waitTimeout time.Duration, sig os.Signal, sigName string) error {
+ 	if !pc.IsAlive() {
+ 		return nil
+ 	}
+@@ -125,10 +99,10 @@ func (pc *processController) Quit(waitTimeout time.Duration) error {
+ 		waitDone <- pc.Wait()
+ 	}()
+ 
+-	// Trying to terminate the process by using a "SIGINT" signal.
++	// Trying to terminate the process by using the specified signal.
+ 	// In case of failure a "SIGKILL" signal will be used.
+-	if err := pc.SendSignal(syscall.SIGQUIT); err != nil {
+-		return fmt.Errorf("failed to send SIGINT to instance: %s", err)
++	if err := pc.SendSignal(sig); err != nil {
++		return fmt.Errorf("failed to send %s to instance: %s", sigName, err)
+ 	}
+ 
+ 	// Terminate the process at any cost.

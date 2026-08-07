@@ -1,0 +1,158 @@
+[
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "func (h *EventHandler[T, P]) generatePmapEventBytes(ctx context.Context, m pubsub.Message) ([]byte, error) {\n\t// Get the GCS object as bytes given GCS notification information.\n\tvar processErr error\n\n\tyb, err := h.getGCSObjectBytes(ctx, m.Attributes)\n\tif err != nil {\n\t\treturn nil, errors.Join(processErr, fmt.Errorf(\"failed to get GCS object: %w\", err))\n\t}\n\tp, err := objectBytesToProto[T, P](yb)\n\tif err != nil {\n\t\treturn nil, errors.Join(processErr, fmt.Errorf(\"failed to convert GCS object to proto: %w\", err))\n\t}\n\tfor _, processor := range h.processors {\n\t\tif err := processor.Process(ctx, p); err != nil {\n\t\t\tprocessErr = fmt.Errorf(\"failed to process object: %w\", err)\n\t\t\tbreak\n\t\t}\n\t}\n\n\tpayload, err := anypb.New(p)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"failed to convert object to pmap event payload: %w\", err)\n\t}\n\n\tvar gr *v1alpha1.GitHubSource\n\tif m.Attributes[\"payloadFormat\"] == \"JSON_API_V1\" {\n\t\tgr, err = parseGitHubSource(ctx, m.Data, m.Attributes)\n\t\tif err != nil {\n\t\t\t// Join with the processErr. We don't want to lose the user facing error if it's not nil.\n\t\t\treturn nil, errors.Join(processErr, fmt.Errorf(\"failed to parse metadata: %w\", err))\n\t\t}\n\t}\n\n\tevent := &v1alpha1.PmapEvent{\n\t\tPayload:      payload,\n\t\tGithubSource: gr,\n\t}\n\n\teventBytes, err := protojson.Marshal(event)\n\tif err != nil {\n\t\t// Join with the processErr. We don't want to lose the user facing error if it's not nil.\n\t\treturn nil, errors.Join(processErr, fmt.Errorf(\"failed to marshal event to byte: %w\", err))\n\t}\n\treturn eventBytes, processErr\n}\n\n// getGCSObjectBytes calls the GCS storage client with objAttrs information, and returns the object bytes.\nfunc (h *EventHandler[T, P]) getGCSObjectBytes(ctx context.Context, objAttrs map[string]string) ([]byte, error) {\n\t// Get bucket and object id from message attributes.\n\tbucketID, found := objAttrs[\"bucketId\"]\n\tif !found {\n\t\treturn nil, fmt.Errorf(\"bucket ID not found\")\n\t}\n\tobjectID, found := objAttrs[\"objectId\"]\n\tif !found {\n\t\treturn nil, fmt.Errorf(\"object ID not found\")\n\t}\n\n\t// Read the object from bucket.\n\trc, err := h.client.Bucket(bucketID).Object(objectID).NewReader(ctx)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"failed to create GCS object reader: %w\", err)\n\t}\n\tdefer rc.Close()\n\tyb, err := io.ReadAll(io.LimitReader(rc, gcsObjectSizeLimitInBytes))\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"failed to read object from GCS: %w\", err)\n\t}\n\treturn yb, nil\n}\n\n// objectBytesToProto converts the object yaml bytes into a proto message wrapper.\nfunc objectBytesToProto[T any, P ProtoWrapper[T]](yb []byte) (P, error) {\n\tp := P(new(T))\n\tif err := protoutil.FromYAML(yb, p); err != nil {\n\t\treturn nil, pmaperrors.New(fmt.Sprintf(\"failed to unmarshal object yaml: %v\", err))\n\t}\n\treturn p, nil\n}",
+          "end_line": 338,
+          "start_line": 267
+        }
+      ]
+    },
+    "response_chars": 6207,
+    "round": 1,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 338,
+          "replacement_lines": 79,
+          "start_line": 267
+        }
+      ],
+      "current_file_lines": 427,
+      "updated_excerpt": {
+        "content": "257: \t\t\treturn fmt.Errorf(\"failed to send failure event downstream: %w\", err)\n258: \t\t}\n259: \t\treturn nil\n260: \t}\n261: \tif err := h.successMessenger.Send(ctx, eventBytes, attr); err != nil {\n262: \t\treturn fmt.Errorf(\"failed to send succuss event downstream: %w\", err)\n263: \t}\n264: \treturn nil\n265: }\n266: \n267: func (h *EventHandler[T, P]) generatePmapEventBytes(ctx context.Context, m pubsub.Message) ([]byte, error) {\n268: \t// Get the GCS object as bytes given GCS notification information.\n269: \tvar processErr error\n270: \n271: \tyb, err := h.getGCSObjectBytes(ctx, m.Attributes)\n272: \tif err != nil {\n273: \t\treturn nil, errors.Join(processErr, fmt.Errorf(\"failed to get GCS object: %w\", err))\n274: \t}\n275: \tp, err := objectBytesToProto[T, P](yb)\n276: \tif err != nil {\n277: \t\treturn nil, errors.Join(processErr, fmt.Errorf(\"failed to convert GCS object to proto: %w\", err))\n278: \t}\n279: \tfor _, processor := range h.processors {\n280: \t\tif err := processor.Process(ctx, p); err != nil {\n281: \t\t\tprocessErr = fmt.Errorf(\"failed to process object: %w\", err)\n282: \t\t\tbreak\n283: \t\t}\n284: \t}\n285: \n286: \tpayload, err := anypb.New(p)\n287: \tif err != nil {\n288: \t\treturn nil, fmt.Errorf(\"failed to convert object to pmap event payload: %w\", err)\n289: \t}\n290: \n291: \tvar gr *v1alpha1.GitHubSource\n292: \tif m.Attributes[\"payloadFormat\"] == \"JSON_API_V1\" {\n293: \t\tgr, err = parseGitHubSource(ctx, m.Data, m.Attributes)\n294: \t\tif err != nil {\n295: \t\t\t// Join with the processErr. We don't want to lose the user facing error if it's not nil.\n296: \t\t\treturn nil, errors.Join(processErr, fmt.Errorf(\"failed to parse metadata: %w\", err))\n297: \t\t}",
+        "end_line": 297,
+        "path_lines": 427,
+        "start_line": 257
+      }
+    },
+    "usage": {
+      "input_tokens": 4892,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 3132,
+      "output_tokens_details": {
+        "reasoning_tokens": 1221
+      },
+      "total_tokens": 8024
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 360,
+      "path": "pkg/server/event_handler.go",
+      "start_line": 267
+    },
+    "response_chars": 193,
+    "round": 2,
+    "tool_result": {
+      "content": "267: func (h *EventHandler[T, P]) generatePmapEventBytes(ctx context.Context, m pubsub.Message) ([]byte, error) {\n268: \t// Get the GCS object as bytes given GCS notification information.\n269: \tvar processErr error\n270: \n271: \tyb, err := h.getGCSObjectBytes(ctx, m.Attributes)\n272: \tif err != nil {\n273: \t\treturn nil, errors.Join(processErr, fmt.Errorf(\"failed to get GCS object: %w\", err))\n274: \t}\n275: \tp, err := objectBytesToProto[T, P](yb)\n276: \tif err != nil {\n277: \t\treturn nil, errors.Join(processErr, fmt.Errorf(\"failed to convert GCS object to proto: %w\", err))\n278: \t}\n279: \tfor _, processor := range h.processors {\n280: \t\tif err := processor.Process(ctx, p); err != nil {\n281: \t\t\tprocessErr = fmt.Errorf(\"failed to process object: %w\", err)\n282: \t\t\tbreak\n283: \t\t}\n284: \t}\n285: \n286: \tpayload, err := anypb.New(p)\n287: \tif err != nil {\n288: \t\treturn nil, fmt.Errorf(\"failed to convert object to pmap event payload: %w\", err)\n289: \t}\n290: \n291: \tvar gr *v1alpha1.GitHubSource\n292: \tif m.Attributes[\"payloadFormat\"] == \"JSON_API_V1\" {\n293: \t\tgr, err = parseGitHubSource(ctx, m.Data, m.Attributes)\n294: \t\tif err != nil {\n295: \t\t\t// Join with the processErr. We don't want to lose the user facing error if it's not nil.\n296: \t\t\treturn nil, errors.Join(processErr, fmt.Errorf(\"failed to parse metadata: %w\", err))\n297: \t\t}\n298: \t}\n299: \n300: \tevent := &v1alpha1.PmapEvent{\n301: \t\tPayload:      payload,\n302: \t\tGithubSource: gr,\n303: \t}\n304: \n305: \teventBytes, err := protojson.Marshal(event)\n306: \tif err != nil {\n307: \t\t// Join with the processErr. We don't want to lose the user facing error if it's not nil.\n308: \t\treturn nil, errors.Join(processErr, fmt.Errorf(\"failed to marshal event to byte: %w\", err))\n309: \t}\n310: \treturn eventBytes, processErr\n311: }\n312: \n313: // getGCSObjectBytes calls the GCS storage client with objAttrs information, and returns the object bytes.\n314: func (h *EventHandler[T, P]) getGCSObjectBytes(ctx context.Context, objAttrs map[string]string) ([]byte, error) {\n315: \t// Get bucket and object id from message attributes.\n316: \tbucketID, found := objAttrs[\"bucketId\"]\n317: \tif !found {\n318: \t\treturn nil, fmt.Errorf(\"bucket ID not found\")\n319: \t}\n320: \tobjectID, found := objAttrs[\"objectId\"]\n321: \tif !found {\n322: \t\treturn nil, fmt.Errorf(\"object ID not found\")\n323: \t}\n324: \n325: \t// Read the object from bucket.\n326: \trc, err := h.client.Bucket(bucketID).Object(objectID).NewReader(ctx)\n327: \tif err != nil {\n328: \t\treturn nil, fmt.Errorf(\"failed to create GCS object reader: %w\", err)\n329: \t}\n330: \tdefer rc.Close()\n331: \tyb, err := io.ReadAll(io.LimitReader(rc, gcsObjectSizeLimitInBytes))\n332: \tif err != nil {\n333: \t\treturn nil, fmt.Errorf(\"failed to read object from GCS: %w\", err)\n334: \t}\n335: \treturn yb, nil\n336: }\n337: \n338: // objectBytesToProto converts the object yaml bytes into a proto message wrapper.\n339: func objectBytesToProto[T any, P ProtoWrapper[T]](yb []byte) (P, error) {\n340: \tp := P(new(T))\n341: \tif err := protoutil.FromYAML(yb, p); err != nil {\n342: \t\treturn nil, pmaperrors.New(fmt.Sprintf(\"failed to unmarshal object yaml: %v\", err))\n343: \t}\n344: \treturn p, nil\n345: }\n346: \n347: type notificationPayload struct {\n348: \tMetadata map[string]string `json:\"metadata,omitempty\"`\n349: }\n350: \n351: func parseGitHubSource(ctx context.Context, data []byte, objAttrs map[string]string) (*v1alpha1.GitHubSource, error) {\n352: \tlogger := logging.FromContext(ctx)\n353: \n354: \tvar pm *notificationPayload\n355: \tif err := json.Unmarshal(data, &pm); err != nil {\n356: \t\treturn nil, fmt.Errorf(\"failed to unmarshal payloadMetadata %w\", err)\n357: \t}\n358: \n359: \tvar r v1alpha1.GitHubSource\n360: ",
+      "end_line": 360,
+      "path_lines": 427,
+      "start_line": 267
+    },
+    "usage": {
+      "input_tokens": 6476,
+      "input_tokens_details": {
+        "cached_tokens": 4352
+      },
+      "output_tokens": 864,
+      "output_tokens_details": {
+        "reasoning_tokens": 793
+      },
+      "total_tokens": 7340
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\t\treturn nil, errors.Join(processErr, fmt.Errorf(\"failed to get GCS object: %w\", err))",
+          "end_line": 277,
+          "start_line": 277
+        }
+      ]
+    },
+    "response_chars": 416,
+    "round": 3,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 277,
+          "replacement_lines": 1,
+          "start_line": 277
+        }
+      ],
+      "current_file_lines": 427,
+      "updated_excerpt": {
+        "content": "267: func (h *EventHandler[T, P]) generatePmapEventBytes(ctx context.Context, m pubsub.Message) ([]byte, error) {\n268: \t// Get the GCS object as bytes given GCS notification information.\n269: \tvar processErr error\n270: \n271: \tyb, err := h.getGCSObjectBytes(ctx, m.Attributes)\n272: \tif err != nil {\n273: \t\treturn nil, errors.Join(processErr, fmt.Errorf(\"failed to get GCS object: %w\", err))\n274: \t}\n275: \tp, err := objectBytesToProto[T, P](yb)\n276: \tif err != nil {\n277: \t\treturn nil, errors.Join(processErr, fmt.Errorf(\"failed to get GCS object: %w\", err))\n278: \t}\n279: \tfor _, processor := range h.processors {\n280: \t\tif err := processor.Process(ctx, p); err != nil {\n281: \t\t\tprocessErr = fmt.Errorf(\"failed to process object: %w\", err)\n282: \t\t\tbreak\n283: \t\t}\n284: \t}\n285: \n286: \tpayload, err := anypb.New(p)\n287: \tif err != nil {\n288: \t\treturn nil, fmt.Errorf(\"failed to convert object to pmap event payload: %w\", err)\n289: \t}\n290: \n291: \tvar gr *v1alpha1.GitHubSource\n292: \tif m.Attributes[\"payloadFormat\"] == \"JSON_API_V1\" {\n293: \t\tgr, err = parseGitHubSource(ctx, m.Data, m.Attributes)\n294: \t\tif err != nil {\n295: \t\t\t// Join with the processErr. We don't want to lose the user facing error if it's not nil.\n296: \t\t\treturn nil, errors.Join(processErr, fmt.Errorf(\"failed to parse metadata: %w\", err))\n297: \t\t}\n298: \t}\n299: \n300: \tevent := &v1alpha1.PmapEvent{\n301: \t\tPayload:      payload,\n302: \t\tGithubSource: gr,\n303: \t}\n304: \n305: \teventBytes, err := protojson.Marshal(event)\n306: \tif err != nil {\n307: \t\t// Join with the processErr. We don't want to lose the user facing error if it's not nil.",
+        "end_line": 307,
+        "path_lines": 427,
+        "start_line": 267
+      }
+    },
+    "usage": {
+      "input_tokens": 7825,
+      "input_tokens_details": {
+        "cached_tokens": 5888
+      },
+      "output_tokens": 874,
+      "output_tokens_details": {
+        "reasoning_tokens": 733
+      },
+      "total_tokens": 8699
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "pkg/server/event_handler.go",
+      "query": "getGCSObjectProto"
+    },
+    "response_chars": 82,
+    "round": 4,
+    "tool_result": {
+      "matches": [],
+      "query": "getGCSObjectProto",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 8531,
+      "input_tokens_details": {
+        "cached_tokens": 7424
+      },
+      "output_tokens": 260,
+      "output_tokens_details": {
+        "reasoning_tokens": 233
+      },
+      "total_tokens": 8791
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 5,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__abcxyz__pmap__pull_150__comment_1261484356__modularity.patch"
+    },
+    "usage": {
+      "input_tokens": 8585,
+      "input_tokens_details": {
+        "cached_tokens": 7936
+      },
+      "output_tokens": 350,
+      "output_tokens_details": {
+        "reasoning_tokens": 339
+      },
+      "total_tokens": 8935
+    }
+  }
+]

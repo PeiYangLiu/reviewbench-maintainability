@@ -1,0 +1,65 @@
+--- a/internal/lockfilescalibr/translation.go
++++ b/internal/lockfilescalibr/translation.go
+@@ -83,10 +83,17 @@
+ 		return nil, err
+ 	}
+ 
++	return extractWithExtractor(ctx, localPath, info, ext)
++}
++
++// extractWithExtractor runs the given extractor against the file at localPath,
++// tagging each resulting inventory item with the extractor used.
++func extractWithExtractor(ctx context.Context, localPath string, info fs.FileInfo, ext filesystem.Extractor) ([]*extractor.Inventory, error) {
+ 	si, err := createScanInput(localPath, info)
+ 	if err != nil {
+ 		return nil, err
+ 	}
++
+ 	inv, err := ext.Extract(ctx, si)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("(extracting as %s) %w", ext.Name(), err)
+@@ -122,21 +129,7 @@
+ 	if extractAs != "" {
+ 		for _, ext := range lockfileExtractors {
+ 			if lockfileExtractorMapping[extractAs] == ext.Name() {
+-				si, err := createScanInput(localPath, info)
+-				if err != nil {
+-					return nil, err
+-				}
+-
+-				inv, err := ext.Extract(ctx, si)
+-				if err != nil {
+-					return nil, fmt.Errorf("(extracting as %s) %w", extractAs, err)
+-				}
+-
+-				for i := range inv {
+-					inv[i].Extractor = ext
+-				}
+-
+-				return inv, nil
++				return extractWithExtractor(ctx, localPath, info, ext)
+ 			}
+ 		}
+ 
+@@ -149,19 +142,12 @@
+ 	for _, ext := range lockfileExtractors {
+ 		if ext.FileRequired(localPath, info) {
+ 			extractorFound = true
+-			si, err := createScanInput(localPath, info)
++
++			inv, err := extractWithExtractor(ctx, localPath, info, ext)
+ 			if err != nil {
+ 				return nil, err
+ 			}
+ 
+-			inv, err := ext.Extract(ctx, si)
+-			if err != nil {
+-				return nil, fmt.Errorf("(extracting as %s) %w", ext.Name(), err)
+-			}
+-
+-			for i := range inv {
+-				inv[i].Extractor = ext
+-			}
+ 			output = append(output, inv...)
+ 		}
+ 	}

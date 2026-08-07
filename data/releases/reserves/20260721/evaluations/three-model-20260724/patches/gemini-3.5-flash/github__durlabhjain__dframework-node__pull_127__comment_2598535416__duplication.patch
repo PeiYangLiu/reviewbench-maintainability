@@ -1,0 +1,62 @@
+--- a/lib/sql.js
++++ b/lib/sql.js
+@@ -265,45 +265,32 @@
+         if (useTvp) {
+             request.input(paramName, tvp);
+             const tvpAlias = this.getNextTvpAlias();
++            const tvpParamName = buildParameterName(paramName);
+             
+-            // Generate statement based on strategy
+-            if (operatorStrategy === 'innerJoin' && operator === 'IN') {
+-                statement = `INNER JOIN ${buildParameterName(paramName)} AS ${tvpAlias} ON ${fieldName} = ${tvpAlias}.${tvpColumnName}`;
+-            } else if (operatorStrategy === 'exists' && operator === 'IN') {
+-                statement = `EXISTS (SELECT 1 FROM ${buildParameterName(paramName)} AS ${tvpAlias} WHERE ${fieldName} = ${tvpAlias}.${tvpColumnName})`;
+-            } else if (operatorStrategy === 'exists' && operator === 'NOT IN') {
+-                statement = `NOT EXISTS (SELECT 1 FROM ${buildParameterName(paramName)} AS ${tvpAlias} WHERE ${fieldName} = ${tvpAlias}.${tvpColumnName})`;
+-            } else if (operatorStrategy === 'innerJoin' && operator === 'NOT IN') {
+-                // For NOT IN with INNER JOIN, we need to use NOT EXISTS or LEFT JOIN with NULL check
+-                // NOT EXISTS is more straightforward
+-                statement = `NOT EXISTS (SELECT 1 FROM ${buildParameterName(paramName)} AS ${tvpAlias} WHERE ${fieldName} = ${tvpAlias}.${tvpColumnName})`;
++            // For 'exists', and 'innerJoin' when operator is 'NOT IN', we use EXISTS/NOT EXISTS clause
++            if (operatorStrategy === 'exists' || (operatorStrategy === 'innerJoin' && operator === 'NOT IN')) {
++                const existsOperator = operator === 'NOT IN' ? 'NOT EXISTS' : 'EXISTS';
++                statement = `${existsOperator} (SELECT 1 FROM ${tvpParamName} AS ${tvpAlias} WHERE ${fieldName} = ${tvpAlias}.${tvpColumnName})`;
++            } else if (operatorStrategy === 'innerJoin') {
++                statement = `INNER JOIN ${tvpParamName} AS ${tvpAlias} ON ${fieldName} = ${tvpAlias}.${tvpColumnName}`;
+             } else {
+                 // Default to IN/NOT IN operator
+-                statement = `${fieldName} ${operator} (SELECT ${tvpColumnName} FROM ${buildParameterName(paramName)})`;
++                statement = `${fieldName} ${operator} (SELECT ${tvpColumnName} FROM ${tvpParamName})`;
+             }
+             
+             return { paramNames: [paramName], values: [tvp], statement, alias: tvpAlias };
+         }
+ 
+         // For non-TVP scenarios (individual parameters)
+-        if (operatorStrategy === 'innerJoin' && operator === 'IN') {
+-            // Create a derived table with the values
++        if (operatorStrategy === 'exists' || (operatorStrategy === 'innerJoin' && operator === 'NOT IN')) {
++            const tvpAlias = this.getNextTvpAlias();
++            const valuesList = paramNames.map(p => `SELECT ${p} AS Value`).join(' UNION ALL ');
++            const existsOperator = operator === 'NOT IN' ? 'NOT EXISTS' : 'EXISTS';
++            statement = `${existsOperator} (SELECT 1 FROM (${valuesList}) AS ${tvpAlias} WHERE ${fieldName} = ${tvpAlias}.Value)`;
++        } else if (operatorStrategy === 'innerJoin') {
+             const tvpAlias = this.getNextTvpAlias();
+             const valuesList = paramNames.map(p => `SELECT ${p} AS Value`).join(' UNION ALL ');
+             statement = `INNER JOIN (${valuesList}) AS ${tvpAlias} ON ${fieldName} = ${tvpAlias}.Value`;
+-        } else if (operatorStrategy === 'exists' && operator === 'IN') {
+-            const tvpAlias = this.getNextTvpAlias();
+-            const valuesList = paramNames.map(p => `SELECT ${p} AS Value`).join(' UNION ALL ');
+-            statement = `EXISTS (SELECT 1 FROM (${valuesList}) AS ${tvpAlias} WHERE ${fieldName} = ${tvpAlias}.Value)`;
+-        } else if (operatorStrategy === 'exists' && operator === 'NOT IN') {
+-            const tvpAlias = this.getNextTvpAlias();
+-            const valuesList = paramNames.map(p => `SELECT ${p} AS Value`).join(' UNION ALL ');
+-            statement = `NOT EXISTS (SELECT 1 FROM (${valuesList}) AS ${tvpAlias} WHERE ${fieldName} = ${tvpAlias}.Value)`;
+-        } else if (operatorStrategy === 'innerJoin' && operator === 'NOT IN') {
+-            // For NOT IN with INNER JOIN, use NOT EXISTS
+-            const tvpAlias = this.getNextTvpAlias();
+-            const valuesList = paramNames.map(p => `SELECT ${p} AS Value`).join(' UNION ALL ');
+-            statement = `NOT EXISTS (SELECT 1 FROM (${valuesList}) AS ${tvpAlias} WHERE ${fieldName} = ${tvpAlias}.Value)`;
+         } else {
+             // Default to IN/NOT IN operator
+             statement = `${fieldName} ${operator} (${paramNames.join(', ')})`;

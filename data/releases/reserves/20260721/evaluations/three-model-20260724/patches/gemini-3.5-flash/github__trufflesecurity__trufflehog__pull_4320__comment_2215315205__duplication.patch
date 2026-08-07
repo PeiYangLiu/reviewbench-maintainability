@@ -1,0 +1,143 @@
+--- a/pkg/sources/gitlab/gitlab.go
++++ b/pkg/sources/gitlab/gitlab.go
+@@ -269,18 +269,8 @@
+ 			},
+ 		}
+ 
+-		if len(s.groupIds) > 0 {
+-			if err := s.getAllProjectReposInGroup(ctx, apiClient, s.groupIds, ignoreRepo, reporter); err != nil {
+-				return err
+-			}
+-		} else if feature.UseSimplifiedGitlabEnumeration.Load() {
+-			if err := s.getAllProjectReposV2(ctx, apiClient, ignoreRepo, reporter); err != nil {
+-				return err
+-			}
+-		} else {
+-			if err := s.getAllProjectRepos(ctx, apiClient, ignoreRepo, reporter); err != nil {
+-				return err
+-			}
++		if err := s.fetchAllProjectRepos(ctx, apiClient, ignoreRepo, reporter); err != nil {
++			return err
+ 		}
+ 
+ 	} else {
+@@ -408,21 +398,9 @@
+ 		},
+ 	}
+ 
+-	if len(s.groupIds) > 0 {
+-		if err := s.getAllProjectReposInGroup(ctx, apiClient, s.groupIds, ignoreProject, visitor); err != nil {
+-			errs = append(errs, err)
+-			return errs
+-		}
+-	} else if feature.UseSimplifiedGitlabEnumeration.Load() {
+-		if err := s.getAllProjectReposV2(ctx, apiClient, ignoreProject, visitor); err != nil {
+-			errs = append(errs, err)
+-			return errs
+-		}
+-	} else {
+-		if err := s.getAllProjectRepos(ctx, apiClient, ignoreProject, visitor); err != nil {
+-			errs = append(errs, err)
+-			return errs
+-		}
++	if err := s.fetchAllProjectRepos(ctx, apiClient, ignoreProject, visitor); err != nil {
++		errs = append(errs, err)
++		return errs
+ 	}
+ 
+ 	if len(repos) == 0 {
+@@ -479,6 +457,34 @@
+ 		return true
+ 	}
+ 	return false
++}
++
++func (s *Source) fetchAllProjectRepos(
++	ctx context.Context,
++	apiClient *gitlab.Client,
++	ignoreRepo func(string) bool,
++	reporter sources.UnitReporter,
++) error {
++	if len(s.groupIds) > 0 {
++		return s.getAllProjectReposInGroup(ctx, apiClient, s.groupIds, ignoreRepo, reporter)
++	}
++	if feature.UseSimplifiedGitlabEnumeration.Load() {
++		return s.getAllProjectReposV2(ctx, apiClient, ignoreRepo, reporter)
++	}
++	return s.getAllProjectRepos(ctx, apiClient, ignoreRepo, reporter)
++}
++
++func (s *Source) cloneRepo(ctx context.Context, repoURL string) (string, *gogit.Repository, error) {
++	if s.authMethod == "UNAUTHENTICATED" {
++		return git.CloneRepoUsingUnauthenticated(ctx, repoURL)
++	}
++	// If a username is not provided we need to use a default one in order to clone a private repo.
++	// Not setting "placeholder" as s.user on purpose in case any downstream services rely on a "" value for s.user.
++	user := s.user
++	if user == "" {
++		user = "placeholder"
++	}
++	return git.CloneRepoUsingToken(ctx, s.token, repoURL, user, s.useAuthInUrl)
+ }
+ 
+ // getAllProjectRepos enumerates all GitLab projects using the provided API client.
+@@ -881,21 +887,7 @@
+ 				s.resumeInfoSlice = sources.RemoveRepoFromResumeInfo(s.resumeInfoSlice, repoURL)
+ 			}(s)
+ 
+-			var path string
+-			var repo *gogit.Repository
+-			var err error
+-			if s.authMethod == "UNAUTHENTICATED" {
+-				path, repo, err = git.CloneRepoUsingUnauthenticated(ctx, repoURL)
+-			} else {
+-				// If a username is not provided we need to use a default one in order to clone a private repo.
+-				// Not setting "placeholder" as s.user on purpose in case any downstream services rely on a "" value for s.user.
+-				user := s.user
+-				if user == "" {
+-					user = "placeholder"
+-				}
+-
+-				path, repo, err = git.CloneRepoUsingToken(ctx, s.token, repoURL, user, s.useAuthInUrl)
+-			}
++			path, repo, err := s.cloneRepo(ctx, repoURL)
+ 			if err != nil {
+ 				scanErrs.Add(err)
+ 				return nil
+@@ -1059,34 +1051,14 @@
+ 		_ = reporter.UnitErr(ctx, fmt.Errorf("could not compile include/exclude repo glob: %w", err))
+ 	})
+ 
+-	if len(s.groupIds) > 0 {
+-		return s.getAllProjectReposInGroup(ctx, apiClient, s.groupIds, ignoreRepo, reporter)
+-	} else if feature.UseSimplifiedGitlabEnumeration.Load() {
+-		return s.getAllProjectReposV2(ctx, apiClient, ignoreRepo, reporter)
+-	} else {
+-		return s.getAllProjectRepos(ctx, apiClient, ignoreRepo, reporter)
+-	}
++	return s.fetchAllProjectRepos(ctx, apiClient, ignoreRepo, reporter)
+ }
+ 
+ // ChunkUnit downloads and reports chunks for the given GitLab repository unit.
+ func (s *Source) ChunkUnit(ctx context.Context, unit sources.SourceUnit, reporter sources.ChunkReporter) error {
+ 	repoURL, _ := unit.SourceUnitID()
+ 
+-	var path string
+-	var repo *gogit.Repository
+-	var err error
+-	if s.authMethod == "UNAUTHENTICATED" {
+-		path, repo, err = git.CloneRepoUsingUnauthenticated(ctx, repoURL)
+-	} else {
+-		// If a username is not provided we need to use a default one in order to clone a private repo.
+-		// Not setting "placeholder" as s.user on purpose in case any downstream services rely on a "" value for s.user.
+-		user := s.user
+-		if user == "" {
+-			user = "placeholder"
+-		}
+-
+-		path, repo, err = git.CloneRepoUsingToken(ctx, s.token, repoURL, user, s.useAuthInUrl)
+-	}
++	path, repo, err := s.cloneRepo(ctx, repoURL)
+ 	if err != nil {
+ 		return err
+ 	}

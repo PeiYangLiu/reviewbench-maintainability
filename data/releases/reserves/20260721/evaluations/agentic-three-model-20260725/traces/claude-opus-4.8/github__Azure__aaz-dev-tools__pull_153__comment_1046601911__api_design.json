@@ -1,0 +1,285 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 60,
+      "path": "src/aaz_dev/cli/controller/portal_cli_generator.py",
+      "start_line": 1
+    },
+    "response_chars": 106,
+    "round": 1,
+    "tool_result": {
+      "content": "1: from command.model.configuration import CMDCommand, CMDHttpOperation\n2: from command.model.specs import CMDSpecsCommand, CMDSpecsCommandVersion\n3: from utils import exceptions, portal_file_schema\n4: from utils.config import Config\n5: import os, json, re, logging\n6: import jsonschema\n7: \n8: class PortalCliGenerator:\n9:     COMMAND_ROOT_NAME = \"az\"\n10:     DOC_ROOT_NAME = \"https://docs.microsoft.com/cli/azure\"\n11: \n12:     # az change-analysis list --star-ttime bbb --endtime aaa -g aaa\n13:     PARA_REG_PATTERN = re.compile(r\" --?([a-zA-Z0-9\\-]+) ?\")\n14: \n15:     # /subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}...\n16:     # /providers/Microsoft.Network/dnsResolvers/{dnsResolverName}/inboundEndpoints/{inboundEndpointName}\n17:     RESOURCE_PATH_PATTERN = re.compile(r\"/([a-zA-Z0-9\\-]+)/?\")\n18: \n19:     # /subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}...\n20:     # /providers/Microsoft.OperationalInsights/workspaces/{workspaceName}...\n21:     # /providers/Microsoft.SecurityInsights/incidents/{incidentId}\n22: \n23:     def __init__(self):\n24:         pass\n25: \n26:     def fill_resource_type(self, cmd_portal_info, cmd_cfg, leaf):\n27:         \"\"\"\n28:         path: ....Microsoft.Network/dnsForwardingRulesets/{dnsForwardingRulesetName}/forwardingRules/{forwardingRuleName}\n29:         resource_type: dnsForwardingRulesets/forwardingRules\n30:         path: ....Microsoft.Network/dnsForwardingRulesets/{dnsForwardingRulesetName}/forwardingRules -> list cmd\n31:         resource_type: dnsForwardingRulesets\n32:         \"\"\"\n33:         if cmd_cfg.resources is None:\n34:             raise exceptions.ResourceNotFind(\"Resource not exist\")\n35:         resource = cmd_cfg.resources[-1]\n36:         if resource.rp_name is None:\n37:             raise exceptions.ResourceNotFind(\"Resource rp_name not exist\")\n38:         if resource.swagger_path is None:\n39:             raise exceptions.ResourceNotFind(\"Resource swagger_path not exist\")\n40:         rp_name = resource.rp_name\n41:         swagger_path = resource.swagger_path\n42:         cmd_portal_info['rp_name'] = rp_name\n43:         swagger_provider_ind = swagger_path.lower().rfind(rp_name.lower())\n44:         if swagger_provider_ind == -1:\n45:             logging.warning(\"please check cmd \" + \" \".join(leaf.names) + \" resource id: \" + swagger_path)\n46:             return\n47:         folder_end_ind = swagger_path.rfind(\"{\", swagger_provider_ind)\n48:         resource_paths = re.finditer(self.RESOURCE_PATH_PATTERN, swagger_path[swagger_provider_ind:folder_end_ind])\n49:         resource_type = \"\"\n50:         for resource_match in resource_paths:\n51:             resource_folder = resource_match.group(1)\n52:             if len(resource_type) == 0:\n53:                 resource_type += resource_folder\n54:             else:\n55:                 resource_type += \"/\" + resource_folder\n56:         cmd_portal_info['resourceType'] = resource_type\n57: \n58:     def fill_api_version(self, cmd_portal_info, target_version):\n59:         if target_version.name is None:\n60:             raise exceptions.ResourceNotFind(\"version name not exist\")",
+      "end_line": 60,
+      "path_lines": 386,
+      "start_line": 1
+    },
+    "usage": {
+      "completion_tokens": 77,
+      "prompt_tokens": 2464,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 2541
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 140,
+      "path": "src/aaz_dev/cli/controller/portal_cli_generator.py",
+      "start_line": 60
+    },
+    "response_chars": 108,
+    "round": 2,
+    "tool_result": {
+      "content": "60:             raise exceptions.ResourceNotFind(\"version name not exist\")\n61:         cmd_portal_info['apiVersion'] = target_version.name\n62: \n63:     def generate_base_learn_more(self, cmd_portal_info, leaf):\n64:         \"\"\"\n65:         cmd: az xx yy zz\n66:         leaf.names: [xx, yy, zz]\n67:         help link: https://learn.microsoft.com/cli/azure/xx/yy\n68:         \"\"\"\n69:         base_help_url = self.DOC_ROOT_NAME + \"/\" + \"/\".join(leaf.names[:-1])\n70:         cmd_portal_info['learnMore'] = {'url': base_help_url}\n71: \n72:     def generate_cmd_learn_more(self, help_info, leaf):\n73:         \"\"\"\n74:         cmd name: az xx yy zz\n75:         leaf.names: [xx, yy, zz]\n76:         help link: https://learn.microsoft.com/cli/azure/xx/yy#az-xx-yy-zz\n77:         \"\"\"\n78:         cmd_help_url = self.DOC_ROOT_NAME + \"/\" + \"/\".join(leaf.names[:-1]) + \"#\" + \\\n79:                        \"-\".join([self.COMMAND_ROOT_NAME] + leaf.names)\n80:         help_info['learnMore'] = {'url' : cmd_help_url}\n81: \n82:     def fill_cmd_name(self, cmd_info, leaf):\n83:         cmd_name = \" \".join([self.COMMAND_ROOT_NAME] + leaf.names)\n84:         cmd_info['name'] = cmd_name\n85: \n86:     def fill_cmd_desc(self, cmd_info, leaf):\n87:         cmd_info['description'] = leaf.help.to_primitive()['short']\n88: \n89:     def fill_cmd_path(self, cmd_info, cmd_cfg):\n90:         if cmd_cfg.resources is None:\n91:             raise exceptions.ResourceNotFind(\"Resource not exist\")\n92:         resource = cmd_cfg.resources[-1]\n93:         cmd_info['path'] = resource.swagger_path\n94: \n95:     def fill_cmd_confirmation(self, cmd_info, cmd_cfg):\n96:         if cmd_cfg.confirmation:\n97:             cmd_info['confirmation'] = True\n98:         else:\n99:             cmd_info['confirmation'] = False\n100: \n101:     def fill_cmd_help(self, cmd_info, cmd_cfg, leaf):\n102:         help_info = {}\n103:         self.generate_cmd_learn_more(help_info, leaf)\n104:         option_list = []\n105:         for arg_group in cmd_cfg.arg_groups:\n106:             for arg in arg_group.args:\n107:                 assert arg.options is not None\n108:                 if len(arg.options) > 0:\n109:                     # parameter set ignore 1 character option\n110:                     option_list += filter(lambda opt: len(opt) > 1, arg.options)\n111:         parameters_list = [ \"[--\" + param_name + \"]\" for param_name in option_list]\n112:         help_info['parameterSets'] = [{'parameters': parameters_list}]\n113:         cmd_info['help'] = help_info\n114: \n115:     def generate_default_example(self, cmd_info, leaf, var_option_list):\n116:         parameters = []\n117:         for (para_var, raw_options, is_required, is_in_path) in var_option_list:\n118:             if not is_required:\n119:                 continue\n120:             pick_options = list(filter(lambda opt: len(opt) > 1, raw_options))\n121:             pick_option = pick_options[0]\n122:             parameters.append({\n123:                 'name': (\"-\" if len(pick_option) == 1 else \"--\") + pick_option,\n124:                 'value': \"[\" + para_var.replace(\"$Path\", \"path\") + \"]\"\n125:             })\n126:         if len(parameters) > 0:\n127:             cmd_info['examples'] = [{\n128:                 'description': leaf.help.to_primitive()['short'],\n129:                 'parameters': parameters\n130:             }]\n131: \n132:     def find_para_var(self, para, var_option_list):\n133:         for (var, options, is_required, is_in_path) in var_option_list:\n134:             if para in options:\n135:                 return (var, options, is_required, is_in_path)\n136:         return (None, None, None, None)\n137: \n138:     def fill_cmd_examples(self, cmd_info, cmd_cfg, leaf, target_version):\n139:         var_option_list = []\n140:         var_required = set()",
+      "end_line": 140,
+      "path_lines": 386,
+      "start_line": 60
+    },
+    "usage": {
+      "completion_tokens": 232,
+      "prompt_tokens": 4046,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 4278
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/aaz_dev/cli/api/portal.py",
+      "query": "generate_module_command_portal"
+    },
+    "response_chars": 97,
+    "round": 3,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 45,
+          "text": "def generate_module_command_portal(module):"
+        }
+      ],
+      "query": "generate_module_command_portal",
+      "truncated": false
+    },
+    "usage": {
+      "completion_tokens": 140,
+      "prompt_tokens": 5847,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 5987
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/aaz_dev/cli/controller/portal_cli_generator.py",
+      "query": "def generate_cmds_portal"
+    },
+    "response_chars": 112,
+    "round": 4,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 310,
+          "text": "    def generate_cmds_portal(self, cmd_portal_list):"
+        }
+      ],
+      "query": "def generate_cmds_portal",
+      "truncated": false
+    },
+    "usage": {
+      "completion_tokens": 136,
+      "prompt_tokens": 5963,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 6099
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 386,
+      "path": "src/aaz_dev/cli/controller/portal_cli_generator.py",
+      "start_line": 300
+    },
+    "response_chars": 109,
+    "round": 5,
+    "tool_result": {
+      "content": "300:                                      resource_paths[-1] + \".json\"\n301:                 resource_file_folder = os.path.dirname(resource_file_path)\n302:                 if not os.path.exists(resource_file_folder):\n303:                     os.makedirs(resource_file_folder)\n304:                 if not self.valid_portal_json_format(resource_info):\n305:                     logging.info(\"json format error\")\n306:                     continue\n307:                 with open(resource_file_path, \"w\") as f_out:\n308:                     f_out.write(json.dumps(resource_info, indent=4))\n309: \n310:     def generate_cmds_portal(self, cmd_portal_list):\n311:         portal_dict = {}\n312:         cmd_dedup = set()\n313:         for cmd_portal_info in cmd_portal_list:\n314:             if 'rp_name' not in cmd_portal_info or 'resourceType' not in cmd_portal_info or \\\n315:                 'apiVersion' not in cmd_portal_info or 'name' not in cmd_portal_info:\n316:                 continue\n317: \n318:             cmd_name = cmd_portal_info['name']\n319:             if cmd_name in cmd_dedup:\n320:                 logging.info(\"{0} cmd has repeated from versions {1}\".format(cmd_name, cmd_portal_info['apiVersion']))\n321:                 continue\n322:             cmd_dedup.add(cmd_name)\n323:             rp_name = cmd_portal_info['rp_name']\n324:             rescoure_type = cmd_portal_info['resourceType']\n325:             api_version = cmd_portal_info['apiVersion']\n326:             learn_more = cmd_portal_info['learnMore']\n327: \n328:             del cmd_portal_info['rp_name'], cmd_portal_info['resourceType']\n329:             del cmd_portal_info['apiVersion'], cmd_portal_info['learnMore']\n330:             if rp_name not in portal_dict:\n331:                 portal_dict[rp_name] = {\n332:                     rescoure_type: {\n333:                         \"resourceType\": rescoure_type,\n334:                         \"apiVersion\": api_version,\n335:                         \"learnMore\": learn_more,\n336:                         'commands': [cmd_portal_info]\n337:                     }\n338:                 }\n339:                 continue\n340:             rescoure_infos = portal_dict[rp_name]\n341:             if rescoure_type not in rescoure_infos:\n342:                 rescoure_infos[rescoure_type] = {\n343:                     \"resourceType\": rescoure_type,\n344:                     \"apiVersion\": api_version,\n345:                     \"learnMore\": learn_more,\n346:                     'commands': [cmd_portal_info]\n347:                 }\n348:                 continue\n349:             rescoure_info = rescoure_infos[rescoure_type]\n350:             rescoure_info['commands'].append(cmd_portal_info)\n351: \n352:         self.generate_portal_file(portal_dict)\n353: \n354: if __name__ == '__main__':\n355:     generator = PortalCliGenerator()\n356:     resource_info = {\n357:         \"resourceType\": \"virtualMachines\",\n358:         \"apiVersion\": \"2021-11-01\",\n359:         \"confirmation\": True,\n360:         \"learnMore\": {\n361:             \"url\": \"https://docs.microsoft.com/cli/azure/vm\"\n362:         },\n363:     }\n364:     schema = {\n365:         \"type\": \"object\",\n366:         \"properties\": {\n367:             \"resourceType\": {\"type\": \"string\"},\n368:             \"apiVersion\": {\"type\": \"string\"},\n369:             \"confirmation\": {\"type\": \"boolean\"},\n370:             \"learnMore\": {\n371:                 \"type\": \"object\",\n372:                 \"properties\": {\n373:                     \"url\": {\"type\": \"string\"}\n374:                 }\n375:             }\n376:         }\n377:     }\n378:     print(jsonschema.validate(instance=resource_info, schema=schema))\n379:     try:\n380:         jsonschema.validate(instance=resource_info, schema=schema)\n381:     except jsonschema.exceptions.ValidationError as err:\n382:         print(err)\n383: \n384:     print(\"verification done\")\n385: \n386: ",
+      "end_line": 386,
+      "path_lines": 386,
+      "start_line": 300
+    },
+    "usage": {
+      "completion_tokens": 111,
+      "prompt_tokens": 6098,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 6209
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/aaz_dev/cli/controller/portal_cli_generator.py",
+      "query": "def generate_command_portal_raw"
+    },
+    "response_chars": 119,
+    "round": 6,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 261,
+          "text": "    def generate_command_portal_raw(self, cmd_cfg, leaf, target_version):"
+        }
+      ],
+      "query": "def generate_command_portal_raw",
+      "truncated": false
+    },
+    "usage": {
+      "completion_tokens": 335,
+      "prompt_tokens": 7769,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 8104
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/aaz_dev/cli/api/portal.py",
+      "query": "apis"
+    },
+    "response_chars": 71,
+    "round": 7,
+    "tool_result": {
+      "matches": [],
+      "query": "apis",
+      "truncated": false
+    },
+    "usage": {
+      "completion_tokens": 96,
+      "prompt_tokens": 7914,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 8010
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/aaz_dev/cli/controller/portal_cli_generator.py",
+      "query": "def generate_command_portal_raw"
+    },
+    "response_chars": 119,
+    "round": 8,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 261,
+          "text": "    def generate_command_portal_raw(self, cmd_cfg, leaf, target_version):"
+        }
+      ],
+      "query": "def generate_command_portal_raw",
+      "truncated": false
+    },
+    "usage": {
+      "completion_tokens": 158,
+      "prompt_tokens": 7990,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 8148
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 310,
+      "path": "src/aaz_dev/cli/controller/portal_cli_generator.py",
+      "start_line": 261
+    },
+    "response_chars": 1322,
+    "round": 9,
+    "tool_result": {
+      "content": "261:     def generate_command_portal_raw(self, cmd_cfg, leaf, target_version):\n262:         if not isinstance(cmd_cfg, CMDCommand) or \\\n263:                 not isinstance(leaf, CMDSpecsCommand) or \\\n264:                 not isinstance(target_version, CMDSpecsCommandVersion):\n265:             return None\n266:         if cmd_cfg.arg_groups is None:\n267:             logging.info(\"{0} cmd has no arg_group\".format(\" \".join(leaf.names)))\n268:             return None\n269:         if not self.__check_cmd_examples(cmd_cfg):\n270:             logging.info(\"{0} cmd do not has examples\".format(\" \".join(leaf.names)))\n271:             return None\n272:         cmd_portal_info = {}\n273:         self.fill_resource_type(cmd_portal_info, cmd_cfg, leaf)\n274:         self.fill_api_version(cmd_portal_info, target_version)\n275:         self.generate_base_learn_more(cmd_portal_info, leaf)\n276:         self.generate_cmd_info(cmd_portal_info, cmd_cfg, leaf, target_version)\n277:         return cmd_portal_info\n278: \n279:     def get_portal_file_path(self):\n280:         cli_folder = Config.CLI_PATH\n281:         if not os.path.exists(cli_folder) or not os.path.isdir(cli_folder):\n282:             raise ValueError(f\"Invalid Cli Main Repo folder: '{cli_folder}'\")\n283:         data_model_folder = os.path.join(cli_folder, \"data-model-for-portal\")\n284:         return data_model_folder\n285: \n286:     def valid_portal_json_format(self, portal_data):\n287:         try:\n288:             jsonschema.validate(instance=portal_data, schema=portal_file_schema.PORTAL_FILE_SCHEMA)\n289:         except jsonschema.exceptions.ValidationError as err:\n290:             #print(err)\n291:             return False\n292:         return True\n293: \n294:     def generate_portal_file(self, portal_dict):\n295:         data_model_folder = self.get_portal_file_path()\n296:         for rp_name, resource_infos in portal_dict.items():\n297:             for resource_type, resource_info in resource_infos.items():\n298:                 resource_paths = [rp_name] + resource_type.split(\"/\")\n299:                 resource_file_path = data_model_folder + \"/\" + \"/\".join(resource_paths[:-1]) + \"/\" + \\\n300:                                      resource_paths[-1] + \".json\"\n301:                 resource_file_folder = os.path.dirname(resource_file_path)\n302:                 if not os.path.exists(resource_file_folder):\n303:                     os.makedirs(resource_file_folder)\n304:                 if not self.valid_portal_json_format(resource_info):\n305:                     logging.info(\"json format error\")\n306:                     continue\n307:                 with open(resource_file_path, \"w\") as f_out:\n308:                     f_out.write(json.dumps(resource_info, indent=4))\n309: \n310:     def generate_cmds_portal(self, cmd_portal_list):",
+      "end_line": 310,
+      "path_lines": 386,
+      "start_line": 261
+    },
+    "usage": {
+      "completion_tokens": 729,
+      "prompt_tokens": 8135,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 8864
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "def generate_module_command_portal(module):\n    from cli.controller.az_module_manager import AzMainManager, AzExtensionManager\n    from command.controller.specs_manager import AAZSpecsManager\n    az_main_manager = AzMainManager()\n    az_ext_manager = AzExtensionManager()\n    aaz_spec_manager = AAZSpecsManager()\n    root = aaz_spec_manager.find_command_group()\n    if not root:\n        return \"Command group spec root not exist\"\n    portal_cli_generator = PortalCliGenerator()\n\n    def load_module_registered_cmds(mod):\n        if az_main_manager.has_module(mod):\n            cli_module = az_main_manager.load_module(mod)\n            logging.info(\"Input module: {0} in cli\".format(mod))\n        elif az_ext_manager.has_module(mod):\n            cli_module = az_ext_manager.load_module(mod)\n            logging.info(\"Input module: {0} in cli extension\".format(mod))\n        else:\n            raise ValueError(\"Invalid input module: {0}, please check\".format(mod))\n        return az_main_manager.find_module_cmd_registered(cli_module['profiles']['latest'])\n\n    def build_cmd_portal_list(registered_cmds):\n        cmd_portal_list = []\n        for cmd_name_version in registered_cmds:\n            # cmd_name_version = ['monitor', 'diagnostic-setting', 'list', '2021-05-01-preview']\n            node_names = cmd_name_version[:-2]\n            leaf_name = cmd_name_version[-2]\n            registered_version = cmd_name_version[-1]\n            leaf = aaz_spec_manager.find_command(*node_names, leaf_name)\n            if not leaf or not leaf.versions:\n                logging.warning(\"Command group: \" + \" \".join(node_names) + \" not exist\")\n                continue\n            if not leaf.versions:\n                logging.warning(\"Command group: \" + \" \".join(node_names) + \" version not exist\")\n                continue\n            target_version = None\n            for v in (leaf.versions or []):\n                if v.name == registered_version:\n                    target_version = v\n                    break\n            if not target_version:\n                logging.warning(\"Command: \" + \" \".join(node_names) + \" version not exist\")\n                continue\n            logging.info(\"Generating portal config of [ az {0} ] with registered version {1}\".format(\" \".join(cmd_name_version[:-1]),\n                                                                                              registered_version))\n            cfg_reader = aaz_spec_manager.load_resource_cfg_reader_by_command_with_version(leaf, version=target_version)\n            cmd_cfg = cfg_reader.find_command(*leaf.names)\n            cmd_portal_info = portal_cli_generator.generate_command_portal_raw(cmd_cfg, leaf, target_version)\n            if cmd_portal_info:\n                cmd_portal_list.append(cmd_portal_info)\n        return cmd_portal_list\n\n    for mod in module:\n        registered_cmds = load_module_registered_cmds(mod)\n        cmd_portal_list = build_cmd_portal_list(registered_cmds)\n        portal_cli_generator.generate_cmds_portal(cmd_portal_list)\n    logging.info(\"done\")",
+          "end_line": 95,
+          "start_line": 45
+        }
+      ]
+    },
+    "response_chars": 3215,
+    "round": 10,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 95,
+          "replacement_lines": 58,
+          "start_line": 45
+        }
+      ],
+      "current_file_lines": 102,
+      "updated_excerpt": {
+        "content": "35:     required=not Config.CLI_EXTENSION_PATH,\n36:     callback=Config.validate_and_setup_cli_extension_path,\n37:     expose_value=False,\n38:     help=\"The local path of azure-cli-extension repo. Official repo is https://github.com/Azure/azure-cli-extensions\"\n39: )\n40: @click.option(\n41:     \"--module\", '-m',\n42:     required=True, multiple=True,\n43:     help=\"Name of the module to generate seperated.\"\n44: )\n45: def generate_module_command_portal(module):\n46:     from cli.controller.az_module_manager import AzMainManager, AzExtensionManager\n47:     from command.controller.specs_manager import AAZSpecsManager\n48:     az_main_manager = AzMainManager()\n49:     az_ext_manager = AzExtensionManager()\n50:     aaz_spec_manager = AAZSpecsManager()\n51:     root = aaz_spec_manager.find_command_group()\n52:     if not root:\n53:         return \"Command group spec root not exist\"\n54:     portal_cli_generator = PortalCliGenerator()\n55: \n56:     def load_module_registered_cmds(mod):\n57:         if az_main_manager.has_module(mod):\n58:             cli_module = az_main_manager.load_module(mod)\n59:             logging.info(\"Input module: {0} in cli\".format(mod))\n60:         elif az_ext_manager.has_module(mod):\n61:             cli_module = az_ext_manager.load_module(mod)\n62:             logging.info(\"Input module: {0} in cli extension\".format(mod))\n63:         else:\n64:             raise ValueError(\"Invalid input module: {0}, please check\".format(mod))\n65:         return az_main_manager.find_module_cmd_registered(cli_module['profiles']['latest'])\n66: \n67:     def build_cmd_portal_list(registered_cmds):\n68:         cmd_portal_list = []\n69:         for cmd_name_version in registered_cmds:\n70:             # cmd_name_version = ['monitor', 'diagnostic-setting', 'list', '2021-05-01-preview']\n71:             node_names = cmd_name_version[:-2]\n72:             leaf_name = cmd_name_version[-2]\n73:             registered_version = cmd_name_version[-1]\n74:             leaf = aaz_spec_manager.find_command(*node_names, leaf_name)\n75:             if not leaf or not leaf.versions:",
+        "end_line": 75,
+        "path_lines": 102,
+        "start_line": 35
+      }
+    },
+    "usage": {
+      "completion_tokens": 1664,
+      "prompt_tokens": 9387,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 11051
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 11,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/claude-opus-4.8/patches/github__Azure__aaz-dev-tools__pull_153__comment_1046601911__api_design.patch"
+    },
+    "usage": {
+      "completion_tokens": 77,
+      "prompt_tokens": 11595,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 11672
+    }
+  }
+]

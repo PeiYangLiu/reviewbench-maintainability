@@ -1,0 +1,72 @@
+--- a/connectors/sources/sharepoint.py
++++ b/connectors/sources/sharepoint.py
+@@ -190,6 +190,30 @@
+         await self.session.close()
+         self.session = None
+ 
++    def _is_downloadable(self, document, doit):
++        """Check whether a document's content should be fetched.
++
++        Args:
++            document (dictionary): Modified document.
++            doit (boolean): Boolean value for whether to get content or not.
++
++        Returns:
++            tuple: (is_downloadable, filename) where is_downloadable is a
++            boolean and filename is the resolved file name.
++        """
++        document_size = int(document["size"])
++        filename = (
++            document["title"] if document["type"] == "File" else document["file_name"]
++        )
++        if not (doit and document_size):
++            return False, filename
++        if document_size > FILE_SIZE_LIMIT:
++            logger.warning(
++                f"File size {document_size} of file {filename} is larger than {FILE_SIZE_LIMIT} bytes. Discarding file content"
++            )
++            return False, filename
++        return True, filename
++
+     @retryable(
+         retries=RETRIES,
+         interval=RETRY_INTERVAL,
+@@ -210,17 +234,8 @@
+         Returns:
+             dictionary: Content document with id, timestamp & text.
+         """
+-        document_size = int(document["size"])
+-        filename = (
+-            document["title"] if document["type"] == "File" else document["file_name"]
+-        )
+-        if not (doit and document_size):
+-            return
+-
+-        if document_size > FILE_SIZE_LIMIT:
+-            logger.warning(
+-                f"File size {document_size} of file {filename} is larger than {FILE_SIZE_LIMIT} bytes. Discarding file content"
+-            )
++        is_downloadable, filename = self._is_downloadable(document, doit)
++        if not is_downloadable:
+             return
+ 
+         source_file_name = ""
+@@ -274,16 +289,8 @@
+         Returns:
+             dictionary: Content document with id, timestamp & text.
+         """
+-        document_size = int(document["size"])
+-        filename = (
+-            document["title"] if document["type"] == "File" else document["file_name"]
+-        )
+-        if not (doit and document_size):
+-            return
+-        if document_size > FILE_SIZE_LIMIT:
+-            logger.warning(
+-                f"File size {document_size} of file {filename} is larger than {FILE_SIZE_LIMIT} bytes. Discarding file content"
+-            )
++        is_downloadable, filename = self._is_downloadable(document, doit)
++        if not is_downloadable:
+             return
+         source_file_name = ""
+         if self.is_cloud:

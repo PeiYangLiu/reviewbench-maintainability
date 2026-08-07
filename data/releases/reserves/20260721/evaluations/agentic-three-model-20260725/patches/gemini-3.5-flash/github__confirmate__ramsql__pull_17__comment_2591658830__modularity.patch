@@ -1,0 +1,133 @@
+diff --git a/engine/agnostic/transaction.go b/engine/agnostic/transaction.go
+index c7584ec..59178af 100644
+--- a/engine/agnostic/transaction.go
++++ b/engine/agnostic/transaction.go
+@@ -591,6 +591,39 @@ func (t *Transaction) Insert(schema, relation string, values map[string]any) (*T
+ 	}
+ 
+ 	// Validate foreign keys after tuple is complete
++	if err := t.validateForeignKeys(schema, relation, r, tuple); err != nil {
++		return nil, t.abort(err)
++	}
++
++	// check primary key violation
++	ok, err := r.CheckPrimaryKey(tuple)
++	if err != nil {
++		return nil, t.abort(err)
++	}
++	if !ok {
++		return nil, t.abort(fmt.Errorf("primary key violation"))
++	}
++
++	// insert into row list
++	log.Debug("Inserting %v", tuple.values)
++	e := r.rows.PushBack(tuple)
++
++	// update indexes
++	for _, index := range r.indexes {
++		index.Add(e)
++	}
++
++	// add change
++	c := ValueChange{
++		current: e,
++		old:     nil,
++		l:       r.rows,
++	}
++	t.changes.PushBack(c)
++
++	return tuple, nil
++
++func (t *Transaction) validateForeignKeys(schema, relation string, r *Relation, tuple *Tuple) error {
+ 	// Group FKs by signature and validate each unique FK once with composite predicates
+ 	fks := uniqueRelationFKs(r)
+ 	for _, fk := range fks {
+@@ -600,7 +633,7 @@ func (t *Transaction) Insert(schema, relation string, values map[string]any) (*T
+ 		for _, localCol := range fk.LocalColumns() {
+ 			idx, ok := r.attrIndex[localCol]
+ 			if !ok {
+-				return nil, t.abort(fmt.Errorf("FK local column %s not found in relation %s", localCol, relation))
++				return fmt.Errorf("FK local column %s not found in relation %s", localCol, relation)
+ 			}
+ 			val := tuple.values[idx]
+ 			localVals[localCol] = val
+@@ -627,15 +660,15 @@ func (t *Transaction) Insert(schema, relation string, values map[string]any) (*T
+ 			// Reference parent PK
+ 			ps, err := t.e.schema(refSchema)
+ 			if err != nil {
+-				return nil, t.abort(err)
++				return err
+ 			}
+ 			pr, err := ps.Relation(refRel)
+ 			if err != nil {
+-				return nil, t.abort(err)
++				return err
+ 			}
+ 			// For composite FK, parent PK must match in size
+ 			if len(pr.pk) != len(fk.LocalColumns()) {
+-				return nil, t.abort(fmt.Errorf("foreign key on %s has %d columns but referenced PK on %s.%s has %d columns", relation, len(fk.LocalColumns()), refSchema, refRel, len(pr.pk)))
++				return fmt.Errorf("foreign key on %s has %d columns but referenced PK on %s.%s has %d columns", relation, len(fk.LocalColumns()), refSchema, refRel, len(pr.pk))
+ 			}
+ 			for _, pkIdx := range pr.pk {
+ 				refCols = append(refCols, pr.attributes[pkIdx].name)
+@@ -644,7 +677,7 @@ func (t *Transaction) Insert(schema, relation string, values map[string]any) (*T
+ 
+ 		// Ensure FK and ref columns match in count
+ 		if len(fk.LocalColumns()) != len(refCols) {
+-			return nil, t.abort(fmt.Errorf("foreign key on %s has %d columns but references %d columns on %s.%s", relation, len(fk.LocalColumns()), len(refCols), refSchema, refRel))
++			return fmt.Errorf("foreign key on %s has %d columns but references %d columns on %s.%s", relation, len(fk.LocalColumns()), len(refCols), refSchema, refRel)
+ 		}
+ 
+ 		// Build composite predicate: refCol1=val1 AND refCol2=val2 AND ...
+@@ -673,47 +706,20 @@ func (t *Transaction) Insert(schema, relation string, values map[string]any) (*T
+ 		// Check existence in parent relation
+ 		n, err := t.Plan(refSchema, nil, pred, nil, nil)
+ 		if err != nil {
+-			return nil, t.abort(err)
++			return err
+ 		}
+ 		_, rows, err := n.Exec()
+ 		if err != nil {
+-			return nil, t.abort(err)
++			return err
+ 		}
+ 		if len(rows) == 0 {
+ 			// Build a readable error message
+ 			localColsStr := strings.Join(fk.LocalColumns(), ", ")
+ 			refColsStr := strings.Join(refCols, ", ")
+-			return nil, t.abort(fmt.Errorf("insert violates foreign key: %s.%s(%s) references %s.%s(%s)", schema, relation, localColsStr, refSchema, refRel, refColsStr))
++			return fmt.Errorf("insert violates foreign key: %s.%s(%s) references %s.%s(%s)", schema, relation, localColsStr, refSchema, refRel, refColsStr)
+ 		}
+ 	}
+-
+-	// check primary key violation
+-	ok, err := r.CheckPrimaryKey(tuple)
+-	if err != nil {
+-		return nil, t.abort(err)
+-	}
+-	if !ok {
+-		return nil, t.abort(fmt.Errorf("primary key violation"))
+-	}
+-
+-	// insert into row list
+-	log.Debug("Inserting %v", tuple.values)
+-	e := r.rows.PushBack(tuple)
+-
+-	// update indexes
+-	for _, index := range r.indexes {
+-		index.Add(e)
+-	}
+-
+-	// add change
+-	c := ValueChange{
+-		current: e,
+-		old:     nil,
+-		l:       r.rows,
+-	}
+-	t.changes.PushBack(c)
+-
+-	return tuple, nil
++	return nil
+ }
+ 
+ // Query data from relations

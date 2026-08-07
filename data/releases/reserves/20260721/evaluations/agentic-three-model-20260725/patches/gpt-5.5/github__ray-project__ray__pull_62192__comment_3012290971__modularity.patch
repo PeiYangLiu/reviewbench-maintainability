@@ -1,0 +1,146 @@
+diff --git a/python/ray/util/client/worker.py b/python/ray/util/client/worker.py
+index d054ee4..9731096 100644
+--- a/python/ray/util/client/worker.py
++++ b/python/ray/util/client/worker.py
+@@ -86,6 +86,69 @@ def backoff(timeout: int) -> int:
+     return timeout
+ 
+ 
++def _prepare_init_request_serialized_data(
++    job_config: Optional[JobConfig], ray_init_kwargs: Optional[Dict[str, Any]] = None
++) -> Tuple[Optional[bytes], str]:
++    """Prepare serialized job config and init kwargs for InitRequest."""
++    if ray_init_kwargs is None:
++        ray_init_kwargs = {}
++    else:
++        ray_init_kwargs = dict(ray_init_kwargs)
++    if "logging_config" in ray_init_kwargs and isinstance(
++        ray_init_kwargs["logging_config"], LoggingConfig
++    ):
++        lc = ray_init_kwargs["logging_config"]
++        # Convert LoggingConfig to dict before client sends it over JSON in
++        # InitRequest.
++        ray_init_kwargs["logging_config"] = dataclasses.asdict(lc)
++    # If JobConfig has no py_logging_config, copy logging_config onto JobConfig
++    # for the pickled job.
++    if job_config is not None:
++        lc_raw = ray_init_kwargs.get("logging_config")
++        if lc_raw is not None and job_config.py_logging_config is None:
++            if isinstance(lc_raw, dict):
++                field_names = {f.name for f in dataclasses.fields(LoggingConfig)}
++                job_config.set_py_logging_config(
++                    LoggingConfig(
++                        **{k: v for k, v in lc_raw.items() if k in field_names}
++                    )
++                )
++            elif isinstance(lc_raw, LoggingConfig):
++                job_config.set_py_logging_config(lc_raw)
++
++    if job_config is None:
++        serialized_job_config = None
++    else:
++        with tempfile.TemporaryDirectory() as tmp_dir:
++            from ray._private.ray_constants import RAY_RUNTIME_ENV_IGNORE_GITIGNORE
++
++            runtime_env = job_config.runtime_env or {}
++            # Determine whether to respect .gitignore files based on environment variable
++            # Default is True (respect .gitignore). Set to False if env var is "1".
++            include_gitignore = (
++                os.environ.get(RAY_RUNTIME_ENV_IGNORE_GITIGNORE, "0") != "1"
++            )
++            runtime_env = upload_py_modules_if_needed(
++                runtime_env,
++                scratch_dir=tmp_dir,
++                include_gitignore=include_gitignore,
++                logger=logger,
++            )
++            runtime_env = upload_working_dir_if_needed(
++                runtime_env,
++                scratch_dir=tmp_dir,
++                include_gitignore=include_gitignore,
++                logger=logger,
++            )
++            # Remove excludes, it isn't relevant after the upload step.
++            runtime_env.pop("excludes", None)
++            job_config.set_runtime_env(runtime_env, validate=True)
++
++        serialized_job_config = pickle.dumps(job_config)
++
++    return serialized_job_config, json.dumps(ray_init_kwargs)
++
++
+ class Worker:
+     def __init__(
+         self,
+@@ -876,66 +939,15 @@ class Worker:
+         self, job_config: JobConfig, ray_init_kwargs: Optional[Dict[str, Any]] = None
+     ):
+         """Initialize the server"""
+-        if ray_init_kwargs is None:
+-            ray_init_kwargs = {}
+-        else:
+-            ray_init_kwargs = dict(ray_init_kwargs)
+-        if "logging_config" in ray_init_kwargs and isinstance(
+-            ray_init_kwargs["logging_config"], LoggingConfig
+-        ):
+-            lc = ray_init_kwargs["logging_config"]
+-            # Convert LoggingConfig to dict before client sends it over JSON in InitRequest
+-            ray_init_kwargs["logging_config"] = dataclasses.asdict(lc)
+-        # If JobConfig has no py_logging_config, copy logging_config onto JobConfig for the pickled job.
+-        if job_config is not None:
+-            lc_raw = ray_init_kwargs.get("logging_config")
+-            if lc_raw is not None and job_config.py_logging_config is None:
+-                if isinstance(lc_raw, dict):
+-                    field_names = {f.name for f in dataclasses.fields(LoggingConfig)}
+-                    job_config.set_py_logging_config(
+-                        LoggingConfig(
+-                            **{k: v for k, v in lc_raw.items() if k in field_names}
+-                        )
+-                    )
+-                elif isinstance(lc_raw, LoggingConfig):
+-                    job_config.set_py_logging_config(lc_raw)
+         try:
+-            if job_config is None:
+-                serialized_job_config = None
+-            else:
+-                with tempfile.TemporaryDirectory() as tmp_dir:
+-                    from ray._private.ray_constants import (
+-                        RAY_RUNTIME_ENV_IGNORE_GITIGNORE,
+-                    )
+-
+-                    runtime_env = job_config.runtime_env or {}
+-                    # Determine whether to respect .gitignore files based on environment variable
+-                    # Default is True (respect .gitignore). Set to False if env var is "1".
+-                    include_gitignore = (
+-                        os.environ.get(RAY_RUNTIME_ENV_IGNORE_GITIGNORE, "0") != "1"
+-                    )
+-                    runtime_env = upload_py_modules_if_needed(
+-                        runtime_env,
+-                        scratch_dir=tmp_dir,
+-                        include_gitignore=include_gitignore,
+-                        logger=logger,
+-                    )
+-                    runtime_env = upload_working_dir_if_needed(
+-                        runtime_env,
+-                        scratch_dir=tmp_dir,
+-                        include_gitignore=include_gitignore,
+-                        logger=logger,
+-                    )
+-                    # Remove excludes, it isn't relevant after the upload step.
+-                    runtime_env.pop("excludes", None)
+-                    job_config.set_runtime_env(runtime_env, validate=True)
+-
+-                serialized_job_config = pickle.dumps(job_config)
+-
++            (
++                serialized_job_config,
++                serialized_ray_init_kwargs,
++            ) = _prepare_init_request_serialized_data(job_config, ray_init_kwargs)
+             response = self.data_client.Init(
+                 ray_client_pb2.InitRequest(
+                     job_config=serialized_job_config,
+-                    ray_init_kwargs=json.dumps(ray_init_kwargs),
++                    ray_init_kwargs=serialized_ray_init_kwargs,
+                     reconnect_grace_period=self._reconnect_grace_period,
+                 )
+             )

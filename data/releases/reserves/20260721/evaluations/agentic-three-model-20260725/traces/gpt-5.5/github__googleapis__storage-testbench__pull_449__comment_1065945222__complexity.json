@@ -1,0 +1,335 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 120,
+      "path": "testbench/common.py",
+      "start_line": 1
+    },
+    "response_chars": 230,
+    "round": 1,
+    "tool_result": {
+      "content": "1: # Copyright 2020 Google LLC\n2: #\n3: # Licensed under the Apache License, Version 2.0 (the \"License\");\n4: # you may not use this file except in compliance with the License.\n5: # You may obtain a copy of the License at\n6: #\n7: #     http://www.apache.org/licenses/LICENSE-2.0\n8: #\n9: # Unless required by applicable law or agreed to in writing, software\n10: # distributed under the License is distributed on an \"AS IS\" BASIS,\n11: # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n12: # See the License for the specific language governing permissions and\n13: # limitations under the License.\n14: \n15: \"\"\"Common utils\"\"\"\n16: \n17: import base64\n18: from functools import wraps\n19: import gzip\n20: import io\n21: import json\n22: import random\n23: import re\n24: import socket\n25: import struct\n26: import types\n27: \n28: import flask\n29: from google.protobuf import timestamp_pb2\n30: from grpc import StatusCode\n31: from requests_toolbelt import MultipartDecoder\n32: from requests_toolbelt.multipart.decoder import ImproperBodyPartContentException\n33: import scalpl\n34: \n35: from google.storage.v2 import storage_pb2\n36: import testbench\n37: import platform\n38: \n39: re_remove_index = re.compile(r\"\\[\\d+\\]+|^[0-9]+\")\n40: retry_return_error_code = re.compile(r\"return-([0-9]+)$\")\n41: retry_return_error_connection = re.compile(r\"return-([a-z\\-]+)$\")\n42: retry_return_error_after_bytes = re.compile(r\"return-([0-9]+)-after-([0-9]+)K$\")\n43: retry_return_short_response = re.compile(\n44:     r\"return-broken-stream-final-chunk-after-([0-9]+)B$\"\n45: )\n46: retry_return_broken_stream_after_bytes = re.compile(\n47:     r\"return-broken-stream-after-([0-9]+)K$\"\n48: )\n49: content_range_split = re.compile(r\"bytes (\\*|[0-9]+-[0-9]+|[0-9]+-\\*)\\/(\\*|[0-9]+)\")\n50: \n51: # === STR === #\n52: \n53: \n54: re_snake_case = re.compile(r\"(?<!^)(?=[A-Z])\")\n55: \n56: \n57: def to_snake_case(string):\n58:     return re_snake_case.sub(\"_\", string).lower()\n59: \n60: \n61: def remove_index(string):\n62:     return re_remove_index.sub(\"\", string)\n63: \n64: \n65: # === FAKE REQUEST === #\n66: \n67: \n68: class FakeRequest(types.SimpleNamespace):\n69:     \"\"\"\n70:     Adapt requests to JSON API requests.\n71:     Converts gRPC and XML requests to an equivalent representation as a JSON request.\n72:     TODO(#86) - this is used as a helper to treat some XML and gRPC requests as-if\n73:         they where JSON requests, but seems like the work is incomplete.\n74:     \"\"\"\n75: \n76:     protobuf_wrapper_to_json_args = {\n77:         \"if_generation_match\": \"ifGenerationMatch\",\n78:         \"if_generation_not_match\": \"ifGenerationNotMatch\",\n79:         \"if_metageneration_match\": \"ifMetagenerationMatch\",\n80:         \"if_metageneration_not_match\": \"ifMetagenerationNotMatch\",\n81:     }\n82: \n83:     _COMMON_HEADERS = {\n84:         \"range\",\n85:         \"accept-encoding\",\n86:     }\n87: \n88:     def __init__(self, **kwargs):\n89:         super().__init__(**kwargs)\n90: \n91:     @classmethod\n92:     def init_xml(cls, request):\n93:         # Copy any common headers or starting with `x-goog-`\n94:         headers = {\n95:             key.lower(): value\n96:             for key, value in request.headers.items()\n97:             if key.lower().startswith(\"x-goog-\") or key.lower() in cls._COMMON_HEADERS\n98:         }\n99:         args = request.args.to_dict()\n100:         args.update(cls.xml_headers_to_json_args(headers))\n101:         return cls(args=args, headers=headers, environ=getattr(request, \"environ\", {}))\n102: \n103:     @classmethod\n104:     def xml_headers_to_json_args(cls, headers):\n105:         field_map = {\n106:             \"x-goog-if-generation-match\": \"ifGenerationMatch\",\n107:             \"x-goog-if-metageneration-match\": \"ifMetagenerationMatch\",\n108:             \"x-goog-acl\": \"predefinedAcl\",\n109:         }\n110:         args = {}\n111:         for field_xml, field_json in field_map.items():\n112:             if field_xml in headers:\n113:                 args[field_json] = headers[field_xml]\n114:         return args\n115: \n116:     @classmethod\n117:     def init_protobuf(cls, request, context):\n118:         assert context is not None\n119:         fake_request = FakeRequest(args={}, headers={})\n120:         fake_request.update_protobuf(request, context)",
+      "end_line": 120,
+      "path_lines": 996,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 8462,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 567,
+      "output_tokens_details": {
+        "reasoning_tokens": 481
+      },
+      "total_tokens": 9029
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "def __get_request_socket(request, running_on_windows):\n    if running_on_windows:\n        channel = request.environ.get(\"waitress.channel\", None)\n        if channel is None:\n            return None\n        return channel.socket\n    return request.environ.get(\"gunicorn.socket\", None)\n\n\n",
+          "end_line": 683,
+          "start_line": 684
+        },
+        {
+          "content": "            conn_socket = __get_request_socket(request, running_on_windows)\n            if conn_socket is not None:\n                conn_socket.setsockopt(\n                    socket.SOL_SOCKET, socket.SO_LINGER, struct.pack(\"ii\", 1, 0)\n                )\n                conn_socket.close()",
+          "end_line": 743,
+          "start_line": 728
+        },
+        {
+          "content": "            conn_socket = __get_request_socket(request, running_on_windows)\n            return __get_streamer_response_fn(database, method, conn_socket, test_id)",
+          "end_line": 758,
+          "start_line": 753
+        },
+        {
+          "content": "        conn_socket = __get_request_socket(request, running_on_windows)\n        return __get_streamer_response_fn(\n            database, method, conn_socket, test_id, limit=after_bytes\n        )",
+          "end_line": 771,
+          "start_line": 766
+        }
+      ]
+    },
+    "response_chars": 2499,
+    "round": 2,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 683,
+          "replacement_lines": 9,
+          "start_line": 684
+        },
+        {
+          "end_line": 743,
+          "replacement_lines": 6,
+          "start_line": 728
+        },
+        {
+          "end_line": 758,
+          "replacement_lines": 2,
+          "start_line": 753
+        },
+        {
+          "end_line": 771,
+          "replacement_lines": 4,
+          "start_line": 766
+        }
+      ],
+      "current_file_lines": 989,
+      "updated_excerpt": {
+        "content": "674: \n675:         return flask.Response(streamer(), headers=_extract_headers(data))\n676: \n677:     return response_handler\n678: \n679: \n680: def __get_default_response_fn(data):\n681:     return data\n682: \n683: \n684: def __get_request_socket(request, running_on_windows):\n685:     if running_on_windows:\n686:         channel = request.environ.get(\"waitress.channel\", None)\n687:         if channel is None:\n688:             return None\n689:         return channel.socket\n690:     return request.environ.get(\"gunicorn.socket\", None)\n691: \n692: \n693: def __get_limit_response_fn(database, upload_id, test_id, method, limit):\n694:     def limited_response_fn(data):\n695:         upload = database.get_upload(upload_id, None)\n696:         if upload.complete:\n697:             database.dequeue_next_instruction(test_id, method)\n698:             data = _extract_data(data)\n699:             return flask.Response(\n700:                 data[0:limit], status=200, content_type=\"application/json\"\n701:             )\n702:         else:\n703:             return data\n704: \n705:     return limited_response_fn\n706: \n707: \n708: def handle_retry_test_instruction(database, request, method):\n709:     upload_id = request.args.get(\"upload_id\", None)\n710:     test_id = request.headers.get(\"x-retry-test-id\", None)\n711:     running_on_windows = False  # Default flag value.\n712:     if platform.system().lower() == \"windows\":\n713:         running_on_windows = True\n714:     if not test_id or not database.has_instructions_retry_test(test_id, method):",
+        "end_line": 714,
+        "path_lines": 989,
+        "start_line": 674
+      }
+    },
+    "usage": {
+      "input_tokens": 9827,
+      "input_tokens_details": {
+        "cached_tokens": 7936
+      },
+      "output_tokens": 1667,
+      "output_tokens_details": {
+        "reasoning_tokens": 1062
+      },
+      "total_tokens": 11494
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 780,
+      "path": "testbench/common.py",
+      "start_line": 720
+    },
+    "response_chars": 78,
+    "round": 3,
+    "tool_result": {
+      "content": "720:     if error_code_matches:\n721:         database.dequeue_next_instruction(test_id, method)\n722:         items = list(error_code_matches.groups())\n723:         error_code = items[0]\n724:         error_message = {\n725:             \"error\": {\"message\": \"Retry Test: Caused a {}\".format(error_code)}\n726:         }\n727:         testbench.error.generic(\n728:             msg=error_message, rest_code=error_code, grpc_code=None, context=None\n729:         )\n730:     retry_connection_matches = testbench.common.retry_return_error_connection.match(\n731:         next_instruction\n732:     )\n733:     if retry_connection_matches:\n734:         items = list(retry_connection_matches.groups())\n735:         if items[0] == \"reset-connection\":\n736:             database.dequeue_next_instruction(test_id, method)\n737:             conn_socket = __get_request_socket(request, running_on_windows)\n738:             if conn_socket is not None:\n739:                 conn_socket.setsockopt(\n740:                     socket.SOL_SOCKET, socket.SO_LINGER, struct.pack(\"ii\", 1, 0)\n741:                 )\n742:                 conn_socket.close()\n743:             # This exception is raised to abort the flow control. The connection\n744:             # has already been closed, causing the client to receive a \"connection\n745:             # reset by peer\" (or a similar error). The exception is useful in\n746:             # unit tests (where there is no socket to close), and stops the testbench\n747:             # from trying to complete a request that we intentionally aborted.\n748:             raise testbench.error.RestException(\n749:                 \"Injected 'connection reset by peer' fault\", 500\n750:             )\n751:         elif items[0] == \"broken-stream\":\n752:             conn_socket = __get_request_socket(request, running_on_windows)\n753:             return __get_streamer_response_fn(database, method, conn_socket, test_id)\n754:             )\n755:     broken_stream_after_bytes = (\n756:         testbench.common.retry_return_broken_stream_after_bytes.match(next_instruction)\n757:     )\n758:     if broken_stream_after_bytes and method == \"storage.objects.get\":\n759:         items = list(broken_stream_after_bytes.groups())\n760:         after_bytes = int(items[0]) * 1024\n761:         conn_socket = __get_request_socket(request, running_on_windows)\n762:         return __get_streamer_response_fn(\n763:             database, method, conn_socket, test_id, limit=after_bytes\n764:         )\n765:         )\n766:     error_after_bytes_matches = testbench.common.retry_return_error_after_bytes.match(\n767:         next_instruction\n768:     )\n769:     if error_after_bytes_matches and method == \"storage.objects.insert\":\n770:         items = list(error_after_bytes_matches.groups())\n771:         error_code = int(items[0])\n772:         after_bytes = int(items[1]) * 1024\n773:         # Upload failures should allow to not complete after certain bytes\n774:         upload_id = request.args.get(\"upload_id\", None)\n775:         if upload_id is not None:\n776:             upload = database.get_upload(upload_id, None)\n777:             if upload is not None and len(upload.media) >= after_bytes:\n778:                 database.dequeue_next_instruction(test_id, method)\n779:                 testbench.error.generic(\n780:                     \"Fault injected after uploading %d bytes\" % len(upload.media),",
+      "end_line": 780,
+      "path_lines": 989,
+      "start_line": 720
+    },
+    "usage": {
+      "input_tokens": 10657,
+      "input_tokens_details": {
+        "cached_tokens": 9472
+      },
+      "output_tokens": 232,
+      "output_tokens_details": {
+        "reasoning_tokens": 197
+      },
+      "total_tokens": 10889
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "",
+          "end_line": 754,
+          "start_line": 754
+        },
+        {
+          "content": "",
+          "end_line": 765,
+          "start_line": 765
+        }
+      ]
+    },
+    "response_chars": 401,
+    "round": 4,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 754,
+          "replacement_lines": 0,
+          "start_line": 754
+        },
+        {
+          "end_line": 765,
+          "replacement_lines": 0,
+          "start_line": 765
+        }
+      ],
+      "current_file_lines": 987,
+      "updated_excerpt": {
+        "content": "744:             # has already been closed, causing the client to receive a \"connection\n745:             # reset by peer\" (or a similar error). The exception is useful in\n746:             # unit tests (where there is no socket to close), and stops the testbench\n747:             # from trying to complete a request that we intentionally aborted.\n748:             raise testbench.error.RestException(\n749:                 \"Injected 'connection reset by peer' fault\", 500\n750:             )\n751:         elif items[0] == \"broken-stream\":\n752:             conn_socket = __get_request_socket(request, running_on_windows)\n753:             return __get_streamer_response_fn(database, method, conn_socket, test_id)\n754:     broken_stream_after_bytes = (\n755:         testbench.common.retry_return_broken_stream_after_bytes.match(next_instruction)\n756:     )\n757:     if broken_stream_after_bytes and method == \"storage.objects.get\":\n758:         items = list(broken_stream_after_bytes.groups())\n759:         after_bytes = int(items[0]) * 1024\n760:         conn_socket = __get_request_socket(request, running_on_windows)\n761:         return __get_streamer_response_fn(\n762:             database, method, conn_socket, test_id, limit=after_bytes\n763:         )\n764:     error_after_bytes_matches = testbench.common.retry_return_error_after_bytes.match(\n765:         next_instruction\n766:     )\n767:     if error_after_bytes_matches and method == \"storage.objects.insert\":\n768:         items = list(error_after_bytes_matches.groups())\n769:         error_code = int(items[0])\n770:         after_bytes = int(items[1]) * 1024\n771:         # Upload failures should allow to not complete after certain bytes\n772:         upload_id = request.args.get(\"upload_id\", None)\n773:         if upload_id is not None:\n774:             upload = database.get_upload(upload_id, None)\n775:             if upload is not None and len(upload.media) >= after_bytes:\n776:                 database.dequeue_next_instruction(test_id, method)\n777:                 testbench.error.generic(\n778:                     \"Fault injected after uploading %d bytes\" % len(upload.media),\n779:                     rest_code=error_code,\n780:                     grpc_code=StatusCode.INTERNAL,  # not really used\n781:                     context=None,\n782:                 )\n783:     retry_return_short_response = testbench.common.retry_return_short_response.match(\n784:         next_instruction",
+        "end_line": 784,
+        "path_lines": 987,
+        "start_line": 744
+      }
+    },
+    "usage": {
+      "input_tokens": 11530,
+      "input_tokens_details": {
+        "cached_tokens": 10496
+      },
+      "output_tokens": 618,
+      "output_tokens_details": {
+        "reasoning_tokens": 471
+      },
+      "total_tokens": 12148
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 770,
+      "path": "testbench/common.py",
+      "start_line": 680
+    },
+    "response_chars": 236,
+    "round": 5,
+    "tool_result": {
+      "content": "680: def __get_default_response_fn(data):\n681:     return data\n682: \n683: \n684: def __get_request_socket(request, running_on_windows):\n685:     if running_on_windows:\n686:         channel = request.environ.get(\"waitress.channel\", None)\n687:         if channel is None:\n688:             return None\n689:         return channel.socket\n690:     return request.environ.get(\"gunicorn.socket\", None)\n691: \n692: \n693: def __get_limit_response_fn(database, upload_id, test_id, method, limit):\n694:     def limited_response_fn(data):\n695:         upload = database.get_upload(upload_id, None)\n696:         if upload.complete:\n697:             database.dequeue_next_instruction(test_id, method)\n698:             data = _extract_data(data)\n699:             return flask.Response(\n700:                 data[0:limit], status=200, content_type=\"application/json\"\n701:             )\n702:         else:\n703:             return data\n704: \n705:     return limited_response_fn\n706: \n707: \n708: def handle_retry_test_instruction(database, request, method):\n709:     upload_id = request.args.get(\"upload_id\", None)\n710:     test_id = request.headers.get(\"x-retry-test-id\", None)\n711:     running_on_windows = False  # Default flag value.\n712:     if platform.system().lower() == \"windows\":\n713:         running_on_windows = True\n714:     if not test_id or not database.has_instructions_retry_test(test_id, method):\n715:         return __get_default_response_fn\n716:     next_instruction = database.peek_next_instruction(test_id, method)\n717:     error_code_matches = testbench.common.retry_return_error_code.match(\n718:         next_instruction\n719:     )\n720:     if error_code_matches:\n721:         database.dequeue_next_instruction(test_id, method)\n722:         items = list(error_code_matches.groups())\n723:         error_code = items[0]\n724:         error_message = {\n725:             \"error\": {\"message\": \"Retry Test: Caused a {}\".format(error_code)}\n726:         }\n727:         testbench.error.generic(\n728:             msg=error_message, rest_code=error_code, grpc_code=None, context=None\n729:         )\n730:     retry_connection_matches = testbench.common.retry_return_error_connection.match(\n731:         next_instruction\n732:     )\n733:     if retry_connection_matches:\n734:         items = list(retry_connection_matches.groups())\n735:         if items[0] == \"reset-connection\":\n736:             database.dequeue_next_instruction(test_id, method)\n737:             conn_socket = __get_request_socket(request, running_on_windows)\n738:             if conn_socket is not None:\n739:                 conn_socket.setsockopt(\n740:                     socket.SOL_SOCKET, socket.SO_LINGER, struct.pack(\"ii\", 1, 0)\n741:                 )\n742:                 conn_socket.close()\n743:             # This exception is raised to abort the flow control. The connection\n744:             # has already been closed, causing the client to receive a \"connection\n745:             # reset by peer\" (or a similar error). The exception is useful in\n746:             # unit tests (where there is no socket to close), and stops the testbench\n747:             # from trying to complete a request that we intentionally aborted.\n748:             raise testbench.error.RestException(\n749:                 \"Injected 'connection reset by peer' fault\", 500\n750:             )\n751:         elif items[0] == \"broken-stream\":\n752:             conn_socket = __get_request_socket(request, running_on_windows)\n753:             return __get_streamer_response_fn(database, method, conn_socket, test_id)\n754:     broken_stream_after_bytes = (\n755:         testbench.common.retry_return_broken_stream_after_bytes.match(next_instruction)\n756:     )\n757:     if broken_stream_after_bytes and method == \"storage.objects.get\":\n758:         items = list(broken_stream_after_bytes.groups())\n759:         after_bytes = int(items[0]) * 1024\n760:         conn_socket = __get_request_socket(request, running_on_windows)\n761:         return __get_streamer_response_fn(\n762:             database, method, conn_socket, test_id, limit=after_bytes\n763:         )\n764:     error_after_bytes_matches = testbench.common.retry_return_error_after_bytes.match(\n765:         next_instruction\n766:     )\n767:     if error_after_bytes_matches and method == \"storage.objects.insert\":\n768:         items = list(error_after_bytes_matches.groups())\n769:         error_code = int(items[0])\n770:         after_bytes = int(items[1]) * 1024",
+      "end_line": 770,
+      "path_lines": 987,
+      "start_line": 680
+    },
+    "usage": {
+      "input_tokens": 12236,
+      "input_tokens_details": {
+        "cached_tokens": 11008
+      },
+      "output_tokens": 435,
+      "output_tokens_details": {
+        "reasoning_tokens": 349
+      },
+      "total_tokens": 12671
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "def __get_request_socket(request):\n    if platform.system().lower() == \"windows\":\n        channel = request.environ.get(\"waitress.channel\", None)\n        if channel is None:\n            return None\n        return channel.socket\n    return request.environ.get(\"gunicorn.socket\", None)",
+          "end_line": 690,
+          "start_line": 684
+        },
+        {
+          "content": "",
+          "end_line": 713,
+          "start_line": 711
+        },
+        {
+          "content": "            conn_socket = __get_request_socket(request)",
+          "end_line": 737,
+          "start_line": 737
+        },
+        {
+          "content": "            conn_socket = __get_request_socket(request)",
+          "end_line": 752,
+          "start_line": 752
+        },
+        {
+          "content": "        conn_socket = __get_request_socket(request)",
+          "end_line": 760,
+          "start_line": 760
+        }
+      ]
+    },
+    "response_chars": 718,
+    "round": 6,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 690,
+          "replacement_lines": 7,
+          "start_line": 684
+        },
+        {
+          "end_line": 713,
+          "replacement_lines": 0,
+          "start_line": 711
+        },
+        {
+          "end_line": 737,
+          "replacement_lines": 1,
+          "start_line": 737
+        },
+        {
+          "end_line": 752,
+          "replacement_lines": 1,
+          "start_line": 752
+        },
+        {
+          "end_line": 760,
+          "replacement_lines": 1,
+          "start_line": 760
+        }
+      ],
+      "current_file_lines": 984,
+      "updated_excerpt": {
+        "content": "674: \n675:         return flask.Response(streamer(), headers=_extract_headers(data))\n676: \n677:     return response_handler\n678: \n679: \n680: def __get_default_response_fn(data):\n681:     return data\n682: \n683: \n684: def __get_request_socket(request):\n685:     if platform.system().lower() == \"windows\":\n686:         channel = request.environ.get(\"waitress.channel\", None)\n687:         if channel is None:\n688:             return None\n689:         return channel.socket\n690:     return request.environ.get(\"gunicorn.socket\", None)\n691: \n692: \n693: def __get_limit_response_fn(database, upload_id, test_id, method, limit):\n694:     def limited_response_fn(data):\n695:         upload = database.get_upload(upload_id, None)\n696:         if upload.complete:\n697:             database.dequeue_next_instruction(test_id, method)\n698:             data = _extract_data(data)\n699:             return flask.Response(\n700:                 data[0:limit], status=200, content_type=\"application/json\"\n701:             )\n702:         else:\n703:             return data\n704: \n705:     return limited_response_fn\n706: \n707: \n708: def handle_retry_test_instruction(database, request, method):\n709:     upload_id = request.args.get(\"upload_id\", None)\n710:     test_id = request.headers.get(\"x-retry-test-id\", None)\n711:     if not test_id or not database.has_instructions_retry_test(test_id, method):\n712:         return __get_default_response_fn\n713:     next_instruction = database.peek_next_instruction(test_id, method)\n714:     error_code_matches = testbench.common.retry_return_error_code.match(",
+        "end_line": 714,
+        "path_lines": 984,
+        "start_line": 674
+      }
+    },
+    "usage": {
+      "input_tokens": 13405,
+      "input_tokens_details": {
+        "cached_tokens": 12032
+      },
+      "output_tokens": 687,
+      "output_tokens_details": {
+        "reasoning_tokens": 504
+      },
+      "total_tokens": 14092
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 765,
+      "path": "testbench/common.py",
+      "start_line": 730
+    },
+    "response_chars": 157,
+    "round": 7,
+    "tool_result": {
+      "content": "730:     if retry_connection_matches:\n731:         items = list(retry_connection_matches.groups())\n732:         if items[0] == \"reset-connection\":\n733:             database.dequeue_next_instruction(test_id, method)\n734:             conn_socket = __get_request_socket(request)\n735:             if conn_socket is not None:\n736:                 conn_socket.setsockopt(\n737:                     socket.SOL_SOCKET, socket.SO_LINGER, struct.pack(\"ii\", 1, 0)\n738:                 )\n739:                 conn_socket.close()\n740:             # This exception is raised to abort the flow control. The connection\n741:             # has already been closed, causing the client to receive a \"connection\n742:             # reset by peer\" (or a similar error). The exception is useful in\n743:             # unit tests (where there is no socket to close), and stops the testbench\n744:             # from trying to complete a request that we intentionally aborted.\n745:             raise testbench.error.RestException(\n746:                 \"Injected 'connection reset by peer' fault\", 500\n747:             )\n748:         elif items[0] == \"broken-stream\":\n749:             conn_socket = __get_request_socket(request)\n750:             return __get_streamer_response_fn(database, method, conn_socket, test_id)\n751:     broken_stream_after_bytes = (\n752:         testbench.common.retry_return_broken_stream_after_bytes.match(next_instruction)\n753:     )\n754:     if broken_stream_after_bytes and method == \"storage.objects.get\":\n755:         items = list(broken_stream_after_bytes.groups())\n756:         after_bytes = int(items[0]) * 1024\n757:         conn_socket = __get_request_socket(request)\n758:         return __get_streamer_response_fn(\n759:             database, method, conn_socket, test_id, limit=after_bytes\n760:         )\n761:     error_after_bytes_matches = testbench.common.retry_return_error_after_bytes.match(\n762:         next_instruction\n763:     )\n764:     if error_after_bytes_matches and method == \"storage.objects.insert\":\n765:         items = list(error_after_bytes_matches.groups())",
+      "end_line": 765,
+      "path_lines": 984,
+      "start_line": 730
+    },
+    "usage": {
+      "input_tokens": 14167,
+      "input_tokens_details": {
+        "cached_tokens": 13056
+      },
+      "output_tokens": 357,
+      "output_tokens_details": {
+        "reasoning_tokens": 300
+      },
+      "total_tokens": 14524
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 8,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__googleapis__storage-testbench__pull_449__comment_1065945222__complexity.patch"
+    },
+    "usage": {
+      "input_tokens": 14722,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 364,
+      "output_tokens_details": {
+        "reasoning_tokens": 353
+      },
+      "total_tokens": 15086
+    }
+  }
+]

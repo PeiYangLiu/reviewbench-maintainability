@@ -1,0 +1,82 @@
+diff --git a/cou/steps/plan.py b/cou/steps/plan.py
+index 9d5c2af..4a791d0 100644
+--- a/cou/steps/plan.py
++++ b/cou/steps/plan.py
+@@ -15,6 +15,8 @@
+ """Upgrade planning utilities."""
+ 
+ import logging
++from collections.abc import Iterable
++from itertools import chain
+ from typing import Callable
+ 
+ from cou.apps.app import OpenStackApplication
+@@ -44,19 +46,39 @@ async def generate_plan(analysis_result: Analysis) -> UpgradeStep:
+         UpgradeStep(description="backup mysql databases", parallel=False, function=backup)
+     )
+ 
+-    principal_upgrade_plan = await create_upgrade_group(
++    principal_control_plane_upgrade_plan = await create_upgrade_group(
+         analysis_result=analysis_result,
+-        description="Principal(s) upgrade plan",
++        description="Principal(s) upgrade plan for control plane",
+         target=target,
+-        filter_function=lambda app: not isinstance(app, OpenStackSubordinateApplication),
++        filter_function=lambda analysis: (
++            app
++            for app in analysis.apps_control_plane
++            if not isinstance(app, OpenStackSubordinateApplication)
++        ),
+     )
+-    plan.add_step(principal_upgrade_plan)
++    plan.add_step(principal_control_plane_upgrade_plan)
++
++    principal_data_plane_upgrade_plan = await create_upgrade_group(
++        analysis_result=analysis_result,
++        description="Principal(s) upgrade plan for data plane",
++        target=target,
++        filter_function=lambda analysis: (
++            app
++            for app in analysis.apps_data_plane
++            if not isinstance(app, OpenStackSubordinateApplication)
++        ),
++    )
++    plan.add_step(principal_data_plane_upgrade_plan)
+ 
+     subordinate_upgrade_plan = await create_upgrade_group(
+         analysis_result=analysis_result,
+         description="Subordinate(s) upgrade plan",
+         target=target,
+-        filter_function=lambda app: isinstance(app, OpenStackSubordinateApplication),
++        filter_function=lambda analysis: (
++            app
++            for app in chain(analysis.apps_control_plane, analysis.apps_data_plane)
++            if isinstance(app, OpenStackSubordinateApplication)
++        ),
+     )
+     plan.add_step(subordinate_upgrade_plan)
+ 
+@@ -67,7 +89,7 @@ async def create_upgrade_group(
+     analysis_result: Analysis,
+     target: str,
+     description: str,
+-    filter_function: Callable[[OpenStackApplication], bool],
++    filter_function: Callable[[Analysis], Iterable[OpenStackApplication]],
+ ) -> UpgradeStep:
+     """Create upgrade group.
+ 
+@@ -78,12 +100,12 @@ async def create_upgrade_group(
+     :param description: Description of the upgrade step.
+     :type description: str
+     :param filter_function: Function to filter applications.
+-    :type filter_function: Callable[[OpenStackApplication], bool]
++    :type filter_function: Callable[[Analysis], Iterable[OpenStackApplication]]
+     :return: Upgrade group.
+     :rtype: UpgradeStep
+     """
+     group_upgrade_plan = UpgradeStep(description=description, parallel=False, function=None)
+-    for app in filter(filter_function, analysis_result.apps_control_plane):
++    for app in filter_function(analysis_result):
+         try:
+             app_upgrade_plan = app.generate_upgrade_plan(target)
+         except HaltUpgradePlanGeneration as exc:

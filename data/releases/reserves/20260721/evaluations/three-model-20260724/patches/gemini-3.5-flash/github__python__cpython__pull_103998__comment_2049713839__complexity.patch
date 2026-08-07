@@ -1,0 +1,88 @@
+--- a/Objects/unicodeobject.c
++++ b/Objects/unicodeobject.c
+@@ -14270,25 +14270,10 @@
+     return Py_BuildValue("(N)", copy);
+ }
+ 
+-/* Dedent a string.
+-   Behaviour is expected to be an exact match of `textwrap.dedent`.
+-   Return a new reference on success, NULL with exception set on error.
+-   */
+-PyAPI_FUNC(PyObject *)
+-_PyUnicode_Dedent(PyObject *unicode)
+-{
+-    Py_ssize_t src_len = 0;
+-    const char *src = PyUnicode_AsUTF8AndSize(unicode, &src_len);
+-    if (!src) {
+-        return NULL;
+-    }
+-    if (src_len <= 0) {
+-        Py_INCREF(unicode);
+-        return unicode;
+-    }
+-
++static Py_ssize_t
++dedent_find_candidate_len(const char *src, Py_ssize_t src_len)
++{
+     const char *end = src + src_len;
+-
+     // [candidate_start, candidate_start + candidate_len)
+     // describes the current longest common leading whitespace
+     const char *candidate_start = NULL;
+@@ -14305,8 +14290,7 @@
+                    in this line */
+                 if (iter == line_start) {
+                     // some line has no indent, fast exit!
+-                    Py_INCREF(unicode);
+-                    return unicode;
++                    return 0;
+                 }
+                 leading_whitespace_end = iter;
+             }
+@@ -14348,18 +14332,38 @@
+             candidate_len = new_candidate_len;
+             if (candidate_len == 0) {
+                 // No common things now, fast exit!
+-                Py_INCREF(unicode);
+-                return unicode;
+-            }
+-        }
+-    }
+-
+-    assert(candidate_len >= 0);
+-    /* Final check for strings that contain nothing but whitespace. */
++                return 0;
++            }
++        }
++    }
++
++    return candidate_len;
++}
++
++/* Dedent a string.
++   Behaviour is expected to be an exact match of `textwrap.dedent`.
++   Return a new reference on success, NULL with exception set on error.
++   */
++PyAPI_FUNC(PyObject *)
++_PyUnicode_Dedent(PyObject *unicode)
++{
++    Py_ssize_t src_len = 0;
++    const char *src = PyUnicode_AsUTF8AndSize(unicode, &src_len);
++    if (!src) {
++        return NULL;
++    }
++    if (src_len <= 0) {
++        Py_INCREF(unicode);
++        return unicode;
++    }
++
++    Py_ssize_t candidate_len = dedent_find_candidate_len(src, src_len);
+     if (candidate_len == 0) {
+         Py_INCREF(unicode);
+         return unicode;
+     }
++
++    const char *end = src + src_len;
+ 
+     // now we should trigger a dedent
+     char *dest = PyMem_Malloc(src_len);

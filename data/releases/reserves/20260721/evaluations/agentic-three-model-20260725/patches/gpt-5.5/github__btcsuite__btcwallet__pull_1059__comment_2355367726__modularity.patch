@@ -1,0 +1,118 @@
+diff --git a/wtxmgr/query.go b/wtxmgr/query.go
+index c5165ac..d138134 100644
+--- a/wtxmgr/query.go
++++ b/wtxmgr/query.go
+@@ -459,6 +459,55 @@ func (s *Store) PreviousPkScripts(ns walletdb.ReadBucket, rec *TxRecord, block *
+ 	return pkScripts, nil
+ }
+ 
++// minedUtxo returns the mined credit for an outpoint if it is known to the
++// store as an unspent output.
++func (s *Store) minedUtxo(ns walletdb.ReadBucket, outpoint wire.OutPoint,
++	k []byte) (*Credit, error) {
++
++	unspentVal := ns.NestedReadBucket(bucketUnspent).Get(k)
++	if unspentVal == nil {
++		return nil, nil
++	}
++
++	var block Block
++	err := readUnspentBlock(unspentVal, &block)
++	if err != nil {
++		return nil, err
++	}
++
++	// We have the block, now fetch the full transaction record.
++	rec, err := fetchTxRecord(ns, &outpoint.Hash, &block)
++	if err != nil {
++		return nil, err
++	}
++
++	// Ensure the output index is valid for the transaction.
++	if int(outpoint.Index) >= len(rec.MsgTx.TxOut) {
++		str := fmt.Sprintf("mined credit %v references "+
++			"non-existent output index", outpoint)
++		return nil, storeError(ErrData, str, nil)
++	}
++	txOut := rec.MsgTx.TxOut[outpoint.Index]
++
++	blockTime, err := fetchBlockTime(ns, block.Height)
++	if err != nil {
++		return nil, err
++	}
++
++	credit := &Credit{
++		OutPoint: outpoint,
++		BlockMeta: BlockMeta{
++			Block: block,
++			Time:  blockTime,
++		},
++		Amount:       btcutil.Amount(txOut.Value),
++		PkScript:     txOut.PkScript,
++		Received:     rec.Received,
++		FromCoinBase: blockchain.IsCoinBaseTx(&rec.MsgTx),
++	}
++	return credit, nil
++}
++
+ // TODO(yy): This method is inefficient as it requires multiple database
+ // lookups (unspent, tx records) to construct the full credit. This
+ // should be optimized by denormalizing the unspent bucket to include
+@@ -467,7 +516,6 @@ func (s *Store) PreviousPkScripts(ns walletdb.ReadBucket, rec *TxRecord, block *
+ // TODO(yy): This function only confirms the existence of a UTXO but does
+ // not guarantee its spendability. A more comprehensive version should
+ // also check the 'unminedInputs' and 'lockedOutputs' buckets.
+-//
+ // GetUtxo returns the credit for a given outpoint, if it is known to the
+ // store as a UTXO. It checks for mined (confirmed) UTXOs first, and then
+ // unmined (unconfirmed) credits. If the UTXO is not found, ErrUtxoNotFound is
+@@ -479,44 +527,11 @@ func (s *Store) GetUtxo(ns walletdb.ReadBucket,
+ 	k := canonicalOutPoint(&outpoint.Hash, outpoint.Index)
+ 
+ 	// First, check if the UTXO is a mined and unspent credit.
+-	unspentVal := ns.NestedReadBucket(bucketUnspent).Get(k)
+-	if unspentVal != nil {
+-		var block Block
+-		err := readUnspentBlock(unspentVal, &block)
+-		if err != nil {
+-			return nil, err
+-		}
+-
+-		// We have the block, now fetch the full transaction record.
+-		rec, err := fetchTxRecord(ns, &outpoint.Hash, &block)
+-		if err != nil {
+-			return nil, err
+-		}
+-
+-		// Ensure the output index is valid for the transaction.
+-		if int(outpoint.Index) >= len(rec.MsgTx.TxOut) {
+-			str := fmt.Sprintf("mined credit %v references "+
+-				"non-existent output index", outpoint)
+-			return nil, storeError(ErrData, str, nil)
+-		}
+-		txOut := rec.MsgTx.TxOut[outpoint.Index]
+-
+-		blockTime, err := fetchBlockTime(ns, block.Height)
+-		if err != nil {
+-			return nil, err
+-		}
+-
+-		credit := &Credit{
+-			OutPoint: outpoint,
+-			BlockMeta: BlockMeta{
+-				Block: block,
+-				Time:  blockTime,
+-			},
+-			Amount:       btcutil.Amount(txOut.Value),
+-			PkScript:     txOut.PkScript,
+-			Received:     rec.Received,
+-			FromCoinBase: blockchain.IsCoinBaseTx(&rec.MsgTx),
+-		}
++	credit, err := s.minedUtxo(ns, outpoint, k)
++	if err != nil {
++		return nil, err
++	}
++	if credit != nil {
+ 		return credit, nil
+ 	}
+ 

@@ -1,0 +1,107 @@
+diff --git a/operator/internal/certrotation/rotation.go b/operator/internal/certrotation/rotation.go
+index 4718948..680a9fe 100644
+--- a/operator/internal/certrotation/rotation.go
++++ b/operator/internal/certrotation/rotation.go
+@@ -22,6 +22,7 @@ var (
+ 
+ type signerRotation struct {
+ 	Issuer string
++	Clock  func() time.Time
+ }
+ 
+ func (r *signerRotation) NewCertificate(validity time.Duration) (*crypto.TLSCertificateConfig, error) {
+@@ -29,12 +30,19 @@ func (r *signerRotation) NewCertificate(validity time.Duration) (*crypto.TLSCert
+ 		return nil, errMissingIssuer
+ 	}
+ 
+-	signerName := fmt.Sprintf("%s@%d", r.Issuer, time.Now().Unix())
++	signerName := fmt.Sprintf("%s@%d", r.Issuer, r.now().Unix())
+ 	return crypto.MakeSelfSignedCAConfigForDuration(signerName, validity)
+ }
+ 
+ func (r *signerRotation) NeedNewCertificate(annotations map[string]string, refresh time.Duration) string {
+-	return needNewCertificate(annotations, refresh, nil)
++	return needNewCertificate(annotations, refresh, nil, r.now())
++}
++
++func (r *signerRotation) now() time.Time {
++	if r.Clock != nil {
++		return r.Clock()
++	}
++	return time.Now()
+ }
+ 
+ func (r *signerRotation) SetAnnotations(ca *crypto.TLSCertificateConfig, annotations map[string]string) {
+@@ -46,6 +54,7 @@ func (r *signerRotation) SetAnnotations(ca *crypto.TLSCertificateConfig, annotat
+ type certificateRotation struct {
+ 	UserInfo  user.Info
+ 	Hostnames []string
++	Clock     func() time.Time
+ }
+ 
+ func (r *certificateRotation) NewCertificate(signer *crypto.CA, validity time.Duration) (*crypto.TLSCertificateConfig, error) {
+@@ -74,7 +83,7 @@ func (r *certificateRotation) NewCertificate(signer *crypto.CA, validity time.Du
+ }
+ 
+ func (r *certificateRotation) NeedNewCertificate(annotations map[string]string, signer *crypto.CA, caBundleCerts []*x509.Certificate, refresh time.Duration) string {
+-	reason := needNewCertificate(annotations, refresh, signer)
++	reason := needNewCertificate(annotations, refresh, signer, r.now())
+ 	if len(reason) > 0 {
+ 		return reason
+ 	}
+@@ -108,6 +117,13 @@ func (r *certificateRotation) NeedNewCertificate(annotations map[string]string,
+ 	return ""
+ }
+ 
++func (r *certificateRotation) now() time.Time {
++	if r.Clock != nil {
++		return r.Clock()
++	}
++	return time.Now()
++}
++
+ func (r *certificateRotation) SetAnnotations(cert *crypto.TLSCertificateConfig, annotations map[string]string) {
+ 	hostnames := sets.String{}
+ 	for _, ip := range cert.Certs[0].IPAddresses {
+@@ -124,7 +140,7 @@ func (r *certificateRotation) SetAnnotations(cert *crypto.TLSCertificateConfig,
+ 	annotations[CertificateHostnames] = strings.Join(hostnames.List(), ",")
+ }
+ 
+-func needNewCertificate(annotations map[string]string, refresh time.Duration, signer *crypto.CA) string {
++func needNewCertificate(annotations map[string]string, refresh time.Duration, signer *crypto.CA, now time.Time) string {
+ 	notAfterString := annotations[CertificateNotAfterAnnotation]
+ 	if len(notAfterString) == 0 {
+ 		return "missing notAfter"
+@@ -144,7 +160,7 @@ func needNewCertificate(annotations map[string]string, refresh time.Duration, si
+ 	}
+ 
+ 	// Is cert expired?
+-	if time.Now().After(notAfter) {
++	if now.After(notAfter) {
+ 		return "already expired"
+ 	}
+ 
+@@ -156,20 +172,20 @@ func needNewCertificate(annotations map[string]string, refresh time.Duration, si
+ 
+ 	// Are we at 80% of validity?
+ 	at80Percent := notAfter.Add(-validity / 5)
+-	if time.Now().After(at80Percent) {
++	if now.After(at80Percent) {
+ 		return fmt.Sprintf("past its latest possible time %v", at80Percent)
+ 	}
+ 
+ 	// If Certificate is past its refresh time, we may have action to take. We only do this if the signer is old enough.
+ 	developerSpecifiedRefresh := notBefore.Add(refresh)
+-	if time.Now().After(developerSpecifiedRefresh) {
++	if now.After(developerSpecifiedRefresh) {
+ 		if signer == nil {
+ 			return fmt.Sprintf("past its refresh time %v", developerSpecifiedRefresh)
+ 		}
+ 
+ 		// make sure the signer has been valid for more than 10% of the target's refresh time.
+ 		timeToWaitForTrustRotation := refresh / 10
+-		if time.Now().After(signer.Config.Certs[0].NotBefore.Add(timeToWaitForTrustRotation)) {
++		if now.After(signer.Config.Certs[0].NotBefore.Add(timeToWaitForTrustRotation)) {
+ 			return fmt.Sprintf("past its refresh time %v", developerSpecifiedRefresh)
+ 		}
+ 	}

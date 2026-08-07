@@ -1,0 +1,66 @@
+diff --git a/magpie/ui/management/views.py b/magpie/ui/management/views.py
+index 20a2990..17d629a 100644
+--- a/magpie/ui/management/views.py
++++ b/magpie/ui/management/views.py
+@@ -24,15 +24,7 @@ from magpie.cli.sync_resources import OUT_OF_SYNC, fetch_single_service, get_las
+ from magpie.cli.sync_services import SYNC_SERVICES_TYPES
+ from magpie.constants import get_constant, network_enabled
+ # FIXME: remove (REMOTE_RESOURCE_TREE_SERVICE, RESOURCE_TYPE_DICT), implement getters via API
+-from magpie.models import (
+-    REMOTE_RESOURCE_TREE_SERVICE,
+-    RESOURCE_TYPE_DICT,
+-    NetworkNode,
+-    NetworkRemoteUser,
+-    User,
+-    UserGroupStatus,
+-    UserStatuses
+-)
++from magpie.models import REMOTE_RESOURCE_TREE_SERVICE, RESOURCE_TYPE_DICT, UserGroupStatus, UserStatuses
+ from magpie.permissions import Permission, PermissionSet
+ # FIXME: remove (SERVICE_TYPE_DICT), implement getters via API
+ from magpie.services import SERVICE_TYPE_DICT
+@@ -171,12 +163,7 @@ class ManagementViews(AdminRequests, BaseViews):
+ 
+         # add network information
+         if network_enabled(self.request):
+-            network_remote_users = (self.request.db.query(NetworkRemoteUser)
+-                                    .join(User).filter(User.user_name == user_name)
+-                                    .all())
+-            existing_network_remote_user_nodes = {nu.network_node_id: nu.name for nu in network_remote_users}
+-            network_nodes = self.request.db.query(NetworkNode).order_by(NetworkNode.id).all()
+-            user_info["network_nodes"] = [(n.name, existing_network_remote_user_nodes.get(n.id)) for n in network_nodes]
++            user_info["network_nodes"] = self.get_network_user_nodes(user_name)
+             user_info["network_routes"] = {"create": schemas.NetworkRemoteUsersAPI.name,
+                                            "delete": schemas.NetworkRemoteUserAPI.name}
+ 
+@@ -324,6 +311,30 @@ class ManagementViews(AdminRequests, BaseViews):
+         user_info["permission_titles"] = [Permission(perm).title for perm in res_perm_names]
+         return self.add_template_data(data=user_info)
+ 
++    def get_network_user_nodes(self, user_name):
++        try:
++            path = schemas.NetworkNodesAPI.path
++            resp = request_api(self.request, path, "GET")
++            check_response(resp)
++            network_nodes = get_json(resp)["nodes"]
++        except HTTPNotFound:
++            network_nodes = []
++
++        try:
++            path = schemas.NetworkRemoteUsersAPI.path
++            resp = request_api(self.request, path, "GET")
++            check_response(resp)
++            network_remote_users = get_json(resp)["remote_users"]
++        except HTTPNotFound:
++            network_remote_users = []
++
++        existing_network_remote_user_nodes = {
++            remote_user["node_name"]: remote_user["remote_user_name"]
++            for remote_user in network_remote_users
++            if remote_user["user_name"] == user_name
++        }
++        return [(node["name"], existing_network_remote_user_nodes.get(node["name"])) for node in network_nodes]
++
+     def view_pending_user(self):
+         """
+         Displays a pending user registration profile details.

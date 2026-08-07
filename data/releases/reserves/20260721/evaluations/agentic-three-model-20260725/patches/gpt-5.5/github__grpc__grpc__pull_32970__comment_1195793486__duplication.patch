@@ -1,0 +1,91 @@
+diff --git a/src/core/ext/xds/xds_audit_logger_registry.cc b/src/core/ext/xds/xds_audit_logger_registry.cc
+index 88b50d4..8158ea4 100644
+--- a/src/core/ext/xds/xds_audit_logger_registry.cc
++++ b/src/core/ext/xds/xds_audit_logger_registry.cc
+@@ -30,6 +30,7 @@
+ #include "envoy/config/rbac/v3/rbac.upb.h"
+ 
+ #include "src/core/ext/xds/xds_common_types.h"
++#include "src/core/lib/gprpp/match.h"
+ #include "src/core/lib/gprpp/validation_errors.h"
+ #include "src/core/lib/security/authorization/audit_logging.h"
+ 
+@@ -58,6 +59,16 @@ class StdoutLoggerConfigFactory : public XdsAuditLoggerRegistry::ConfigFactory {
+   }
+ };
+ 
++absl::optional<Json> ValidateAndWrapAuditLoggerConfig(
++    absl::string_view name, Json json_config, ValidationErrors* errors) {
++  auto result = AuditLoggerRegistry::ParseConfig(name, json_config);
++  if (!result.ok()) {
++    errors->AddError(result.status().message());
++    return Json();
++  }
++  return Json::FromObject({{std::string(name), std::move(json_config)}});
++}
++
+ }  // namespace
+ 
+ XdsAuditLoggerRegistry::XdsAuditLoggerRegistry() {
+@@ -85,38 +96,29 @@ Json XdsAuditLoggerRegistry::ConvertXdsAuditLoggerConfig(
+             typed_extension_config);
+     auto extension = ExtractXdsExtension(context, typed_config, errors);
+     if (!extension.has_value()) return Json();
+-    // Check for registered audit logger type.
+-    absl::string_view* serialized_value =
+-        absl::get_if<absl::string_view>(&extension->value);
+-    if (serialized_value != nullptr) {
+-      auto config_factory_it =
+-          audit_logger_config_factories_.find(extension->type);
+-      if (config_factory_it != audit_logger_config_factories_.end()) {
+-        auto json_config = Json::FromObject(
+-            config_factory_it->second->ConvertXdsAuditLoggerConfig(
+-                context, *serialized_value, errors));
+-        auto result = AuditLoggerRegistry::ParseConfig(
+-            config_factory_it->second->name(), json_config);
+-        if (!result.ok()) {
+-          errors->AddError(result.status().message());
+-          return Json();
+-        }
+-        return Json::FromObject(
+-            {{std::string(config_factory_it->second->name()), json_config}});
+-      }
+-    }
+-    // Check for custom audit logger type.
+-    Json* json = absl::get_if<Json>(&extension->value);
+-    if (json != nullptr &&
+-        AuditLoggerRegistry::FactoryExists(extension->type)) {
+-      auto result = AuditLoggerRegistry::ParseConfig(extension->type, *json);
+-      if (!result.ok()) {
+-        errors->AddError(result.status().message());
+-        return Json();
+-      }
+-      return Json::FromObject(
+-          {{std::string(extension->type), std::move(*json)}});
+-    }
++    auto result = MatchMutable(
++        &extension->value,
++        [this, &context, &extension, errors](absl::string_view* serialized_value)
++            -> absl::optional<Json> {
++          auto config_factory_it =
++              audit_logger_config_factories_.find(extension->type);
++          if (config_factory_it == audit_logger_config_factories_.end()) {
++            return absl::nullopt;
++          }
++          auto json_config = Json::FromObject(
++              config_factory_it->second->ConvertXdsAuditLoggerConfig(
++                  context, *serialized_value, errors));
++          return ValidateAndWrapAuditLoggerConfig(
++              config_factory_it->second->name(), std::move(json_config), errors);
++        },
++        [&extension, errors](Json* json) -> absl::optional<Json> {
++          if (!AuditLoggerRegistry::FactoryExists(extension->type)) {
++            return absl::nullopt;
++          }
++          return ValidateAndWrapAuditLoggerConfig(extension->type,
++                                                 std::move(*json), errors);
++        });
++    if (result.has_value()) return std::move(*result);
+   }
+   // Add validation error only if the config is not marked optional.
+   if (!envoy_config_rbac_v3_RBAC_AuditLoggingOptions_AuditLoggerConfig_is_optional(

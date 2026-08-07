@@ -1,0 +1,69 @@
+--- a/druidctl/cmd/listresources/listresources.go
++++ b/druidctl/cmd/listresources/listresources.go
+@@ -15,8 +15,10 @@
+ 	"github.com/gardener/etcd-druid/druidctl/internal/log"
+ 	"github.com/gardener/etcd-druid/druidctl/internal/printer"
+ 
++	"k8s.io/apimachinery/pkg/api/meta"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
++	"k8s.io/apimachinery/pkg/runtime/schema"
+ )
+ 
+ // ResourceKey identifies a Kubernetes resource kind by group/version/resource/Kind.
+@@ -104,8 +106,7 @@
+ 	if len(tokens) == 0 || (len(tokens) == 1 && tokens[0] == "all") {
+ 		tokens = defaultResourceTokens()
+ 	}
+-	resolver := newRESTMapperResolver(genClient.RESTMapper())
+-	metas, err := resolver.resolve(tokens)
++	metas, err := resolveTokens(genClient.RESTMapper(), tokens)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -225,6 +226,45 @@
+ 	return []string{"po", "sts", "svc", "cm", "secret", "pvc", "lease", "pdb", "role", "rolebinding", "sa"}
+ }
+ 
++type resourceMeta struct {
++	GVR        schema.GroupVersionResource
++	Kind       string
++	Namespaced bool
++}
++
++func resolveTokens(mapper meta.RESTMapper, tokens []string) ([]resourceMeta, error) {
++	var metas []resourceMeta
++	seen := make(map[schema.GroupVersionResource]struct{})
++	for _, token := range tokens {
++		gvr := schema.GroupVersionResource{Resource: token}
++		fullyQualifiedGVR, err := mapper.ResourceFor(gvr)
++		if err != nil {
++			return nil, fmt.Errorf("failed to resolve resource %q: %w", token, err)
++		}
++		if _, ok := seen[fullyQualifiedGVR]; ok {
++			continue
++		}
++		seen[fullyQualifiedGVR] = struct{}{}
++
++		gvk, err := mapper.KindFor(fullyQualifiedGVR)
++		if err != nil {
++			return nil, fmt.Errorf("failed to get kind for resource %q: %w", token, err)
++		}
++
++		mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
++		if err != nil {
++			return nil, fmt.Errorf("failed to get REST mapping for resource %q: %w", token, err)
++		}
++
++		metas = append(metas, resourceMeta{
++			GVR:        fullyQualifiedGVR,
++			Kind:       gvk.Kind,
++			Namespaced: mapping.Scope.Name() == meta.RESTScopeNameNamespace,
++		})
++	}
++	return metas, nil
++}
++
+ func toResourceRef(u *unstructured.Unstructured) ResourceRef {
+ 	age := time.Since(u.GetCreationTimestamp().Time)
+ 	return ResourceRef{

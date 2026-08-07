@@ -1,0 +1,106 @@
+diff --git a/exporter/pbm_collector.go b/exporter/pbm_collector.go
+index f1d6c29..b0583ff 100644
+--- a/exporter/pbm_collector.go
++++ b/exporter/pbm_collector.go
+@@ -56,18 +56,18 @@ func (p *pbmCollector) Collect(ch chan<- prometheus.Metric) {
+ 	p.base.Collect(ch)
+ }
+ 
++func appendPbmMetric(metrics *[]prometheus.Metric, name, help string, value float64, labels map[string]string) {
++	const prefix = "mongodb_pbm_"
++	d := prometheus.NewDesc(prefix+name, help, nil, labels)
++	*metrics = append(*metrics, prometheus.MustNewConstMetric(d, prometheus.GaugeValue, value))
++}
++
+ func (p *pbmCollector) collect(ch chan<- prometheus.Metric) {
+ 	defer measureCollectTime(ch, "mongodb", "pbm")()
+ 
+ 	var metrics []prometheus.Metric
+ 	logger := p.base.logger
+ 
+-	createMetric := func(name, help string, value float64, labels map[string]string) {
+-		const prefix = "mongodb_pbm_"
+-		d := prometheus.NewDesc(prefix+name, help, nil, labels)
+-		metrics = append(metrics, prometheus.MustNewConstMetric(d, prometheus.GaugeValue, value))
+-	}
+-
+ 	pbmClient, err := sdk.NewClient(p.ctx, p.mongoURI)
+ 	if err != nil {
+ 		logger.Errorf("failed to create PBM client: %s", err.Error())
+@@ -81,12 +81,12 @@ func (p *pbmCollector) collect(ch chan<- prometheus.Metric) {
+ 	}
+ 
+ 	if pbmConfig != nil {
+-		createMetric("cluster_backup_configured",
++		appendPbmMetric(&metrics, "cluster_backup_configured",
+ 			"PBM backups are configured for the cluster",
+ 			float64(1), nil)
+ 
+ 		if pbmConfig.PITR.Enabled {
+-			createMetric("cluster_pitr_backup_enabled",
++			appendPbmMetric(&metrics, "cluster_pitr_backup_enabled",
+ 				"PBM PITR backups are enabled for the cluster",
+ 				float64(1), nil)
+ 		}
+@@ -108,17 +108,12 @@ func (p *pbmCollector) pbmAgentMetrics(ctx context.Context, pbmClient *sdk.Clien
+ 	}
+ 
+ 	metrics := make([]prometheus.Metric, 0, len(clusterStatus))
+-	createMetric := func(name, help string, value float64, labels map[string]string) {
+-		const prefix = "mongodb_pbm_"
+-		d := prometheus.NewDesc(prefix+name, help, nil, labels)
+-		metrics = append(metrics, prometheus.MustNewConstMetric(d, prometheus.GaugeValue, value))
+-	}
+ 
+ 	for replsetName, nodes := range clusterStatus {
+ 		for _, node := range nodes {
+ 			switch {
+ 			case node.OK:
+-				createMetric("agent_status",
++				appendPbmMetric(&metrics, "agent_status",
+ 					"PBM Agent Status",
+ 					float64(pbmAgentStatusOK),
+ 					map[string]string{
+@@ -128,7 +123,7 @@ func (p *pbmCollector) pbmAgentMetrics(ctx context.Context, pbmClient *sdk.Clien
+ 					})
+ 
+ 			case node.IsAgentLost():
+-				createMetric("agent_status",
++				appendPbmMetric(&metrics, "agent_status",
+ 					"PBM Agent Status",
+ 					float64(pbmAgentStatusLost),
+ 					map[string]string{
+@@ -138,7 +133,7 @@ func (p *pbmCollector) pbmAgentMetrics(ctx context.Context, pbmClient *sdk.Clien
+ 					})
+ 
+ 			default: // !node.OK
+-				createMetric("agent_status",
++				appendPbmMetric(&metrics, "agent_status",
+ 					"PBM Agent Status",
+ 					float64(pbmAgentStatusError),
+ 					map[string]string{
+@@ -161,14 +156,9 @@ func pbmBackupsMetrics(ctx context.Context, pbmClient *sdk.Client, l *logrus.Ent
+ 	}
+ 
+ 	metrics := make([]prometheus.Metric, 0, len(backupsList))
+-	createMetric := func(name, help string, value float64, labels map[string]string) {
+-		const prefix = "mongodb_pbm_"
+-		d := prometheus.NewDesc(prefix+name, help, nil, labels)
+-		metrics = append(metrics, prometheus.MustNewConstMetric(d, prometheus.GaugeValue, value))
+-	}
+ 
+ 	for _, backup := range backupsList {
+-		createMetric("backup_size",
++		appendPbmMetric(&metrics, "backup_size",
+ 			"Size of PBM backup",
+ 			float64(backup.Size), map[string]string{
+ 				"opid":   backup.OPID,
+@@ -185,7 +175,7 @@ func pbmBackupsMetrics(ctx context.Context, pbmClient *sdk.Client, l *logrus.Ent
+ 		}
+ 
+ 		duration := time.Unix(endTime-backup.StartTS, 0).Unix()
+-		createMetric("backup_duration_seconds",
++		appendPbmMetric(&metrics, "backup_duration_seconds",
+ 			"Duration of PBM backup",
+ 			float64(duration), map[string]string{
+ 				"opid":   backup.OPID,

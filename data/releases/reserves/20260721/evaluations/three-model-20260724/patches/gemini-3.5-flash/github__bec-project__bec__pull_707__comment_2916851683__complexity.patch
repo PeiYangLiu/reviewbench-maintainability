@@ -1,0 +1,70 @@
+--- a/bec_server/bec_server/data_processing/lmfit1d_service.py
++++ b/bec_server/bec_server/data_processing/lmfit1d_service.py
+@@ -61,14 +61,10 @@
+ 
+     def _build_model(self, model: str | list[str] | tuple[str, ...]) -> lmfit.Model:
+         if isinstance(model, (list, tuple)):
+-            return self._build_composite_model(self._coerce_model_list(model))
++            return self._build_composite_model(list(model))
+         if isinstance(model, str):
+-            return self._build_single_model(model)
++            return self._get_model_cls(model)()
+         raise ValueError(f"Unknown model {model}")
+-
+-    def _build_single_model(self, model_name: str) -> lmfit.Model:
+-        model_cls = self._get_model_cls(model_name)
+-        return model_cls()
+ 
+     def _build_composite_model(self, model_list: Sequence[str]) -> lmfit.Model:
+         if not model_list:
+@@ -79,8 +75,12 @@
+         self.model_name_sequence = list(model_list)
+         composite_model: lmfit.model.Model | None = None
+         for index, model_name in enumerate(model_list):
+-            component_name = self._component_name(model_name, index)
+-            component = self._create_component(model_name, component_name)
++            component_name = f"{model_name}_{index}"
++            prefix = f"{component_name}_"
++            self.model_sequence.append(component_name)
++            self.model_prefixes[component_name] = prefix
++            component = self._get_model_cls(model_name)(prefix=prefix)
++            self.model_components[component_name] = component
+             composite_model = component if composite_model is None else composite_model + component
+         self._build_component_lookup()
+         logger.debug(
+@@ -95,23 +95,6 @@
+         if not model_cls:
+             raise ValueError(f"Unknown model {model_name}")
+         return model_cls
+-
+-    @staticmethod
+-    def _component_name(model_name: str, index: int) -> str:
+-        return f"{model_name}_{index}"
+-
+-    def _create_component(self, model_name: str, component_name: str):
+-        model_cls = self._get_model_cls(model_name)
+-        prefix = f"{component_name}_"
+-        self.model_sequence.append(component_name)
+-        self.model_prefixes[component_name] = prefix
+-        component = model_cls(prefix=prefix)
+-        self.model_components[component_name] = component
+-        return component
+-
+-    @staticmethod
+-    def _coerce_model_list(model_list: Iterable[str]) -> list[str]:
+-        return list(model_list)
+ 
+     def _build_component_lookup(self) -> None:
+         unique_names = len(set(self.model_name_sequence)) == len(self.model_name_sequence)
+@@ -189,10 +172,7 @@
+ 
+     def _expand_param_map(self, component_name: str, param_map: dict) -> dict:
+         prefix = self.model_prefixes[component_name]
+-        expanded = {}
+-        for param_name, spec in param_map.items():
+-            expanded[f"{prefix}{param_name}"] = spec
+-        return expanded
++        return {f"{prefix}{param_name}": spec for param_name, spec in param_map.items()}
+ 
+     def _guess_parameters(self, x: np.ndarray, y: np.ndarray) -> lmfit.Parameters:
+         guessed_params = self.model.make_params()

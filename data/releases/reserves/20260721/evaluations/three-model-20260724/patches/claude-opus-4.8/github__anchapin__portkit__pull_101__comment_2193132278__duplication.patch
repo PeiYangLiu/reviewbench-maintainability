@@ -1,0 +1,68 @@
+--- a/backend/src/main.py
++++ b/backend/src/main.py
+@@ -286,7 +286,21 @@
+             created_at=job.created_at,
+             updated_at=job.updated_at
+         )
+-    
++
++    async def update_job_state(session, status, progress, result_url=None):
++        # Consolidates the repetitive status/progress update pattern:
++        # update DB status + progress, refresh job, rebuild legacy mirror and cache.
++        await crud.update_job_status(session, job_id, status)
++        await crud.upsert_progress(session, job_id, progress)
++        # Refresh job from database to get latest status
++        job = await crud.get_job(session, job_id)
++        mirror = mirror_dict_from_job(job, progress, result_url)
++        conversion_jobs_db[job_id] = mirror
++        await cache.set_job_status(job_id, mirror.model_dump())
++        await cache.set_progress(job_id, progress)
++        logger.info(f"Job {job_id}: Status updated to {job.status}, Progress: {progress}%")
++        return job
++
+     try:
+         logger.info(f"Job {job_id}: Creating database session...")
+         async with AsyncSessionLocal() as session:
+@@ -301,20 +315,7 @@
+             # Stage 1: Preprocessing -> Processing
+             await asyncio.sleep(10)
+             logger.info(f"Job {job_id}: Stage 1 delay completed, updating to processing...")
+-            job = await crud.update_job_status(session, job_id, "processing")
+-            logger.info(f"Job {job_id}: Status updated to {job.status}, updating progress to 25%...")
+-            await crud.upsert_progress(session, job_id, 25)
+-            logger.info(f"Job {job_id}: Progress updated to 25%, refreshing job from database...")
+-            # Refresh job from database to get latest status
+-            job = await crud.get_job(session, job_id)
+-            logger.info(f"Job {job_id}: Job refreshed, creating mirror...")
+-            # Mirror
+-            mirror = mirror_dict_from_job(job, 25)
+-            conversion_jobs_db[job_id] = mirror
+-            logger.info(f"Job {job_id}: Mirror created, updating cache...")
+-            await cache.set_job_status(job_id, mirror.model_dump())
+-            await cache.set_progress(job_id, 25)
+-            logger.info(f"Job {job_id}: Status updated to {job.status}, Progress: 25%")
++            job = await update_job_state(session, "processing", 25)
+ 
+             # Stage 2: Processing -> Postprocessing
+             logger.info(f"Job {job_id}: Starting stage 2 (15s delay)...")
+@@ -326,19 +327,7 @@
+                 logger.info(f"Job {job_id} was cancelled. Stopping AI simulation.")
+                 return
+             logger.info(f"Job {job_id}: Not cancelled, updating to postprocessing...")
+-            job = await crud.update_job_status(session, job_id, "postprocessing")
+-            logger.info(f"Job {job_id}: Status updated to {job.status}, updating progress to 75%...")
+-            await crud.upsert_progress(session, job_id, 75)
+-            logger.info(f"Job {job_id}: Progress updated to 75%, refreshing job from database...")
+-            # Refresh job from database to get latest status
+-            job = await crud.get_job(session, job_id)
+-            logger.info(f"Job {job_id}: Job refreshed, creating mirror...")
+-            mirror = mirror_dict_from_job(job, 75)
+-            conversion_jobs_db[job_id] = mirror
+-            logger.info(f"Job {job_id}: Mirror created, updating cache...")
+-            await cache.set_job_status(job_id, mirror.model_dump())
+-            await cache.set_progress(job_id, 75)
+-            logger.info(f"Job {job_id}: Status updated to {job.status}, Progress: 75%")
++            job = await update_job_state(session, "postprocessing", 75)
+ 
+             # Stage 3: Postprocessing -> Completed
+             logger.info(f"Job {job_id}: Starting stage 3 (10s delay)...")

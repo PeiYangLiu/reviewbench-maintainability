@@ -1,0 +1,67 @@
+--- a/services/director-v2/src/simcore_service_director_v2/api/routes/dynamic_services.py
++++ b/services/director-v2/src/simcore_service_director_v2/api/routes/dynamic_services.py
+@@ -5,7 +5,7 @@
+ 
+ import async_timeout
+ import httpx
+-from fastapi import APIRouter, Depends, Header, Request
++from fastapi import APIRouter, Depends, Header
+ from fastapi.responses import RedirectResponse
+ from models_library.projects import ProjectID
+ from models_library.projects_nodes import NodeID
+@@ -170,10 +170,12 @@
+     summary="stops previously spawned dynamic-sidecar",
+ )
+ async def stop_dynamic_service(
+-    request: Request,
+     node_uuid: NodeID,
+     can_save: Optional[bool] = True,
+     director_v0_client: DirectorV0Client = Depends(get_director_v0_client),
++    dynamic_services_settings: DynamicServicesSettings = Depends(
++        get_dynamic_services_settings
++    ),
+     scheduler: DynamicSidecarsScheduler = Depends(get_scheduler),
+ ) -> Union[NoContentResponse, RedirectResponse]:
+     try:
+@@ -193,7 +195,7 @@
+     # services, containsers, volumes and networks.
+     # Once the service is no longer being tracked this can return
+     dynamic_sidecar_settings: DynamicSidecarSettings = (
+-        request.app.state.settings.DYNAMIC_SERVICES.DYNAMIC_SIDECAR
++        dynamic_services_settings.DYNAMIC_SIDECAR
+     )
+     _STOPPED_CHECK_INTERVAL = 1.0
+     async with async_timeout.timeout(
+@@ -213,10 +215,14 @@
+ )
+ @log_decorator(logger=logger)
+ async def service_retrieve_data_on_ports(
+-    request: Request,
+     node_uuid: NodeID,
+     retrieve_settings: RetrieveDataIn,
+-    scheduler: DynamicSidecarsScheduler = Depends(get_scheduler),
++    director_v0_client: DirectorV0Client = Depends(get_director_v0_client),
++    dynamic_services_settings: DynamicServicesSettings = Depends(
++        get_dynamic_services_settings
++    ),
++    scheduler: DynamicSidecarsScheduler = Depends(get_scheduler),
++    services_client: ServicesClient = Depends(get_services_client),
+ ) -> RetrieveDataOutEnveloped:
+     try:
+         return await scheduler.retrieve_service_inputs(
+@@ -227,12 +233,11 @@
+         # makes request to director-v0 and sends back reply
+ 
+         service_base_url: URL = await get_service_base_url(
+-            node_uuid, get_director_v0_client(request)
+-        )
+-        services_client: ServicesClient = get_services_client(request)
++            node_uuid, director_v0_client
++        )
+ 
+         dynamic_sidecar_settings: DynamicSidecarSettings = (
+-            request.app.state.settings.DYNAMIC_SERVICES.DYNAMIC_SIDECAR
++            dynamic_services_settings.DYNAMIC_SIDECAR
+         )
+         timeout = httpx.Timeout(
+             dynamic_sidecar_settings.DYNAMIC_SIDECAR_API_SAVE_RESTORE_STATE_TIMEOUT,

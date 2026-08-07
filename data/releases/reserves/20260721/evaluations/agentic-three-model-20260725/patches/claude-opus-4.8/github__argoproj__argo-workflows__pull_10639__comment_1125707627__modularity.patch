@@ -1,0 +1,48 @@
+diff --git a/workflow/controller/exec_control.go b/workflow/controller/exec_control.go
+index c22a518..ee37433 100644
+--- a/workflow/controller/exec_control.go
++++ b/workflow/controller/exec_control.go
+@@ -82,19 +82,7 @@ func (woc *wfOperationCtx) handleExecutionControlError(nodeID string, wfNodesLoc
+ 	node := woc.wf.Status.Nodes[nodeID]
+ 	woc.markNodePhase(node.Name, wfv1.NodeFailed, errorMsg)
+ 
+-	children := []wfv1.NodeStatus{}
+-	q := []wfv1.NodeStatus{node}
+-	for {
+-		if len(q) <= 0 {
+-			break
+-		}
+-		childNode := q[0]
+-		q = q[1:]
+-		for _, nodeID := range childNode.Children {
+-			q = append(q, woc.wf.Status.Nodes[nodeID])
+-		}
+-		children = append(children, childNode)
+-	}
++	children := collectDescendantNodes(woc.wf.Status.Nodes, node)
+ 
+ 	// if node is a pod created from ContainerSet template
+ 	// then need to fail child nodes so they will not hang in Pending after pod deletion
+@@ -105,6 +93,22 @@ func (woc *wfOperationCtx) handleExecutionControlError(nodeID string, wfNodesLoc
+ 	}
+ }
+ 
++// collectDescendantNodes returns the given node and all of its descendants
++// by traversing the node's children breadth-first.
++func collectDescendantNodes(nodes wfv1.Nodes, root wfv1.NodeStatus) []wfv1.NodeStatus {
++	children := []wfv1.NodeStatus{}
++	q := []wfv1.NodeStatus{root}
++	for len(q) > 0 {
++		childNode := q[0]
++		q = q[1:]
++		for _, nodeID := range childNode.Children {
++			q = append(q, nodes[nodeID])
++		}
++		children = append(children, childNode)
++	}
++	return children
++}
++
+ // killDaemonedChildren kill any daemoned pods of a steps or DAG template node.
+ func (woc *wfOperationCtx) killDaemonedChildren(nodeID string) {
+ 	woc.log.Infof("Checking daemoned children of %s", nodeID)

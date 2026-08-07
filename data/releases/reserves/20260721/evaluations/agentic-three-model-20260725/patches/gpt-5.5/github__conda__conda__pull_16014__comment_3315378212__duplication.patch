@@ -1,0 +1,69 @@
+diff --git a/conda/cli/conda_argparse.py b/conda/cli/conda_argparse.py
+index 6860c26..d0a61dc 100644
+--- a/conda/cli/conda_argparse.py
++++ b/conda/cli/conda_argparse.py
+@@ -301,36 +301,29 @@ def configure_parser_plugins(sub_parsers) -> None:
+     plugin_subcommands = context.plugin_manager.get_subcommands()
+     for name, plugin_subcommand in plugin_subcommands.items():
+         # if the name of the plugin-based subcommand overlaps a built-in
+-        # subcommand, we print an error
++        # subcommand, only bundled previews may extend the built-in parser
+         if name in BUILTIN_COMMANDS:
+-            if (
+-                is_preview_subcommand(plugin_subcommand)
+-                and name in BUILTIN_COMMAND_PARSERS
+-            ):
++            if is_preview_subcommand(plugin_subcommand) and name in BUILTIN_COMMAND_PARSERS:
+                 parser = BUILTIN_COMMAND_PARSERS[name](sub_parsers)
+-                if plugin_subcommand.configure_parser:
+-                    plugin_subcommand.configure_parser(parser)
+-                parser.set_defaults(_plugin_subcommand=plugin_subcommand)
+-                continue
+-
+-            log.error(
+-                dals(
+-                    f"""
+-                    The plugin '{name}' is trying to override the built-in command
+-                    with the same name, which is not allowed.
+-
+-                    Please uninstall the plugin to stop seeing this error message.
+-                    """
++            else:
++                log.error(
++                    dals(
++                        f"""
++                        The plugin '{name}' is trying to override the built-in command
++                        with the same name, which is not allowed.
++
++                        Please uninstall the plugin to stop seeing this error message.
++                        """
++                    )
+                 )
++                continue
++        else:
++            parser = sub_parsers.add_parser(
++                name,
++                description=plugin_subcommand.summary,
++                help=plugin_subcommand.summary,
++                add_help=False,  # defer to subcommand's help processing
+             )
+-            continue
+-
+-        parser = sub_parsers.add_parser(
+-            name,
+-            description=plugin_subcommand.summary,
+-            help=plugin_subcommand.summary,
+-            add_help=False,  # defer to subcommand's help processing
+-        )
+ 
+         # case 1: plugin extends the parser
+         if plugin_subcommand.configure_parser:
+@@ -343,7 +336,7 @@ def configure_parser_plugins(sub_parsers) -> None:
+                 pass
+ 
+         # case 2: plugin has their own parser, see _GreedySubParsersAction
+-        else:
++        elif name not in BUILTIN_COMMANDS:
+             parser.greedy = True
+ 
+         # underscore prefixed indicating this is not a normal argparse argument

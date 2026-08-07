@@ -1,0 +1,64 @@
+--- a/scripts/updateapilist.py
++++ b/scripts/updateapilist.py
+@@ -145,20 +145,27 @@
+     )
+ 
+ 
+-def client_for_repo(repo_slug, is_split_repo: bool = True) -> Optional[CloudClient]:
+-    path = SPLIT_REPO_PATH_FORMAT if is_split_repo else MONO_REPO_PATH_FORMAT
+-    path = path.format(repo_slug=repo_slug)
+-    url = f"{RAW_CONTENT_BASE_URL}/{path}/{REPO_METADATA_FILENAME}"
+-    response = requests.get(url)
+-    if response.status_code != requests.codes.ok:
+-        return
+-
+-    return CloudClient(response.json())
+-
+-
+-def get_clients_batch_from_response_json(response_json, is_split_repo: bool = True) -> List[CloudClient]:
+-    repos_key = REPO_RESPONSE_KEY if is_split_repo else PACKAGE_RESPONSE_KEY
+-    return [client_for_repo(repo[repos_key], is_split_repo) for repo in response_json if (not is_split_repo or allowed_repo(repo))]
++class Extractor:
++    def __init__(self, is_split_repo: bool):
++        self.is_split_repo = is_split_repo
++        self.path_format = SPLIT_REPO_PATH_FORMAT if is_split_repo else MONO_REPO_PATH_FORMAT
++        self.repos_key = REPO_RESPONSE_KEY if is_split_repo else PACKAGE_RESPONSE_KEY
++
++    def client_for_repo(self, repo_slug) -> Optional[CloudClient]:
++        path = self.path_format.format(repo_slug=repo_slug)
++        url = f"{RAW_CONTENT_BASE_URL}/{path}/{REPO_METADATA_FILENAME}"
++        response = requests.get(url)
++        if response.status_code != requests.codes.ok:
++            return None
++
++        return CloudClient(response.json())
++
++    def get_clients_batch_from_response_json(self, response_json) -> List[CloudClient]:
++        return [
++            self.client_for_repo(repo[self.repos_key])
++            for repo in response_json
++            if (not self.is_split_repo or allowed_repo(repo))
++        ]
+ 
+ 
+ def mono_repo_clients(token: str) -> List[CloudClient]:
+@@ -167,7 +174,8 @@
+     headers = {'Authorization': f'token {token}'}
+     response = requests.get(url=url, headers=headers)
+ 
+-    return get_clients_batch_from_response_json(response.json(), is_split_repo=False)
++    extractor = Extractor(is_split_repo=False)
++    return extractor.get_clients_batch_from_response_json(response.json())
+ 
+ 
+ def split_repo_clients(token: str) -> List[CloudClient]:
+@@ -185,7 +193,8 @@
+         repositories = response.json().get("items", [])
+         if len(repositories) == 0:
+             break
+-        return get_clients_batch_from_response_json(repositories)
++        extractor = Extractor(is_split_repo=True)
++        return extractor.get_clients_batch_from_response_json(repositories)
+ 
+ 
+ def get_token():

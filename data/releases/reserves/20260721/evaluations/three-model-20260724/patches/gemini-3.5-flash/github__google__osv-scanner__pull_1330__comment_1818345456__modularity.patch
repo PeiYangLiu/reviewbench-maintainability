@@ -1,0 +1,92 @@
+--- a/internal/lockfilescalibr/translation.go
++++ b/internal/lockfilescalibr/translation.go
+@@ -76,6 +76,24 @@
+ 	"Gemfile.lock": "ruby/gemfilelock",
+ }
+ 
++func extract(ctx context.Context, localPath string, info fs.FileInfo, ext filesystem.Extractor, errorName string) ([]*extractor.Inventory, error) {
++	si, err := createScanInput(localPath, info)
++	if err != nil {
++		return nil, err
++	}
++
++	inv, err := ext.Extract(ctx, si)
++	if err != nil {
++		return nil, fmt.Errorf("(extracting as %s) %w", errorName, err)
++	}
++
++	for i := range inv {
++		inv[i].Extractor = ext
++	}
++
++	return inv, nil
++}
++
+ // ExtractWithExtractor attempts to extract the file at the given path with the extractor passed in
+ func ExtractWithExtractor(ctx context.Context, localPath string, ext filesystem.Extractor) ([]*extractor.Inventory, error) {
+ 	info, err := os.Stat(localPath)
+@@ -83,20 +101,7 @@
+ 		return nil, err
+ 	}
+ 
+-	si, err := createScanInput(localPath, info)
+-	if err != nil {
+-		return nil, err
+-	}
+-	inv, err := ext.Extract(ctx, si)
+-	if err != nil {
+-		return nil, fmt.Errorf("(extracting as %s) %w", ext.Name(), err)
+-	}
+-
+-	for i := range inv {
+-		inv[i].Extractor = ext
+-	}
+-
+-	return inv, nil
++	return extract(ctx, localPath, info, ext, ext.Name())
+ }
+ 
+ // Extract attempts to extract the file at the given path
+@@ -122,21 +127,7 @@
+ 	if extractAs != "" {
+ 		for _, ext := range lockfileExtractors {
+ 			if lockfileExtractorMapping[extractAs] == ext.Name() {
+-				si, err := createScanInput(localPath, info)
+-				if err != nil {
+-					return nil, err
+-				}
+-
+-				inv, err := ext.Extract(ctx, si)
+-				if err != nil {
+-					return nil, fmt.Errorf("(extracting as %s) %w", extractAs, err)
+-				}
+-
+-				for i := range inv {
+-					inv[i].Extractor = ext
+-				}
+-
+-				return inv, nil
++				return extract(ctx, localPath, info, ext, extractAs)
+ 			}
+ 		}
+ 
+@@ -149,18 +140,9 @@
+ 	for _, ext := range lockfileExtractors {
+ 		if ext.FileRequired(localPath, info) {
+ 			extractorFound = true
+-			si, err := createScanInput(localPath, info)
++			inv, err := extract(ctx, localPath, info, ext, ext.Name())
+ 			if err != nil {
+ 				return nil, err
+-			}
+-
+-			inv, err := ext.Extract(ctx, si)
+-			if err != nil {
+-				return nil, fmt.Errorf("(extracting as %s) %w", ext.Name(), err)
+-			}
+-
+-			for i := range inv {
+-				inv[i].Extractor = ext
+ 			}
+ 			output = append(output, inv...)
+ 		}

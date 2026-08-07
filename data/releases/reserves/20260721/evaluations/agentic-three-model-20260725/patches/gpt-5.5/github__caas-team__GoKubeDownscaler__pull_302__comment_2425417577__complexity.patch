@@ -1,0 +1,76 @@
+diff --git a/internal/pkg/values/scope.go b/internal/pkg/values/scope.go
+index dd880df..8fd100e 100644
+--- a/internal/pkg/values/scope.go
++++ b/internal/pkg/values/scope.go
+@@ -224,45 +224,54 @@ func (s Scopes) GetScaleChildren() bool {
+ 	return false
+ }
+ 
+-// GetExcluded checks if the scopes exclude scaling.
+-func (s Scopes) GetExcluded() (excluded, upscaleOnExclusion bool) { //nolint: nonamedreturns, cyclop // could be refactored in the future to simplify cyclop
+-	upscaleOnExclusion = false
+-
++// GetUpscaleOnExclusion checks if excluded workloads should be upscaled.
++func (s Scopes) GetUpscaleOnExclusion() bool {
+ 	for _, scope := range s {
+-		if scope.UpscaleOnExclusion.isSet && scope.UpscaleOnExclusion.value {
+-			upscaleOnExclusion = true
++		if scope.UpscaleOnExclusion.isSet {
++			return scope.UpscaleOnExclusion.value
+ 		}
++	}
++
++	return false
++}
++
++// GetExcluded checks if the scopes exclude scaling and whether exclusions should upscale.
++func (s Scopes) GetExcluded() (bool, bool) {
++	upscaleOnExclusion := s.GetUpscaleOnExclusion()
++	excluded := s.getExcluded()
++	if excluded && upscaleOnExclusion {
++		return false, true
++	}
+ 
++	return excluded, upscaleOnExclusion
++}
++
++func (s Scopes) getExcluded() bool {
++	for _, scope := range s {
+ 		if scope.Exclude == nil {
+ 			continue
+ 		}
+ 
+-		if scope.Exclude.inTimeSpans() && !upscaleOnExclusion {
+-			return true, false
++		if scope.Exclude.inTimeSpans() {
++			return true
+ 		}
+ 
+ 		break
+ 	}
+ 
+-	upscaleOnExclusion = false
+-
+ 	for _, scope := range s {
+-		if scope.UpscaleOnExclusion.isSet && scope.UpscaleOnExclusion.value {
+-			upscaleOnExclusion = true
+-		}
+-
+ 		if scope.ExcludeUntil == nil {
+ 			continue
+ 		}
+ 
+-		if scope.ExcludeUntil.After(time.Now()) && !upscaleOnExclusion {
+-			return true, false
++		if scope.ExcludeUntil.After(time.Now()) {
++			return true
+ 		}
+ 
+ 		break
+ 	}
+ 
+-	return false, upscaleOnExclusion
++	return false
+ }
+ 
+ // IsInGracePeriod gets the grace period of the uppermost scope that has it set.

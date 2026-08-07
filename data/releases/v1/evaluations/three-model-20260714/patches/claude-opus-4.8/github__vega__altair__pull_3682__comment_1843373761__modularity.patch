@@ -1,0 +1,54 @@
+--- a/altair/utils/_vegafusion_data.py
++++ b/altair/utils/_vegafusion_data.py
+@@ -25,6 +25,27 @@
+ 
+     from vegafusion.runtime import ChartState
+ 
++
++def _is_supported_by_vegafusion_v2(data: DataType) -> bool:
++    # VegaFusion v2 supports narwhals-compatible DataFrames
++    return isinstance(data, DataFrameLike) or isinstance(
++        nw.from_native(data, pass_through=True), (nw.DataFrame, nw.LazyFrame)
++    )
++
++
++def _is_supported_by_vegafusion_v1(data: DataType) -> bool:
++    return isinstance(data, DataFrameLike)
++
++
++# Select the appropriate support check once, based on the installed
++# VegaFusion version, rather than re-checking the version on every call.
++if (_vegafusion_version := importlib_version("vegafusion")) and Version(
++    _vegafusion_version
++) >= Version("2.0.0a0"):
++    _is_supported_by_vegafusion = _is_supported_by_vegafusion_v2
++else:
++    _is_supported_by_vegafusion = _is_supported_by_vegafusion_v1
++
+ # Temporary storage for dataframes that have been extracted
+ # from charts by the vegafusion data transformer. Use a WeakValueDictionary
+ # rather than a dict so that the Python interpreter is free to garbage
+@@ -70,20 +91,9 @@
+         return vegafusion_data_transformer
+ 
+     # Test whether VegaFusion supports the data type
+-    is_v2 = (
+-        Version(version) >= Version("2.0.0a0")
+-        if (version := importlib_version("vegafusion"))
+-        else False
+-    )
+-    if is_v2:
+-        # VegaFusion v2 support narwhals-compatible DataFrames
+-        supported_by_vf = isinstance(data, DataFrameLike) or isinstance(
+-            nw.from_native(data, pass_through=True), (nw.DataFrame, nw.LazyFrame)
+-        )
+-    else:
+-        supported_by_vf = isinstance(data, DataFrameLike)
+-
+-    if supported_by_vf and not isinstance(data, SupportsGeoInterface):
++    if _is_supported_by_vegafusion(data) and not isinstance(
++        data, SupportsGeoInterface
++    ):
+         table_name = f"table_{uuid.uuid4()}".replace("-", "_")
+         extracted_inline_tables[table_name] = data
+         return {"url": VEGAFUSION_PREFIX + table_name}

@@ -1,0 +1,72 @@
+diff --git a/pkg/sources/gitlab/gitlab.go b/pkg/sources/gitlab/gitlab.go
+index 98978a8..a36ee47 100644
+--- a/pkg/sources/gitlab/gitlab.go
++++ b/pkg/sources/gitlab/gitlab.go
+@@ -269,18 +269,8 @@ func (s *Source) Chunks(ctx context.Context, chunksChan chan *sources.Chunk, tar
+ 			},
+ 		}
+ 
+-		if len(s.groupIds) > 0 {
+-			if err := s.getAllProjectReposInGroup(ctx, apiClient, s.groupIds, ignoreRepo, reporter); err != nil {
+-				return err
+-			}
+-		} else if feature.UseSimplifiedGitlabEnumeration.Load() {
+-			if err := s.getAllProjectReposV2(ctx, apiClient, ignoreRepo, reporter); err != nil {
+-				return err
+-			}
+-		} else {
+-			if err := s.getAllProjectRepos(ctx, apiClient, ignoreRepo, reporter); err != nil {
+-				return err
+-			}
++		if err := s.enumerateAllProjectRepos(ctx, apiClient, ignoreRepo, reporter); err != nil {
++			return err
+ 		}
+ 
+ 	} else {
+@@ -408,21 +398,9 @@ func (s *Source) Validate(ctx context.Context) []error {
+ 		},
+ 	}
+ 
+-	if len(s.groupIds) > 0 {
+-		if err := s.getAllProjectReposInGroup(ctx, apiClient, s.groupIds, ignoreProject, visitor); err != nil {
+-			errs = append(errs, err)
+-			return errs
+-		}
+-	} else if feature.UseSimplifiedGitlabEnumeration.Load() {
+-		if err := s.getAllProjectReposV2(ctx, apiClient, ignoreProject, visitor); err != nil {
+-			errs = append(errs, err)
+-			return errs
+-		}
+-	} else {
+-		if err := s.getAllProjectRepos(ctx, apiClient, ignoreProject, visitor); err != nil {
+-			errs = append(errs, err)
+-			return errs
+-		}
++	if err := s.enumerateAllProjectRepos(ctx, apiClient, ignoreProject, visitor); err != nil {
++		errs = append(errs, err)
++		return errs
+ 	}
+ 
+ 	if len(repos) == 0 {
+@@ -431,7 +409,20 @@ func (s *Source) Validate(ctx context.Context) []error {
+ 
+ 	return errs
+ }
+-
++func (s *Source) enumerateAllProjectRepos(
++	ctx context.Context,
++	apiClient *gitlab.Client,
++	ignoreRepo func(string) bool,
++	reporter sources.UnitReporter,
++) error {
++	if len(s.groupIds) > 0 {
++		return s.getAllProjectReposInGroup(ctx, apiClient, s.groupIds, ignoreRepo, reporter)
++	} else if feature.UseSimplifiedGitlabEnumeration.Load() {
++		return s.getAllProjectReposV2(ctx, apiClient, ignoreRepo, reporter)
++	} else {
++		return s.getAllProjectRepos(ctx, apiClient, ignoreRepo, reporter)
++	}
++}
+ func (s *Source) newClient() (*gitlab.Client, error) {
+ 	// Initialize a new api instance.
+ 	switch s.authMethod {

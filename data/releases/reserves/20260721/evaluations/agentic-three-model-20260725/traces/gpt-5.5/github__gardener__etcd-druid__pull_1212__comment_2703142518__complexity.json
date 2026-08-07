@@ -1,0 +1,573 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 240,
+      "path": "druidctl/cmd/listresources/resourceresolver.go",
+      "start_line": 1
+    },
+    "response_chars": 103,
+    "round": 1,
+    "tool_result": {
+      "content": "1: // SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company and Gardener contributors\n2: //\n3: // SPDX-License-Identifier: Apache-2.0\n4: \n5: package listresources\n6: \n7: import (\n8: \t\"fmt\"\n9: \t\"strings\"\n10: \n11: \t\"golang.org/x/text/cases\"\n12: \t\"golang.org/x/text/language\"\n13: \t\"k8s.io/apimachinery/pkg/api/meta\"\n14: \t\"k8s.io/apimachinery/pkg/runtime/schema\"\n15: )\n16: \n17: // resourceMeta captures details needed to operate against a resource type.\n18: type resourceMeta struct {\n19: \tGVR        schema.GroupVersionResource\n20: \tKind       string\n21: \tNamespaced bool\n22: }\n23: \n24: // shortNameMap maps common short names to their full resource names.\n25: var shortNameMap = map[string]schema.GroupVersionKind{\n26: \t// Core v1\n27: \t\"po\":  {Group: \"\", Version: \"v1\", Kind: \"Pod\"},\n28: \t\"pod\": {Group: \"\", Version: \"v1\", Kind: \"Pod\"},\n29: \t\"svc\": {Group: \"\", Version: \"v1\", Kind: \"Service\"},\n30: \t\"cm\":  {Group: \"\", Version: \"v1\", Kind: \"ConfigMap\"},\n31: \t\"pvc\": {Group: \"\", Version: \"v1\", Kind: \"PersistentVolumeClaim\"},\n32: \t\"sa\":  {Group: \"\", Version: \"v1\", Kind: \"ServiceAccount\"},\n33: \t// Also map plural names\n34: \t\"pods\":                   {Group: \"\", Version: \"v1\", Kind: \"Pod\"},\n35: \t\"services\":               {Group: \"\", Version: \"v1\", Kind: \"Service\"},\n36: \t\"configmaps\":             {Group: \"\", Version: \"v1\", Kind: \"ConfigMap\"},\n37: \t\"secrets\":                {Group: \"\", Version: \"v1\", Kind: \"Secret\"},\n38: \t\"persistentvolumeclaims\": {Group: \"\", Version: \"v1\", Kind: \"PersistentVolumeClaim\"},\n39: \t\"serviceaccounts\":        {Group: \"\", Version: \"v1\", Kind: \"ServiceAccount\"},\n40: \t// Apps v1\n41: \t\"sts\":          {Group: \"apps\", Version: \"v1\", Kind: \"StatefulSet\"},\n42: \t\"statefulsets\": {Group: \"apps\", Version: \"v1\", Kind: \"StatefulSet\"},\n43: \t// Coordination\n44: \t\"lease\":  {Group: \"coordination.k8s.io\", Version: \"v1\", Kind: \"Lease\"},\n45: \t\"leases\": {Group: \"coordination.k8s.io\", Version: \"v1\", Kind: \"Lease\"},\n46: \t// Policy\n47: \t\"pdb\":                  {Group: \"policy\", Version: \"v1\", Kind: \"PodDisruptionBudget\"},\n48: \t\"poddisruptionbudgets\": {Group: \"policy\", Version: \"v1\", Kind: \"PodDisruptionBudget\"},\n49: \t// RBAC\n50: \t\"role\":         {Group: \"rbac.authorization.k8s.io\", Version: \"v1\", Kind: \"Role\"},\n51: \t\"roles\":        {Group: \"rbac.authorization.k8s.io\", Version: \"v1\", Kind: \"Role\"},\n52: \t\"rolebinding\":  {Group: \"rbac.authorization.k8s.io\", Version: \"v1\", Kind: \"RoleBinding\"},\n53: \t\"rolebindings\": {Group: \"rbac.authorization.k8s.io\", Version: \"v1\", Kind: \"RoleBinding\"},\n54: }\n55: \n56: // restMapperResolver resolves user tokens to resource metadata using RESTMapper.\n57: type restMapperResolver struct {\n58: \tmapper meta.RESTMapper\n59: }\n60: \n61: // newRESTMapperResolver creates a resolver using the provided RESTMapper.\n62: func newRESTMapperResolver(mapper meta.RESTMapper) *restMapperResolver {\n63: \treturn &restMapperResolver{mapper: mapper}\n64: }\n65: \n66: // resolve converts tokens (short names, resource names, kinds) into resource metadata list.\n67: func (r *restMapperResolver) resolve(tokens []string) ([]resourceMeta, error) {\n68: \tif len(tokens) == 0 {\n69: \t\treturn nil, fmt.Errorf(\"no resource tokens provided\")\n70: \t}\n71: \n72: \tout := make([]resourceMeta, 0, len(tokens))\n73: \tseen := map[schema.GroupVersionResource]struct{}{}\n74: \tvar unknown []string\n75: \n76: \tfor _, t := range tokens {\n77: \t\ttok := strings.TrimSpace(strings.ToLower(t))\n78: \t\tif tok == \"\" {\n79: \t\t\tcontinue\n80: \t\t}\n81: \n82: \t\tm, err := r.resolveToken(tok)\n83: \t\tif err != nil {\n84: \t\t\tunknown = append(unknown, t)\n85: \t\t\tcontinue\n86: \t\t}\n87: \n88: \t\tif _, dup := seen[m.GVR]; dup {\n89: \t\t\tcontinue\n90: \t\t}\n91: \t\tseen[m.GVR] = struct{}{}\n92: \t\tout = append(out, m)\n93: \t}\n94: \n95: \tif len(unknown) > 0 {\n96: \t\treturn nil, &unknownResourcesError{Tokens: unknown, Known: commonResourceHints()}\n97: \t}\n98: \n99: \treturn out, nil\n100: }\n101: \n102: // resolveToken resolves a single token using the short name map and RESTMapper.\n103: func (r *restMapperResolver) resolveToken(token string) (resourceMeta, error) {\n104: \t// Try short name map first\n105: \tif gvk, ok := shortNameMap[token]; ok {\n106: \t\treturn r.gvkToMeta(gvk)\n107: \t}\n108: \n109: \t// Try as a Kind name\n110: \ttitleCaser := cases.Title(language.English)\n111: \tcapitalizedToken := titleCaser.String(token)\n112: \tmapping, err := r.mapper.RESTMapping(schema.GroupKind{Kind: capitalizedToken})\n113: \tif err == nil {\n114: \t\treturn resourceMeta{\n115: \t\t\tGVR:        mapping.Resource,\n116: \t\t\tKind:       mapping.GroupVersionKind.Kind,\n117: \t\t\tNamespaced: mapping.Scope.Name() == meta.RESTScopeNameNamespace,\n118: \t\t}, nil\n119: \t}\n120: \n121: \treturn resourceMeta{}, fmt.Errorf(\"unknown resource: %s\", token)\n122: }\n123: \n124: // gvkToMeta converts a GVK to resourceMeta using the RESTMapper.\n125: func (r *restMapperResolver) gvkToMeta(gvk schema.GroupVersionKind) (resourceMeta, error) {\n126: \tmapping, err := r.mapper.RESTMapping(gvk.GroupKind(), gvk.Version)\n127: \tif err != nil {\n128: \t\treturn resourceMeta{}, fmt.Errorf(\"failed to get mapping for %v: %w\", gvk, err)\n129: \t}\n130: \n131: \treturn resourceMeta{\n132: \t\tGVR:        mapping.Resource,\n133: \t\tKind:       mapping.GroupVersionKind.Kind,\n134: \t\tNamespaced: mapping.Scope.Name() == meta.RESTScopeNameNamespace,\n135: \t}, nil\n136: }\n137: \n138: // unknownResourcesError conveys which tokens failed and a subset of known tokens.\n139: type unknownResourcesError struct {\n140: \tTokens []string\n141: \tKnown  []string\n142: }\n143: \n144: func (e *unknownResourcesError) Error() string {\n145: \treturn fmt.Sprintf(\"unknown resource tokens: %v; known examples: %v\", e.Tokens, e.Known)\n146: }\n147: \n148: // commonResourceHints returns common resource tokens for error hints.\n149: func commonResourceHints() []string {\n150: \treturn []string{\n151: \t\t\"po\", \"pods\", \"svc\", \"services\", \"cm\", \"configmaps\",\n152: \t\t\"sts\", \"statefulsets\", \"pvc\", \"persistentvolumeclaims\",\n153: \t\t\"secrets\", \"sa\", \"serviceaccounts\", \"lease\", \"leases\",\n154: \t\t\"pdb\", \"poddisruptionbudgets\", \"role\", \"rolebinding\",\n155: \t}\n156: }",
+      "end_line": 156,
+      "path_lines": 156,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 3308,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 107,
+      "output_tokens_details": {
+        "reasoning_tokens": 70
+      },
+      "total_tokens": 3415
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 40,
+      "path": "druidctl/cmd/listresources/listresources.go",
+      "start_line": 1
+    },
+    "response_chars": 2616,
+    "round": 2,
+    "tool_result": {
+      "content": "1: // SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company and Gardener contributors\n2: //\n3: // SPDX-License-Identifier: Apache-2.0\n4: \n5: package listresources\n6: \n7: import (\n8: \t\"context\"\n9: \t\"fmt\"\n10: \t\"sort\"\n11: \t\"strings\"\n12: \t\"time\"\n13: \n14: \tcmdutils \"github.com/gardener/etcd-druid/druidctl/cmd/utils\"\n15: \t\"github.com/gardener/etcd-druid/druidctl/internal/log\"\n16: \t\"github.com/gardener/etcd-druid/druidctl/internal/printer\"\n17: \n18: \tmetav1 \"k8s.io/apimachinery/pkg/apis/meta/v1\"\n19: \t\"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured\"\n20: )\n21: \n22: // ResourceKey identifies a Kubernetes resource kind by group/version/resource/Kind.\n23: type ResourceKey struct {\n24: \tGroup    string `json:\"group\" yaml:\"group\"`\n25: \tVersion  string `json:\"version\" yaml:\"version\"`\n26: \tResource string `json:\"resource\" yaml:\"resource\"`\n27: \tKind     string `json:\"kind\" yaml:\"kind\"`\n28: }\n29: \n30: // ResourceRef references a single namespaced resource and includes its age.\n31: type ResourceRef struct {\n32: \tNamespace string        `json:\"namespace\" yaml:\"namespace\"`\n33: \tName      string        `json:\"name\" yaml:\"name\"`\n34: \tAge       time.Duration `json:\"age\" yaml:\"age\"`\n35: }\n36: \n37: // EtcdRef identifies an Etcd custom resource by name and namespace.\n38: type EtcdRef struct {\n39: \tName      string `json:\"name\" yaml:\"name\"`\n40: \tNamespace string `json:\"namespace\" yaml:\"namespace\"`",
+      "end_line": 40,
+      "path_lines": 258,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 5561,
+      "input_tokens_details": {
+        "cached_tokens": 2816
+      },
+      "output_tokens": 2820,
+      "output_tokens_details": {
+        "reasoning_tokens": 1967
+      },
+      "total_tokens": 8381
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "druidctl",
+      "query": "RESTMapper()"
+    },
+    "response_chars": 188,
+    "round": 3,
+    "tool_result": {
+      "matches": [],
+      "query": "RESTMapper()",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 6112,
+      "input_tokens_details": {
+        "cached_tokens": 5376
+      },
+      "output_tokens": 666,
+      "output_tokens_details": {
+        "reasoning_tokens": 595
+      },
+      "total_tokens": 6778
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "druidctl",
+      "query": "type Generic"
+    },
+    "response_chars": 204,
+    "round": 4,
+    "tool_result": {
+      "matches": [],
+      "query": "type Generic",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 6159,
+      "input_tokens_details": {
+        "cached_tokens": 5888
+      },
+      "output_tokens": 489,
+      "output_tokens_details": {
+        "reasoning_tokens": 411
+      },
+      "total_tokens": 6648
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 258,
+      "path": "druidctl/cmd/listresources/listresources.go",
+      "start_line": 1
+    },
+    "response_chars": 6693,
+    "round": 5,
+    "tool_result": {
+      "content": "1: // SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company and Gardener contributors\n2: //\n3: // SPDX-License-Identifier: Apache-2.0\n4: \n5: package listresources\n6: \n7: import (\n8: \t\"context\"\n9: \t\"fmt\"\n10: \t\"sort\"\n11: \t\"strings\"\n12: \t\"time\"\n13: \n14: \tcmdutils \"github.com/gardener/etcd-druid/druidctl/cmd/utils\"\n15: \t\"github.com/gardener/etcd-druid/druidctl/internal/log\"\n16: \t\"github.com/gardener/etcd-druid/druidctl/internal/printer\"\n17: \n18: \tmetav1 \"k8s.io/apimachinery/pkg/apis/meta/v1\"\n19: \t\"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured\"\n20: )\n21: \n22: // ResourceKey identifies a Kubernetes resource kind by group/version/resource/Kind.\n23: type ResourceKey struct {\n24: \tGroup    string `json:\"group\" yaml:\"group\"`\n25: \tVersion  string `json:\"version\" yaml:\"version\"`\n26: \tResource string `json:\"resource\" yaml:\"resource\"`\n27: \tKind     string `json:\"kind\" yaml:\"kind\"`\n28: }\n29: \n30: // ResourceRef references a single namespaced resource and includes its age.\n31: type ResourceRef struct {\n32: \tNamespace string        `json:\"namespace\" yaml:\"namespace\"`\n33: \tName      string        `json:\"name\" yaml:\"name\"`\n34: \tAge       time.Duration `json:\"age\" yaml:\"age\"`\n35: }\n36: \n37: // EtcdRef identifies an Etcd custom resource by name and namespace.\n38: type EtcdRef struct {\n39: \tName      string `json:\"name\" yaml:\"name\"`\n40: \tNamespace string `json:\"namespace\" yaml:\"namespace\"`\n41: }\n42: \n43: // ResourceListPerKey groups resources under a single ResourceKey.\n44: type ResourceListPerKey struct {\n45: \tKey       ResourceKey   `json:\"key\" yaml:\"key\"`\n46: \tResources []ResourceRef `json:\"resources\" yaml:\"resources\"`\n47: }\n48: \n49: // EtcdResourceResult contains all managed resources for a single Etcd.\n50: type EtcdResourceResult struct {\n51: \tEtcd  EtcdRef              `json:\"etcd\" yaml:\"etcd\"`\n52: \tItems []ResourceListPerKey `json:\"items\" yaml:\"items\"`\n53: }\n54: \n55: // Result is the top-level aggregation for managed resources across Etcds.\n56: type Result struct {\n57: \tEtcds []EtcdResourceResult `json:\"etcds\" yaml:\"etcds\"`\n58: \tKind  string               `json:\"kind\" yaml:\"kind\"`\n59: }\n60: \n61: func (l *listResourcesCmdCtx) complete(options *cmdutils.GlobalOptions) error {\n62: \tetcdClient, err := options.Clients.EtcdClient()\n63: \tif err != nil {\n64: \t\toptions.Logger.Error(l.IOStreams.ErrOut, \"Unable to create etcd client: \", err)\n65: \t\treturn err\n66: \t}\n67: \tl.EtcdClient = etcdClient\n68: \n69: \tgenericClient, err := options.Clients.GenericClient()\n70: \tif err != nil {\n71: \t\toptions.Logger.Error(l.IOStreams.ErrOut, \"Unable to create generic kube clients: \", err)\n72: \t\treturn err\n73: \t}\n74: \tl.GenericClient = genericClient\n75: \n76: \tl.Printer, err = printer.NewFormatter(printer.OutputFormat(l.OutputFormat))\n77: \tif err != nil {\n78: \t\toptions.Logger.Error(l.IOStreams.ErrOut, \"Failed to create formatter: \", err)\n79: \t\treturn err\n80: \t}\n81: \n82: \t// Build etcd reference list from resource args using kubectl-compatible parsing\n83: \tl.etcdRefList = options.BuildEtcdRefList()\n84: \treturn nil\n85: }\n86: \n87: func (l *listResourcesCmdCtx) validate() error {\n88: \treturn l.GlobalOptions.ValidateResourceSelection()\n89: }\n90: \n91: // execute lists the managed resources for the selected etcd resources based on the filter.\n92: func (l *listResourcesCmdCtx) execute(ctx context.Context) error {\n93: \tif l.AllNamespaces {\n94: \t\tl.Logger.Info(l.IOStreams.Out, \"Listing all Managed resources for Etcds across all namespaces\")\n95: \t} else {\n96: \t\tl.Logger.Info(l.IOStreams.Out, \"Listing Managed resources for selected Etcds\")\n97: \t}\n98: \tout := l.Logger\n99: \n100: \tetcdClient := l.EtcdClient\n101: \tgenClient := l.GenericClient\n102: \n103: \ttokens := parseFilter(l.Filter)\n104: \tif len(tokens) == 0 || (len(tokens) == 1 && tokens[0] == \"all\") {\n105: \t\ttokens = defaultResourceTokens()\n106: \t}\n107: \tresolver := newRESTMapperResolver(genClient.RESTMapper())\n108: \tmetas, err := resolver.resolve(tokens)\n109: \tif err != nil {\n110: \t\treturn err\n111: \t}\n112: \n113: \t// Identify etcds to operate on\n114: \tetcdList, err := cmdutils.GetEtcdList(ctx, etcdClient, l.etcdRefList, l.AllNamespaces, l.GetNamespace(), l.LabelSelector)\n115: \tif err != nil {\n116: \t\treturn err\n117: \t}\n118: \tif len(etcdList.Items) == 0 {\n119: \t\tif !l.AllNamespaces {\n120: \t\t\treturn fmt.Errorf(\"no Etcd resources found in namespace %q\", l.GetNamespace())\n121: \t\t}\n122: \t\tout.Info(l.IOStreams.Out, \"No Etcd resources found across all namespaces\")\n123: \t\treturn nil\n124: \t}\n125: \n126: \tresult := Result{\n127: \t\tEtcds: make([]EtcdResourceResult, 0, len(etcdList.Items)),\n128: \t\tKind:  \"EtcdResourceList\",\n129: \t}\n130: \tfor _, etcd := range etcdList.Items {\n131: \t\tetcdResult := EtcdResourceResult{\n132: \t\t\tEtcd:  EtcdRef{Name: etcd.Name, Namespace: etcd.Namespace},\n133: \t\t\tItems: make([]ResourceListPerKey, 0),\n134: \t\t}\n135: \n136: \t\tlabelSelector := fmt.Sprintf(\"app.kubernetes.io/part-of=%s\", etcd.Name)\n137: \t\tfor _, resMeta := range metas {\n138: \t\t\tresourceNamespace := \"\"\n139: \t\t\tif resMeta.Namespaced {\n140: \t\t\t\tresourceNamespace = etcd.Namespace\n141: \t\t\t}\n142: \t\t\tresourceList, err := genClient.Dynamic().Resource(resMeta.GVR).Namespace(resourceNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})\n143: \t\t\tif err != nil {\n144: \t\t\t\tout.Warning(l.IOStreams.Out, \"Failed to list \", resMeta.GVR.Resource, \" for etcd \", etcd.Name, \": \", err.Error())\n145: \t\t\t\tcontinue\n146: \t\t\t}\n147: \t\t\tif len(resourceList.Items) == 0 {\n148: \t\t\t\tcontinue\n149: \t\t\t}\n150: \t\t\tresourceKey := ResourceKey{Group: resMeta.GVR.Group, Version: resMeta.GVR.Version, Resource: resMeta.GVR.Resource, Kind: resMeta.Kind}\n151: \t\t\tfor _, item := range resourceList.Items {\n152: \t\t\t\tfound := false\n153: \t\t\t\tfor idx, resourceListPerKey := range etcdResult.Items {\n154: \t\t\t\t\tif resourceListPerKey.Key == resourceKey {\n155: \t\t\t\t\t\tetcdResult.Items[idx].Resources = append(etcdResult.Items[idx].Resources, toResourceRef(&item))\n156: \t\t\t\t\t\tfound = true\n157: \t\t\t\t\t\tbreak\n158: \t\t\t\t\t}\n159: \t\t\t\t}\n160: \t\t\t\tif !found {\n161: \t\t\t\t\tetcdResult.Items = append(etcdResult.Items, ResourceListPerKey{\n162: \t\t\t\t\t\tKey:       resourceKey,\n163: \t\t\t\t\t\tResources: []ResourceRef{toResourceRef(&item)},\n164: \t\t\t\t\t})\n165: \t\t\t\t}\n166: \t\t\t}\n167: \t\t}\n168: \t\t// Sort within each resource kind by namespace/name for determinism\n169: \t\tfor kindIdx := range etcdResult.Items {\n170: \t\t\tsort.Slice(etcdResult.Items[kindIdx].Resources, func(i, j int) bool {\n171: \t\t\t\tresourceA, resourceB := etcdResult.Items[kindIdx].Resources[i], etcdResult.Items[kindIdx].Resources[j]\n172: \t\t\t\tif resourceA.Namespace == resourceB.Namespace {\n173: \t\t\t\t\treturn resourceA.Name < resourceB.Name\n174: \t\t\t\t}\n175: \t\t\t\treturn resourceA.Namespace < resourceB.Namespace\n176: \t\t\t})\n177: \t\t}\n178: \t\tresult.Etcds = append(result.Etcds, etcdResult)\n179: \t}\n180: \n181: \t// Sort etcds by namespace/name\n182: \tsort.Slice(result.Etcds, func(i, j int) bool {\n183: \t\tif result.Etcds[i].Etcd.Namespace == result.Etcds[j].Etcd.Namespace {\n184: \t\t\treturn result.Etcds[i].Etcd.Name < result.Etcds[j].Etcd.Name\n185: \t\t}\n186: \t\treturn result.Etcds[i].Etcd.Namespace < result.Etcds[j].Etcd.Namespace\n187: \t})\n188: \tif l.Printer != nil {\n189: \t\tvar outputData []byte\n190: \t\toutputData, err = l.Printer.Print(result)\n191: \t\tif err != nil {\n192: \t\t\treturn fmt.Errorf(\"failed to marshal result to desired format: %w\", err)\n193: \t\t}\n194: \t\tfmt.Fprintf(l.IOStreams.Out, \"%s\\n\", string(outputData))\n195: \t\treturn nil\n196: \t}\n197: \tl.renderListResources(out, result.Etcds)\n198: \treturn nil\n199: }\n200: \n201: // parseFilter splits and normalizes the filter string\n202: func parseFilter(filter string) []string {\n203: \tif strings.TrimSpace(filter) == \"\" {\n204: \t\treturn nil\n205: \t}\n206: \tparts := strings.Split(filter, \",\")\n207: \tout := make([]string, 0, len(parts))\n208: \tseen := map[string]struct{}{}\n209: \tfor _, p := range parts {\n210: \t\tt := strings.ToLower(strings.TrimSpace(p))\n211: \t\tif t == \"\" {\n212: \t\t\tcontinue\n213: \t\t}\n214: \t\tif _, ok := seen[t]; ok {\n215: \t\t\tcontinue\n216: \t\t}\n217: \t\tseen[t] = struct{}{}\n218: \t\tout = append(out, t)\n219: \t}\n220: \treturn out\n221: }\n222: \n223: // defaultResourceTokens returns the curated default set for \"all\"\n224: func defaultResourceTokens() []string {\n225: \treturn []string{\"po\", \"sts\", \"svc\", \"cm\", \"secret\", \"pvc\", \"lease\", \"pdb\", \"role\", \"rolebinding\", \"sa\"}\n226: }\n227: \n228: func toResourceRef(u *unstructured.Unstructured) ResourceRef {\n229: \tage := time.Since(u.GetCreationTimestamp().Time)\n230: \treturn ResourceRef{\n231: \t\tNamespace: u.GetNamespace(),\n232: \t\tName:      u.GetName(),\n233: \t\tAge:       age,\n234: \t}\n235: }\n236: \n237: // renderListResources prints results in a grouped, neat format using the Logger.\n238: func (l *listResourcesCmdCtx) renderListResources(log log.Logger, results []EtcdResourceResult) {\n239: \tfor _, etcdResourceResult := range results {\n240: \t\tlog.RawHeader(l.IOStreams.Out, fmt.Sprintf(\"Etcd [%s/%s]\", etcdResourceResult.Etcd.Namespace, etcdResourceResult.Etcd.Name))\n241: \t\tif len(etcdResourceResult.Items) == 0 {\n242: \t\t\tlog.Info(l.IOStreams.Out, \"No resources found for selected filters\")\n243: \t\t\tcontinue\n244: \t\t}\n245: \n246: \t\tkeyList := etcdResourceResult.Items\n247: \t\tsort.Slice(keyList, func(i, j int) bool {\n248: \t\t\tif keyList[i].Key.Kind == keyList[j].Key.Kind {\n249: \t\t\t\treturn len(keyList[i].Key.Resource) < len(keyList[j].Key.Resource)\n250: \t\t\t}\n251: \t\t\treturn len(keyList[i].Key.Kind) < len(keyList[j].Key.Kind)\n252: \t\t})\n253: \t\ttable := SetupListResourcesTable(keyList)\n254: \t\tif _, err := fmt.Fprintln(l.IOStreams.Out, table); err != nil {\n255: \t\t\tlog.Warning(l.IOStreams.ErrOut, \"Failed writing resources table: \", err.Error())\n256: \t\t}\n257: \t}\n258: }",
+      "end_line": 258,
+      "path_lines": 258,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 6205,
+      "input_tokens_details": {
+        "cached_tokens": 5888
+      },
+      "output_tokens": 4589,
+      "output_tokens_details": {
+        "reasoning_tokens": 2642
+      },
+      "total_tokens": 10794
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "druidctl",
+      "query": "RESTMapper"
+    },
+    "response_chars": 2153,
+    "round": 6,
+    "tool_result": {
+      "matches": [],
+      "query": "RESTMapper",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 9757,
+      "input_tokens_details": {
+        "cached_tokens": 5888
+      },
+      "output_tokens": 3818,
+      "output_tokens_details": {
+        "reasoning_tokens": 3177
+      },
+      "total_tokens": 13575
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\t\"k8s.io/apimachinery/pkg/api/meta\"\n\tmetav1 \"k8s.io/apimachinery/pkg/apis/meta/v1\"\n\t\"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured\"\n\t\"k8s.io/apimachinery/pkg/runtime/schema\"",
+          "end_line": 20,
+          "start_line": 18
+        },
+        {
+          "content": "\tresourceMappings, err := resolveResourceMappings(genClient.RESTMapper(), tokens)",
+          "end_line": 108,
+          "start_line": 107
+        },
+        {
+          "content": "\t\tfor _, mapping := range resourceMappings {\n\t\t\tresourceNamespace := \"\"\n\t\t\tif mapping.Scope.Name() == meta.RESTScopeNameNamespace {\n\t\t\t\tresourceNamespace = etcd.Namespace\n\t\t\t}\n\t\t\tresourceList, err := genClient.Dynamic().Resource(mapping.Resource).Namespace(resourceNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})\n\t\t\tif err != nil {\n\t\t\t\tout.Warning(l.IOStreams.Out, \"Failed to list \", mapping.Resource.Resource, \" for etcd \", etcd.Name, \": \", err.Error())\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tif len(resourceList.Items) == 0 {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tresourceKey := ResourceKey{Group: mapping.Resource.Group, Version: mapping.Resource.Version, Resource: mapping.Resource.Resource, Kind: mapping.GroupVersionKind.Kind}",
+          "end_line": 150,
+          "start_line": 137
+        },
+        {
+          "content": "func resolveResourceMappings(mapper meta.RESTMapper, tokens []string) ([]*meta.RESTMapping, error) {\n\tif len(tokens) == 0 {\n\t\treturn nil, fmt.Errorf(\"no resource tokens provided\")\n\t}\n\n\tresourceMappings := make([]*meta.RESTMapping, 0, len(tokens))\n\tseen := map[schema.GroupVersionResource]struct{}{}\n\tvar unknown []string\n\tfor _, token := range tokens {\n\t\tresource, err := mapper.ResourceFor(schema.GroupVersionResource{Resource: token})\n\t\tif err != nil {\n\t\t\tunknown = append(unknown, token)\n\t\t\tcontinue\n\t\t}\n\t\tkind, err := mapper.KindFor(resource)\n\t\tif err != nil {\n\t\t\tunknown = append(unknown, token)\n\t\t\tcontinue\n\t\t}\n\t\tmapping, err := mapper.RESTMapping(kind.GroupKind(), kind.Version)\n\t\tif err != nil {\n\t\t\tunknown = append(unknown, token)\n\t\t\tcontinue\n\t\t}\n\t\tif _, ok := seen[mapping.Resource]; ok {\n\t\t\tcontinue\n\t\t}\n\t\tseen[mapping.Resource] = struct{}{}\n\t\tresourceMappings = append(resourceMappings, mapping)\n\t}\n\n\tif len(unknown) > 0 {\n\t\treturn nil, fmt.Errorf(\"unknown resource tokens: %v\", unknown)\n\t}\n\n\treturn resourceMappings, nil\n}\n\n",
+          "end_line": 227,
+          "start_line": 228
+        }
+      ]
+    },
+    "response_chars": 5029,
+    "round": 7,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 20,
+          "replacement_lines": 4,
+          "start_line": 18
+        },
+        {
+          "end_line": 108,
+          "replacement_lines": 1,
+          "start_line": 107
+        },
+        {
+          "end_line": 150,
+          "replacement_lines": 14,
+          "start_line": 137
+        },
+        {
+          "end_line": 227,
+          "replacement_lines": 38,
+          "start_line": 228
+        }
+      ],
+      "current_file_lines": 296,
+      "updated_excerpt": {
+        "content": "8: \t\"context\"\n9: \t\"fmt\"\n10: \t\"sort\"\n11: \t\"strings\"\n12: \t\"time\"\n13: \n14: \tcmdutils \"github.com/gardener/etcd-druid/druidctl/cmd/utils\"\n15: \t\"github.com/gardener/etcd-druid/druidctl/internal/log\"\n16: \t\"github.com/gardener/etcd-druid/druidctl/internal/printer\"\n17: \n18: \t\"k8s.io/apimachinery/pkg/api/meta\"\n19: \tmetav1 \"k8s.io/apimachinery/pkg/apis/meta/v1\"\n20: \t\"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured\"\n21: \t\"k8s.io/apimachinery/pkg/runtime/schema\"\n22: \n23: // ResourceKey identifies a Kubernetes resource kind by group/version/resource/Kind.\n24: type ResourceKey struct {\n25: \tGroup    string `json:\"group\" yaml:\"group\"`\n26: \tVersion  string `json:\"version\" yaml:\"version\"`\n27: \tResource string `json:\"resource\" yaml:\"resource\"`\n28: \tKind     string `json:\"kind\" yaml:\"kind\"`\n29: }\n30: \n31: // ResourceRef references a single namespaced resource and includes its age.\n32: type ResourceRef struct {\n33: \tNamespace string        `json:\"namespace\" yaml:\"namespace\"`\n34: \tName      string        `json:\"name\" yaml:\"name\"`\n35: \tAge       time.Duration `json:\"age\" yaml:\"age\"`\n36: }\n37: \n38: // EtcdRef identifies an Etcd custom resource by name and namespace.\n39: type EtcdRef struct {\n40: \tName      string `json:\"name\" yaml:\"name\"`\n41: \tNamespace string `json:\"namespace\" yaml:\"namespace\"`\n42: }\n43: \n44: // ResourceListPerKey groups resources under a single ResourceKey.\n45: type ResourceListPerKey struct {\n46: \tKey       ResourceKey   `json:\"key\" yaml:\"key\"`\n47: \tResources []ResourceRef `json:\"resources\" yaml:\"resources\"`\n48: }",
+        "end_line": 48,
+        "path_lines": 296,
+        "start_line": 8
+      }
+    },
+    "usage": {
+      "input_tokens": 9803,
+      "input_tokens_details": {
+        "cached_tokens": 9472
+      },
+      "output_tokens": 4053,
+      "output_tokens_details": {
+        "reasoning_tokens": 2606
+      },
+      "total_tokens": 13856
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 320,
+      "path": "druidctl/cmd/listresources/listresources.go",
+      "start_line": 1
+    },
+    "response_chars": 302,
+    "round": 8,
+    "tool_result": {
+      "content": "1: // SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company and Gardener contributors\n2: //\n3: // SPDX-License-Identifier: Apache-2.0\n4: \n5: package listresources\n6: \n7: import (\n8: \t\"context\"\n9: \t\"fmt\"\n10: \t\"sort\"\n11: \t\"strings\"\n12: \t\"time\"\n13: \n14: \tcmdutils \"github.com/gardener/etcd-druid/druidctl/cmd/utils\"\n15: \t\"github.com/gardener/etcd-druid/druidctl/internal/log\"\n16: \t\"github.com/gardener/etcd-druid/druidctl/internal/printer\"\n17: \n18: \t\"k8s.io/apimachinery/pkg/api/meta\"\n19: \tmetav1 \"k8s.io/apimachinery/pkg/apis/meta/v1\"\n20: \t\"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured\"\n21: \t\"k8s.io/apimachinery/pkg/runtime/schema\"\n22: \n23: // ResourceKey identifies a Kubernetes resource kind by group/version/resource/Kind.\n24: type ResourceKey struct {\n25: \tGroup    string `json:\"group\" yaml:\"group\"`\n26: \tVersion  string `json:\"version\" yaml:\"version\"`\n27: \tResource string `json:\"resource\" yaml:\"resource\"`\n28: \tKind     string `json:\"kind\" yaml:\"kind\"`\n29: }\n30: \n31: // ResourceRef references a single namespaced resource and includes its age.\n32: type ResourceRef struct {\n33: \tNamespace string        `json:\"namespace\" yaml:\"namespace\"`\n34: \tName      string        `json:\"name\" yaml:\"name\"`\n35: \tAge       time.Duration `json:\"age\" yaml:\"age\"`\n36: }\n37: \n38: // EtcdRef identifies an Etcd custom resource by name and namespace.\n39: type EtcdRef struct {\n40: \tName      string `json:\"name\" yaml:\"name\"`\n41: \tNamespace string `json:\"namespace\" yaml:\"namespace\"`\n42: }\n43: \n44: // ResourceListPerKey groups resources under a single ResourceKey.\n45: type ResourceListPerKey struct {\n46: \tKey       ResourceKey   `json:\"key\" yaml:\"key\"`\n47: \tResources []ResourceRef `json:\"resources\" yaml:\"resources\"`\n48: }\n49: \n50: // EtcdResourceResult contains all managed resources for a single Etcd.\n51: type EtcdResourceResult struct {\n52: \tEtcd  EtcdRef              `json:\"etcd\" yaml:\"etcd\"`\n53: \tItems []ResourceListPerKey `json:\"items\" yaml:\"items\"`\n54: }\n55: \n56: // Result is the top-level aggregation for managed resources across Etcds.\n57: type Result struct {\n58: \tEtcds []EtcdResourceResult `json:\"etcds\" yaml:\"etcds\"`\n59: \tKind  string               `json:\"kind\" yaml:\"kind\"`\n60: }\n61: \n62: func (l *listResourcesCmdCtx) complete(options *cmdutils.GlobalOptions) error {\n63: \tetcdClient, err := options.Clients.EtcdClient()\n64: \tif err != nil {\n65: \t\toptions.Logger.Error(l.IOStreams.ErrOut, \"Unable to create etcd client: \", err)\n66: \t\treturn err\n67: \t}\n68: \tl.EtcdClient = etcdClient\n69: \n70: \tgenericClient, err := options.Clients.GenericClient()\n71: \tif err != nil {\n72: \t\toptions.Logger.Error(l.IOStreams.ErrOut, \"Unable to create generic kube clients: \", err)\n73: \t\treturn err\n74: \t}\n75: \tl.GenericClient = genericClient\n76: \n77: \tl.Printer, err = printer.NewFormatter(printer.OutputFormat(l.OutputFormat))\n78: \tif err != nil {\n79: \t\toptions.Logger.Error(l.IOStreams.ErrOut, \"Failed to create formatter: \", err)\n80: \t\treturn err\n81: \t}\n82: \n83: \t// Build etcd reference list from resource args using kubectl-compatible parsing\n84: \tl.etcdRefList = options.BuildEtcdRefList()\n85: \treturn nil\n86: }\n87: \n88: func (l *listResourcesCmdCtx) validate() error {\n89: \treturn l.GlobalOptions.ValidateResourceSelection()\n90: }\n91: \n92: // execute lists the managed resources for the selected etcd resources based on the filter.\n93: func (l *listResourcesCmdCtx) execute(ctx context.Context) error {\n94: \tif l.AllNamespaces {\n95: \t\tl.Logger.Info(l.IOStreams.Out, \"Listing all Managed resources for Etcds across all namespaces\")\n96: \t} else {\n97: \t\tl.Logger.Info(l.IOStreams.Out, \"Listing Managed resources for selected Etcds\")\n98: \t}\n99: \tout := l.Logger\n100: \n101: \tetcdClient := l.EtcdClient\n102: \tgenClient := l.GenericClient\n103: \n104: \ttokens := parseFilter(l.Filter)\n105: \tif len(tokens) == 0 || (len(tokens) == 1 && tokens[0] == \"all\") {\n106: \t\ttokens = defaultResourceTokens()\n107: \t}\n108: \tresourceMappings, err := resolveResourceMappings(genClient.RESTMapper(), tokens)\n109: \tif err != nil {\n110: \t\treturn err\n111: \t}\n112: \n113: \t// Identify etcds to operate on\n114: \tetcdList, err := cmdutils.GetEtcdList(ctx, etcdClient, l.etcdRefList, l.AllNamespaces, l.GetNamespace(), l.LabelSelector)\n115: \tif err != nil {\n116: \t\treturn err\n117: \t}\n118: \tif len(etcdList.Items) == 0 {\n119: \t\tif !l.AllNamespaces {\n120: \t\t\treturn fmt.Errorf(\"no Etcd resources found in namespace %q\", l.GetNamespace())\n121: \t\t}\n122: \t\tout.Info(l.IOStreams.Out, \"No Etcd resources found across all namespaces\")\n123: \t\treturn nil\n124: \t}\n125: \n126: \tresult := Result{\n127: \t\tEtcds: make([]EtcdResourceResult, 0, len(etcdList.Items)),\n128: \t\tKind:  \"EtcdResourceList\",\n129: \t}\n130: \tfor _, etcd := range etcdList.Items {\n131: \t\tetcdResult := EtcdResourceResult{\n132: \t\t\tEtcd:  EtcdRef{Name: etcd.Name, Namespace: etcd.Namespace},\n133: \t\t\tItems: make([]ResourceListPerKey, 0),\n134: \t\t}\n135: \n136: \t\tlabelSelector := fmt.Sprintf(\"app.kubernetes.io/part-of=%s\", etcd.Name)\n137: \t\tfor _, mapping := range resourceMappings {\n138: \t\t\tresourceNamespace := \"\"\n139: \t\t\tif mapping.Scope.Name() == meta.RESTScopeNameNamespace {\n140: \t\t\t\tresourceNamespace = etcd.Namespace\n141: \t\t\t}\n142: \t\t\tresourceList, err := genClient.Dynamic().Resource(mapping.Resource).Namespace(resourceNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})\n143: \t\t\tif err != nil {\n144: \t\t\t\tout.Warning(l.IOStreams.Out, \"Failed to list \", mapping.Resource.Resource, \" for etcd \", etcd.Name, \": \", err.Error())\n145: \t\t\t\tcontinue\n146: \t\t\t}\n147: \t\t\tif len(resourceList.Items) == 0 {\n148: \t\t\t\tcontinue\n149: \t\t\t}\n150: \t\t\tresourceKey := ResourceKey{Group: mapping.Resource.Group, Version: mapping.Resource.Version, Resource: mapping.Resource.Resource, Kind: mapping.GroupVersionKind.Kind}\n151: \t\t\tfor _, item := range resourceList.Items {\n152: \t\t\t\tfound := false\n153: \t\t\t\tfor idx, resourceListPerKey := range etcdResult.Items {\n154: \t\t\t\t\tif resourceListPerKey.Key == resourceKey {\n155: \t\t\t\t\t\tetcdResult.Items[idx].Resources = append(etcdResult.Items[idx].Resources, toResourceRef(&item))\n156: \t\t\t\t\t\tfound = true\n157: \t\t\t\t\t\tbreak\n158: \t\t\t\t\t}\n159: \t\t\t\t}\n160: \t\t\t\tif !found {\n161: \t\t\t\t\tetcdResult.Items = append(etcdResult.Items, ResourceListPerKey{\n162: \t\t\t\t\t\tKey:       resourceKey,\n163: \t\t\t\t\t\tResources: []ResourceRef{toResourceRef(&item)},\n164: \t\t\t\t\t})\n165: \t\t\t\t}\n166: \t\t\t}\n167: \t\t}\n168: \t\t// Sort within each resource kind by namespace/name for determinism\n169: \t\tfor kindIdx := range etcdResult.Items {\n170: \t\t\tsort.Slice(etcdResult.Items[kindIdx].Resources, func(i, j int) bool {\n171: \t\t\t\tresourceA, resourceB := etcdResult.Items[kindIdx].Resources[i], etcdResult.Items[kindIdx].Resources[j]\n172: \t\t\t\tif resourceA.Namespace == resourceB.Namespace {\n173: \t\t\t\t\treturn resourceA.Name < resourceB.Name\n174: \t\t\t\t}\n175: \t\t\t\treturn resourceA.Namespace < resourceB.Namespace\n176: \t\t\t})\n177: \t\t}\n178: \t\tresult.Etcds = append(result.Etcds, etcdResult)\n179: \t}\n180: \n181: \t// Sort etcds by namespace/name\n182: \tsort.Slice(result.Etcds, func(i, j int) bool {\n183: \t\tif result.Etcds[i].Etcd.Namespace == result.Etcds[j].Etcd.Namespace {\n184: \t\t\treturn result.Etcds[i].Etcd.Name < result.Etcds[j].Etcd.Name\n185: \t\t}\n186: \t\treturn result.Etcds[i].Etcd.Namespace < result.Etcds[j].Etcd.Namespace\n187: \t})\n188: \tif l.Printer != nil {\n189: \t\tvar outputData []byte\n190: \t\toutputData, err = l.Printer.Print(result)\n191: \t\tif err != nil {\n192: \t\t\treturn fmt.Errorf(\"failed to marshal result to desired format: %w\", err)\n193: \t\t}\n194: \t\tfmt.Fprintf(l.IOStreams.Out, \"%s\\n\", string(outputData))\n195: \t\treturn nil\n196: \t}\n197: \tl.renderListResources(out, result.Etcds)\n198: \treturn nil\n199: }\n200: \n201: // parseFilter splits and normalizes the filter string\n202: func parseFilter(filter string) []string {\n203: \tif strings.TrimSpace(filter) == \"\" {\n204: \t\treturn nil\n205: \t}\n206: \tparts := strings.Split(filter, \",\")\n207: \tout := make([]string, 0, len(parts))\n208: \tseen := map[string]struct{}{}\n209: \tfor _, p := range parts {\n210: \t\tt := strings.ToLower(strings.TrimSpace(p))\n211: \t\tif t == \"\" {\n212: \t\t\tcontinue\n213: \t\t}\n214: \t\tif _, ok := seen[t]; ok {\n215: \t\t\tcontinue\n216: \t\t}\n217: \t\tseen[t] = struct{}{}\n218: \t\tout = append(out, t)\n219: \t}\n220: \treturn out\n221: }\n222: \n223: // defaultResourceTokens returns the curated default set for \"all\"\n224: func defaultResourceTokens() []string {\n225: \treturn []string{\"po\", \"sts\", \"svc\", \"cm\", \"secret\", \"pvc\", \"lease\", \"pdb\", \"role\", \"rolebinding\", \"sa\"}\n226: }\n227: \n228: func resolveResourceMappings(mapper meta.RESTMapper, tokens []string) ([]*meta.RESTMapping, error) {\n229: \tif len(tokens) == 0 {\n230: \t\treturn nil, fmt.Errorf(\"no resource tokens provided\")\n231: \t}\n232: \n233: \tresourceMappings := make([]*meta.RESTMapping, 0, len(tokens))\n234: \tseen := map[schema.GroupVersionResource]struct{}{}\n235: \tvar unknown []string\n236: \tfor _, token := range tokens {\n237: \t\tresource, err := mapper.ResourceFor(schema.GroupVersionResource{Resource: token})\n238: \t\tif err != nil {\n239: \t\t\tunknown = append(unknown, token)\n240: \t\t\tcontinue\n241: \t\t}\n242: \t\tkind, err := mapper.KindFor(resource)\n243: \t\tif err != nil {\n244: \t\t\tunknown = append(unknown, token)\n245: \t\t\tcontinue\n246: \t\t}\n247: \t\tmapping, err := mapper.RESTMapping(kind.GroupKind(), kind.Version)\n248: \t\tif err != nil {\n249: \t\t\tunknown = append(unknown, token)\n250: \t\t\tcontinue\n251: \t\t}\n252: \t\tif _, ok := seen[mapping.Resource]; ok {\n253: \t\t\tcontinue\n254: \t\t}\n255: \t\tseen[mapping.Resource] = struct{}{}\n256: \t\tresourceMappings = append(resourceMappings, mapping)\n257: \t}\n258: \n259: \tif len(unknown) > 0 {\n260: \t\treturn nil, fmt.Errorf(\"unknown resource tokens: %v\", unknown)\n261: \t}\n262: \n263: \treturn resourceMappings, nil\n264: }\n265: \n266: func toResourceRef(u *unstructured.Unstructured) ResourceRef {\n267: \tage := time.Since(u.GetCreationTimestamp().Time)\n268: \treturn ResourceRef{\n269: \t\tNamespace: u.GetNamespace(),\n270: \t\tName:      u.GetName(),\n271: \t\tAge:       age,\n272: \t}\n273: }\n274: \n275: // renderListResources prints results in a grouped, neat format using the Logger.\n276: func (l *listResourcesCmdCtx) renderListResources(log log.Logger, results []EtcdResourceResult) {\n277: \tfor _, etcdResourceResult := range results {\n278: \t\tlog.RawHeader(l.IOStreams.Out, fmt.Sprintf(\"Etcd [%s/%s]\", etcdResourceResult.Etcd.Namespace, etcdResourceResult.Etcd.Name))\n279: \t\tif len(etcdResourceResult.Items) == 0 {\n280: \t\t\tlog.Info(l.IOStreams.Out, \"No resources found for selected filters\")\n281: \t\t\tcontinue\n282: \t\t}\n283: \n284: \t\tkeyList := etcdResourceResult.Items\n285: \t\tsort.Slice(keyList, func(i, j int) bool {\n286: \t\t\tif keyList[i].Key.Kind == keyList[j].Key.Kind {\n287: \t\t\t\treturn len(keyList[i].Key.Resource) < len(keyList[j].Key.Resource)\n288: \t\t\t}\n289: \t\t\treturn len(keyList[i].Key.Kind) < len(keyList[j].Key.Kind)\n290: \t\t})\n291: \t\ttable := SetupListResourcesTable(keyList)\n292: \t\tif _, err := fmt.Fprintln(l.IOStreams.Out, table); err != nil {\n293: \t\t\tlog.Warning(l.IOStreams.ErrOut, \"Failed writing resources table: \", err.Error())\n294: \t\t}\n295: \t}\n296: }",
+      "end_line": 296,
+      "path_lines": 296,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 11162,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 188,
+      "output_tokens_details": {
+        "reasoning_tokens": 84
+      },
+      "total_tokens": 11350
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": ")",
+          "end_line": 21,
+          "start_line": 22
+        }
+      ]
+    },
+    "response_chars": 248,
+    "round": 9,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 21,
+          "replacement_lines": 1,
+          "start_line": 22
+        }
+      ],
+      "current_file_lines": 297,
+      "updated_excerpt": {
+        "content": "12: \t\"time\"\n13: \n14: \tcmdutils \"github.com/gardener/etcd-druid/druidctl/cmd/utils\"\n15: \t\"github.com/gardener/etcd-druid/druidctl/internal/log\"\n16: \t\"github.com/gardener/etcd-druid/druidctl/internal/printer\"\n17: \n18: \t\"k8s.io/apimachinery/pkg/api/meta\"\n19: \tmetav1 \"k8s.io/apimachinery/pkg/apis/meta/v1\"\n20: \t\"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured\"\n21: \t\"k8s.io/apimachinery/pkg/runtime/schema\"\n22: )\n23: \n24: // ResourceKey identifies a Kubernetes resource kind by group/version/resource/Kind.\n25: type ResourceKey struct {\n26: \tGroup    string `json:\"group\" yaml:\"group\"`\n27: \tVersion  string `json:\"version\" yaml:\"version\"`\n28: \tResource string `json:\"resource\" yaml:\"resource\"`\n29: \tKind     string `json:\"kind\" yaml:\"kind\"`\n30: }\n31: \n32: // ResourceRef references a single namespaced resource and includes its age.\n33: type ResourceRef struct {\n34: \tNamespace string        `json:\"namespace\" yaml:\"namespace\"`\n35: \tName      string        `json:\"name\" yaml:\"name\"`\n36: \tAge       time.Duration `json:\"age\" yaml:\"age\"`\n37: }\n38: \n39: // EtcdRef identifies an Etcd custom resource by name and namespace.\n40: type EtcdRef struct {\n41: \tName      string `json:\"name\" yaml:\"name\"`\n42: \tNamespace string `json:\"namespace\" yaml:\"namespace\"`\n43: }\n44: \n45: // ResourceListPerKey groups resources under a single ResourceKey.\n46: type ResourceListPerKey struct {\n47: \tKey       ResourceKey   `json:\"key\" yaml:\"key\"`\n48: \tResources []ResourceRef `json:\"resources\" yaml:\"resources\"`\n49: }\n50: \n51: // EtcdResourceResult contains all managed resources for a single Etcd.\n52: type EtcdResourceResult struct {",
+        "end_line": 52,
+        "path_lines": 297,
+        "start_line": 12
+      }
+    },
+    "usage": {
+      "input_tokens": 15173,
+      "input_tokens_details": {
+        "cached_tokens": 11008
+      },
+      "output_tokens": 760,
+      "output_tokens_details": {
+        "reasoning_tokens": 664
+      },
+      "total_tokens": 15933
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "druidctl",
+      "query": "GenericClient"
+    },
+    "response_chars": 219,
+    "round": 10,
+    "tool_result": {
+      "matches": [],
+      "query": "GenericClient",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 15803,
+      "input_tokens_details": {
+        "cached_tokens": 14592
+      },
+      "output_tokens": 764,
+      "output_tokens_details": {
+        "reasoning_tokens": 684
+      },
+      "total_tokens": 16567
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 320,
+      "path": "druidctl/cmd/listresources/listresources.go",
+      "start_line": 1
+    },
+    "response_chars": 120,
+    "round": 11,
+    "tool_result": {
+      "content": "1: // SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company and Gardener contributors\n2: //\n3: // SPDX-License-Identifier: Apache-2.0\n4: \n5: package listresources\n6: \n7: import (\n8: \t\"context\"\n9: \t\"fmt\"\n10: \t\"sort\"\n11: \t\"strings\"\n12: \t\"time\"\n13: \n14: \tcmdutils \"github.com/gardener/etcd-druid/druidctl/cmd/utils\"\n15: \t\"github.com/gardener/etcd-druid/druidctl/internal/log\"\n16: \t\"github.com/gardener/etcd-druid/druidctl/internal/printer\"\n17: \n18: \t\"k8s.io/apimachinery/pkg/api/meta\"\n19: \tmetav1 \"k8s.io/apimachinery/pkg/apis/meta/v1\"\n20: \t\"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured\"\n21: \t\"k8s.io/apimachinery/pkg/runtime/schema\"\n22: )\n23: \n24: // ResourceKey identifies a Kubernetes resource kind by group/version/resource/Kind.\n25: type ResourceKey struct {\n26: \tGroup    string `json:\"group\" yaml:\"group\"`\n27: \tVersion  string `json:\"version\" yaml:\"version\"`\n28: \tResource string `json:\"resource\" yaml:\"resource\"`\n29: \tKind     string `json:\"kind\" yaml:\"kind\"`\n30: }\n31: \n32: // ResourceRef references a single namespaced resource and includes its age.\n33: type ResourceRef struct {\n34: \tNamespace string        `json:\"namespace\" yaml:\"namespace\"`\n35: \tName      string        `json:\"name\" yaml:\"name\"`\n36: \tAge       time.Duration `json:\"age\" yaml:\"age\"`\n37: }\n38: \n39: // EtcdRef identifies an Etcd custom resource by name and namespace.\n40: type EtcdRef struct {\n41: \tName      string `json:\"name\" yaml:\"name\"`\n42: \tNamespace string `json:\"namespace\" yaml:\"namespace\"`\n43: }\n44: \n45: // ResourceListPerKey groups resources under a single ResourceKey.\n46: type ResourceListPerKey struct {\n47: \tKey       ResourceKey   `json:\"key\" yaml:\"key\"`\n48: \tResources []ResourceRef `json:\"resources\" yaml:\"resources\"`\n49: }\n50: \n51: // EtcdResourceResult contains all managed resources for a single Etcd.\n52: type EtcdResourceResult struct {\n53: \tEtcd  EtcdRef              `json:\"etcd\" yaml:\"etcd\"`\n54: \tItems []ResourceListPerKey `json:\"items\" yaml:\"items\"`\n55: }\n56: \n57: // Result is the top-level aggregation for managed resources across Etcds.\n58: type Result struct {\n59: \tEtcds []EtcdResourceResult `json:\"etcds\" yaml:\"etcds\"`\n60: \tKind  string               `json:\"kind\" yaml:\"kind\"`\n61: }\n62: \n63: func (l *listResourcesCmdCtx) complete(options *cmdutils.GlobalOptions) error {\n64: \tetcdClient, err := options.Clients.EtcdClient()\n65: \tif err != nil {\n66: \t\toptions.Logger.Error(l.IOStreams.ErrOut, \"Unable to create etcd client: \", err)\n67: \t\treturn err\n68: \t}\n69: \tl.EtcdClient = etcdClient\n70: \n71: \tgenericClient, err := options.Clients.GenericClient()\n72: \tif err != nil {\n73: \t\toptions.Logger.Error(l.IOStreams.ErrOut, \"Unable to create generic kube clients: \", err)\n74: \t\treturn err\n75: \t}\n76: \tl.GenericClient = genericClient\n77: \n78: \tl.Printer, err = printer.NewFormatter(printer.OutputFormat(l.OutputFormat))\n79: \tif err != nil {\n80: \t\toptions.Logger.Error(l.IOStreams.ErrOut, \"Failed to create formatter: \", err)\n81: \t\treturn err\n82: \t}\n83: \n84: \t// Build etcd reference list from resource args using kubectl-compatible parsing\n85: \tl.etcdRefList = options.BuildEtcdRefList()\n86: \treturn nil\n87: }\n88: \n89: func (l *listResourcesCmdCtx) validate() error {\n90: \treturn l.GlobalOptions.ValidateResourceSelection()\n91: }\n92: \n93: // execute lists the managed resources for the selected etcd resources based on the filter.\n94: func (l *listResourcesCmdCtx) execute(ctx context.Context) error {\n95: \tif l.AllNamespaces {\n96: \t\tl.Logger.Info(l.IOStreams.Out, \"Listing all Managed resources for Etcds across all namespaces\")\n97: \t} else {\n98: \t\tl.Logger.Info(l.IOStreams.Out, \"Listing Managed resources for selected Etcds\")\n99: \t}\n100: \tout := l.Logger\n101: \n102: \tetcdClient := l.EtcdClient\n103: \tgenClient := l.GenericClient\n104: \n105: \ttokens := parseFilter(l.Filter)\n106: \tif len(tokens) == 0 || (len(tokens) == 1 && tokens[0] == \"all\") {\n107: \t\ttokens = defaultResourceTokens()\n108: \t}\n109: \tresourceMappings, err := resolveResourceMappings(genClient.RESTMapper(), tokens)\n110: \tif err != nil {\n111: \t\treturn err\n112: \t}\n113: \n114: \t// Identify etcds to operate on\n115: \tetcdList, err := cmdutils.GetEtcdList(ctx, etcdClient, l.etcdRefList, l.AllNamespaces, l.GetNamespace(), l.LabelSelector)\n116: \tif err != nil {\n117: \t\treturn err\n118: \t}\n119: \tif len(etcdList.Items) == 0 {\n120: \t\tif !l.AllNamespaces {\n121: \t\t\treturn fmt.Errorf(\"no Etcd resources found in namespace %q\", l.GetNamespace())\n122: \t\t}\n123: \t\tout.Info(l.IOStreams.Out, \"No Etcd resources found across all namespaces\")\n124: \t\treturn nil\n125: \t}\n126: \n127: \tresult := Result{\n128: \t\tEtcds: make([]EtcdResourceResult, 0, len(etcdList.Items)),\n129: \t\tKind:  \"EtcdResourceList\",\n130: \t}\n131: \tfor _, etcd := range etcdList.Items {\n132: \t\tetcdResult := EtcdResourceResult{\n133: \t\t\tEtcd:  EtcdRef{Name: etcd.Name, Namespace: etcd.Namespace},\n134: \t\t\tItems: make([]ResourceListPerKey, 0),\n135: \t\t}\n136: \n137: \t\tlabelSelector := fmt.Sprintf(\"app.kubernetes.io/part-of=%s\", etcd.Name)\n138: \t\tfor _, mapping := range resourceMappings {\n139: \t\t\tresourceNamespace := \"\"\n140: \t\t\tif mapping.Scope.Name() == meta.RESTScopeNameNamespace {\n141: \t\t\t\tresourceNamespace = etcd.Namespace\n142: \t\t\t}\n143: \t\t\tresourceList, err := genClient.Dynamic().Resource(mapping.Resource).Namespace(resourceNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})\n144: \t\t\tif err != nil {\n145: \t\t\t\tout.Warning(l.IOStreams.Out, \"Failed to list \", mapping.Resource.Resource, \" for etcd \", etcd.Name, \": \", err.Error())\n146: \t\t\t\tcontinue\n147: \t\t\t}\n148: \t\t\tif len(resourceList.Items) == 0 {\n149: \t\t\t\tcontinue\n150: \t\t\t}\n151: \t\t\tresourceKey := ResourceKey{Group: mapping.Resource.Group, Version: mapping.Resource.Version, Resource: mapping.Resource.Resource, Kind: mapping.GroupVersionKind.Kind}\n152: \t\t\tfor _, item := range resourceList.Items {\n153: \t\t\t\tfound := false\n154: \t\t\t\tfor idx, resourceListPerKey := range etcdResult.Items {\n155: \t\t\t\t\tif resourceListPerKey.Key == resourceKey {\n156: \t\t\t\t\t\tetcdResult.Items[idx].Resources = append(etcdResult.Items[idx].Resources, toResourceRef(&item))\n157: \t\t\t\t\t\tfound = true\n158: \t\t\t\t\t\tbreak\n159: \t\t\t\t\t}\n160: \t\t\t\t}\n161: \t\t\t\tif !found {\n162: \t\t\t\t\tetcdResult.Items = append(etcdResult.Items, ResourceListPerKey{\n163: \t\t\t\t\t\tKey:       resourceKey,\n164: \t\t\t\t\t\tResources: []ResourceRef{toResourceRef(&item)},\n165: \t\t\t\t\t})\n166: \t\t\t\t}\n167: \t\t\t}\n168: \t\t}\n169: \t\t// Sort within each resource kind by namespace/name for determinism\n170: \t\tfor kindIdx := range etcdResult.Items {\n171: \t\t\tsort.Slice(etcdResult.Items[kindIdx].Resources, func(i, j int) bool {\n172: \t\t\t\tresourceA, resourceB := etcdResult.Items[kindIdx].Resources[i], etcdResult.Items[kindIdx].Resources[j]\n173: \t\t\t\tif resourceA.Namespace == resourceB.Namespace {\n174: \t\t\t\t\treturn resourceA.Name < resourceB.Name\n175: \t\t\t\t}\n176: \t\t\t\treturn resourceA.Namespace < resourceB.Namespace\n177: \t\t\t})\n178: \t\t}\n179: \t\tresult.Etcds = append(result.Etcds, etcdResult)\n180: \t}\n181: \n182: \t// Sort etcds by namespace/name\n183: \tsort.Slice(result.Etcds, func(i, j int) bool {\n184: \t\tif result.Etcds[i].Etcd.Namespace == result.Etcds[j].Etcd.Namespace {\n185: \t\t\treturn result.Etcds[i].Etcd.Name < result.Etcds[j].Etcd.Name\n186: \t\t}\n187: \t\treturn result.Etcds[i].Etcd.Namespace < result.Etcds[j].Etcd.Namespace\n188: \t})\n189: \tif l.Printer != nil {\n190: \t\tvar outputData []byte\n191: \t\toutputData, err = l.Printer.Print(result)\n192: \t\tif err != nil {\n193: \t\t\treturn fmt.Errorf(\"failed to marshal result to desired format: %w\", err)\n194: \t\t}\n195: \t\tfmt.Fprintf(l.IOStreams.Out, \"%s\\n\", string(outputData))\n196: \t\treturn nil\n197: \t}\n198: \tl.renderListResources(out, result.Etcds)\n199: \treturn nil\n200: }\n201: \n202: // parseFilter splits and normalizes the filter string\n203: func parseFilter(filter string) []string {\n204: \tif strings.TrimSpace(filter) == \"\" {\n205: \t\treturn nil\n206: \t}\n207: \tparts := strings.Split(filter, \",\")\n208: \tout := make([]string, 0, len(parts))\n209: \tseen := map[string]struct{}{}\n210: \tfor _, p := range parts {\n211: \t\tt := strings.ToLower(strings.TrimSpace(p))\n212: \t\tif t == \"\" {\n213: \t\t\tcontinue\n214: \t\t}\n215: \t\tif _, ok := seen[t]; ok {\n216: \t\t\tcontinue\n217: \t\t}\n218: \t\tseen[t] = struct{}{}\n219: \t\tout = append(out, t)\n220: \t}\n221: \treturn out\n222: }\n223: \n224: // defaultResourceTokens returns the curated default set for \"all\"\n225: func defaultResourceTokens() []string {\n226: \treturn []string{\"po\", \"sts\", \"svc\", \"cm\", \"secret\", \"pvc\", \"lease\", \"pdb\", \"role\", \"rolebinding\", \"sa\"}\n227: }\n228: \n229: func resolveResourceMappings(mapper meta.RESTMapper, tokens []string) ([]*meta.RESTMapping, error) {\n230: \tif len(tokens) == 0 {\n231: \t\treturn nil, fmt.Errorf(\"no resource tokens provided\")\n232: \t}\n233: \n234: \tresourceMappings := make([]*meta.RESTMapping, 0, len(tokens))\n235: \tseen := map[schema.GroupVersionResource]struct{}{}\n236: \tvar unknown []string\n237: \tfor _, token := range tokens {\n238: \t\tresource, err := mapper.ResourceFor(schema.GroupVersionResource{Resource: token})\n239: \t\tif err != nil {\n240: \t\t\tunknown = append(unknown, token)\n241: \t\t\tcontinue\n242: \t\t}\n243: \t\tkind, err := mapper.KindFor(resource)\n244: \t\tif err != nil {\n245: \t\t\tunknown = append(unknown, token)\n246: \t\t\tcontinue\n247: \t\t}\n248: \t\tmapping, err := mapper.RESTMapping(kind.GroupKind(), kind.Version)\n249: \t\tif err != nil {\n250: \t\t\tunknown = append(unknown, token)\n251: \t\t\tcontinue\n252: \t\t}\n253: \t\tif _, ok := seen[mapping.Resource]; ok {\n254: \t\t\tcontinue\n255: \t\t}\n256: \t\tseen[mapping.Resource] = struct{}{}\n257: \t\tresourceMappings = append(resourceMappings, mapping)\n258: \t}\n259: \n260: \tif len(unknown) > 0 {\n261: \t\treturn nil, fmt.Errorf(\"unknown resource tokens: %v\", unknown)\n262: \t}\n263: \n264: \treturn resourceMappings, nil\n265: }\n266: \n267: func toResourceRef(u *unstructured.Unstructured) ResourceRef {\n268: \tage := time.Since(u.GetCreationTimestamp().Time)\n269: \treturn ResourceRef{\n270: \t\tNamespace: u.GetNamespace(),\n271: \t\tName:      u.GetName(),\n272: \t\tAge:       age,\n273: \t}\n274: }\n275: \n276: // renderListResources prints results in a grouped, neat format using the Logger.\n277: func (l *listResourcesCmdCtx) renderListResources(log log.Logger, results []EtcdResourceResult) {\n278: \tfor _, etcdResourceResult := range results {\n279: \t\tlog.RawHeader(l.IOStreams.Out, fmt.Sprintf(\"Etcd [%s/%s]\", etcdResourceResult.Etcd.Namespace, etcdResourceResult.Etcd.Name))\n280: \t\tif len(etcdResourceResult.Items) == 0 {\n281: \t\t\tlog.Info(l.IOStreams.Out, \"No resources found for selected filters\")\n282: \t\t\tcontinue\n283: \t\t}\n284: \n285: \t\tkeyList := etcdResourceResult.Items\n286: \t\tsort.Slice(keyList, func(i, j int) bool {\n287: \t\t\tif keyList[i].Key.Kind == keyList[j].Key.Kind {\n288: \t\t\t\treturn len(keyList[i].Key.Resource) < len(keyList[j].Key.Resource)\n289: \t\t\t}\n290: \t\t\treturn len(keyList[i].Key.Kind) < len(keyList[j].Key.Kind)\n291: \t\t})\n292: \t\ttable := SetupListResourcesTable(keyList)\n293: \t\tif _, err := fmt.Fprintln(l.IOStreams.Out, table); err != nil {\n294: \t\t\tlog.Warning(l.IOStreams.ErrOut, \"Failed writing resources table: \", err.Error())\n295: \t\t}\n296: \t}\n297: }",
+      "end_line": 297,
+      "path_lines": 297,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 15849,
+      "input_tokens_details": {
+        "cached_tokens": 15616
+      },
+      "output_tokens": 1393,
+      "output_tokens_details": {
+        "reasoning_tokens": 1347
+      },
+      "total_tokens": 17242
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\t\tresource, err := mapper.ResourceFor(schema.GroupVersionResource{Resource: token})\n\t\tif err != nil {\n\t\t\tkind, kindErr := mapper.KindFor(schema.GroupVersionResource{Resource: token})\n\t\t\tif kindErr != nil {\n\t\t\t\tunknown = append(unknown, token)\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tmapping, err := mapper.RESTMapping(kind.GroupKind(), kind.Version)\n\t\t\tif err != nil {\n\t\t\t\tunknown = append(unknown, token)\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tif _, ok := seen[mapping.Resource]; ok {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tseen[mapping.Resource] = struct{}{}\n\t\t\tresourceMappings = append(resourceMappings, mapping)\n\t\t\tcontinue\n\t\t}\n\t\tkind, err := mapper.KindFor(resource)\n\t\tif err != nil {\n\t\t\tunknown = append(unknown, token)\n\t\t\tcontinue\n\t\t}",
+          "end_line": 247,
+          "start_line": 237
+        }
+      ]
+    },
+    "response_chars": 1814,
+    "round": 12,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 247,
+          "replacement_lines": 24,
+          "start_line": 237
+        }
+      ],
+      "current_file_lines": 310,
+      "updated_excerpt": {
+        "content": "227: }\n228: \n229: func resolveResourceMappings(mapper meta.RESTMapper, tokens []string) ([]*meta.RESTMapping, error) {\n230: \tif len(tokens) == 0 {\n231: \t\treturn nil, fmt.Errorf(\"no resource tokens provided\")\n232: \t}\n233: \n234: \tresourceMappings := make([]*meta.RESTMapping, 0, len(tokens))\n235: \tseen := map[schema.GroupVersionResource]struct{}{}\n236: \tvar unknown []string\n237: \t\tresource, err := mapper.ResourceFor(schema.GroupVersionResource{Resource: token})\n238: \t\tif err != nil {\n239: \t\t\tkind, kindErr := mapper.KindFor(schema.GroupVersionResource{Resource: token})\n240: \t\t\tif kindErr != nil {\n241: \t\t\t\tunknown = append(unknown, token)\n242: \t\t\t\tcontinue\n243: \t\t\t}\n244: \t\t\tmapping, err := mapper.RESTMapping(kind.GroupKind(), kind.Version)\n245: \t\t\tif err != nil {\n246: \t\t\t\tunknown = append(unknown, token)\n247: \t\t\t\tcontinue\n248: \t\t\t}\n249: \t\t\tif _, ok := seen[mapping.Resource]; ok {\n250: \t\t\t\tcontinue\n251: \t\t\t}\n252: \t\t\tseen[mapping.Resource] = struct{}{}\n253: \t\t\tresourceMappings = append(resourceMappings, mapping)\n254: \t\t\tcontinue\n255: \t\t}\n256: \t\tkind, err := mapper.KindFor(resource)\n257: \t\tif err != nil {\n258: \t\t\tunknown = append(unknown, token)\n259: \t\t\tcontinue\n260: \t\t}\n261: \t\tmapping, err := mapper.RESTMapping(kind.GroupKind(), kind.Version)\n262: \t\tif err != nil {\n263: \t\t\tunknown = append(unknown, token)\n264: \t\t\tcontinue\n265: \t\t}\n266: \t\tif _, ok := seen[mapping.Resource]; ok {\n267: \t\t\tcontinue",
+        "end_line": 267,
+        "path_lines": 310,
+        "start_line": 227
+      }
+    },
+    "usage": {
+      "input_tokens": 19865,
+      "input_tokens_details": {
+        "cached_tokens": 15616
+      },
+      "output_tokens": 2783,
+      "output_tokens_details": {
+        "reasoning_tokens": 2213
+      },
+      "total_tokens": 22648
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 285,
+      "path": "druidctl/cmd/listresources/listresources.go",
+      "start_line": 229
+    },
+    "response_chars": 102,
+    "round": 13,
+    "tool_result": {
+      "content": "229: func resolveResourceMappings(mapper meta.RESTMapper, tokens []string) ([]*meta.RESTMapping, error) {\n230: \tif len(tokens) == 0 {\n231: \t\treturn nil, fmt.Errorf(\"no resource tokens provided\")\n232: \t}\n233: \n234: \tresourceMappings := make([]*meta.RESTMapping, 0, len(tokens))\n235: \tseen := map[schema.GroupVersionResource]struct{}{}\n236: \tvar unknown []string\n237: \t\tresource, err := mapper.ResourceFor(schema.GroupVersionResource{Resource: token})\n238: \t\tif err != nil {\n239: \t\t\tkind, kindErr := mapper.KindFor(schema.GroupVersionResource{Resource: token})\n240: \t\t\tif kindErr != nil {\n241: \t\t\t\tunknown = append(unknown, token)\n242: \t\t\t\tcontinue\n243: \t\t\t}\n244: \t\t\tmapping, err := mapper.RESTMapping(kind.GroupKind(), kind.Version)\n245: \t\t\tif err != nil {\n246: \t\t\t\tunknown = append(unknown, token)\n247: \t\t\t\tcontinue\n248: \t\t\t}\n249: \t\t\tif _, ok := seen[mapping.Resource]; ok {\n250: \t\t\t\tcontinue\n251: \t\t\t}\n252: \t\t\tseen[mapping.Resource] = struct{}{}\n253: \t\t\tresourceMappings = append(resourceMappings, mapping)\n254: \t\t\tcontinue\n255: \t\t}\n256: \t\tkind, err := mapper.KindFor(resource)\n257: \t\tif err != nil {\n258: \t\t\tunknown = append(unknown, token)\n259: \t\t\tcontinue\n260: \t\t}\n261: \t\tmapping, err := mapper.RESTMapping(kind.GroupKind(), kind.Version)\n262: \t\tif err != nil {\n263: \t\t\tunknown = append(unknown, token)\n264: \t\t\tcontinue\n265: \t\t}\n266: \t\tif _, ok := seen[mapping.Resource]; ok {\n267: \t\t\tcontinue\n268: \t\t}\n269: \t\tseen[mapping.Resource] = struct{}{}\n270: \t\tresourceMappings = append(resourceMappings, mapping)\n271: \t}\n272: \n273: \tif len(unknown) > 0 {\n274: \t\treturn nil, fmt.Errorf(\"unknown resource tokens: %v\", unknown)\n275: \t}\n276: \n277: \treturn resourceMappings, nil\n278: }\n279: \n280: func toResourceRef(u *unstructured.Unstructured) ResourceRef {\n281: \tage := time.Since(u.GetCreationTimestamp().Time)\n282: \treturn ResourceRef{\n283: \t\tNamespace: u.GetNamespace(),\n284: \t\tName:      u.GetName(),\n285: \t\tAge:       age,",
+      "end_line": 285,
+      "path_lines": 310,
+      "start_line": 229
+    },
+    "usage": {
+      "input_tokens": 20725,
+      "input_tokens_details": {
+        "cached_tokens": 19712
+      },
+      "output_tokens": 54,
+      "output_tokens_details": {
+        "reasoning_tokens": 20
+      },
+      "total_tokens": 20779
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "func resolveResourceMappings(mapper meta.RESTMapper, tokens []string) ([]*meta.RESTMapping, error) {\n\tif len(tokens) == 0 {\n\t\treturn nil, fmt.Errorf(\"no resource tokens provided\")\n\t}\n\n\tresourceMappings := make([]*meta.RESTMapping, 0, len(tokens))\n\tseen := map[schema.GroupVersionResource]struct{}{}\n\tvar unknown []string\n\tfor _, token := range tokens {\n\t\tresource, err := mapper.ResourceFor(schema.GroupVersionResource{Resource: token})\n\t\tif err != nil {\n\t\t\tunknown = append(unknown, token)\n\t\t\tcontinue\n\t\t}\n\t\tkind, err := mapper.KindFor(resource)\n\t\tif err != nil {\n\t\t\tunknown = append(unknown, token)\n\t\t\tcontinue\n\t\t}\n\t\tmapping, err := mapper.RESTMapping(kind.GroupKind(), kind.Version)\n\t\tif err != nil {\n\t\t\tunknown = append(unknown, token)\n\t\t\tcontinue\n\t\t}\n\t\tif _, ok := seen[mapping.Resource]; ok {\n\t\t\tcontinue\n\t\t}\n\t\tseen[mapping.Resource] = struct{}{}\n\t\tresourceMappings = append(resourceMappings, mapping)\n\t}\n\n\tif len(unknown) > 0 {\n\t\treturn nil, fmt.Errorf(\"unknown resource tokens: %v\", unknown)\n\t}\n\n\treturn resourceMappings, nil\n}\n",
+          "end_line": 278,
+          "start_line": 229
+        }
+      ]
+    },
+    "response_chars": 2627,
+    "round": 14,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 278,
+          "replacement_lines": 37,
+          "start_line": 229
+        }
+      ],
+      "current_file_lines": 297,
+      "updated_excerpt": {
+        "content": "219: \t\tout = append(out, t)\n220: \t}\n221: \treturn out\n222: }\n223: \n224: // defaultResourceTokens returns the curated default set for \"all\"\n225: func defaultResourceTokens() []string {\n226: \treturn []string{\"po\", \"sts\", \"svc\", \"cm\", \"secret\", \"pvc\", \"lease\", \"pdb\", \"role\", \"rolebinding\", \"sa\"}\n227: }\n228: \n229: func resolveResourceMappings(mapper meta.RESTMapper, tokens []string) ([]*meta.RESTMapping, error) {\n230: \tif len(tokens) == 0 {\n231: \t\treturn nil, fmt.Errorf(\"no resource tokens provided\")\n232: \t}\n233: \n234: \tresourceMappings := make([]*meta.RESTMapping, 0, len(tokens))\n235: \tseen := map[schema.GroupVersionResource]struct{}{}\n236: \tvar unknown []string\n237: \tfor _, token := range tokens {\n238: \t\tresource, err := mapper.ResourceFor(schema.GroupVersionResource{Resource: token})\n239: \t\tif err != nil {\n240: \t\t\tunknown = append(unknown, token)\n241: \t\t\tcontinue\n242: \t\t}\n243: \t\tkind, err := mapper.KindFor(resource)\n244: \t\tif err != nil {\n245: \t\t\tunknown = append(unknown, token)\n246: \t\t\tcontinue\n247: \t\t}\n248: \t\tmapping, err := mapper.RESTMapping(kind.GroupKind(), kind.Version)\n249: \t\tif err != nil {\n250: \t\t\tunknown = append(unknown, token)\n251: \t\t\tcontinue\n252: \t\t}\n253: \t\tif _, ok := seen[mapping.Resource]; ok {\n254: \t\t\tcontinue\n255: \t\t}\n256: \t\tseen[mapping.Resource] = struct{}{}\n257: \t\tresourceMappings = append(resourceMappings, mapping)\n258: \t}\n259: ",
+        "end_line": 259,
+        "path_lines": 297,
+        "start_line": 219
+      }
+    },
+    "usage": {
+      "input_tokens": 21497,
+      "input_tokens_details": {
+        "cached_tokens": 20224
+      },
+      "output_tokens": 1855,
+      "output_tokens_details": {
+        "reasoning_tokens": 1058
+      },
+      "total_tokens": 23352
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "func resolveResourceMappings(mapper meta.RESTMapper, tokens []string) ([]*meta.RESTMapping, error) {\n\tif len(tokens) == 0 {\n\t\treturn nil, fmt.Errorf(\"no resource tokens provided\")\n\t}\n\n\tresourceMappings := make([]*meta.RESTMapping, 0, len(tokens))\n\tseen := map[schema.GroupVersionResource]struct{}{}\n\tvar unknown []string\n\tfor _, token := range tokens {\n\t\tmapping, err := resolveResourceMapping(mapper, token)\n\t\tif err != nil {\n\t\t\tunknown = append(unknown, token)\n\t\t\tcontinue\n\t\t}\n\t\tif _, ok := seen[mapping.Resource]; ok {\n\t\t\tcontinue\n\t\t}\n\t\tseen[mapping.Resource] = struct{}{}\n\t\tresourceMappings = append(resourceMappings, mapping)\n\t}\n\n\tif len(unknown) > 0 {\n\t\treturn nil, fmt.Errorf(\"unknown resource tokens: %v\", unknown)\n\t}\n\n\treturn resourceMappings, nil\n}\n\nfunc resolveResourceMapping(mapper meta.RESTMapper, token string) (*meta.RESTMapping, error) {\n\tresource, err := mapper.ResourceFor(schema.GroupVersionResource{Resource: token})\n\tif err == nil {\n\t\treturn restMappingForResource(mapper, resource)\n\t}\n\n\tkind, err := mapper.KindFor(schema.GroupVersionResource{Resource: token})\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn mapper.RESTMapping(kind.GroupKind(), kind.Version)\n}\n\nfunc restMappingForResource(mapper meta.RESTMapper, resource schema.GroupVersionResource) (*meta.RESTMapping, error) {\n\tkind, err := mapper.KindFor(resource)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn mapper.RESTMapping(kind.GroupKind(), kind.Version)\n}\n",
+          "end_line": 265,
+          "start_line": 229
+        }
+      ]
+    },
+    "response_chars": 3445,
+    "round": 15,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 265,
+          "replacement_lines": 48,
+          "start_line": 229
+        }
+      ],
+      "current_file_lines": 308,
+      "updated_excerpt": {
+        "content": "219: \t\tout = append(out, t)\n220: \t}\n221: \treturn out\n222: }\n223: \n224: // defaultResourceTokens returns the curated default set for \"all\"\n225: func defaultResourceTokens() []string {\n226: \treturn []string{\"po\", \"sts\", \"svc\", \"cm\", \"secret\", \"pvc\", \"lease\", \"pdb\", \"role\", \"rolebinding\", \"sa\"}\n227: }\n228: \n229: func resolveResourceMappings(mapper meta.RESTMapper, tokens []string) ([]*meta.RESTMapping, error) {\n230: \tif len(tokens) == 0 {\n231: \t\treturn nil, fmt.Errorf(\"no resource tokens provided\")\n232: \t}\n233: \n234: \tresourceMappings := make([]*meta.RESTMapping, 0, len(tokens))\n235: \tseen := map[schema.GroupVersionResource]struct{}{}\n236: \tvar unknown []string\n237: \tfor _, token := range tokens {\n238: \t\tmapping, err := resolveResourceMapping(mapper, token)\n239: \t\tif err != nil {\n240: \t\t\tunknown = append(unknown, token)\n241: \t\t\tcontinue\n242: \t\t}\n243: \t\tif _, ok := seen[mapping.Resource]; ok {\n244: \t\t\tcontinue\n245: \t\t}\n246: \t\tseen[mapping.Resource] = struct{}{}\n247: \t\tresourceMappings = append(resourceMappings, mapping)\n248: \t}\n249: \n250: \tif len(unknown) > 0 {\n251: \t\treturn nil, fmt.Errorf(\"unknown resource tokens: %v\", unknown)\n252: \t}\n253: \n254: \treturn resourceMappings, nil\n255: }\n256: \n257: func resolveResourceMapping(mapper meta.RESTMapper, token string) (*meta.RESTMapping, error) {\n258: \tresource, err := mapper.ResourceFor(schema.GroupVersionResource{Resource: token})\n259: \tif err == nil {",
+        "end_line": 259,
+        "path_lines": 308,
+        "start_line": 219
+      }
+    },
+    "usage": {
+      "input_tokens": 22429,
+      "input_tokens_details": {
+        "cached_tokens": 21248
+      },
+      "output_tokens": 1817,
+      "output_tokens_details": {
+        "reasoning_tokens": 820
+      },
+      "total_tokens": 24246
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 320,
+      "path": "druidctl/cmd/listresources/listresources.go",
+      "start_line": 249
+    },
+    "response_chars": 102,
+    "round": 16,
+    "tool_result": {
+      "content": "249: \n250: \tif len(unknown) > 0 {\n251: \t\treturn nil, fmt.Errorf(\"unknown resource tokens: %v\", unknown)\n252: \t}\n253: \n254: \treturn resourceMappings, nil\n255: }\n256: \n257: func resolveResourceMapping(mapper meta.RESTMapper, token string) (*meta.RESTMapping, error) {\n258: \tresource, err := mapper.ResourceFor(schema.GroupVersionResource{Resource: token})\n259: \tif err == nil {\n260: \t\treturn restMappingForResource(mapper, resource)\n261: \t}\n262: \n263: \tkind, err := mapper.KindFor(schema.GroupVersionResource{Resource: token})\n264: \tif err != nil {\n265: \t\treturn nil, err\n266: \t}\n267: \treturn mapper.RESTMapping(kind.GroupKind(), kind.Version)\n268: }\n269: \n270: func restMappingForResource(mapper meta.RESTMapper, resource schema.GroupVersionResource) (*meta.RESTMapping, error) {\n271: \tkind, err := mapper.KindFor(resource)\n272: \tif err != nil {\n273: \t\treturn nil, err\n274: \t}\n275: \treturn mapper.RESTMapping(kind.GroupKind(), kind.Version)\n276: }\n277: \n278: func toResourceRef(u *unstructured.Unstructured) ResourceRef {\n279: \tage := time.Since(u.GetCreationTimestamp().Time)\n280: \treturn ResourceRef{\n281: \t\tNamespace: u.GetNamespace(),\n282: \t\tName:      u.GetName(),\n283: \t\tAge:       age,\n284: \t}\n285: }\n286: \n287: // renderListResources prints results in a grouped, neat format using the Logger.\n288: func (l *listResourcesCmdCtx) renderListResources(log log.Logger, results []EtcdResourceResult) {\n289: \tfor _, etcdResourceResult := range results {\n290: \t\tlog.RawHeader(l.IOStreams.Out, fmt.Sprintf(\"Etcd [%s/%s]\", etcdResourceResult.Etcd.Namespace, etcdResourceResult.Etcd.Name))\n291: \t\tif len(etcdResourceResult.Items) == 0 {\n292: \t\t\tlog.Info(l.IOStreams.Out, \"No resources found for selected filters\")\n293: \t\t\tcontinue\n294: \t\t}\n295: \n296: \t\tkeyList := etcdResourceResult.Items\n297: \t\tsort.Slice(keyList, func(i, j int) bool {\n298: \t\t\tif keyList[i].Key.Kind == keyList[j].Key.Kind {\n299: \t\t\t\treturn len(keyList[i].Key.Resource) < len(keyList[j].Key.Resource)\n300: \t\t\t}\n301: \t\t\treturn len(keyList[i].Key.Kind) < len(keyList[j].Key.Kind)\n302: \t\t})\n303: \t\ttable := SetupListResourcesTable(keyList)\n304: \t\tif _, err := fmt.Fprintln(l.IOStreams.Out, table); err != nil {\n305: \t\t\tlog.Warning(l.IOStreams.ErrOut, \"Failed writing resources table: \", err.Error())\n306: \t\t}\n307: \t}\n308: }",
+      "end_line": 308,
+      "path_lines": 308,
+      "start_line": 249
+    },
+    "usage": {
+      "input_tokens": 23460,
+      "input_tokens_details": {
+        "cached_tokens": 22272
+      },
+      "output_tokens": 49,
+      "output_tokens_details": {
+        "reasoning_tokens": 15
+      },
+      "total_tokens": 23509
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "druidctl/cmd/listresources",
+      "query": "type listResourcesCmdCtx"
+    },
+    "response_chars": 792,
+    "round": 17,
+    "tool_result": {
+      "matches": [],
+      "query": "type listResourcesCmdCtx",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 24314,
+      "input_tokens_details": {
+        "cached_tokens": 23296
+      },
+      "output_tokens": 1633,
+      "output_tokens_details": {
+        "reasoning_tokens": 1368
+      },
+      "total_tokens": 25947
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 18,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__gardener__etcd-druid__pull_1212__comment_2703142518__complexity.patch"
+    },
+    "usage": {
+      "input_tokens": 24370,
+      "input_tokens_details": {
+        "cached_tokens": 23808
+      },
+      "output_tokens": 1400,
+      "output_tokens_details": {
+        "reasoning_tokens": 1389
+      },
+      "total_tokens": 25770
+    }
+  }
+]

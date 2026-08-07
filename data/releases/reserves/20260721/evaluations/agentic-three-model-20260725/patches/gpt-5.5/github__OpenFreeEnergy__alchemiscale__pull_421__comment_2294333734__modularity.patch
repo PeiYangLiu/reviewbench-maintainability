@@ -1,0 +1,271 @@
+diff --git a/alchemiscale/strategist/service.py b/alchemiscale/strategist/service.py
+index 93ac698..c439c68 100644
+--- a/alchemiscale/strategist/service.py
++++ b/alchemiscale/strategist/service.py
+@@ -247,24 +247,147 @@ class StrategistService:
+ 
+         return task_counts
+ 
++    def _count_successful_results(self, network_sk: ScopedKey) -> int:
++        """Count successful ProtocolDAGResults for all transformations in a network."""
++        return len(
++            [
++                ref_sk
++                for transformation_sk in self.n4js.get_network_transformations(network_sk)
++                for ref_sk in self.n4js.get_transformation_results(transformation_sk)
++                if self.n4js.get_gufe(ref_sk).ok
++            ]
++        )
++
++    def _cancel_all_actioned_tasks(self, network_sk: ScopedKey) -> None:
++        """Cancel all actioned tasks for a network's taskhub."""
++        taskhub_sk = self.n4js.get_taskhub(network_sk)
++        with self.n4js.transaction() as tx:
++            task_sks = self.n4js.get_taskhub_tasks(taskhub_sk, tx=tx)
++            self.n4js.cancel_tasks(task_sks, taskhub_sk, tx=tx)
++
++    def _tasks_to_action(
++        self,
++        transformation_sk: ScopedKey,
++        actioned_tasks: list[ScopedKey],
++        required: int,
++    ) -> list[ScopedKey]:
++        """Select existing tasks to action, creating new tasks if needed."""
++        tasks_to_action = []
++
++        # Get existing actionable tasks for the transformation
++        transformation_tasks = self.n4js.get_transformation_tasks(transformation_sk)
++        actionable_tasks_status = {
++            task_sk: status
++            for task_sk, status in zip(
++                transformation_tasks,
++                self.n4js.get_task_status(transformation_tasks),
++            )
++            if status in [TaskStatusEnum.waiting, TaskStatusEnum.running]
++            and task_sk not in actioned_tasks
++        }
++
++        # Add actionable tasks not already actioned, starting with those that are already running
++        for task_sk in actionable_tasks_status:
++            status = actionable_tasks_status[task_sk]
++            if status == TaskStatusEnum.running:
++                tasks_to_action.append(task_sk)
++                if len(tasks_to_action) >= required:
++                    break
++
++        # If we still need more, add actionable tasks that are waiting
++        if len(tasks_to_action) < required:
++            for task_sk in actionable_tasks_status:
++                status = actionable_tasks_status[task_sk]
++                if status == TaskStatusEnum.waiting:
++                    tasks_to_action.append(task_sk)
++                    if len(tasks_to_action) >= required:
++                        break
++
++        # Create new tasks if needed
++        if len(tasks_to_action) < required:
++            new_tasks = self.n4js.create_tasks(
++                [transformation_sk] * (required - len(tasks_to_action))
++            )
++            tasks_to_action.extend(new_tasks)
++
++        return tasks_to_action
++
++    def _tasks_to_cancel(
++        self, actioned_tasks: list[ScopedKey], excess: int
++    ) -> list[ScopedKey]:
++        """Select excess actioned tasks to cancel, preferring waiting tasks."""
++        tasks_to_cancel = []
++        actioned_status = self.n4js.get_task_status(actioned_tasks)
++
++        # First cancel waiting tasks
++        for task_sk, status in zip(actioned_tasks, actioned_status):
++            if status == TaskStatusEnum.waiting:
++                tasks_to_cancel.append(task_sk)
++                if len(tasks_to_cancel) >= excess:
++                    break
++
++        # Then cancel running tasks if needed
++        if len(tasks_to_cancel) < excess:
++            for task_sk, status in zip(actioned_tasks, actioned_status):
++                if status == TaskStatusEnum.running:
++                    tasks_to_cancel.append(task_sk)
++                    if len(tasks_to_cancel) >= excess:
++                        break
++
++        return tasks_to_cancel
++
++    def _reconcile_transformation_tasks(
++        self,
++        transformation_sk: ScopedKey,
++        taskhub_sk: ScopedKey,
++        target_count: int,
++        strategy_mode: StrategyModeEnum,
++    ) -> None:
++        """Action or cancel tasks for one transformation to reach the target count."""
++        actioned_tasks = self.n4js.get_transformation_actioned_tasks(
++            transformation_sk, taskhub_sk
++        )
++        actioned_count = len(actioned_tasks)
++
++        if target_count > actioned_count:
++            # Action additional tasks, creating them as necessary
++            required = target_count - actioned_count
++            tasks_to_action = self._tasks_to_action(
++                transformation_sk, actioned_tasks, required
++            )
++            self.n4js.action_tasks(tasks_to_action, taskhub_sk)
++
++        elif target_count < actioned_count and strategy_mode == StrategyModeEnum.full:
++            # Cancel excess tasks
++            excess = actioned_count - target_count
++            tasks_to_cancel = self._tasks_to_cancel(actioned_tasks, excess)
++            self.n4js.cancel_tasks(tasks_to_cancel, taskhub_sk)
++
++    def _apply_task_counts(
++        self,
++        task_counts: dict[GufeKey, int],
++        taskhub_sk: ScopedKey,
++        sk_to_tf: dict[ScopedKey, Transformation],
++        strategy_mode: StrategyModeEnum,
++    ) -> None:
++        """Apply target task counts for each transformation in a taskhub."""
++        # Create reverse mapping from transformation gufe key to ScopedKey
++        tf_key_to_sk = {value.key: key for key, value in sk_to_tf.items()}
++
++        # Set task counts for each transformation
++        for transformation_key, target_count in task_counts.items():
++            transformation_sk = tf_key_to_sk[transformation_key]
++            self._reconcile_transformation_tasks(
++                transformation_sk, taskhub_sk, target_count, strategy_mode
++            )
++
+     def _execute_strategy(
+         self, network_sk: ScopedKey, strategy_state: StrategyState
+     ) -> StrategyState:
+         """Execute a single strategy and return updated state."""
+         try:
+             # Check if strategy went dormant - count successful results
+-            current_result_count = len(
+-                [
+-                    ref_sk
+-                    for transformation_sk in self.n4js.get_network_transformations(
+-                        network_sk
+-                    )
+-                    for ref_sk in self.n4js.get_transformation_results(
+-                        transformation_sk
+-                    )
+-                    if self.n4js.get_gufe(ref_sk).ok
+-                ]
+-            )
++            current_result_count = self._count_successful_results(network_sk)
+ 
+             # If dormant, check if new results appeared
+             if strategy_state.status == StrategyStatusEnum.dormant:
+@@ -302,10 +425,7 @@ class StrategistService:
+ 
+                 # If in full mode, cancel all actioned tasks
+                 if strategy_state.mode == StrategyModeEnum.full:
+-                    taskhub_sk = self.n4js.get_taskhub(network_sk)
+-                    with self.n4js.transaction() as tx:
+-                        task_sks = self.n4js.get_taskhub_tasks(taskhub_sk, tx=tx)
+-                        self.n4js.cancel_tasks(task_sks, taskhub_sk, tx=tx)
++                    self._cancel_all_actioned_tasks(network_sk)
+ 
+                 strategy_state.last_iteration_result_count = current_result_count
+                 strategy_state.last_iteration = datetime.datetime.now(tz=datetime.UTC)
+@@ -327,91 +447,9 @@ class StrategistService:
+             )
+ 
+             taskhub_sk = self.n4js.get_taskhub(network_sk)
+-
+-            # Create reverse mapping from transformation gufe key to ScopedKey
+-            tf_key_to_sk = {value.key: key for key, value in sk_to_tf.items()}
+-
+-            # Set task counts for each transformation
+-            for transformation_key, target_count in task_counts.items():
+-
+-                transformation_sk = tf_key_to_sk[transformation_key]
+-
+-                actioned_tasks = self.n4js.get_transformation_actioned_tasks(
+-                    transformation_sk, taskhub_sk
+-                )
+-                actioned_count = len(actioned_tasks)
+-
+-                if target_count > actioned_count:
+-                    # Action additional tasks, creating them as necessary
+-                    required = target_count - actioned_count
+-                    tasks_to_action = []
+-
+-                    # Get existing actionable tasks for the transformation
+-                    transformation_tasks = self.n4js.get_transformation_tasks(
+-                        transformation_sk
+-                    )
+-                    actionable_tasks_status = {
+-                        task_sk: status
+-                        for task_sk, status in zip(
+-                            transformation_tasks,
+-                            self.n4js.get_task_status(transformation_tasks),
+-                        )
+-                        if status in [TaskStatusEnum.waiting, TaskStatusEnum.running]
+-                        and task_sk not in actioned_tasks
+-                    }
+-
+-                    # Add actionable tasks not already actioned, starting with those that are already running
+-                    for task_sk in actionable_tasks_status:
+-                        status = actionable_tasks_status[task_sk]
+-                        if status == TaskStatusEnum.running:
+-                            tasks_to_action.append(task_sk)
+-                            if len(tasks_to_action) >= required:
+-                                break
+-
+-                    # If we still need more, add actionable tasks that are waiting
+-                    if len(tasks_to_action) < required:
+-                        for task_sk in actionable_tasks_status:
+-                            status = actionable_tasks_status[task_sk]
+-                            if status == TaskStatusEnum.waiting:
+-                                tasks_to_action.append(task_sk)
+-                                if len(tasks_to_action) >= required:
+-                                    break
+-
+-                    # Create new tasks if needed
+-                    if len(tasks_to_action) < required:
+-                        new_tasks = self.n4js.create_tasks(
+-                            [transformation_sk] * (required - len(tasks_to_action))
+-                        )
+-                        tasks_to_action.extend(new_tasks)
+-
+-                    self.n4js.action_tasks(tasks_to_action, taskhub_sk)
+-
+-                elif (
+-                    target_count < actioned_count
+-                    and strategy_state.mode == StrategyModeEnum.full
+-                ):
+-                    # Cancel excess tasks
+-                    excess = actioned_count - target_count
+-                    tasks_to_cancel = []
+-
+-                    actioned_status = self.n4js.get_task_status(actioned_tasks)
+-
+-                    # First cancel waiting tasks
+-                    for task_sk, status in zip(actioned_tasks, actioned_status):
+-                        if status == TaskStatusEnum.waiting:
+-                            tasks_to_cancel.append(task_sk)
+-                            if len(tasks_to_cancel) >= excess:
+-                                break
+-
+-                    # Then cancel running tasks if needed
+-                    if len(tasks_to_cancel) < excess:
+-                        for task_sk, status in zip(actioned_tasks, actioned_status):
+-                            if status == TaskStatusEnum.running:
+-                                tasks_to_cancel.append(task_sk)
+-                                if len(tasks_to_cancel) >= excess:
+-                                    break
+-
+-                    self.n4js.cancel_tasks(tasks_to_cancel, taskhub_sk)
++            self._apply_task_counts(
++                task_counts, taskhub_sk, sk_to_tf, strategy_state.mode
++            )
+ 
+             # Update strategy state
+             strategy_state.last_iteration = datetime.datetime.now(tz=datetime.UTC)

@@ -1,0 +1,63 @@
+diff --git a/instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo/mongo.go b/instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo/mongo.go
+index 82acfe2..93cec61 100644
+--- a/instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo/mongo.go
++++ b/instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo/mongo.go
+@@ -35,24 +35,16 @@ type monitor struct {
+ func (m *monitor) Started(ctx context.Context, evt *event.CommandStartedEvent) {
+ 	hostname, port := peerInfo(evt)
+ 
+-	attrs := []attribute.KeyValue{semconv.DBSystemMongoDB}
+-
+-	attrs = appendOpNameAttrs(attrs, evt.CommandName)
+-	attrs = appendDBNamespace(attrs, evt.DatabaseName)
+-	attrs = appendNetworkPort(attrs, port)
+-	attrs = appendNetworkHost(attrs, hostname)
+-	attrs = appendNetworkAddress(attrs, net.JoinHostPort(hostname, strconv.Itoa(port)))
+-	attrs = appendNetworkTransport(attrs)
+-
+-	if !m.cfg.CommandAttributeDisabled {
+-		attrs = appendDBStatement(attrs, sanitizeCommand(evt.Command))
++	var collection string
++	if coll, err := extractCollection(evt); err == nil && coll != "" {
++		collection = coll
+ 	}
+ 
++	attrs := commandAttributes(evt, hostname, port, collection, !m.cfg.CommandAttributeDisabled)
++
+ 	var spanName string
+-	if collection, err := extractCollection(evt); err == nil && collection != "" {
++	if collection != "" {
+ 		spanName = collection + "."
+-
+-		attrs = appendCollection(attrs, collection)
+ 	}
+ 
+ 	spanName += evt.CommandName
+@@ -70,6 +62,27 @@ func (m *monitor) Started(ctx context.Context, evt *event.CommandStartedEvent) {
+ 	m.Unlock()
+ }
+ 
++func commandAttributes(evt *event.CommandStartedEvent, hostname string, port int, collection string, includeCommand bool) []attribute.KeyValue {
++	attrs := []attribute.KeyValue{semconv.DBSystemMongoDB}
++
++	attrs = appendOpNameAttrs(attrs, evt.CommandName)
++	attrs = appendDBNamespace(attrs, evt.DatabaseName)
++	attrs = appendNetworkPort(attrs, port)
++	attrs = appendNetworkHost(attrs, hostname)
++	attrs = appendNetworkAddress(attrs, net.JoinHostPort(hostname, strconv.Itoa(port)))
++	attrs = appendNetworkTransport(attrs)
++
++	if includeCommand {
++		attrs = appendDBStatement(attrs, sanitizeCommand(evt.Command))
++	}
++
++	if collection != "" {
++		attrs = appendCollection(attrs, collection)
++	}
++
++	return attrs
++}
++
+ func (m *monitor) Succeeded(ctx context.Context, evt *event.CommandSucceededEvent) {
+ 	m.Finished(&evt.CommandFinishedEvent, nil)
+ }

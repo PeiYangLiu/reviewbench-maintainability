@@ -1,0 +1,210 @@
+[
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "from collections.abc import Sequence",
+          "end_line": 6,
+          "start_line": 6
+        },
+        {
+          "content": "    def _build_model(self, model: str | list[str] | tuple[str, ...]) -> lmfit.Model:\n        if isinstance(model, str):\n            model_cls = self._get_model_cls(model)\n            return model_cls()\n        if not isinstance(model, (list, tuple)):\n            raise ValueError(f\"Unknown model {model}\")\n\n        model_names = list(model)\n        if not model_names:\n            raise ValueError(\"Composite model list cannot be empty.\")\n\n        self.model_components = {}\n        self.model_prefixes = {}\n        self.model_sequence = []\n        self.model_name_sequence = model_names\n\n        composite_model: lmfit.model.Model | None = None\n        for index, model_name in enumerate(model_names):\n            component_name = f\"{model_name}_{index}\"\n            prefix = f\"{component_name}_\"\n            component = self._get_model_cls(model_name)(prefix=prefix)\n\n            self.model_sequence.append(component_name)\n            self.model_prefixes[component_name] = prefix\n            self.model_components[component_name] = component\n            composite_model = component if composite_model is None else composite_model + component\n\n        if len(set(model_names)) == len(model_names):\n            self.model_name_to_component = dict(zip(model_names, self.model_sequence))\n\n        logger.debug(\n            f\"Initialized composite lmfit model with components={list(self.model_components.keys())} \"\n            f\"prefixes={self.model_prefixes}\"\n        )\n        return composite_model\n\n    @staticmethod\n    def _get_model_cls(model_name: str):\n        model_cls = getattr(lmfit.models, model_name, None)\n        if not model_cls:\n            raise ValueError(f\"Unknown model {model_name}\")\n        return model_cls",
+          "end_line": 124,
+          "start_line": 62
+        }
+      ]
+    },
+    "response_chars": 2139,
+    "round": 1,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 6,
+          "replacement_lines": 1,
+          "start_line": 6
+        },
+        {
+          "end_line": 124,
+          "replacement_lines": 42,
+          "start_line": 62
+        }
+      ],
+      "current_file_lines": 677,
+      "updated_excerpt": {
+        "content": "1: from __future__ import annotations\n2: \n3: import inspect\n4: import threading\n5: import time\n6: from collections.abc import Sequence\n7: \n8: import lmfit\n9: import numpy as np\n10: \n11: from bec_lib import messages\n12: from bec_lib.device import DeviceBase\n13: from bec_lib.endpoints import MessageEndpoints\n14: from bec_lib.lmfit_serializer import deserialize_param_object, serialize_lmfit_params\n15: from bec_lib.logger import bec_logger\n16: from bec_lib.scan_items import ScanItem\n17: from bec_server.data_processing.dap_service import DAPError, DAPServiceBase\n18: \n19: logger = bec_logger.logger\n20: \n21: \n22: class LmfitService1D(DAPServiceBase):\n23:     \"\"\"\n24:     Lmfit service for 1D data.\n25:     \"\"\"\n26: \n27:     AUTO_FIT_SUPPORTED = True\n28: \n29:     def __init__(\n30:         self, model: str | list[str] | tuple[str, ...], *args, continuous: bool = False, **kwargs\n31:     ):\n32:         \"\"\"\n33:         Initialize the lmfit service. This is a multiplexer service that provides\n34:         access to multiple lmfit models.\n35: \n36:         Args:",
+        "end_line": 36,
+        "path_lines": 677,
+        "start_line": 1
+      }
+    },
+    "usage": {
+      "input_tokens": 7610,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 1348,
+      "output_tokens_details": {
+        "reasoning_tokens": 819
+      },
+      "total_tokens": 8958
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 140,
+      "path": "bec_server/bec_server/data_processing/lmfit1d_service.py",
+      "start_line": 45
+    },
+    "response_chars": 114,
+    "round": 2,
+    "tool_result": {
+      "content": "45:         self.signal_y = None\n46:         self.parameters = None\n47:         self.override_params = None\n48:         self.model_sequence: list[str] | None = None\n49:         self.model_name_sequence: list[str] | None = None\n50:         self.model_name_to_component: dict[str, str] | None = None\n51:         self._parameter_override_names = []\n52:         self.current_scan_item = None\n53:         self.finished_id = None\n54:         self.model_components: dict[str, lmfit.Model] | None = None\n55:         self.model_prefixes: dict[str, str] | None = None\n56:         self.model = self._build_model(model)\n57:         self.finish_event = None\n58:         self.data = None\n59:         self.continuous = continuous\n60:         self.oversample = 1\n61: \n62:     def _build_model(self, model: str | list[str] | tuple[str, ...]) -> lmfit.Model:\n63:         if isinstance(model, str):\n64:             model_cls = self._get_model_cls(model)\n65:             return model_cls()\n66:         if not isinstance(model, (list, tuple)):\n67:             raise ValueError(f\"Unknown model {model}\")\n68: \n69:         model_names = list(model)\n70:         if not model_names:\n71:             raise ValueError(\"Composite model list cannot be empty.\")\n72: \n73:         self.model_components = {}\n74:         self.model_prefixes = {}\n75:         self.model_sequence = []\n76:         self.model_name_sequence = model_names\n77: \n78:         composite_model: lmfit.model.Model | None = None\n79:         for index, model_name in enumerate(model_names):\n80:             component_name = f\"{model_name}_{index}\"\n81:             prefix = f\"{component_name}_\"\n82:             component = self._get_model_cls(model_name)(prefix=prefix)\n83: \n84:             self.model_sequence.append(component_name)\n85:             self.model_prefixes[component_name] = prefix\n86:             self.model_components[component_name] = component\n87:             composite_model = component if composite_model is None else composite_model + component\n88: \n89:         if len(set(model_names)) == len(model_names):\n90:             self.model_name_to_component = dict(zip(model_names, self.model_sequence))\n91: \n92:         logger.debug(\n93:             f\"Initialized composite lmfit model with components={list(self.model_components.keys())} \"\n94:             f\"prefixes={self.model_prefixes}\"\n95:         )\n96:         return composite_model\n97: \n98:     @staticmethod\n99:     def _get_model_cls(model_name: str):\n100:         model_cls = getattr(lmfit.models, model_name, None)\n101:         if not model_cls:\n102:             raise ValueError(f\"Unknown model {model_name}\")\n103:         return model_cls\n104:     def _expand_composite_parameters(self, parameters: dict | list | tuple) -> dict:\n105:         if self.model_components is None or self.model_prefixes is None:\n106:             return parameters\n107:         if isinstance(parameters, (list, tuple)):\n108:             return self._expand_composite_list(parameters)\n109:         if isinstance(parameters, dict):\n110:             return self._expand_composite_dict(parameters)\n111:         raise DAPError(\"Composite parameters must be a dict or list.\")\n112: \n113:     def _expand_composite_list(self, parameters: list | tuple) -> dict:\n114:         if self.model_sequence is None or len(parameters) != len(self.model_sequence):\n115:             raise DAPError(\n116:                 \"Composite parameters list must match the length of the composite model list.\"\n117:             )\n118:         expanded: dict = {}\n119:         for index, param_map in enumerate(parameters):\n120:             if param_map is None:\n121:                 continue\n122:             if not isinstance(param_map, dict):\n123:                 raise DAPError(\n124:                     f\"Composite parameters list item {index} must be a dict of parameter overrides.\"\n125:                 )\n126:             component_name = self.model_sequence[index]\n127:             expanded.update(self._expand_param_map(component_name, param_map))\n128:         return expanded\n129: \n130:     def _expand_composite_dict(self, parameters: dict) -> dict:\n131:         expanded: dict = {}\n132:         component_keys = set(self.model_components.keys())\n133:         if set(parameters.keys()).issubset(component_keys):\n134:             for component_name, param_map in parameters.items():\n135:                 if param_map is None:\n136:                     continue\n137:                 if not isinstance(param_map, dict):\n138:                     raise DAPError(\n139:                         f\"Composite parameters for '{component_name}' must be a dict of parameter overrides.\"\n140:                     )",
+      "end_line": 140,
+      "path_lines": 677,
+      "start_line": 45
+    },
+    "usage": {
+      "input_tokens": 8485,
+      "input_tokens_details": {
+        "cached_tokens": 7424
+      },
+      "output_tokens": 53,
+      "output_tokens_details": {
+        "reasoning_tokens": 15
+      },
+      "total_tokens": 8538
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "bec_server/bec_server/data_processing/lmfit1d_service.py",
+      "query": "Sequence"
+    },
+    "response_chars": 543,
+    "round": 3,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 6,
+          "text": "from collections.abc import Sequence"
+        }
+      ],
+      "query": "Sequence",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 9714,
+      "input_tokens_details": {
+        "cached_tokens": 7936
+      },
+      "output_tokens": 407,
+      "output_tokens_details": {
+        "reasoning_tokens": 250
+      },
+      "total_tokens": 10121
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "",
+          "end_line": 6,
+          "start_line": 6
+        },
+        {
+          "content": "\n",
+          "end_line": 103,
+          "start_line": 104
+        }
+      ]
+    },
+    "response_chars": 353,
+    "round": 4,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 6,
+          "replacement_lines": 0,
+          "start_line": 6
+        },
+        {
+          "end_line": 103,
+          "replacement_lines": 1,
+          "start_line": 104
+        }
+      ],
+      "current_file_lines": 677,
+      "updated_excerpt": {
+        "content": "1: from __future__ import annotations\n2: \n3: import inspect\n4: import threading\n5: import time\n6: \n7: import lmfit\n8: import numpy as np\n9: \n10: from bec_lib import messages\n11: from bec_lib.device import DeviceBase\n12: from bec_lib.endpoints import MessageEndpoints\n13: from bec_lib.lmfit_serializer import deserialize_param_object, serialize_lmfit_params\n14: from bec_lib.logger import bec_logger\n15: from bec_lib.scan_items import ScanItem\n16: from bec_server.data_processing.dap_service import DAPError, DAPServiceBase\n17: \n18: logger = bec_logger.logger\n19: \n20: \n21: class LmfitService1D(DAPServiceBase):\n22:     \"\"\"\n23:     Lmfit service for 1D data.\n24:     \"\"\"\n25: \n26:     AUTO_FIT_SUPPORTED = True\n27: \n28:     def __init__(\n29:         self, model: str | list[str] | tuple[str, ...], *args, continuous: bool = False, **kwargs\n30:     ):\n31:         \"\"\"\n32:         Initialize the lmfit service. This is a multiplexer service that provides\n33:         access to multiple lmfit models.\n34: \n35:         Args:\n36:             model (str | list[str]): Model name or list of model names for a composite.",
+        "end_line": 36,
+        "path_lines": 677,
+        "start_line": 1
+      }
+    },
+    "usage": {
+      "input_tokens": 9786,
+      "input_tokens_details": {
+        "cached_tokens": 9472
+      },
+      "output_tokens": 499,
+      "output_tokens_details": {
+        "reasoning_tokens": 369
+      },
+      "total_tokens": 10285
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 112,
+      "path": "bec_server/bec_server/data_processing/lmfit1d_service.py",
+      "start_line": 90
+    },
+    "response_chars": 114,
+    "round": 5,
+    "tool_result": {
+      "content": "90: \n91:         logger.debug(\n92:             f\"Initialized composite lmfit model with components={list(self.model_components.keys())} \"\n93:             f\"prefixes={self.model_prefixes}\"\n94:         )\n95:         return composite_model\n96: \n97:     @staticmethod\n98:     def _get_model_cls(model_name: str):\n99:         model_cls = getattr(lmfit.models, model_name, None)\n100:         if not model_cls:\n101:             raise ValueError(f\"Unknown model {model_name}\")\n102:         return model_cls\n103: \n104:     def _expand_composite_parameters(self, parameters: dict | list | tuple) -> dict:\n105:         if self.model_components is None or self.model_prefixes is None:\n106:             return parameters\n107:         if isinstance(parameters, (list, tuple)):\n108:             return self._expand_composite_list(parameters)\n109:         if isinstance(parameters, dict):\n110:             return self._expand_composite_dict(parameters)\n111:         raise DAPError(\"Composite parameters must be a dict or list.\")\n112: ",
+      "end_line": 112,
+      "path_lines": 677,
+      "start_line": 90
+    },
+    "usage": {
+      "input_tokens": 10260,
+      "input_tokens_details": {
+        "cached_tokens": 9472
+      },
+      "output_tokens": 92,
+      "output_tokens_details": {
+        "reasoning_tokens": 54
+      },
+      "total_tokens": 10352
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 6,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__bec-project__bec__pull_707__comment_2916851683__complexity.patch"
+    },
+    "usage": {
+      "input_tokens": 10595,
+      "input_tokens_details": {
+        "cached_tokens": 9984
+      },
+      "output_tokens": 140,
+      "output_tokens_details": {
+        "reasoning_tokens": 129
+      },
+      "total_tokens": 10735
+    }
+  }
+]

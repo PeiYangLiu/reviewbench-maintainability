@@ -1,0 +1,56 @@
+diff --git a/src/tribler/core/components/libtorrent/download_manager/download_manager.py b/src/tribler/core/components/libtorrent/download_manager/download_manager.py
+index 8577236..a4a6c57 100644
+--- a/src/tribler/core/components/libtorrent/download_manager/download_manager.py
++++ b/src/tribler/core/components/libtorrent/download_manager/download_manager.py
+@@ -58,6 +58,16 @@ DEFAULT_LT_EXTENSIONS = [
+ ]
+ 
+ 
++def torrent_rate_limit_to_libtorrent(rate):
++    torrent_rate = {0: -1, -1: 1}
++    return torrent_rate.get(rate, rate * 1024)
++
++
++def libtorrent_rate_limit_to_torrent(libtorrent_rate):
++    torrent_rate = {-1: 0, 1: -1}
++    return torrent_rate.get(libtorrent_rate, libtorrent_rate // 1024)
++
++
+ def encode_atp(atp):
+     for k, v in atp.items():
+         if isinstance(v, str):
+@@ -363,8 +373,7 @@ class DownloadManager(TaskManager):
+     def set_upload_rate_limit(self, rate, hops=None):
+         # Rate conversion due to the fact that we had a different system with Swift
+         # and the old python BitTorrent core: unlimited == 0, stop == -1, else rate in kbytes
+-        torrent_rate = {0: -1, -1: 1}
+-        libtorrent_rate = torrent_rate.get(rate, rate * 1024)
++        libtorrent_rate = torrent_rate_limit_to_libtorrent(rate)
+ 
+         # Pass outgoing_port and num_outgoing_ports to dict due to bug in libtorrent 0.16.18
+         settings_dict = {'upload_rate_limit': libtorrent_rate, 'outgoing_port': 0, 'num_outgoing_ports': 1}
+@@ -375,12 +384,10 @@ class DownloadManager(TaskManager):
+         # Rate conversion due to the fact that we had a different system with Swift
+         # and the old python BitTorrent core: unlimited == 0, stop == -1, else rate in kbytes
+         libtorrent_rate = self.get_session(hops).upload_rate_limit()
+-        torrent_rate = {-1: 0, 1: -1}
+-        return torrent_rate.get(libtorrent_rate, libtorrent_rate // 1024)
++        return libtorrent_rate_limit_to_torrent(libtorrent_rate)
+ 
+     def set_download_rate_limit(self, rate, hops=None):
+-        torrent_rate = {0: -1, -1: 1}
+-        libtorrent_rate = torrent_rate.get(rate, rate * 1024)
++        libtorrent_rate = torrent_rate_limit_to_libtorrent(rate)
+ 
+         # Pass outgoing_port and num_outgoing_ports to dict due to bug in libtorrent 0.16.18
+         settings_dict = {'download_rate_limit': libtorrent_rate}
+@@ -389,8 +396,7 @@ class DownloadManager(TaskManager):
+ 
+     def get_download_rate_limit(self, hops=0):
+         libtorrent_rate = self.get_session(hops).download_rate_limit()
+-        torrent_rate = {-1: 0, 1: -1}
+-        return torrent_rate.get(libtorrent_rate, libtorrent_rate // 1024)
++        return libtorrent_rate_limit_to_torrent(libtorrent_rate)
+ 
+     def process_alert(self, alert, hops=0):
+         alert_type = alert.__class__.__name__

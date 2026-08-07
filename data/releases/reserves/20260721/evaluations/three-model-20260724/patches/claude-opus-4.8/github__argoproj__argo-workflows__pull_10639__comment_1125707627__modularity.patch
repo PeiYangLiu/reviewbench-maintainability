@@ -1,0 +1,47 @@
+--- a/workflow/controller/exec_control.go
++++ b/workflow/controller/exec_control.go
+@@ -82,27 +82,29 @@
+ 	node := woc.wf.Status.Nodes[nodeID]
+ 	woc.markNodePhase(node.Name, wfv1.NodeFailed, errorMsg)
+ 
+-	children := []wfv1.NodeStatus{}
+-	q := []wfv1.NodeStatus{node}
+-	for {
+-		if len(q) <= 0 {
+-			break
+-		}
+-		childNode := q[0]
+-		q = q[1:]
+-		for _, nodeID := range childNode.Children {
+-			q = append(q, woc.wf.Status.Nodes[nodeID])
+-		}
+-		children = append(children, childNode)
+-	}
+-
+ 	// if node is a pod created from ContainerSet template
+ 	// then need to fail child nodes so they will not hang in Pending after pod deletion
+-	for _, child := range children {
++	for _, child := range woc.getNodeAndDescendants(node) {
+ 		if !child.IsExitNode() && !child.Fulfilled() {
+ 			woc.markNodePhase(child.Name, wfv1.NodeFailed, errorMsg)
+ 		}
+ 	}
++}
++
++// getNodeAndDescendants returns the given node along with all of its
++// descendant nodes, discovered via a breadth-first traversal of Children.
++func (woc *wfOperationCtx) getNodeAndDescendants(node wfv1.NodeStatus) []wfv1.NodeStatus {
++	nodes := []wfv1.NodeStatus{}
++	queue := []wfv1.NodeStatus{node}
++	for len(queue) > 0 {
++		current := queue[0]
++		queue = queue[1:]
++		for _, childID := range current.Children {
++			queue = append(queue, woc.wf.Status.Nodes[childID])
++		}
++		nodes = append(nodes, current)
++	}
++	return nodes
+ }
+ 
+ // killDaemonedChildren kill any daemoned pods of a steps or DAG template node.

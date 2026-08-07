@@ -1,0 +1,42 @@
+diff --git a/pkg/server/event_handler.go b/pkg/server/event_handler.go
+index 1d516fe..49b9b6e 100644
+--- a/pkg/server/event_handler.go
++++ b/pkg/server/event_handler.go
+@@ -268,7 +268,12 @@ func (h *EventHandler[T, P]) generatePmapEventBytes(ctx context.Context, m pubsu
+ 	// Get the GCS object as a proto message given GCS notification information.
+ 	var processErr error
+ 
+-	p, err := h.getGCSObjectProto(ctx, m.Attributes)
++	yb, err := h.getGCSObjectBytes(ctx, m.Attributes)
++	if err != nil {
++		return nil, errors.Join(processErr, fmt.Errorf("failed to get GCS object: %w", err))
++	}
++
++	p, err := parseYAMLToProto[T, P](yb)
+ 	if err != nil {
+ 		return nil, errors.Join(processErr, fmt.Errorf("failed to get GCS object: %w", err))
+ 	}
+@@ -306,8 +311,8 @@ func (h *EventHandler[T, P]) generatePmapEventBytes(ctx context.Context, m pubsu
+ 	return eventBytes, processErr
+ }
+ 
+-// getGCSObjectProto calls the GCS storage client with objAttrs information, and returns the object as a proto message.
+-func (h *EventHandler[T, P]) getGCSObjectProto(ctx context.Context, objAttrs map[string]string) (P, error) {
++// getGCSObjectBytes calls the GCS storage client with objAttrs information, and returns the object bytes.
++func (h *EventHandler[T, P]) getGCSObjectBytes(ctx context.Context, objAttrs map[string]string) ([]byte, error) {
+ 	// Get bucket and object id from message attributes.
+ 	bucketID, found := objAttrs["bucketId"]
+ 	if !found {
+@@ -329,7 +334,11 @@ func (h *EventHandler[T, P]) getGCSObjectProto(ctx context.Context, objAttrs map
+ 		return nil, fmt.Errorf("failed to read object from GCS: %w", err)
+ 	}
+ 
+-	// Convert the object yaml bytes into a proto message wrapper.
++	return yb, nil
++}
++
++// parseYAMLToProto converts the object yaml bytes into a proto message wrapper.
++func parseYAMLToProto[T any, P ProtoWrapper[T]](yb []byte) (P, error) {
+ 	p := P(new(T))
+ 	if err := protoutil.FromYAML(yb, p); err != nil {
+ 		return nil, pmaperrors.New(fmt.Sprintf("failed to unmarshal object yaml: %v", err))

@@ -1,0 +1,134 @@
+diff --git a/exporter/pbm_collector.go b/exporter/pbm_collector.go
+index f1d6c29..9cebc53 100644
+--- a/exporter/pbm_collector.go
++++ b/exporter/pbm_collector.go
+@@ -62,12 +62,6 @@ func (p *pbmCollector) collect(ch chan<- prometheus.Metric) {
+ 	var metrics []prometheus.Metric
+ 	logger := p.base.logger
+ 
+-	createMetric := func(name, help string, value float64, labels map[string]string) {
+-		const prefix = "mongodb_pbm_"
+-		d := prometheus.NewDesc(prefix+name, help, nil, labels)
+-		metrics = append(metrics, prometheus.MustNewConstMetric(d, prometheus.GaugeValue, value))
+-	}
+-
+ 	pbmClient, err := sdk.NewClient(p.ctx, p.mongoURI)
+ 	if err != nil {
+ 		logger.Errorf("failed to create PBM client: %s", err.Error())
+@@ -81,14 +75,14 @@ func (p *pbmCollector) collect(ch chan<- prometheus.Metric) {
+ 	}
+ 
+ 	if pbmConfig != nil {
+-		createMetric("cluster_backup_configured",
++		metrics = append(metrics, makePbmMetric("cluster_backup_configured",
+ 			"PBM backups are configured for the cluster",
+-			float64(1), nil)
++			float64(1), nil))
+ 
+ 		if pbmConfig.PITR.Enabled {
+-			createMetric("cluster_pitr_backup_enabled",
++			metrics = append(metrics, makePbmMetric("cluster_pitr_backup_enabled",
+ 				"PBM PITR backups are enabled for the cluster",
+-				float64(1), nil)
++				float64(1), nil))
+ 		}
+ 	}
+ 
+@@ -108,44 +102,39 @@ func (p *pbmCollector) pbmAgentMetrics(ctx context.Context, pbmClient *sdk.Clien
+ 	}
+ 
+ 	metrics := make([]prometheus.Metric, 0, len(clusterStatus))
+-	createMetric := func(name, help string, value float64, labels map[string]string) {
+-		const prefix = "mongodb_pbm_"
+-		d := prometheus.NewDesc(prefix+name, help, nil, labels)
+-		metrics = append(metrics, prometheus.MustNewConstMetric(d, prometheus.GaugeValue, value))
+-	}
+ 
+ 	for replsetName, nodes := range clusterStatus {
+ 		for _, node := range nodes {
+ 			switch {
+ 			case node.OK:
+-				createMetric("agent_status",
++				metrics = append(metrics, makePbmMetric("agent_status",
+ 					"PBM Agent Status",
+ 					float64(pbmAgentStatusOK),
+ 					map[string]string{
+ 						"host":        node.Host,
+ 						"replica_set": replsetName,
+ 						"role":        string(node.Role),
+-					})
++					}))
+ 
+ 			case node.IsAgentLost():
+-				createMetric("agent_status",
++				metrics = append(metrics, makePbmMetric("agent_status",
+ 					"PBM Agent Status",
+ 					float64(pbmAgentStatusLost),
+ 					map[string]string{
+ 						"host":        node.Host,
+ 						"replica_set": replsetName,
+ 						"role":        string(node.Role),
+-					})
++					}))
+ 
+ 			default: // !node.OK
+-				createMetric("agent_status",
++				metrics = append(metrics, makePbmMetric("agent_status",
+ 					"PBM Agent Status",
+ 					float64(pbmAgentStatusError),
+ 					map[string]string{
+ 						"host":        node.Host,
+ 						"replica_set": replsetName,
+ 						"role":        string(node.Role),
+-					})
++					}))
+ 			}
+ 		}
+ 	}
+@@ -161,20 +150,15 @@ func pbmBackupsMetrics(ctx context.Context, pbmClient *sdk.Client, l *logrus.Ent
+ 	}
+ 
+ 	metrics := make([]prometheus.Metric, 0, len(backupsList))
+-	createMetric := func(name, help string, value float64, labels map[string]string) {
+-		const prefix = "mongodb_pbm_"
+-		d := prometheus.NewDesc(prefix+name, help, nil, labels)
+-		metrics = append(metrics, prometheus.MustNewConstMetric(d, prometheus.GaugeValue, value))
+-	}
+ 
+ 	for _, backup := range backupsList {
+-		createMetric("backup_size",
++		metrics = append(metrics, makePbmMetric("backup_size",
+ 			"Size of PBM backup",
+ 			float64(backup.Size), map[string]string{
+ 				"opid":   backup.OPID,
+ 				"status": string(backup.Status),
+ 				"name":   backup.Name,
+-			})
++			}))
+ 
+ 		var endTime int64
+ 		switch backup.Status { //nolint:exhaustive
+@@ -185,15 +169,21 @@ func pbmBackupsMetrics(ctx context.Context, pbmClient *sdk.Client, l *logrus.Ent
+ 		}
+ 
+ 		duration := time.Unix(endTime-backup.StartTS, 0).Unix()
+-		createMetric("backup_duration_seconds",
++		metrics = append(metrics, makePbmMetric("backup_duration_seconds",
+ 			"Duration of PBM backup",
+ 			float64(duration), map[string]string{
+ 				"opid":   backup.OPID,
+ 				"status": string(backup.Status),
+ 				"name":   backup.Name,
+-			})
++			}))
+ 	}
+ 	return metrics
+ }
+ 
++func makePbmMetric(name, help string, value float64, labels map[string]string) prometheus.Metric {
++	const prefix = "mongodb_pbm_"
++	d := prometheus.NewDesc(prefix+name, help, nil, labels)
++	return prometheus.MustNewConstMetric(d, prometheus.GaugeValue, value)
++}
++
+ var _ prometheus.Collector = (*pbmCollector)(nil)

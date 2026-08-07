@@ -1,0 +1,163 @@
+--- a/src/openforms/prefill/contrib/haalcentraal/plugin.py
++++ b/src/openforms/prefill/contrib/haalcentraal/plugin.py
+@@ -19,6 +19,78 @@
+ from .models import HaalCentraalConfig
+ 
+ logger = logging.getLogger(__name__)
++
++
++class HaalCentraalV1Client:
++    attributes = Attributes
++
++    def __init__(self, service, submission):
++        self.client = service.build_client()
++        self.client.context = PreRequestClientContext(submission=submission)
++
++    def fetch_values(self, bsn: str, attributes: Iterable[str]) -> Dict[str, Any]:
++        headers = dict(headers={"Accept": "application/hal+json"})
++        data = self.client.retrieve(
++            "ingeschrevenpersonen",
++            burgerservicenummer=bsn,
++            url=f"ingeschrevenpersonen/{bsn}",
++            request_kwargs=headers,
++        )
++        values = {}
++        for attr in attributes:
++            try:
++                values[attr] = glom(data, attr)
++            except GlomError:
++                logger.warning(
++                    f"missing expected attribute '{attr}' in backend response"
++                )
++        return values
++
++
++class HaalCentraalV2Client:
++    attributes = AttributesV2
++
++    def __init__(self, service, submission):
++        self.client = service.build_client()
++        self.client.context = PreRequestClientContext(submission=submission)
++
++    def fetch_values(self, bsn: str, attributes: Iterable[str]) -> Dict[str, Any]:
++        headers = dict(
++            headers={"Content-Type": "application/json; charset=utf-8"}
++        )
++        recource_body = {
++            "type": "RaadpleegMetBurgerservicenummer",
++            "burgerservicenummer": [bsn],
++            "fields": attributes,
++        }
++        data = self.client.operation(
++            "Personen",
++            data=recource_body,
++            url="personen",
++            request_kwargs=headers,
++        )
++        values = {}
++        for attr in attributes:
++            try:
++                values[attr] = glom(data["personen"][0], attr)
++            except GlomError:
++                logger.warning(
++                    f"missing expected attribute '{attr}' in backend response"
++                )
++        return values
++
++
++CLIENT_MAPPING = {
++    HaalCentraalVersion.haalcentraal13: HaalCentraalV1Client,
++    HaalCentraalVersion.haalcentraal20: HaalCentraalV2Client,
++}
++
++
++def get_client_class(version: str) -> type:
++    try:
++        return CLIENT_MAPPING[version]
++    except KeyError:
++        raise ValueError(f"Unsupported Haal Centraal version: {version}")
+ 
+ 
+ def get_config():
+@@ -34,11 +106,10 @@
+     if not config:
+         return Attributes
+ 
+-    match config.version:
+-        case HaalCentraalVersion.haalcentraal13:
+-            return Attributes
+-        case HaalCentraalVersion.haalcentraal20:
+-            return AttributesV2
++    try:
++        return get_client_class(config.version).attributes
++    except ValueError:
++        return Attributes
+ 
+ 
+ @register("haalcentraal")
+@@ -59,55 +130,19 @@
+         if not config:
+             return {}
+ 
+-        client = config.service.build_client()
+-        client.context = PreRequestClientContext(submission=submission)
+-
+         try:
+-            match config.version:
+-                case HaalCentraalVersion.haalcentraal13:
+-                    headers = dict(headers={"Accept": "application/hal+json"})
+-                    data = client.retrieve(
+-                        "ingeschrevenpersonen",
+-                        burgerservicenummer=bsn,
+-                        url=f"ingeschrevenpersonen/{bsn}",
+-                        request_kwargs=headers,
+-                    )
+-                case HaalCentraalVersion.haalcentraal20:
+-                    headers = dict(
+-                        headers={"Content-Type": "application/json; charset=utf-8"}
+-                    )
+-                    recource_body = {
+-                        "type": "RaadpleegMetBurgerservicenummer",
+-                        "burgerservicenummer": [bsn],
+-                        "fields": attributes,
+-                    }
+-                    data = client.operation(
+-                        "Personen",
+-                        data=recource_body,
+-                        url="personen",
+-                        request_kwargs=headers,
+-                    )
+-        except RequestException as e:
++            client_class = get_client_class(config.version)
++        except ValueError:
++            logger.error(f"Unsupported Haal Centraal version: {config.version}")
++            return {}
++
++        client = client_class(config.service, submission)
++
++        try:
++            return client.fetch_values(bsn, attributes)
++        except (RequestException, ClientError) as e:
+             logger.exception("exception while making request", exc_info=e)
+             return {}
+-        except ClientError as e:
+-            logger.exception("exception while making request", exc_info=e)
+-            return {}
+-
+-        values = dict()
+-        for attr in attributes:
+-            try:
+-                match config.version:
+-                    case HaalCentraalVersion.haalcentraal13:
+-                        values[attr] = glom(data, attr)
+-                    case HaalCentraalVersion.haalcentraal20:
+-                        values[attr] = glom(data["personen"][0], attr)
+-            except GlomError:
+-                logger.warning(
+-                    f"missing expected attribute '{attr}' in backend response"
+-                )
+-
+-        return values
+ 
+     @classmethod
+     def get_prefill_values(

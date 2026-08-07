@@ -1,0 +1,64 @@
+diff --git a/internal/telemetry/client.go b/internal/telemetry/client.go
+index abd1a96..87f1490 100644
+--- a/internal/telemetry/client.go
++++ b/internal/telemetry/client.go
+@@ -39,6 +39,25 @@ type Client interface {
+ 	Stop()
+ }
+ 
++// Option configures the telemetry client.
++type Option interface {
++	apply(*client)
++}
++
++type optionFunc func(*client)
++
++func (f optionFunc) apply(c *client) {
++	f(c)
++}
++
++// SyncFlushOnStop configures the telemetry client to wait for outstanding
++// telemetry submissions to finish when Stop is called.
++func SyncFlushOnStop() Option {
++	return optionFunc(func(c *client) {
++		c.syncFlushOnStop = true
++	})
++}
++
+ var (
+ 	// GlobalClient acts as a global telemetry client that the
+ 	// tracer, profiler, and appsec products will use
+@@ -134,6 +153,8 @@ type client struct {
+ 	seqID int64
+ 	// heartbeatT is used to schedule heartbeat messages
+ 	heartbeatT *time.Timer
++	// syncFlushOnStop makes Stop wait for outstanding telemetry submissions to finish.
++	syncFlushOnStop bool
+ 	// requests hold all messages which don't need to be immediately sent
+ 	requests []*Request
+ 	// metrics holds un-sent metrics that will be aggregated the next time
+@@ -161,6 +182,15 @@ func (c *client) RegisterAppConfig(name string, value interface{}, origin Origin
+ 	})
+ }
+ 
++// ApplyOps applies telemetry client options.
++func (c *client) ApplyOps(opts ...Option) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	for _, opt := range opts {
++		opt.apply(c)
++	}
++}
++
+ // start registers that the app has begun running with the app-started event.
+ // Must be called with c.mu locked.
+ // start also configures the telemetry client based on the following telemetry
+@@ -280,7 +310,7 @@ func (c *client) Stop() {
+ 	// close request types have no body
+ 	r := c.newRequest(RequestTypeAppClosing)
+ 	c.scheduleSubmit(r)
+-	if internal.BoolEnv("DD_CIVISIBILITY_ENABLED", false) {
++	if c.syncFlushOnStop || internal.BoolEnv("DD_CIVISIBILITY_ENABLED", false) {
+ 		cnn := make(chan struct{})
+ 		c.flushWithCallback(func() {
+ 			cnn <- struct{}{}

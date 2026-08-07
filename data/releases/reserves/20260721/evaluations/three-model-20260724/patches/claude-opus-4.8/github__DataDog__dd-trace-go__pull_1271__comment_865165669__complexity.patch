@@ -1,0 +1,70 @@
+--- a/ddtrace/tracer/textmap.go
++++ b/ddtrace/tracer/textmap.go
+@@ -263,34 +263,41 @@
+ 		return nil
+ 	}
+ 	// propagate trace tags
++	if ctx.trace != nil {
++		if tags := p.marshalPropagatingTags(ctx); tags != "" {
++			writer.Set(traceTagsHeader, tags)
++		}
++	}
++	return nil
++}
++
++// marshalPropagatingTags marshals the propagating tags of the trace attached
++// to the given span context into a string, respecting the configured maximum
++// header length. It returns an empty string if there are no tags to propagate.
++func (p *propagator) marshalPropagatingTags(ctx *spanContext) string {
+ 	var sb strings.Builder
+-	if ctx.trace != nil {
+-		ctx.trace.mu.Lock()
+-		for k, v := range ctx.trace.propagatingTags {
+-			if err := isValidPropagatableTraceTag(k, v); err != nil {
+-				log.Warn("won't propagate tag '%s' (err: %s)", k, err.Error())
+-				ctx.trace.setTag(propagationErrorKey, "encoding_error")
+-				continue
+-			}
+-			if sb.Len()+len(k)+len(v) > p.cfg.MaxTagsHeaderLen {
+-				sb.Reset()
+-				log.Warn("won't propagate trace tags (err: max trace tags header len (%d) reached)", p.cfg.MaxTagsHeaderLen)
+-				ctx.trace.setTag(propagationErrorKey, "max_size")
+-				break
+-			}
+-			if sb.Len() > 0 {
+-				sb.WriteByte(',')
+-			}
+-			sb.WriteString(k)
+-			sb.WriteByte('=')
+-			sb.WriteString(v)
+-		}
+-		ctx.trace.mu.Unlock()
++	ctx.trace.mu.Lock()
++	defer ctx.trace.mu.Unlock()
++	for k, v := range ctx.trace.propagatingTags {
++		if err := isValidPropagatableTraceTag(k, v); err != nil {
++			log.Warn("won't propagate tag '%s' (err: %s)", k, err.Error())
++			ctx.trace.setTag(propagationErrorKey, "encoding_error")
++			continue
++		}
++		if sb.Len()+len(k)+len(v) > p.cfg.MaxTagsHeaderLen {
++			sb.Reset()
++			log.Warn("won't propagate trace tags (err: max trace tags header len (%d) reached)", p.cfg.MaxTagsHeaderLen)
++			ctx.trace.setTag(propagationErrorKey, "max_size")
++			break
++		}
+ 		if sb.Len() > 0 {
+-			writer.Set(traceTagsHeader, sb.String())
+-		}
+-	}
+-	return nil
++			sb.WriteByte(',')
++		}
++		sb.WriteString(k)
++		sb.WriteByte('=')
++		sb.WriteString(v)
++	}
++	return sb.String()
+ }
+ 
+ func (p *propagator) Extract(carrier interface{}) (ddtrace.SpanContext, error) {

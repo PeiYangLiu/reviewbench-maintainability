@@ -1,0 +1,633 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 80,
+      "path": "tests/conftest.py",
+      "start_line": 1
+    },
+    "response_chars": 73,
+    "round": 1,
+    "tool_result": {
+      "content": "1: \"\"\"Pytest fixtures.\"\"\"\n2: \n3: from enum import Enum\n4: from types import ModuleType\n5: from typing import cast\n6: \n7: import pytest\n8: \n9: from array_api_extra._lib._utils._compat import array_namespace\n10: from array_api_extra._lib._utils._compat import device as get_device\n11: from array_api_extra._lib._utils._typing import Device\n12: \n13: \n14: class Library(Enum):\n15:     \"\"\"All array libraries explicitly tested by array-api-extra.\"\"\"\n16: \n17:     ARRAY_API_STRICT = \"array_api_strict\"\n18:     NUMPY = \"numpy\"\n19:     NUMPY_READONLY = \"numpy_readonly\"\n20:     CUPY = \"cupy\"\n21:     TORCH = \"torch\"\n22:     DASK_ARRAY = \"dask.array\"\n23:     SPARSE = \"sparse\"\n24:     JAX_NUMPY = \"jax.numpy\"\n25: \n26:     def __str__(self) -> str:  # type: ignore[explicit-override]  # pyright: ignore[reportImplicitOverride]  # numpydoc ignore=RT01\n27:         \"\"\"Pretty-print parameterized test names.\"\"\"\n28:         return self.value\n29: \n30: \n31: @pytest.fixture(params=tuple(Library))\n32: def library(request: pytest.FixtureRequest) -> Library:  # numpydoc ignore=PR01,RT03\n33:     \"\"\"\n34:     Parameterized fixture that iterates on all libraries.\n35: \n36:     Returns\n37:     -------\n38:     The current Library enum.\n39:     \"\"\"\n40:     elem = cast(Library, request.param)\n41: \n42:     for marker in request.node.iter_markers(\"skip_xp_backend\"):\n43:         skip_library = marker.kwargs.get(\"library\") or marker.args[0]  # type: ignore[no-untyped-usage]\n44:         if not isinstance(skip_library, Library):\n45:             msg = \"argument of skip_xp_backend must be a Library enum\"\n46:             raise TypeError(msg)\n47:         if skip_library == elem:\n48:             reason = cast(str, marker.kwargs.get(\"reason\", \"skip_xp_backend\"))\n49:             pytest.skip(reason=reason)\n50: \n51:     return elem\n52: \n53: \n54: @pytest.fixture\n55: def xp(library: Library) -> ModuleType:  # numpydoc ignore=PR01,RT03\n56:     \"\"\"\n57:     Parameterized fixture that iterates on all libraries.\n58: \n59:     Returns\n60:     -------\n61:     The current array namespace.\n62:     \"\"\"\n63:     name = \"numpy\" if library == Library.NUMPY_READONLY else library.value\n64:     xp = pytest.importorskip(name)\n65:     if library == Library.JAX_NUMPY:\n66:         import jax  # type: ignore[import-not-found]  # pyright: ignore[reportMissingImports]\n67: \n68:         jax.config.update(\"jax_enable_x64\", True)\n69: \n70:     # Possibly wrap module with array_api_compat\n71:     return array_namespace(xp.empty(0))\n72: \n73: \n74: @pytest.fixture\n75: def device(\n76:     library: Library, xp: ModuleType\n77: ) -> Device:  # numpydoc ignore=PR01,RT01,RT03\n78:     \"\"\"\n79:     Return a valid device for the backend.\n80: ",
+      "end_line": 80,
+      "path_lines": 87,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 1613,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 117,
+      "output_tokens_details": {
+        "reasoning_tokens": 88
+      },
+      "total_tokens": 1730
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/array_api_extra",
+      "query": "IsNamespace"
+    },
+    "response_chars": 205,
+    "round": 2,
+    "tool_result": {
+      "matches": [],
+      "query": "IsNamespace",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 2547,
+      "input_tokens_details": {
+        "cached_tokens": 1280
+      },
+      "output_tokens": 627,
+      "output_tokens_details": {
+        "reasoning_tokens": 552
+      },
+      "total_tokens": 3174
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 125,
+      "path": "src/array_api_extra/_delegation.py",
+      "start_line": 1
+    },
+    "response_chars": 1510,
+    "round": 3,
+    "tool_result": {
+      "content": "1: \"\"\"Delegation to existing implementations for Public API Functions.\"\"\"\n2: \n3: import functools\n4: from enum import Enum\n5: from types import ModuleType\n6: from typing import final\n7: \n8: from ._lib import _funcs\n9: from ._lib._utils._compat import (\n10:     array_namespace,\n11:     is_cupy_namespace,\n12:     is_jax_namespace,\n13:     is_numpy_namespace,\n14:     is_torch_namespace,\n15: )\n16: from ._lib._utils._typing import Array\n17: \n18: __all__ = [\"pad\"]\n19: \n20: \n21: @final\n22: class IsNamespace(Enum):\n23:     \"\"\"Enum to access is_namespace functions as the backend.\"\"\"\n24: \n25:     # TODO: when Python 3.10 is dropped, use `enum.member`\n26:     # https://stackoverflow.com/a/74302109\n27:     CUPY = functools.partial(is_cupy_namespace)\n28:     JAX = functools.partial(is_jax_namespace)\n29:     NUMPY = functools.partial(is_numpy_namespace)\n30:     TORCH = functools.partial(is_torch_namespace)\n31: \n32:     def __call__(self, xp: ModuleType) -> bool:\n33:         \"\"\"\n34:         Call the is_namespace function.\n35: \n36:         Parameters\n37:         ----------\n38:         xp : array_namespace\n39:             Array namespace to check.\n40: \n41:         Returns\n42:         -------\n43:         bool\n44:             ``True`` if xp matches the namespace, ``False`` otherwise.\n45:         \"\"\"\n46:         return self.value(xp)\n47: \n48: \n49: CUPY = IsNamespace.CUPY\n50: JAX = IsNamespace.JAX\n51: NUMPY = IsNamespace.NUMPY\n52: TORCH = IsNamespace.TORCH\n53: \n54: \n55: def _delegate(xp: ModuleType, *backends: IsNamespace) -> bool:\n56:     \"\"\"\n57:     Check whether `xp` is one of the `backends` to delegate to.\n58: \n59:     Parameters\n60:     ----------\n61:     xp : array_namespace\n62:         Array namespace to check.\n63:     *backends : IsNamespace\n64:         Arbitrarily many backends (from the ``IsNamespace`` enum) to check.\n65: \n66:     Returns\n67:     -------\n68:     bool\n69:         ``True`` if `xp` matches one of the `backends`, ``False`` otherwise.\n70:     \"\"\"\n71:     return any(is_namespace(xp) for is_namespace in backends)\n72: \n73: \n74: def pad(\n75:     x: Array,\n76:     pad_width: int | tuple[int, int] | list[tuple[int, int]],\n77:     mode: str = \"constant\",\n78:     *,\n79:     constant_values: bool | int | float | complex = 0,\n80:     xp: ModuleType | None = None,\n81: ) -> Array:\n82:     \"\"\"\n83:     Pad the input array.\n84: \n85:     Parameters\n86:     ----------\n87:     x : array\n88:         Input array.\n89:     pad_width : int or tuple of ints or list of pairs of ints\n90:         Pad the input array with this many elements from each side.\n91:         If a list of tuples, ``[(before_0, after_0), ... (before_N, after_N)]``,\n92:         each pair applies to the corresponding axis of ``x``.\n93:         A single tuple, ``(before, after)``, is equivalent to a list of ``x.ndim``\n94:         copies of this tuple.\n95:     mode : str, optional\n96:         Only \"constant\" mode is currently supported, which pads with\n97:         the value passed to `constant_values`.\n98:     constant_values : python scalar, optional\n99:         Use this value to pad the input. Default is zero.\n100:     xp : array_namespace, optional\n101:         The standard-compatible namespace for `x`. Default: infer.\n102: \n103:     Returns\n104:     -------\n105:     array\n106:         The input array,\n107:         padded with ``pad_width`` elements equal to ``constant_values``.\n108:     \"\"\"\n109:     xp = array_namespace(x) if xp is None else xp\n110: \n111:     if mode != \"constant\":\n112:         msg = \"Only `'constant'` mode is currently supported\"\n113:         raise NotImplementedError(msg)\n114: \n115:     # https://github.com/pytorch/pytorch/blob/cf76c05b4dc629ac989d1fb8e789d4fac04a095a/torch/_numpy/_funcs_impl.py#L2045-L2056\n116:     if _delegate(xp, TORCH):\n117:         pad_width = xp.asarray(pad_width)\n118:         pad_width = xp.broadcast_to(pad_width, (x.ndim, 2))\n119:         pad_width = xp.flip(pad_width, axis=(0,)).flatten()\n120:         return xp.nn.functional.pad(x, tuple(pad_width), value=constant_values)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]\n121: \n122:     if _delegate(xp, NUMPY, JAX, CUPY):\n123:         return xp.pad(x, pad_width, mode, constant_values=constant_values)\n124: \n125:     return _funcs.pad(x, pad_width, constant_values=constant_values, xp=xp)",
+      "end_line": 125,
+      "path_lines": 125,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 2595,
+      "input_tokens_details": {
+        "cached_tokens": 2304
+      },
+      "output_tokens": 1322,
+      "output_tokens_details": {
+        "reasoning_tokens": 845
+      },
+      "total_tokens": 3917
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "from enum import Enum",
+          "end_line": 4,
+          "start_line": 3
+        },
+        {
+          "content": "@final\nclass Library(Enum):\n    \"\"\"All array libraries explicitly supported by array-api-extra.\"\"\"\n\n    ARRAY_API_STRICT = \"array_api_strict\"\n    NUMPY = \"numpy\"\n    NUMPY_READONLY = \"numpy_readonly\"\n    CUPY = \"cupy\"\n    TORCH = \"torch\"\n    DASK_ARRAY = \"dask.array\"\n    SPARSE = \"sparse\"\n    JAX_NUMPY = \"jax.numpy\"\n\n    def __str__(self) -> str:\n        \"\"\"Pretty-print library names.\"\"\"\n        return self.value\n\n\n_IS_NAMESPACE = {\n    Library.CUPY: is_cupy_namespace,\n    Library.JAX_NUMPY: is_jax_namespace,\n    Library.NUMPY: is_numpy_namespace,\n    Library.NUMPY_READONLY: is_numpy_namespace,\n    Library.TORCH: is_torch_namespace,\n}",
+          "end_line": 46,
+          "start_line": 21
+        },
+        {
+          "content": "CUPY = Library.CUPY\nJAX = Library.JAX_NUMPY\nNUMPY = Library.NUMPY\nTORCH = Library.TORCH",
+          "end_line": 52,
+          "start_line": 49
+        },
+        {
+          "content": "def _delegate(xp: ModuleType, *backends: Library) -> bool:\n    \"\"\"\n    Check whether `xp` is one of the `backends` to delegate to.\n\n    Parameters\n    ----------\n    xp : array_namespace\n        Array namespace to check.\n    *backends : Library\n        Arbitrarily many backends (from the ``Library`` enum) to check.\n\n    Returns\n    -------\n    bool\n        ``True`` if `xp` matches one of the `backends`, ``False`` otherwise.\n    \"\"\"\n    return any(_IS_NAMESPACE[backend](xp) for backend in backends)",
+          "end_line": 71,
+          "start_line": 55
+        }
+      ]
+    },
+    "response_chars": 1534,
+    "round": 4,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 4,
+          "replacement_lines": 1,
+          "start_line": 3
+        },
+        {
+          "end_line": 46,
+          "replacement_lines": 25,
+          "start_line": 21
+        },
+        {
+          "end_line": 52,
+          "replacement_lines": 4,
+          "start_line": 49
+        },
+        {
+          "end_line": 71,
+          "replacement_lines": 17,
+          "start_line": 55
+        }
+      ],
+      "current_file_lines": 123,
+      "updated_excerpt": {
+        "content": "1: \"\"\"Delegation to existing implementations for Public API Functions.\"\"\"\n2: \n3: from enum import Enum\n4: from types import ModuleType\n5: from typing import final\n6: \n7: from ._lib import _funcs\n8: from ._lib._utils._compat import (\n9:     array_namespace,\n10:     is_cupy_namespace,\n11:     is_jax_namespace,\n12:     is_numpy_namespace,\n13:     is_torch_namespace,\n14: )\n15: from ._lib._utils._typing import Array\n16: \n17: __all__ = [\"pad\"]\n18: \n19: \n20: @final\n21: class Library(Enum):\n22:     \"\"\"All array libraries explicitly supported by array-api-extra.\"\"\"\n23: \n24:     ARRAY_API_STRICT = \"array_api_strict\"\n25:     NUMPY = \"numpy\"\n26:     NUMPY_READONLY = \"numpy_readonly\"\n27:     CUPY = \"cupy\"\n28:     TORCH = \"torch\"\n29:     DASK_ARRAY = \"dask.array\"\n30:     SPARSE = \"sparse\"\n31:     JAX_NUMPY = \"jax.numpy\"\n32: \n33:     def __str__(self) -> str:",
+        "end_line": 33,
+        "path_lines": 123,
+        "start_line": 1
+      }
+    },
+    "usage": {
+      "input_tokens": 4020,
+      "input_tokens_details": {
+        "cached_tokens": 2304
+      },
+      "output_tokens": 978,
+      "output_tokens_details": {
+        "reasoning_tokens": 516
+      },
+      "total_tokens": 4998
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 130,
+      "path": "src/array_api_extra/_delegation.py",
+      "start_line": 1
+    },
+    "response_chars": 275,
+    "round": 5,
+    "tool_result": {
+      "content": "1: \"\"\"Delegation to existing implementations for Public API Functions.\"\"\"\n2: \n3: from enum import Enum\n4: from types import ModuleType\n5: from typing import final\n6: \n7: from ._lib import _funcs\n8: from ._lib._utils._compat import (\n9:     array_namespace,\n10:     is_cupy_namespace,\n11:     is_jax_namespace,\n12:     is_numpy_namespace,\n13:     is_torch_namespace,\n14: )\n15: from ._lib._utils._typing import Array\n16: \n17: __all__ = [\"pad\"]\n18: \n19: \n20: @final\n21: class Library(Enum):\n22:     \"\"\"All array libraries explicitly supported by array-api-extra.\"\"\"\n23: \n24:     ARRAY_API_STRICT = \"array_api_strict\"\n25:     NUMPY = \"numpy\"\n26:     NUMPY_READONLY = \"numpy_readonly\"\n27:     CUPY = \"cupy\"\n28:     TORCH = \"torch\"\n29:     DASK_ARRAY = \"dask.array\"\n30:     SPARSE = \"sparse\"\n31:     JAX_NUMPY = \"jax.numpy\"\n32: \n33:     def __str__(self) -> str:\n34:         \"\"\"Pretty-print library names.\"\"\"\n35:         return self.value\n36: \n37: \n38: _IS_NAMESPACE = {\n39:     Library.CUPY: is_cupy_namespace,\n40:     Library.JAX_NUMPY: is_jax_namespace,\n41:     Library.NUMPY: is_numpy_namespace,\n42:     Library.NUMPY_READONLY: is_numpy_namespace,\n43:     Library.TORCH: is_torch_namespace,\n44: }\n45: \n46: \n47: CUPY = Library.CUPY\n48: JAX = Library.JAX_NUMPY\n49: NUMPY = Library.NUMPY\n50: TORCH = Library.TORCH\n51: \n52: \n53: def _delegate(xp: ModuleType, *backends: Library) -> bool:\n54:     \"\"\"\n55:     Check whether `xp` is one of the `backends` to delegate to.\n56: \n57:     Parameters\n58:     ----------\n59:     xp : array_namespace\n60:         Array namespace to check.\n61:     *backends : Library\n62:         Arbitrarily many backends (from the ``Library`` enum) to check.\n63: \n64:     Returns\n65:     -------\n66:     bool\n67:         ``True`` if `xp` matches one of the `backends`, ``False`` otherwise.\n68:     \"\"\"\n69:     return any(_IS_NAMESPACE[backend](xp) for backend in backends)\n70: \n71: \n72: def pad(\n73:     x: Array,\n74:     pad_width: int | tuple[int, int] | list[tuple[int, int]],\n75:     mode: str = \"constant\",\n76:     *,\n77:     constant_values: bool | int | float | complex = 0,\n78:     xp: ModuleType | None = None,\n79: ) -> Array:\n80:     \"\"\"\n81:     Pad the input array.\n82: \n83:     Parameters\n84:     ----------\n85:     x : array\n86:         Input array.\n87:     pad_width : int or tuple of ints or list of pairs of ints\n88:         Pad the input array with this many elements from each side.\n89:         If a list of tuples, ``[(before_0, after_0), ... (before_N, after_N)]``,\n90:         each pair applies to the corresponding axis of ``x``.\n91:         A single tuple, ``(before, after)``, is equivalent to a list of ``x.ndim``\n92:         copies of this tuple.\n93:     mode : str, optional\n94:         Only \"constant\" mode is currently supported, which pads with\n95:         the value passed to `constant_values`.\n96:     constant_values : python scalar, optional\n97:         Use this value to pad the input. Default is zero.\n98:     xp : array_namespace, optional\n99:         The standard-compatible namespace for `x`. Default: infer.\n100: \n101:     Returns\n102:     -------\n103:     array\n104:         The input array,\n105:         padded with ``pad_width`` elements equal to ``constant_values``.\n106:     \"\"\"\n107:     xp = array_namespace(x) if xp is None else xp\n108: \n109:     if mode != \"constant\":\n110:         msg = \"Only `'constant'` mode is currently supported\"\n111:         raise NotImplementedError(msg)\n112: \n113:     # https://github.com/pytorch/pytorch/blob/cf76c05b4dc629ac989d1fb8e789d4fac04a095a/torch/_numpy/_funcs_impl.py#L2045-L2056\n114:     if _delegate(xp, TORCH):\n115:         pad_width = xp.asarray(pad_width)\n116:         pad_width = xp.broadcast_to(pad_width, (x.ndim, 2))\n117:         pad_width = xp.flip(pad_width, axis=(0,)).flatten()\n118:         return xp.nn.functional.pad(x, tuple(pad_width), value=constant_values)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]\n119: \n120:     if _delegate(xp, NUMPY, JAX, CUPY):\n121:         return xp.pad(x, pad_width, mode, constant_values=constant_values)\n122: \n123:     return _funcs.pad(x, pad_width, constant_values=constant_values, xp=xp)",
+      "end_line": 123,
+      "path_lines": 123,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 4930,
+      "input_tokens_details": {
+        "cached_tokens": 3840
+      },
+      "output_tokens": 1166,
+      "output_tokens_details": {
+        "reasoning_tokens": 1065
+      },
+      "total_tokens": 6096
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "",
+          "end_line": 44,
+          "start_line": 38
+        },
+        {
+          "content": "    is_namespace = {\n        Library.CUPY: is_cupy_namespace,\n        Library.JAX_NUMPY: is_jax_namespace,\n        Library.NUMPY: is_numpy_namespace,\n        Library.NUMPY_READONLY: is_numpy_namespace,\n        Library.TORCH: is_torch_namespace,\n    }\n    return any(is_namespace[backend](xp) for backend in backends)",
+          "end_line": 69,
+          "start_line": 69
+        }
+      ]
+    },
+    "response_chars": 973,
+    "round": 6,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 44,
+          "replacement_lines": 0,
+          "start_line": 38
+        },
+        {
+          "end_line": 69,
+          "replacement_lines": 8,
+          "start_line": 69
+        }
+      ],
+      "current_file_lines": 123,
+      "updated_excerpt": {
+        "content": "28:     TORCH = \"torch\"\n29:     DASK_ARRAY = \"dask.array\"\n30:     SPARSE = \"sparse\"\n31:     JAX_NUMPY = \"jax.numpy\"\n32: \n33:     def __str__(self) -> str:\n34:         \"\"\"Pretty-print library names.\"\"\"\n35:         return self.value\n36: \n37: \n38: \n39: \n40: CUPY = Library.CUPY\n41: JAX = Library.JAX_NUMPY\n42: NUMPY = Library.NUMPY\n43: TORCH = Library.TORCH\n44: \n45: \n46: def _delegate(xp: ModuleType, *backends: Library) -> bool:\n47:     \"\"\"\n48:     Check whether `xp` is one of the `backends` to delegate to.\n49: \n50:     Parameters\n51:     ----------\n52:     xp : array_namespace\n53:         Array namespace to check.\n54:     *backends : Library\n55:         Arbitrarily many backends (from the ``Library`` enum) to check.\n56: \n57:     Returns\n58:     -------\n59:     bool\n60:         ``True`` if `xp` matches one of the `backends`, ``False`` otherwise.\n61:     \"\"\"\n62:     is_namespace = {\n63:         Library.CUPY: is_cupy_namespace,\n64:         Library.JAX_NUMPY: is_jax_namespace,\n65:         Library.NUMPY: is_numpy_namespace,\n66:         Library.NUMPY_READONLY: is_numpy_namespace,\n67:         Library.TORCH: is_torch_namespace,\n68:     }",
+        "end_line": 68,
+        "path_lines": 123,
+        "start_line": 28
+      }
+    },
+    "usage": {
+      "input_tokens": 6356,
+      "input_tokens_details": {
+        "cached_tokens": 4352
+      },
+      "output_tokens": 875,
+      "output_tokens_details": {
+        "reasoning_tokens": 582
+      },
+      "total_tokens": 7231
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 130,
+      "path": "src/array_api_extra/_delegation.py",
+      "start_line": 1
+    },
+    "response_chars": 770,
+    "round": 7,
+    "tool_result": {
+      "content": "1: \"\"\"Delegation to existing implementations for Public API Functions.\"\"\"\n2: \n3: from enum import Enum\n4: from types import ModuleType\n5: from typing import final\n6: \n7: from ._lib import _funcs\n8: from ._lib._utils._compat import (\n9:     array_namespace,\n10:     is_cupy_namespace,\n11:     is_jax_namespace,\n12:     is_numpy_namespace,\n13:     is_torch_namespace,\n14: )\n15: from ._lib._utils._typing import Array\n16: \n17: __all__ = [\"pad\"]\n18: \n19: \n20: @final\n21: class Library(Enum):\n22:     \"\"\"All array libraries explicitly supported by array-api-extra.\"\"\"\n23: \n24:     ARRAY_API_STRICT = \"array_api_strict\"\n25:     NUMPY = \"numpy\"\n26:     NUMPY_READONLY = \"numpy_readonly\"\n27:     CUPY = \"cupy\"\n28:     TORCH = \"torch\"\n29:     DASK_ARRAY = \"dask.array\"\n30:     SPARSE = \"sparse\"\n31:     JAX_NUMPY = \"jax.numpy\"\n32: \n33:     def __str__(self) -> str:\n34:         \"\"\"Pretty-print library names.\"\"\"\n35:         return self.value\n36: \n37: \n38: \n39: \n40: CUPY = Library.CUPY\n41: JAX = Library.JAX_NUMPY\n42: NUMPY = Library.NUMPY\n43: TORCH = Library.TORCH\n44: \n45: \n46: def _delegate(xp: ModuleType, *backends: Library) -> bool:\n47:     \"\"\"\n48:     Check whether `xp` is one of the `backends` to delegate to.\n49: \n50:     Parameters\n51:     ----------\n52:     xp : array_namespace\n53:         Array namespace to check.\n54:     *backends : Library\n55:         Arbitrarily many backends (from the ``Library`` enum) to check.\n56: \n57:     Returns\n58:     -------\n59:     bool\n60:         ``True`` if `xp` matches one of the `backends`, ``False`` otherwise.\n61:     \"\"\"\n62:     is_namespace = {\n63:         Library.CUPY: is_cupy_namespace,\n64:         Library.JAX_NUMPY: is_jax_namespace,\n65:         Library.NUMPY: is_numpy_namespace,\n66:         Library.NUMPY_READONLY: is_numpy_namespace,\n67:         Library.TORCH: is_torch_namespace,\n68:     }\n69:     return any(is_namespace[backend](xp) for backend in backends)\n70: \n71: \n72: def pad(\n73:     x: Array,\n74:     pad_width: int | tuple[int, int] | list[tuple[int, int]],\n75:     mode: str = \"constant\",\n76:     *,\n77:     constant_values: bool | int | float | complex = 0,\n78:     xp: ModuleType | None = None,\n79: ) -> Array:\n80:     \"\"\"\n81:     Pad the input array.\n82: \n83:     Parameters\n84:     ----------\n85:     x : array\n86:         Input array.\n87:     pad_width : int or tuple of ints or list of pairs of ints\n88:         Pad the input array with this many elements from each side.\n89:         If a list of tuples, ``[(before_0, after_0), ... (before_N, after_N)]``,\n90:         each pair applies to the corresponding axis of ``x``.\n91:         A single tuple, ``(before, after)``, is equivalent to a list of ``x.ndim``\n92:         copies of this tuple.\n93:     mode : str, optional\n94:         Only \"constant\" mode is currently supported, which pads with\n95:         the value passed to `constant_values`.\n96:     constant_values : python scalar, optional\n97:         Use this value to pad the input. Default is zero.\n98:     xp : array_namespace, optional\n99:         The standard-compatible namespace for `x`. Default: infer.\n100: \n101:     Returns\n102:     -------\n103:     array\n104:         The input array,\n105:         padded with ``pad_width`` elements equal to ``constant_values``.\n106:     \"\"\"\n107:     xp = array_namespace(x) if xp is None else xp\n108: \n109:     if mode != \"constant\":\n110:         msg = \"Only `'constant'` mode is currently supported\"\n111:         raise NotImplementedError(msg)\n112: \n113:     # https://github.com/pytorch/pytorch/blob/cf76c05b4dc629ac989d1fb8e789d4fac04a095a/torch/_numpy/_funcs_impl.py#L2045-L2056\n114:     if _delegate(xp, TORCH):\n115:         pad_width = xp.asarray(pad_width)\n116:         pad_width = xp.broadcast_to(pad_width, (x.ndim, 2))\n117:         pad_width = xp.flip(pad_width, axis=(0,)).flatten()\n118:         return xp.nn.functional.pad(x, tuple(pad_width), value=constant_values)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]\n119: \n120:     if _delegate(xp, NUMPY, JAX, CUPY):\n121:         return xp.pad(x, pad_width, mode, constant_values=constant_values)\n122: \n123:     return _funcs.pad(x, pad_width, constant_values=constant_values, xp=xp)",
+      "end_line": 123,
+      "path_lines": 123,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 6976,
+      "input_tokens_details": {
+        "cached_tokens": 5888
+      },
+      "output_tokens": 846,
+      "output_tokens_details": {
+        "reasoning_tokens": 603
+      },
+      "total_tokens": 7822
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "src/array_api_extra",
+      "query": "def __str__"
+    },
+    "response_chars": 657,
+    "round": 8,
+    "tool_result": {
+      "matches": [],
+      "query": "def __str__",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 8402,
+      "input_tokens_details": {
+        "cached_tokens": 6400
+      },
+      "output_tokens": 1234,
+      "output_tokens_details": {
+        "reasoning_tokens": 1004
+      },
+      "total_tokens": 9636
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 200,
+      "path": "pyproject.toml",
+      "start_line": 1
+    },
+    "response_chars": 143,
+    "round": 9,
+    "tool_result": {
+      "content": "1: [build-system]\n2: requires = [\"hatchling\"]\n3: build-backend = \"hatchling.build\"\n4: \n5: [project]\n6: name = \"array-api-extra\"\n7: authors = [\n8:     { name = \"Lucas Colley\", email = \"lucas.colley8@gmail.com\" },\n9:     # { name = \"Open Source Contributors\" },  # https://github.com/pypi/warehouse/issues/14813\n10: ]\n11: description = \"Extra array functions built on top of the array API standard.\"\n12: readme = \"README.md\"\n13: license.file = \"LICENSE\"\n14: requires-python = \">=3.10\"\n15: classifiers = [\n16:     \"Intended Audience :: Developers\",\n17:     \"License :: OSI Approved :: MIT License\",\n18:     \"Operating System :: OS Independent\",\n19:     \"Programming Language :: Python\",\n20:     \"Programming Language :: Python :: 3\",\n21:     \"Programming Language :: Python :: 3 :: Only\",\n22:     \"Programming Language :: Python :: 3.10\",\n23:     \"Programming Language :: Python :: 3.11\",\n24:     \"Programming Language :: Python :: 3.12\",\n25:     \"Programming Language :: Python :: 3.13\",\n26:     \"Typing :: Typed\",\n27: ]\n28: dynamic = [\"version\"]\n29: dependencies = [\"array-api-compat>=1.10.0,<2\"]\n30: \n31: [project.optional-dependencies]\n32: tests = [\n33:     \"pytest >=6\",\n34:     \"pytest-cov >=3\",\n35:     \"array-api-strict\",\n36:     \"numpy\",\n37: ]\n38: docs = [\n39:     \"sphinx>=7.0\",\n40:     \"myst_parser>=0.13\",\n41:     \"sphinx_copybutton\",\n42:     \"sphinx_autodoc_typehints\",\n43:     \"furo>=2023.08.17\",\n44: ]\n45: \n46: [project.urls]\n47: Homepage = \"https://github.com/data-apis/array-api-extra\"\n48: \"Bug Tracker\" = \"https://github.com/data-apis/array-api-extra/issues\"\n49: Changelog = \"https://github.com/data-apis/array-api-extra/releases\"\n50: \n51: \n52: # Hatch\n53: \n54: [tool.hatch]\n55: version.path = \"src/array_api_extra/__init__.py\"\n56: \n57: \n58: # Pixi\n59: \n60: [tool.pixi.project]\n61: channels = [\"https://prefix.dev/conda-forge\"]\n62: platforms = [\"linux-64\", \"osx-arm64\", \"win-64\"]\n63: \n64: [tool.pixi.dependencies]\n65: python = \">=3.10,<3.14\"\n66: array-api-compat = \">=1.10.0,<2\"\n67: \n68: [tool.pixi.pypi-dependencies]\n69: array-api-extra = { path = \".\", editable = true }\n70: \n71: [tool.pixi.feature.lint.dependencies]\n72: pre-commit = \"*\"\n73: pylint = \"*\"\n74: basedmypy = \"*\"\n75: basedpyright = \"*\"\n76: numpydoc = \">=1.8.0,<2\"\n77: # import dependencies for mypy:\n78: array-api-strict = \"*\"\n79: numpy = \"*\"\n80: pytest = \"*\"\n81: \n82: [tool.pixi.feature.lint.tasks]\n83: pre-commit-install = \"pre-commit install\"\n84: pre-commit = \"pre-commit run --all-files\"\n85: mypy = \"mypy\"\n86: pylint = { cmd = \"pylint array_api_extra\", cwd = \"src\" }\n87: pyright = \"basedpyright\"\n88: lint = { depends-on = [\"pre-commit\", \"pylint\", \"mypy\", \"pyright\"] }\n89: \n90: [tool.pixi.feature.tests.dependencies]\n91: pytest = \">=6\"\n92: pytest-cov = \">=3\"\n93: array-api-strict = \"*\"\n94: numpy = \"*\"\n95: \n96: [tool.pixi.feature.tests.tasks]\n97: tests = \"pytest -v\"\n98: tests-cov = \"pytest -v -ra --cov --cov-report=xml --cov-report=term --durations=20\"\n99: \n100: clean-vendor-compat = \"rm -rf vendor_tests/array_api_compat\"\n101: clean-vendor-extra = \"rm -rf vendor_tests/array_api_extra\"\n102: copy-vendor-compat = { cmd = \"cp -r $(python -c 'import site; print(site.getsitepackages()[0])')/array_api_compat vendor_tests/\", depends-on = [\"clean-vendor-compat\"] }\n103: copy-vendor-extra = { cmd = \"cp -r src/array_api_extra vendor_tests/\", depends-on = [\"clean-vendor-extra\"] }\n104: tests-vendor = { cmd = \"pytest -v vendor_tests\", depends-on = [\"copy-vendor-compat\", \"copy-vendor-extra\"] }\n105: \n106: tests-ci = { depends-on = [\"tests-cov\", \"tests-vendor\"] }\n107: coverage = { cmd = \"coverage html\", depends-on = [\"tests-cov\"] }\n108: open-coverage = { cmd = \"open htmlcov/index.html\", depends-on = [\"coverage\"] }\n109: \n110: [tool.pixi.feature.docs.dependencies]\n111: sphinx = \">=7.0\"\n112: furo = \">=2023.08.17\"\n113: myst-parser = \">=0.13\"\n114: sphinx-copybutton = \"*\"\n115: sphinx-autodoc-typehints = \"*\"\n116: \n117: [tool.pixi.feature.docs.tasks]\n118: docs = { cmd = \"sphinx-build . build/\", cwd = \"docs\" }\n119: open-docs = { cmd = \"open build/index.html\", cwd = \"docs\", depends-on = [\"docs\"] }\n120: \n121: [tool.pixi.feature.dev.dependencies]\n122: ipython = \"*\"\n123: \n124: [tool.pixi.feature.dev.tasks]\n125: ipython = { cmd = \"ipython\" }\n126: \n127: [tool.pixi.feature.py310.dependencies]\n128: python = \"~=3.10.0\"\n129: \n130: [tool.pixi.feature.py313.dependencies]\n131: python = \"~=3.13.0\"\n132: \n133: # Backends that can run on CPU-only hosts\n134: [tool.pixi.feature.backends.target.linux-64.dependencies]\n135: pytorch = \"*\"\n136: dask = \"*\"\n137: sparse = \">=0.15\"\n138: jax = \"*\"\n139: \n140: [tool.pixi.feature.backends.target.osx-arm64.dependencies]\n141: pytorch = \"*\"\n142: dask = \"*\"\n143: sparse = \">=0.15\"\n144: jax = \"*\"\n145: \n146: [tool.pixi.feature.backends.target.win-64.dependencies]\n147: # pytorch = \"*\"  # Package unavailable on Windows\n148: dask = \"*\"\n149: sparse = \">=0.15\"\n150: # jax = \"*\"  # Package unavailable on Windows\n151: \n152: # Backends that require a GPU host and a CUDA driver\n153: [tool.pixi.feature.cuda-backends.target.linux-64.dependencies]\n154: cupy = \"*\"\n155: \n156: [tool.pixi.feature.cuda-backends.target.osx-arm64.dependencies]\n157: # cupy = \"*\"  # Package unavailable on macOSX\n158: \n159: [tool.pixi.feature.cuda-backends.target.win-64.dependencies]\n160: cupy = \"*\"\n161: \n162: [tool.pixi.environments]\n163: default = { solve-group = \"default\" }\n164: lint = { features = [\"lint\"], solve-group = \"default\" }\n165: tests = { features = [\"tests\"], solve-group = \"default\" }\n166: docs = { features = [\"docs\"], solve-group = \"default\" }\n167: dev = { features = [\"lint\", \"tests\", \"docs\", \"dev\"], solve-group = \"default\" }\n168: ci-py310 = [\"py310\", \"tests\"]\n169: ci-py313 = [\"py313\", \"tests\"]\n170: # CUDA not available on free github actions\n171: ci-backends = [\"py310\", \"tests\", \"backends\"]\n172: tests-backends = [\"py310\", \"tests\", \"backends\", \"cuda-backends\"]\n173: \n174: # pytest\n175: \n176: [tool.pytest.ini_options]\n177: minversion = \"6.0\"\n178: addopts = [\"-ra\", \"--showlocals\", \"--strict-markers\", \"--strict-config\"]\n179: xfail_strict = true\n180: filterwarnings = [\n181:     \"error\",\n182:     # TODO: when Python 3.10 is dropped, use `enum.member` in `_delegation.py`\n183:     \"ignore:functools.partial will be a method descriptor:FutureWarning\",\n184: ]\n185: log_cli_level = \"INFO\"\n186: testpaths = [\"tests\"]\n187: markers = [\"skip_xp_backend(library, *, reason=None): Skip test for a specific backend\"]\n188: \n189: # Coverage\n190: \n191: [tool.coverage]\n192: run.source = [\"array_api_extra\"]\n193: report.exclude_also = [\n194:     '\\.\\.\\.',\n195:     'if typing.TYPE_CHECKING:',\n196:     'if TYPE_CHECKING:',\n197: ]\n198: \n199: \n200: # mypy",
+      "end_line": 200,
+      "path_lines": 327,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 8453,
+      "input_tokens_details": {
+        "cached_tokens": 7936
+      },
+      "output_tokens": 441,
+      "output_tokens_details": {
+        "reasoning_tokens": 384
+      },
+      "total_tokens": 8894
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 327,
+      "path": "pyproject.toml",
+      "start_line": 200
+    },
+    "response_chars": 413,
+    "round": 10,
+    "tool_result": {
+      "content": "200: # mypy\n201: \n202: [tool.mypy]\n203: files = [\"src\", \"tests\"]\n204: python_version = \"3.10\"\n205: warn_unused_configs = true\n206: strict = true\n207: enable_error_code = [\"ignore-without-code\", \"truthy-bool\"]\n208: disallow_untyped_defs = false\n209: disallow_incomplete_defs = false\n210: # data-apis/array-api#589\n211: disallow_any_expr = false\n212: # false positives with input validation\n213: disable_error_code = [\"redundant-expr\", \"unreachable\"]\n214: \n215: [[tool.mypy.overrides]]\n216: module = \"array_api_extra.*\"\n217: disallow_untyped_defs = true\n218: disallow_incomplete_defs = true\n219: \n220: \n221: # pyright\n222: \n223: [tool.basedpyright]\n224: include = [\"src\", \"tests\"]\n225: pythonVersion = \"3.10\"\n226: pythonPlatform = \"All\"\n227: typeCheckingMode = \"all\"\n228: \n229: # data-apis/array-api#589\n230: reportAny = false\n231: reportExplicitAny = false\n232: # data-apis/array-api-strict#6\n233: reportUnknownMemberType = false\n234: # no array-api-compat type stubs\n235: reportUnknownVariableType = false\n236: # false positives for input validation\n237: reportUnreachable = false\n238: \n239: executionEnvironments = [\n240:     { root = \"tests\", reportPrivateUsage = false },\n241:     { root = \"src\" },\n242: ]\n243: \n244: \n245: # Ruff\n246: \n247: [tool.ruff]\n248: target-version = \"py310\"\n249: \n250: [tool.ruff.lint]\n251: extend-select = [\n252:     \"B\",   # flake8-bugbear\n253:     \"F\",   # Pyflakes\n254:     \"I\",   # isort\n255:     \"E\",   # Pycodestyle\n256:     \"W\",   # Pycodestyle\n257:     \"N\",   # pep8-naming\n258:     \"ARG\", # flake8-unused-arguments\n259:     \"C4\",  # flake8-comprehensions\n260:     \"EM\",  # flake8-errmsg\n261:     \"ICN\", # flake8-import-conventions\n262:     \"ISC\", # flake8-implicit-str-concat\n263:     \"G\",   # flake8-logging-format\n264:     \"PGH\", # pygrep-hooks\n265:     \"PIE\", # flake8-pie\n266:     \"PL\",  # pylint\n267:     \"PT\",  # flake8-pytest-style\n268:     \"PTH\", # flake8-use-pathlib\n269:     \"RET\", # flake8-return\n270:     \"RUF\", # Ruff-specific\n271:     \"SIM\", # flake8-simplify\n272:     \"T20\", # flake8-print\n273:     \"UP\",  # pyupgrade\n274:     \"YTT\", # flake8-2020\n275:     \"EXE\", # flake8-executable\n276:     \"NPY\", # NumPy specific rules\n277:     \"PD\",  # pandas-vet\n278:     \"UP\",  # Pyupgrade\n279: ]\n280: ignore = [\n281:     \"PLR09\",   # Too many <...>\n282:     \"PLR2004\", # Magic value used in comparison\n283:     \"ISC001\",  # Conflicts with formatter\n284:     \"N801\",    # Class name should use CapWords convention\n285:     \"N802\",    # Function name should be lowercase\n286:     \"N806\",    # Variable in function should be lowercase\n287: ]\n288: \n289: [tool.ruff.lint.per-file-ignores]\n290: \"tests/**\" = [\"T20\"]\n291: \n292: \n293: # Pylint\n294: \n295: [tool.pylint]\n296: py-version = \"3.10\"\n297: ignore-paths = [\".*/_version.py\"]\n298: reports.output-format = \"colorized\"\n299: similarities.ignore-imports = \"yes\"\n300: messages_control.disable = [\n301:     \"design\",\n302:     \"fixme\",\n303:     \"line-too-long\",\n304:     \"missing-module-docstring\",\n305:     \"missing-function-docstring\",\n306:     \"too-many-lines\",\n307:     \"wrong-import-position\",\n308: ]\n309: \n310: \n311: # numpydoc\n312: \n313: [tool.numpydoc_validation]\n314: checks = [\n315:     \"all\",  # report on all checks, except the below\n316:     \"EX01\",\n317:     \"SA01\",\n318:     \"ES01\",\n319: ]\n320: exclude = [ # don't report on objects that match any of these regex\n321:     '.*test_at.*',\n322:     '.*test_funcs.*',\n323:     '.*test_testing.*',\n324:     '.*test_utils.*',\n325:     '.*test_version.*',\n326:     '.*test_vendor.*',\n327: ]",
+      "end_line": 327,
+      "path_lines": 327,
+      "start_line": 200
+    },
+    "usage": {
+      "input_tokens": 10919,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 1132,
+      "output_tokens_details": {
+        "reasoning_tokens": 990
+      },
+      "total_tokens": 12051
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "    \"\"\"All array libraries explicitly tested by array-api-extra.\"\"\"",
+          "end_line": 22,
+          "start_line": 22
+        },
+        {
+          "content": "        \"\"\"Pretty-print library names.\"\"\"",
+          "end_line": 34,
+          "start_line": 34
+        },
+        {
+          "content": "",
+          "end_line": 39,
+          "start_line": 37
+        }
+      ]
+    },
+    "response_chars": 564,
+    "round": 11,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 22,
+          "replacement_lines": 1,
+          "start_line": 22
+        },
+        {
+          "end_line": 34,
+          "replacement_lines": 1,
+          "start_line": 34
+        },
+        {
+          "end_line": 39,
+          "replacement_lines": 0,
+          "start_line": 37
+        }
+      ],
+      "current_file_lines": 120,
+      "updated_excerpt": {
+        "content": "12:     is_numpy_namespace,\n13:     is_torch_namespace,\n14: )\n15: from ._lib._utils._typing import Array\n16: \n17: __all__ = [\"pad\"]\n18: \n19: \n20: @final\n21: class Library(Enum):\n22:     \"\"\"All array libraries explicitly tested by array-api-extra.\"\"\"\n23: \n24:     ARRAY_API_STRICT = \"array_api_strict\"\n25:     NUMPY = \"numpy\"\n26:     NUMPY_READONLY = \"numpy_readonly\"\n27:     CUPY = \"cupy\"\n28:     TORCH = \"torch\"\n29:     DASK_ARRAY = \"dask.array\"\n30:     SPARSE = \"sparse\"\n31:     JAX_NUMPY = \"jax.numpy\"\n32: \n33:     def __str__(self) -> str:\n34:         \"\"\"Pretty-print library names.\"\"\"\n35:         return self.value\n36: \n37: CUPY = Library.CUPY\n38: JAX = Library.JAX_NUMPY\n39: NUMPY = Library.NUMPY\n40: TORCH = Library.TORCH\n41: \n42: \n43: def _delegate(xp: ModuleType, *backends: Library) -> bool:\n44:     \"\"\"\n45:     Check whether `xp` is one of the `backends` to delegate to.\n46: \n47:     Parameters\n48:     ----------\n49:     xp : array_namespace\n50:         Array namespace to check.\n51:     *backends : Library\n52:         Arbitrarily many backends (from the ``Library`` enum) to check.",
+        "end_line": 52,
+        "path_lines": 120,
+        "start_line": 12
+      }
+    },
+    "usage": {
+      "input_tokens": 12266,
+      "input_tokens_details": {
+        "cached_tokens": 10496
+      },
+      "output_tokens": 936,
+      "output_tokens_details": {
+        "reasoning_tokens": 759
+      },
+      "total_tokens": 13202
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "    def __str__(self) -> str:  # type: ignore[explicit-override]  # pyright: ignore[reportImplicitOverride]  # numpydoc ignore=RT01\n        \"\"\"Pretty-print parameterized test names.\"\"\"",
+          "end_line": 34,
+          "start_line": 33
+        }
+      ]
+    },
+    "response_chars": 619,
+    "round": 12,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 34,
+          "replacement_lines": 2,
+          "start_line": 33
+        }
+      ],
+      "current_file_lines": 120,
+      "updated_excerpt": {
+        "content": "23: \n24:     ARRAY_API_STRICT = \"array_api_strict\"\n25:     NUMPY = \"numpy\"\n26:     NUMPY_READONLY = \"numpy_readonly\"\n27:     CUPY = \"cupy\"\n28:     TORCH = \"torch\"\n29:     DASK_ARRAY = \"dask.array\"\n30:     SPARSE = \"sparse\"\n31:     JAX_NUMPY = \"jax.numpy\"\n32: \n33:     def __str__(self) -> str:  # type: ignore[explicit-override]  # pyright: ignore[reportImplicitOverride]  # numpydoc ignore=RT01\n34:         \"\"\"Pretty-print parameterized test names.\"\"\"\n35:         return self.value\n36: \n37: CUPY = Library.CUPY\n38: JAX = Library.JAX_NUMPY\n39: NUMPY = Library.NUMPY\n40: TORCH = Library.TORCH\n41: \n42: \n43: def _delegate(xp: ModuleType, *backends: Library) -> bool:\n44:     \"\"\"\n45:     Check whether `xp` is one of the `backends` to delegate to.\n46: \n47:     Parameters\n48:     ----------\n49:     xp : array_namespace\n50:         Array namespace to check.\n51:     *backends : Library\n52:         Arbitrarily many backends (from the ``Library`` enum) to check.\n53: \n54:     Returns\n55:     -------\n56:     bool\n57:         ``True`` if `xp` matches one of the `backends`, ``False`` otherwise.\n58:     \"\"\"\n59:     is_namespace = {\n60:         Library.CUPY: is_cupy_namespace,\n61:         Library.JAX_NUMPY: is_jax_namespace,\n62:         Library.NUMPY: is_numpy_namespace,\n63:         Library.NUMPY_READONLY: is_numpy_namespace,",
+        "end_line": 63,
+        "path_lines": 120,
+        "start_line": 23
+      }
+    },
+    "usage": {
+      "input_tokens": 12863,
+      "input_tokens_details": {
+        "cached_tokens": 12032
+      },
+      "output_tokens": 927,
+      "output_tokens_details": {
+        "reasoning_tokens": 724
+      },
+      "total_tokens": 13790
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 130,
+      "path": "src/array_api_extra/_delegation.py",
+      "start_line": 1
+    },
+    "response_chars": 131,
+    "round": 13,
+    "tool_result": {
+      "content": "1: \"\"\"Delegation to existing implementations for Public API Functions.\"\"\"\n2: \n3: from enum import Enum\n4: from types import ModuleType\n5: from typing import final\n6: \n7: from ._lib import _funcs\n8: from ._lib._utils._compat import (\n9:     array_namespace,\n10:     is_cupy_namespace,\n11:     is_jax_namespace,\n12:     is_numpy_namespace,\n13:     is_torch_namespace,\n14: )\n15: from ._lib._utils._typing import Array\n16: \n17: __all__ = [\"pad\"]\n18: \n19: \n20: @final\n21: class Library(Enum):\n22:     \"\"\"All array libraries explicitly tested by array-api-extra.\"\"\"\n23: \n24:     ARRAY_API_STRICT = \"array_api_strict\"\n25:     NUMPY = \"numpy\"\n26:     NUMPY_READONLY = \"numpy_readonly\"\n27:     CUPY = \"cupy\"\n28:     TORCH = \"torch\"\n29:     DASK_ARRAY = \"dask.array\"\n30:     SPARSE = \"sparse\"\n31:     JAX_NUMPY = \"jax.numpy\"\n32: \n33:     def __str__(self) -> str:  # type: ignore[explicit-override]  # pyright: ignore[reportImplicitOverride]  # numpydoc ignore=RT01\n34:         \"\"\"Pretty-print parameterized test names.\"\"\"\n35:         return self.value\n36: \n37: CUPY = Library.CUPY\n38: JAX = Library.JAX_NUMPY\n39: NUMPY = Library.NUMPY\n40: TORCH = Library.TORCH\n41: \n42: \n43: def _delegate(xp: ModuleType, *backends: Library) -> bool:\n44:     \"\"\"\n45:     Check whether `xp` is one of the `backends` to delegate to.\n46: \n47:     Parameters\n48:     ----------\n49:     xp : array_namespace\n50:         Array namespace to check.\n51:     *backends : Library\n52:         Arbitrarily many backends (from the ``Library`` enum) to check.\n53: \n54:     Returns\n55:     -------\n56:     bool\n57:         ``True`` if `xp` matches one of the `backends`, ``False`` otherwise.\n58:     \"\"\"\n59:     is_namespace = {\n60:         Library.CUPY: is_cupy_namespace,\n61:         Library.JAX_NUMPY: is_jax_namespace,\n62:         Library.NUMPY: is_numpy_namespace,\n63:         Library.NUMPY_READONLY: is_numpy_namespace,\n64:         Library.TORCH: is_torch_namespace,\n65:     }\n66:     return any(is_namespace[backend](xp) for backend in backends)\n67: \n68: \n69: def pad(\n70:     x: Array,\n71:     pad_width: int | tuple[int, int] | list[tuple[int, int]],\n72:     mode: str = \"constant\",\n73:     *,\n74:     constant_values: bool | int | float | complex = 0,\n75:     xp: ModuleType | None = None,\n76: ) -> Array:\n77:     \"\"\"\n78:     Pad the input array.\n79: \n80:     Parameters\n81:     ----------\n82:     x : array\n83:         Input array.\n84:     pad_width : int or tuple of ints or list of pairs of ints\n85:         Pad the input array with this many elements from each side.\n86:         If a list of tuples, ``[(before_0, after_0), ... (before_N, after_N)]``,\n87:         each pair applies to the corresponding axis of ``x``.\n88:         A single tuple, ``(before, after)``, is equivalent to a list of ``x.ndim``\n89:         copies of this tuple.\n90:     mode : str, optional\n91:         Only \"constant\" mode is currently supported, which pads with\n92:         the value passed to `constant_values`.\n93:     constant_values : python scalar, optional\n94:         Use this value to pad the input. Default is zero.\n95:     xp : array_namespace, optional\n96:         The standard-compatible namespace for `x`. Default: infer.\n97: \n98:     Returns\n99:     -------\n100:     array\n101:         The input array,\n102:         padded with ``pad_width`` elements equal to ``constant_values``.\n103:     \"\"\"\n104:     xp = array_namespace(x) if xp is None else xp\n105: \n106:     if mode != \"constant\":\n107:         msg = \"Only `'constant'` mode is currently supported\"\n108:         raise NotImplementedError(msg)\n109: \n110:     # https://github.com/pytorch/pytorch/blob/cf76c05b4dc629ac989d1fb8e789d4fac04a095a/torch/_numpy/_funcs_impl.py#L2045-L2056\n111:     if _delegate(xp, TORCH):\n112:         pad_width = xp.asarray(pad_width)\n113:         pad_width = xp.broadcast_to(pad_width, (x.ndim, 2))\n114:         pad_width = xp.flip(pad_width, axis=(0,)).flatten()\n115:         return xp.nn.functional.pad(x, tuple(pad_width), value=constant_values)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]\n116: \n117:     if _delegate(xp, NUMPY, JAX, CUPY):\n118:         return xp.pad(x, pad_width, mode, constant_values=constant_values)\n119: \n120:     return _funcs.pad(x, pad_width, constant_values=constant_values, xp=xp)",
+      "end_line": 120,
+      "path_lines": 120,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 13468,
+      "input_tokens_details": {
+        "cached_tokens": 12544
+      },
+      "output_tokens": 675,
+      "output_tokens_details": {
+        "reasoning_tokens": 618
+      },
+      "total_tokens": 14143
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 220,
+      "path": "src/array_api_extra/_lib/_utils/_compat.py",
+      "start_line": 1
+    },
+    "response_chars": 274,
+    "round": 14,
+    "tool_result": {
+      "content": "1: \"\"\"Acquire helpers from array-api-compat.\"\"\"\n2: # Allow packages that vendor both `array-api-extra` and\n3: # `array-api-compat` to override the import location\n4: \n5: try:\n6:     from ...._array_api_compat_vendor import (  # pyright: ignore[reportMissingImports]\n7:         array_namespace,\n8:         device,\n9:         is_cupy_namespace,\n10:         is_jax_array,\n11:         is_jax_namespace,\n12:         is_numpy_namespace,\n13:         is_pydata_sparse_namespace,\n14:         is_torch_namespace,\n15:         is_writeable_array,\n16:         size,\n17:     )\n18: except ImportError:\n19:     from array_api_compat import (  # pyright: ignore[reportMissingTypeStubs]\n20:         array_namespace,\n21:         device,\n22:         is_cupy_namespace,\n23:         is_jax_array,\n24:         is_jax_namespace,\n25:         is_numpy_namespace,\n26:         is_pydata_sparse_namespace,\n27:         is_torch_namespace,\n28:         is_writeable_array,\n29:         size,\n30:     )\n31: \n32: __all__ = [\n33:     \"array_namespace\",\n34:     \"device\",\n35:     \"is_cupy_namespace\",\n36:     \"is_jax_array\",\n37:     \"is_jax_namespace\",\n38:     \"is_numpy_namespace\",\n39:     \"is_pydata_sparse_namespace\",\n40:     \"is_torch_namespace\",\n41:     \"is_writeable_array\",\n42:     \"size\",\n43: ]",
+      "end_line": 43,
+      "path_lines": 43,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 14915,
+      "input_tokens_details": {
+        "cached_tokens": 13056
+      },
+      "output_tokens": 1631,
+      "output_tokens_details": {
+        "reasoning_tokens": 1526
+      },
+      "total_tokens": 16546
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\n",
+          "end_line": 36,
+          "start_line": 36
+        }
+      ]
+    },
+    "response_chars": 289,
+    "round": 15,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 36,
+          "replacement_lines": 1,
+          "start_line": 36
+        }
+      ],
+      "current_file_lines": 120,
+      "updated_excerpt": {
+        "content": "26:     NUMPY_READONLY = \"numpy_readonly\"\n27:     CUPY = \"cupy\"\n28:     TORCH = \"torch\"\n29:     DASK_ARRAY = \"dask.array\"\n30:     SPARSE = \"sparse\"\n31:     JAX_NUMPY = \"jax.numpy\"\n32: \n33:     def __str__(self) -> str:  # type: ignore[explicit-override]  # pyright: ignore[reportImplicitOverride]  # numpydoc ignore=RT01\n34:         \"\"\"Pretty-print parameterized test names.\"\"\"\n35:         return self.value\n36: \n37: CUPY = Library.CUPY\n38: JAX = Library.JAX_NUMPY\n39: NUMPY = Library.NUMPY\n40: TORCH = Library.TORCH\n41: \n42: \n43: def _delegate(xp: ModuleType, *backends: Library) -> bool:\n44:     \"\"\"\n45:     Check whether `xp` is one of the `backends` to delegate to.\n46: \n47:     Parameters\n48:     ----------\n49:     xp : array_namespace\n50:         Array namespace to check.\n51:     *backends : Library\n52:         Arbitrarily many backends (from the ``Library`` enum) to check.\n53: \n54:     Returns\n55:     -------\n56:     bool\n57:         ``True`` if `xp` matches one of the `backends`, ``False`` otherwise.\n58:     \"\"\"\n59:     is_namespace = {\n60:         Library.CUPY: is_cupy_namespace,\n61:         Library.JAX_NUMPY: is_jax_namespace,\n62:         Library.NUMPY: is_numpy_namespace,\n63:         Library.NUMPY_READONLY: is_numpy_namespace,\n64:         Library.TORCH: is_torch_namespace,\n65:     }\n66:     return any(is_namespace[backend](xp) for backend in backends)",
+        "end_line": 66,
+        "path_lines": 120,
+        "start_line": 26
+      }
+    },
+    "usage": {
+      "input_tokens": 15381,
+      "input_tokens_details": {
+        "cached_tokens": 14592
+      },
+      "output_tokens": 2065,
+      "output_tokens_details": {
+        "reasoning_tokens": 1955
+      },
+      "total_tokens": 17446
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\n",
+          "end_line": 36,
+          "start_line": 37
+        },
+        {
+          "content": "    for backend in backends:\n        is_namespace_func = is_namespace.get(backend)\n        if is_namespace_func is not None and is_namespace_func(xp):\n            return True\n    return False",
+          "end_line": 66,
+          "start_line": 66
+        }
+      ]
+    },
+    "response_chars": 721,
+    "round": 16,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 36,
+          "replacement_lines": 1,
+          "start_line": 37
+        },
+        {
+          "end_line": 66,
+          "replacement_lines": 5,
+          "start_line": 66
+        }
+      ],
+      "current_file_lines": 125,
+      "updated_excerpt": {
+        "content": "27:     CUPY = \"cupy\"\n28:     TORCH = \"torch\"\n29:     DASK_ARRAY = \"dask.array\"\n30:     SPARSE = \"sparse\"\n31:     JAX_NUMPY = \"jax.numpy\"\n32: \n33:     def __str__(self) -> str:  # type: ignore[explicit-override]  # pyright: ignore[reportImplicitOverride]  # numpydoc ignore=RT01\n34:         \"\"\"Pretty-print parameterized test names.\"\"\"\n35:         return self.value\n36: \n37: \n38: CUPY = Library.CUPY\n39: JAX = Library.JAX_NUMPY\n40: NUMPY = Library.NUMPY\n41: TORCH = Library.TORCH\n42: \n43: \n44: def _delegate(xp: ModuleType, *backends: Library) -> bool:\n45:     \"\"\"\n46:     Check whether `xp` is one of the `backends` to delegate to.\n47: \n48:     Parameters\n49:     ----------\n50:     xp : array_namespace\n51:         Array namespace to check.\n52:     *backends : Library\n53:         Arbitrarily many backends (from the ``Library`` enum) to check.\n54: \n55:     Returns\n56:     -------\n57:     bool\n58:         ``True`` if `xp` matches one of the `backends`, ``False`` otherwise.\n59:     \"\"\"\n60:     is_namespace = {\n61:         Library.CUPY: is_cupy_namespace,\n62:         Library.JAX_NUMPY: is_jax_namespace,\n63:         Library.NUMPY: is_numpy_namespace,\n64:         Library.NUMPY_READONLY: is_numpy_namespace,\n65:         Library.TORCH: is_torch_namespace,\n66:     }\n67:     for backend in backends:",
+        "end_line": 67,
+        "path_lines": 125,
+        "start_line": 27
+      }
+    },
+    "usage": {
+      "input_tokens": 15942,
+      "input_tokens_details": {
+        "cached_tokens": 15104
+      },
+      "output_tokens": 1418,
+      "output_tokens_details": {
+        "reasoning_tokens": 1207
+      },
+      "total_tokens": 17360
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 125,
+      "path": "src/array_api_extra/_delegation.py",
+      "start_line": 1
+    },
+    "response_chars": 183,
+    "round": 17,
+    "tool_result": {
+      "content": "1: \"\"\"Delegation to existing implementations for Public API Functions.\"\"\"\n2: \n3: from enum import Enum\n4: from types import ModuleType\n5: from typing import final\n6: \n7: from ._lib import _funcs\n8: from ._lib._utils._compat import (\n9:     array_namespace,\n10:     is_cupy_namespace,\n11:     is_jax_namespace,\n12:     is_numpy_namespace,\n13:     is_torch_namespace,\n14: )\n15: from ._lib._utils._typing import Array\n16: \n17: __all__ = [\"pad\"]\n18: \n19: \n20: @final\n21: class Library(Enum):\n22:     \"\"\"All array libraries explicitly tested by array-api-extra.\"\"\"\n23: \n24:     ARRAY_API_STRICT = \"array_api_strict\"\n25:     NUMPY = \"numpy\"\n26:     NUMPY_READONLY = \"numpy_readonly\"\n27:     CUPY = \"cupy\"\n28:     TORCH = \"torch\"\n29:     DASK_ARRAY = \"dask.array\"\n30:     SPARSE = \"sparse\"\n31:     JAX_NUMPY = \"jax.numpy\"\n32: \n33:     def __str__(self) -> str:  # type: ignore[explicit-override]  # pyright: ignore[reportImplicitOverride]  # numpydoc ignore=RT01\n34:         \"\"\"Pretty-print parameterized test names.\"\"\"\n35:         return self.value\n36: \n37: \n38: CUPY = Library.CUPY\n39: JAX = Library.JAX_NUMPY\n40: NUMPY = Library.NUMPY\n41: TORCH = Library.TORCH\n42: \n43: \n44: def _delegate(xp: ModuleType, *backends: Library) -> bool:\n45:     \"\"\"\n46:     Check whether `xp` is one of the `backends` to delegate to.\n47: \n48:     Parameters\n49:     ----------\n50:     xp : array_namespace\n51:         Array namespace to check.\n52:     *backends : Library\n53:         Arbitrarily many backends (from the ``Library`` enum) to check.\n54: \n55:     Returns\n56:     -------\n57:     bool\n58:         ``True`` if `xp` matches one of the `backends`, ``False`` otherwise.\n59:     \"\"\"\n60:     is_namespace = {\n61:         Library.CUPY: is_cupy_namespace,\n62:         Library.JAX_NUMPY: is_jax_namespace,\n63:         Library.NUMPY: is_numpy_namespace,\n64:         Library.NUMPY_READONLY: is_numpy_namespace,\n65:         Library.TORCH: is_torch_namespace,\n66:     }\n67:     for backend in backends:\n68:         is_namespace_func = is_namespace.get(backend)\n69:         if is_namespace_func is not None and is_namespace_func(xp):\n70:             return True\n71:     return False\n72: \n73: \n74: def pad(\n75:     x: Array,\n76:     pad_width: int | tuple[int, int] | list[tuple[int, int]],\n77:     mode: str = \"constant\",\n78:     *,\n79:     constant_values: bool | int | float | complex = 0,\n80:     xp: ModuleType | None = None,\n81: ) -> Array:\n82:     \"\"\"\n83:     Pad the input array.\n84: \n85:     Parameters\n86:     ----------\n87:     x : array\n88:         Input array.\n89:     pad_width : int or tuple of ints or list of pairs of ints\n90:         Pad the input array with this many elements from each side.\n91:         If a list of tuples, ``[(before_0, after_0), ... (before_N, after_N)]``,\n92:         each pair applies to the corresponding axis of ``x``.\n93:         A single tuple, ``(before, after)``, is equivalent to a list of ``x.ndim``\n94:         copies of this tuple.\n95:     mode : str, optional\n96:         Only \"constant\" mode is currently supported, which pads with\n97:         the value passed to `constant_values`.\n98:     constant_values : python scalar, optional\n99:         Use this value to pad the input. Default is zero.\n100:     xp : array_namespace, optional\n101:         The standard-compatible namespace for `x`. Default: infer.\n102: \n103:     Returns\n104:     -------\n105:     array\n106:         The input array,\n107:         padded with ``pad_width`` elements equal to ``constant_values``.\n108:     \"\"\"\n109:     xp = array_namespace(x) if xp is None else xp\n110: \n111:     if mode != \"constant\":\n112:         msg = \"Only `'constant'` mode is currently supported\"\n113:         raise NotImplementedError(msg)\n114: \n115:     # https://github.com/pytorch/pytorch/blob/cf76c05b4dc629ac989d1fb8e789d4fac04a095a/torch/_numpy/_funcs_impl.py#L2045-L2056\n116:     if _delegate(xp, TORCH):\n117:         pad_width = xp.asarray(pad_width)\n118:         pad_width = xp.broadcast_to(pad_width, (x.ndim, 2))\n119:         pad_width = xp.flip(pad_width, axis=(0,)).flatten()\n120:         return xp.nn.functional.pad(x, tuple(pad_width), value=constant_values)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]\n121: \n122:     if _delegate(xp, NUMPY, JAX, CUPY):\n123:         return xp.pad(x, pad_width, mode, constant_values=constant_values)\n124: \n125:     return _funcs.pad(x, pad_width, constant_values=constant_values, xp=xp)",
+      "end_line": 125,
+      "path_lines": 125,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 16568,
+      "input_tokens_details": {
+        "cached_tokens": 15616
+      },
+      "output_tokens": 172,
+      "output_tokens_details": {
+        "reasoning_tokens": 105
+      },
+      "total_tokens": 16740
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 18,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__data-apis__array-api-extra__pull_72__comment_1915651555__modularity.patch"
+    },
+    "usage": {
+      "input_tokens": 18055,
+      "input_tokens_details": {
+        "cached_tokens": 16128
+      },
+      "output_tokens": 527,
+      "output_tokens_details": {
+        "reasoning_tokens": 516
+      },
+      "total_tokens": 18582
+    }
+  }
+]

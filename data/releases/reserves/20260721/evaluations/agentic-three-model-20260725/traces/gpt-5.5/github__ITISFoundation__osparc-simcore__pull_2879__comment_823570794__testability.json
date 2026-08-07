@@ -1,0 +1,318 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 220,
+      "path": "services/director-v2/src/simcore_service_director_v2/api/dependencies/dynamic_services.py",
+      "start_line": 1
+    },
+    "response_chars": 1932,
+    "round": 1,
+    "tool_result": {
+      "content": "1: import logging\n2: \n3: from fastapi import Depends, Request\n4: from models_library.projects_nodes import NodeID\n5: from starlette.datastructures import URL\n6: \n7: from ...core.settings import DynamicServicesSettings\n8: from ...models.schemas.dynamic_services import RunningDynamicServiceDetails\n9: from ...modules.dynamic_services import ServicesClient\n10: from ...modules.dynamic_sidecar.scheduler import DynamicSidecarsScheduler\n11: from ...utils.logging_utils import log_decorator\n12: from .director_v0 import DirectorV0Client, get_director_v0_client\n13: \n14: logger = logging.getLogger(__name__)\n15: \n16: \n17: @log_decorator(logger=logger)\n18: async def get_service_base_url(\n19:     node_uuid: NodeID,\n20:     director_v0_client: DirectorV0Client = Depends(get_director_v0_client),\n21: ) -> URL:\n22: \n23:     # get the service details\n24:     service_details: RunningDynamicServiceDetails = (\n25:         await director_v0_client.get_running_service_details(node_uuid)\n26:     )\n27:     return URL(service_details.legacy_service_url)\n28: \n29: \n30: @log_decorator(logger=logger)\n31: def get_services_client(\n32:     request: Request,\n33: ) -> ServicesClient:\n34: \n35:     client = ServicesClient.instance(request.app)\n36:     return client\n37: \n38: \n39: def get_dynamic_services_settings(request: Request) -> DynamicServicesSettings:\n40:     return request.app.state.settings.DYNAMIC_SERVICES\n41: \n42: \n43: def get_scheduler(request: Request) -> DynamicSidecarsScheduler:\n44:     return request.app.state.dynamic_sidecar_scheduler",
+      "end_line": 44,
+      "path_lines": 44,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 3029,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 1332,
+      "output_tokens_details": {
+        "reasoning_tokens": 820
+      },
+      "total_tokens": 4361
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "from fastapi import APIRouter, Depends, Header",
+          "end_line": 8,
+          "start_line": 8
+        },
+        {
+          "content": "    node_uuid: NodeID,\n    can_save: Optional[bool] = True,\n    director_v0_client: DirectorV0Client = Depends(get_director_v0_client),\n    dynamic_services_settings: DynamicServicesSettings = Depends(\n        get_dynamic_services_settings\n    ),\n    scheduler: DynamicSidecarsScheduler = Depends(get_scheduler),\n) -> Union[NoContentResponse, RedirectResponse]:",
+          "end_line": 178,
+          "start_line": 173
+        },
+        {
+          "content": "    dynamic_sidecar_settings: DynamicSidecarSettings = (\n        dynamic_services_settings.DYNAMIC_SIDECAR\n    )",
+          "end_line": 197,
+          "start_line": 195
+        },
+        {
+          "content": "    node_uuid: NodeID,\n    retrieve_settings: RetrieveDataIn,\n    scheduler: DynamicSidecarsScheduler = Depends(get_scheduler),\n    service_base_url: URL = Depends(get_service_base_url),\n    services_client: ServicesClient = Depends(get_services_client),\n    dynamic_services_settings: DynamicServicesSettings = Depends(\n        get_dynamic_services_settings\n    ),\n) -> RetrieveDataOutEnveloped:",
+          "end_line": 220,
+          "start_line": 216
+        },
+        {
+          "content": "\n        dynamic_sidecar_settings: DynamicSidecarSettings = (\n            dynamic_services_settings.DYNAMIC_SIDECAR\n        )",
+          "end_line": 236,
+          "start_line": 229
+        }
+      ]
+    },
+    "response_chars": 2910,
+    "round": 2,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 8,
+          "replacement_lines": 1,
+          "start_line": 8
+        },
+        {
+          "end_line": 178,
+          "replacement_lines": 8,
+          "start_line": 173
+        },
+        {
+          "end_line": 197,
+          "replacement_lines": 3,
+          "start_line": 195
+        },
+        {
+          "end_line": 220,
+          "replacement_lines": 9,
+          "start_line": 216
+        },
+        {
+          "end_line": 236,
+          "replacement_lines": 4,
+          "start_line": 229
+        }
+      ],
+      "current_file_lines": 270,
+      "updated_excerpt": {
+        "content": "1: import asyncio\n2: import logging\n3: from typing import Coroutine, List, Optional, Union, cast\n4: from uuid import UUID\n5: \n6: import async_timeout\n7: import httpx\n8: from fastapi import APIRouter, Depends, Header\n9: from fastapi.responses import RedirectResponse\n10: from models_library.projects import ProjectID\n11: from models_library.projects_nodes import NodeID\n12: from models_library.service_settings_labels import SimcoreServiceLabels\n13: from models_library.services import ServiceKeyVersion\n14: from starlette import status\n15: from starlette.datastructures import URL\n16: \n17: from ...core.settings import DynamicServicesSettings, DynamicSidecarSettings\n18: from ...models.domains.dynamic_services import (\n19:     DynamicServiceCreate,\n20:     DynamicServiceOut,\n21:     RetrieveDataIn,\n22:     RetrieveDataOutEnveloped,\n23: )\n24: from ...models.schemas.constants import UserID\n25: from ...models.schemas.dynamic_services import SchedulerData\n26: from ...modules.dynamic_sidecar.docker_api import (\n27:     is_dynamic_service_running,\n28:     list_dynamic_sidecar_services,\n29: )\n30: from ...modules.dynamic_sidecar.errors import (\n31:     DynamicSidecarNotFoundError,\n32:     LegacyServiceIsNotSupportedError,\n33: )\n34: from ...modules.dynamic_sidecar.scheduler import DynamicSidecarsScheduler\n35: from ...utils.logging_utils import log_decorator\n36: from ...utils.routes import NoContentResponse\n37: from ..dependencies.director_v0 import DirectorV0Client, get_director_v0_client\n38: from ..dependencies.dynamic_services import (",
+        "end_line": 38,
+        "path_lines": 270,
+        "start_line": 1
+      }
+    },
+    "usage": {
+      "input_tokens": 3526,
+      "input_tokens_details": {
+        "cached_tokens": 2816
+      },
+      "output_tokens": 2829,
+      "output_tokens_details": {
+        "reasoning_tokens": 2101
+      },
+      "total_tokens": 6355
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 255,
+      "path": "services/director-v2/src/simcore_service_director_v2/api/routes/dynamic_services.py",
+      "start_line": 160
+    },
+    "response_chars": 142,
+    "round": 3,
+    "tool_result": {
+      "content": "160:         redirection_url = director_v0_client.client.base_url.copy_with(\n161:             path=f\"/v0/running_interactive_services/{node_uuid}\",\n162:         )\n163: \n164:         return RedirectResponse(str(redirection_url))\n165: \n166: \n167: @router.delete(\n168:     \"/{node_uuid}\",\n169:     responses={204: {\"model\": None}},\n170:     summary=\"stops previously spawned dynamic-sidecar\",\n171: )\n172: async def stop_dynamic_service(\n173:     node_uuid: NodeID,\n174:     can_save: Optional[bool] = True,\n175:     director_v0_client: DirectorV0Client = Depends(get_director_v0_client),\n176:     dynamic_services_settings: DynamicServicesSettings = Depends(\n177:         get_dynamic_services_settings\n178:     ),\n179:     scheduler: DynamicSidecarsScheduler = Depends(get_scheduler),\n180: ) -> Union[NoContentResponse, RedirectResponse]:\n181:     try:\n182:         await scheduler.mark_service_for_removal(node_uuid, can_save)\n183:     except DynamicSidecarNotFoundError:\n184:         # legacy service? if it's not then a 404 will anyway be received\n185:         # forward to director-v0\n186:         redirection_url = director_v0_client.client.base_url.copy_with(\n187:             path=f\"/v0/running_interactive_services/{node_uuid}\",\n188:             params={\"can_save\": bool(can_save)},\n189:         )\n190: \n191:         return RedirectResponse(str(redirection_url))\n192: \n193:     # Serice was marked for removal, the scheduler will\n194:     # take care of stopping cleaning up all allocated resources:\n195:     # services, containsers, volumes and networks.\n196:     # Once the service is no longer being tracked this can return\n197:     dynamic_sidecar_settings: DynamicSidecarSettings = (\n198:         dynamic_services_settings.DYNAMIC_SIDECAR\n199:     )\n200:     _STOPPED_CHECK_INTERVAL = 1.0\n201:     async with async_timeout.timeout(\n202:         dynamic_sidecar_settings.DYNAMIC_SIDECAR_WAIT_FOR_SERVICE_TO_STOP\n203:     ):\n204:         while scheduler.is_service_tracked(node_uuid):\n205:             await asyncio.sleep(_STOPPED_CHECK_INTERVAL)\n206: \n207:     return NoContentResponse()\n208: \n209: \n210: @router.post(\n211:     \"/{node_uuid}:retrieve\",\n212:     summary=\"Calls the dynamic service's retrieve endpoint with optional port_keys\",\n213:     response_model=RetrieveDataOutEnveloped,\n214:     status_code=status.HTTP_200_OK,\n215: )\n216: @log_decorator(logger=logger)\n217: async def service_retrieve_data_on_ports(\n218:     node_uuid: NodeID,\n219:     retrieve_settings: RetrieveDataIn,\n220:     scheduler: DynamicSidecarsScheduler = Depends(get_scheduler),\n221:     service_base_url: URL = Depends(get_service_base_url),\n222:     services_client: ServicesClient = Depends(get_services_client),\n223:     dynamic_services_settings: DynamicServicesSettings = Depends(\n224:         get_dynamic_services_settings\n225:     ),\n226: ) -> RetrieveDataOutEnveloped:\n227:     try:\n228:         return await scheduler.retrieve_service_inputs(\n229:             node_uuid, retrieve_settings.port_keys\n230:         )\n231:     except DynamicSidecarNotFoundError:\n232:         # in case of legacy service, no redirect will be used\n233:         # makes request to director-v0 and sends back reply\n234: \n235: \n236:         dynamic_sidecar_settings: DynamicSidecarSettings = (\n237:             dynamic_services_settings.DYNAMIC_SIDECAR\n238:         )\n239:         timeout = httpx.Timeout(\n240:             dynamic_sidecar_settings.DYNAMIC_SIDECAR_API_SAVE_RESTORE_STATE_TIMEOUT,\n241:             connect=dynamic_sidecar_settings.DYNAMIC_SIDECAR_API_CONNECT_TIMEOUT,\n242:         )\n243: \n244:         # this call waits for the service to download data\n245:         response = await services_client.request(\n246:             \"POST\",\n247:             f\"{service_base_url}/retrieve\",\n248:             data=retrieve_settings.json(by_alias=True),\n249:             timeout=timeout,\n250:         )\n251: \n252:         # validate and return\n253:         return RetrieveDataOutEnveloped.parse_obj(response.json())\n254: \n255: ",
+      "end_line": 255,
+      "path_lines": 270,
+      "start_line": 160
+    },
+    "usage": {
+      "input_tokens": 4406,
+      "input_tokens_details": {
+        "cached_tokens": 3328
+      },
+      "output_tokens": 70,
+      "output_tokens_details": {
+        "reasoning_tokens": 26
+      },
+      "total_tokens": 4476
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "    director_v0_client: DirectorV0Client = Depends(get_director_v0_client),\n    scheduler: DynamicSidecarsScheduler = Depends(get_scheduler),\n    services_client: ServicesClient = Depends(get_services_client),\n    dynamic_services_settings: DynamicServicesSettings = Depends(\n        get_dynamic_services_settings\n    ),",
+          "end_line": 225,
+          "start_line": 220
+        },
+        {
+          "content": "\n        service_base_url: URL = await get_service_base_url(\n            node_uuid, director_v0_client\n        )\n        dynamic_sidecar_settings: DynamicSidecarSettings = (\n            dynamic_services_settings.DYNAMIC_SIDECAR\n        )",
+          "end_line": 238,
+          "start_line": 234
+        }
+      ]
+    },
+    "response_chars": 1520,
+    "round": 4,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 225,
+          "replacement_lines": 6,
+          "start_line": 220
+        },
+        {
+          "end_line": 238,
+          "replacement_lines": 7,
+          "start_line": 234
+        }
+      ],
+      "current_file_lines": 272,
+      "updated_excerpt": {
+        "content": "210: @router.post(\n211:     \"/{node_uuid}:retrieve\",\n212:     summary=\"Calls the dynamic service's retrieve endpoint with optional port_keys\",\n213:     response_model=RetrieveDataOutEnveloped,\n214:     status_code=status.HTTP_200_OK,\n215: )\n216: @log_decorator(logger=logger)\n217: async def service_retrieve_data_on_ports(\n218:     node_uuid: NodeID,\n219:     retrieve_settings: RetrieveDataIn,\n220:     director_v0_client: DirectorV0Client = Depends(get_director_v0_client),\n221:     scheduler: DynamicSidecarsScheduler = Depends(get_scheduler),\n222:     services_client: ServicesClient = Depends(get_services_client),\n223:     dynamic_services_settings: DynamicServicesSettings = Depends(\n224:         get_dynamic_services_settings\n225:     ),\n226: ) -> RetrieveDataOutEnveloped:\n227:     try:\n228:         return await scheduler.retrieve_service_inputs(\n229:             node_uuid, retrieve_settings.port_keys\n230:         )\n231:     except DynamicSidecarNotFoundError:\n232:         # in case of legacy service, no redirect will be used\n233:         # makes request to director-v0 and sends back reply\n234: \n235:         service_base_url: URL = await get_service_base_url(\n236:             node_uuid, director_v0_client\n237:         )\n238:         dynamic_sidecar_settings: DynamicSidecarSettings = (\n239:             dynamic_services_settings.DYNAMIC_SIDECAR\n240:         )\n241:         timeout = httpx.Timeout(\n242:             dynamic_sidecar_settings.DYNAMIC_SIDECAR_API_SAVE_RESTORE_STATE_TIMEOUT,\n243:             connect=dynamic_sidecar_settings.DYNAMIC_SIDECAR_API_CONNECT_TIMEOUT,\n244:         )\n245: \n246:         # this call waits for the service to download data\n247:         response = await services_client.request(\n248:             \"POST\",\n249:             f\"{service_base_url}/retrieve\",\n250:             data=retrieve_settings.json(by_alias=True),",
+        "end_line": 250,
+        "path_lines": 272,
+        "start_line": 210
+      }
+    },
+    "usage": {
+      "input_tokens": 5545,
+      "input_tokens_details": {
+        "cached_tokens": 3840
+      },
+      "output_tokens": 1173,
+      "output_tokens_details": {
+        "reasoning_tokens": 795
+      },
+      "total_tokens": 6718
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "services/director-v2/src/simcore_service_director_v2/api/routes/dynamic_services.py",
+      "query": "request"
+    },
+    "response_chars": 289,
+    "round": 5,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 96,
+          "text": "    x_dynamic_sidecar_request_dns: str = Header(...),"
+        },
+        {
+          "line": 97,
+          "text": "    x_dynamic_sidecar_request_scheme: str = Header(...),"
+        },
+        {
+          "line": 132,
+          "text": "        scheduler_data = SchedulerData.from_http_request("
+        },
+        {
+          "line": 136,
+          "text": "            request_dns=x_dynamic_sidecar_request_dns,"
+        },
+        {
+          "line": 137,
+          "text": "            request_scheme=x_dynamic_sidecar_request_scheme,"
+        },
+        {
+          "line": 233,
+          "text": "        # makes request to director-v0 and sends back reply"
+        },
+        {
+          "line": 247,
+          "text": "        response = await services_client.request("
+        }
+      ],
+      "query": "request",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 6281,
+      "input_tokens_details": {
+        "cached_tokens": 5376
+      },
+      "output_tokens": 811,
+      "output_tokens_details": {
+        "reasoning_tokens": 716
+      },
+      "total_tokens": 7092
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 60,
+      "path": "services/director-v2/src/simcore_service_director_v2/api/routes/dynamic_services.py",
+      "start_line": 38
+    },
+    "response_chars": 422,
+    "round": 6,
+    "tool_result": {
+      "content": "38: from ..dependencies.dynamic_services import (\n39:     ServicesClient,\n40:     get_dynamic_services_settings,\n41:     get_scheduler,\n42:     get_service_base_url,\n43:     get_services_client,\n44: )\n45: \n46: router = APIRouter()\n47: logger = logging.getLogger(__name__)\n48: \n49: \n50: @router.get(\n51:     \"\",\n52:     status_code=status.HTTP_200_OK,\n53:     response_model=List[DynamicServiceOut],\n54:     response_model_exclude_unset=True,\n55:     summary=(\n56:         \"returns a list of running interactive services filtered by user_id and/or project_id\"\n57:         \"both legacy (director-v0) and modern (director-v2)\"\n58:     ),\n59: )\n60: async def list_running_dynamic_services(",
+      "end_line": 60,
+      "path_lines": 272,
+      "start_line": 38
+    },
+    "usage": {
+      "input_tokens": 6494,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 1284,
+      "output_tokens_details": {
+        "reasoning_tokens": 1150
+      },
+      "total_tokens": 7778
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 272,
+      "path": "services/director-v2/src/simcore_service_director_v2/api/routes/dynamic_services.py",
+      "start_line": 1
+    },
+    "response_chars": 281,
+    "round": 7,
+    "tool_result": {
+      "content": "1: import asyncio\n2: import logging\n3: from typing import Coroutine, List, Optional, Union, cast\n4: from uuid import UUID\n5: \n6: import async_timeout\n7: import httpx\n8: from fastapi import APIRouter, Depends, Header\n9: from fastapi.responses import RedirectResponse\n10: from models_library.projects import ProjectID\n11: from models_library.projects_nodes import NodeID\n12: from models_library.service_settings_labels import SimcoreServiceLabels\n13: from models_library.services import ServiceKeyVersion\n14: from starlette import status\n15: from starlette.datastructures import URL\n16: \n17: from ...core.settings import DynamicServicesSettings, DynamicSidecarSettings\n18: from ...models.domains.dynamic_services import (\n19:     DynamicServiceCreate,\n20:     DynamicServiceOut,\n21:     RetrieveDataIn,\n22:     RetrieveDataOutEnveloped,\n23: )\n24: from ...models.schemas.constants import UserID\n25: from ...models.schemas.dynamic_services import SchedulerData\n26: from ...modules.dynamic_sidecar.docker_api import (\n27:     is_dynamic_service_running,\n28:     list_dynamic_sidecar_services,\n29: )\n30: from ...modules.dynamic_sidecar.errors import (\n31:     DynamicSidecarNotFoundError,\n32:     LegacyServiceIsNotSupportedError,\n33: )\n34: from ...modules.dynamic_sidecar.scheduler import DynamicSidecarsScheduler\n35: from ...utils.logging_utils import log_decorator\n36: from ...utils.routes import NoContentResponse\n37: from ..dependencies.director_v0 import DirectorV0Client, get_director_v0_client\n38: from ..dependencies.dynamic_services import (\n39:     ServicesClient,\n40:     get_dynamic_services_settings,\n41:     get_scheduler,\n42:     get_service_base_url,\n43:     get_services_client,\n44: )\n45: \n46: router = APIRouter()\n47: logger = logging.getLogger(__name__)\n48: \n49: \n50: @router.get(\n51:     \"\",\n52:     status_code=status.HTTP_200_OK,\n53:     response_model=List[DynamicServiceOut],\n54:     response_model_exclude_unset=True,\n55:     summary=(\n56:         \"returns a list of running interactive services filtered by user_id and/or project_id\"\n57:         \"both legacy (director-v0) and modern (director-v2)\"\n58:     ),\n59: )\n60: async def list_running_dynamic_services(\n61:     user_id: Optional[UserID] = None,\n62:     project_id: Optional[ProjectID] = None,\n63:     director_v0_client: DirectorV0Client = Depends(get_director_v0_client),\n64:     dynamic_services_settings: DynamicServicesSettings = Depends(\n65:         get_dynamic_services_settings\n66:     ),\n67:     scheduler: DynamicSidecarsScheduler = Depends(get_scheduler),\n68: ) -> List[DynamicServiceOut]:\n69:     legacy_running_services: List[DynamicServiceOut] = cast(\n70:         List[DynamicServiceOut],\n71:         await director_v0_client.get_running_services(user_id, project_id),\n72:     )\n73: \n74:     get_stack_statuse_tasks: List[Coroutine] = [\n75:         scheduler.get_stack_status(UUID(service[\"Spec\"][\"Labels\"][\"uuid\"]))\n76:         for service in await list_dynamic_sidecar_services(\n77:             dynamic_services_settings.DYNAMIC_SIDECAR, user_id, project_id\n78:         )\n79:     ]\n80:     dynamic_sidecar_running_services: List[DynamicServiceOut] = cast(\n81:         List[DynamicServiceOut], await asyncio.gather(*get_stack_statuse_tasks)\n82:     )\n83: \n84:     return legacy_running_services + dynamic_sidecar_running_services\n85: \n86: \n87: @router.post(\n88:     \"\",\n89:     summary=\"creates & starts the dynamic service\",\n90:     status_code=status.HTTP_201_CREATED,\n91:     response_model=DynamicServiceOut,\n92: )\n93: @log_decorator(logger=logger)\n94: async def create_dynamic_service(\n95:     service: DynamicServiceCreate,\n96:     x_dynamic_sidecar_request_dns: str = Header(...),\n97:     x_dynamic_sidecar_request_scheme: str = Header(...),\n98:     director_v0_client: DirectorV0Client = Depends(get_director_v0_client),\n99:     dynamic_services_settings: DynamicServicesSettings = Depends(\n100:         get_dynamic_services_settings\n101:     ),\n102:     scheduler: DynamicSidecarsScheduler = Depends(get_scheduler),\n103: ) -> Union[DynamicServiceOut, RedirectResponse]:\n104: \n105:     simcore_service_labels: SimcoreServiceLabels = (\n106:         await director_v0_client.get_service_labels(\n107:             service=ServiceKeyVersion(key=service.key, version=service.version)\n108:         )\n109:     )\n110: \n111:     # LEGACY (backwards compatibility)\n112:     if not simcore_service_labels.needs_dynamic_sidecar:\n113:         # forward to director-v0\n114:         redirect_url_with_query = director_v0_client.client.base_url.copy_with(\n115:             path=\"/v0/running_interactive_services\",\n116:             params={\n117:                 \"user_id\": f\"{service.user_id}\",\n118:                 \"project_id\": f\"{service.project_id}\",\n119:                 \"service_uuid\": f\"{service.node_uuid}\",\n120:                 \"service_key\": f\"{service.key}\",\n121:                 \"service_tag\": f\"{service.version}\",\n122:                 \"service_basepath\": f\"{service.basepath}\",\n123:             },\n124:         )\n125:         logger.debug(\"Redirecting %s\", redirect_url_with_query)\n126:         return RedirectResponse(str(redirect_url_with_query))\n127: \n128:     #\n129:     if not await is_dynamic_service_running(\n130:         service.node_uuid, dynamic_services_settings.DYNAMIC_SIDECAR\n131:     ):\n132:         scheduler_data = SchedulerData.from_http_request(\n133:             service=service,\n134:             simcore_service_labels=simcore_service_labels,\n135:             port=dynamic_services_settings.DYNAMIC_SIDECAR.DYNAMIC_SIDECAR_PORT,\n136:             request_dns=x_dynamic_sidecar_request_dns,\n137:             request_scheme=x_dynamic_sidecar_request_scheme,\n138:         )\n139:         await scheduler.add_service(scheduler_data)\n140: \n141:     return cast(DynamicServiceOut, await scheduler.get_stack_status(service.node_uuid))\n142: \n143: \n144: @router.get(\n145:     \"/{node_uuid}\",\n146:     summary=\"assembles the status for the dynamic-sidecar\",\n147:     response_model=DynamicServiceOut,\n148: )\n149: async def get_dynamic_sidecar_status(\n150:     node_uuid: NodeID,\n151:     director_v0_client: DirectorV0Client = Depends(get_director_v0_client),\n152:     scheduler: DynamicSidecarsScheduler = Depends(get_scheduler),\n153: ) -> Union[DynamicServiceOut, RedirectResponse]:\n154: \n155:     try:\n156:         return cast(DynamicServiceOut, await scheduler.get_stack_status(node_uuid))\n157:     except DynamicSidecarNotFoundError:\n158:         # legacy service? if it's not then a 404 will anyway be received\n159:         # forward to director-v0\n160:         redirection_url = director_v0_client.client.base_url.copy_with(\n161:             path=f\"/v0/running_interactive_services/{node_uuid}\",\n162:         )\n163: \n164:         return RedirectResponse(str(redirection_url))\n165: \n166: \n167: @router.delete(\n168:     \"/{node_uuid}\",\n169:     responses={204: {\"model\": None}},\n170:     summary=\"stops previously spawned dynamic-sidecar\",\n171: )\n172: async def stop_dynamic_service(\n173:     node_uuid: NodeID,\n174:     can_save: Optional[bool] = True,\n175:     director_v0_client: DirectorV0Client = Depends(get_director_v0_client),\n176:     dynamic_services_settings: DynamicServicesSettings = Depends(\n177:         get_dynamic_services_settings\n178:     ),\n179:     scheduler: DynamicSidecarsScheduler = Depends(get_scheduler),\n180: ) -> Union[NoContentResponse, RedirectResponse]:\n181:     try:\n182:         await scheduler.mark_service_for_removal(node_uuid, can_save)\n183:     except DynamicSidecarNotFoundError:\n184:         # legacy service? if it's not then a 404 will anyway be received\n185:         # forward to director-v0\n186:         redirection_url = director_v0_client.client.base_url.copy_with(\n187:             path=f\"/v0/running_interactive_services/{node_uuid}\",\n188:             params={\"can_save\": bool(can_save)},\n189:         )\n190: \n191:         return RedirectResponse(str(redirection_url))\n192: \n193:     # Serice was marked for removal, the scheduler will\n194:     # take care of stopping cleaning up all allocated resources:\n195:     # services, containsers, volumes and networks.\n196:     # Once the service is no longer being tracked this can return\n197:     dynamic_sidecar_settings: DynamicSidecarSettings = (\n198:         dynamic_services_settings.DYNAMIC_SIDECAR\n199:     )\n200:     _STOPPED_CHECK_INTERVAL = 1.0\n201:     async with async_timeout.timeout(\n202:         dynamic_sidecar_settings.DYNAMIC_SIDECAR_WAIT_FOR_SERVICE_TO_STOP\n203:     ):\n204:         while scheduler.is_service_tracked(node_uuid):\n205:             await asyncio.sleep(_STOPPED_CHECK_INTERVAL)\n206: \n207:     return NoContentResponse()\n208: \n209: \n210: @router.post(\n211:     \"/{node_uuid}:retrieve\",\n212:     summary=\"Calls the dynamic service's retrieve endpoint with optional port_keys\",\n213:     response_model=RetrieveDataOutEnveloped,\n214:     status_code=status.HTTP_200_OK,\n215: )\n216: @log_decorator(logger=logger)\n217: async def service_retrieve_data_on_ports(\n218:     node_uuid: NodeID,\n219:     retrieve_settings: RetrieveDataIn,\n220:     director_v0_client: DirectorV0Client = Depends(get_director_v0_client),\n221:     scheduler: DynamicSidecarsScheduler = Depends(get_scheduler),\n222:     services_client: ServicesClient = Depends(get_services_client),\n223:     dynamic_services_settings: DynamicServicesSettings = Depends(\n224:         get_dynamic_services_settings\n225:     ),\n226: ) -> RetrieveDataOutEnveloped:\n227:     try:\n228:         return await scheduler.retrieve_service_inputs(\n229:             node_uuid, retrieve_settings.port_keys\n230:         )\n231:     except DynamicSidecarNotFoundError:\n232:         # in case of legacy service, no redirect will be used\n233:         # makes request to director-v0 and sends back reply\n234: \n235:         service_base_url: URL = await get_service_base_url(\n236:             node_uuid, director_v0_client\n237:         )\n238:         dynamic_sidecar_settings: DynamicSidecarSettings = (\n239:             dynamic_services_settings.DYNAMIC_SIDECAR\n240:         )\n241:         timeout = httpx.Timeout(\n242:             dynamic_sidecar_settings.DYNAMIC_SIDECAR_API_SAVE_RESTORE_STATE_TIMEOUT,\n243:             connect=dynamic_sidecar_settings.DYNAMIC_SIDECAR_API_CONNECT_TIMEOUT,\n244:         )\n245: \n246:         # this call waits for the service to download data\n247:         response = await services_client.request(\n248:             \"POST\",\n249:             f\"{service_base_url}/retrieve\",\n250:             data=retrieve_settings.json(by_alias=True),\n251:             timeout=timeout,\n252:         )\n253: \n254:         # validate and return\n255:         return RetrieveDataOutEnveloped.parse_obj(response.json())\n256: \n257: \n258: @router.post(\n259:     \"/{node_uuid}:restart\",\n260:     summary=\"Calls the dynamic service's restart containers endpoint\",\n261:     status_code=status.HTTP_204_NO_CONTENT,\n262: )\n263: @log_decorator(logger=logger)\n264: async def service_restart_containers(\n265:     node_uuid: NodeID, scheduler: DynamicSidecarsScheduler = Depends(get_scheduler)\n266: ) -> NoContentResponse:\n267:     try:\n268:         await scheduler.restart_containers(node_uuid)\n269:     except DynamicSidecarNotFoundError as error:\n270:         raise LegacyServiceIsNotSupportedError() from error\n271: \n272:     return NoContentResponse()",
+      "end_line": 272,
+      "path_lines": 272,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 6779,
+      "input_tokens_details": {
+        "cached_tokens": 5888
+      },
+      "output_tokens": 562,
+      "output_tokens_details": {
+        "reasoning_tokens": 473
+      },
+      "total_tokens": 7341
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 8,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__ITISFoundation__osparc-simcore__pull_2879__comment_823570794__testability.patch"
+    },
+    "usage": {
+      "input_tokens": 9883,
+      "input_tokens_details": {
+        "cached_tokens": 6400
+      },
+      "output_tokens": 893,
+      "output_tokens_details": {
+        "reasoning_tokens": 882
+      },
+      "total_tokens": 10776
+    }
+  }
+]

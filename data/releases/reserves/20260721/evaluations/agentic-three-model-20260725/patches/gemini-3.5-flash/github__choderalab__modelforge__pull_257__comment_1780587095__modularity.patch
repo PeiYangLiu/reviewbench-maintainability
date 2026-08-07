@@ -1,0 +1,89 @@
+diff --git a/modelforge/potential/neighbors.py b/modelforge/potential/neighbors.py
+index fb11f20..bd74413 100644
+--- a/modelforge/potential/neighbors.py
++++ b/modelforge/potential/neighbors.py
+@@ -1,9 +1,42 @@
+ import torch
++from typing import Tuple
+ from loguru import logger as log
+ from modelforge.potential.models import PairlistData
+ from modelforge.dataset.dataset import NNPInputTuple
+ 
+ 
++def generate_indices(
++    n: int,
++    device: torch.device,
++    only_unique_pairs: bool = False,
++) -> Tuple[torch.Tensor, torch.Tensor]:
++    """
++    Generate pairs of indices using a meshgrid.
++
++    Parameters
++    ----------
++    n : int
++        Number of particles.
++    device : torch.device
++        Device on which to allocate tensors.
++    only_unique_pairs : bool, optional
++        If True, only unique pairs (i < j) are returned.
++        If False, non-unique pairs excluding the diagonal (i != j) are returned.
++        By default False.
++
++    Returns
++    -------
++    Tuple[torch.Tensor, torch.Tensor]
++        A tuple containing the indices of the first and second atoms in each pair.
++    """
++    indices = torch.arange(n, device=device)
++    grid_x, grid_y = torch.meshgrid(indices, indices, indexing="ij")
++    if only_unique_pairs:
++        mask = grid_x < grid_y
++    else:
++        mask = grid_x != grid_y
++    return grid_x[mask], grid_y[mask]
++
+ class OrthogonalDisplacementFunction(torch.nn.Module):
+     def __init__(self, periodic: bool):
+         """
+@@ -133,18 +166,11 @@ class NeighborlistBruteNsq(torch.nn.Module):
+         if self.indices.shape[0] != n:
+             # Generate a range of indices from 0 to n-1
+             self.indices = torch.arange(n, device=atomic_subsystem_indices.device)
+-
+-            # Create a meshgrid of indices
+-            self.i_final_pairs, self.j_final_pairs = torch.meshgrid(
+-                self.indices, self.indices, indexing="ij"
+-            )
+             # We will only consider unique pairs; for non-unique pairs we can just appropriately copy
+             # the data as it will be faster than extra computations.
+-            mask = self.i_final_pairs < self.j_final_pairs
+-
+-            self.i_final_pairs = self.i_final_pairs[mask]
+-            self.j_final_pairs = self.j_final_pairs[mask]
+-
++            self.i_final_pairs, self.j_final_pairs = generate_indices(
++                n, device=atomic_subsystem_indices.device, only_unique_pairs=True
++            )
+         # calculate r_ij and d_ij
+         r_ij, d_ij = self.displacement_function(
+             positions[self.i_final_pairs],
+@@ -282,17 +308,9 @@ class NeighborlistVerletNsq(torch.nn.Module):
+ 
+     def _init_pairs(self, n_particles: int, device: torch.device):
+         self.indices = torch.arange(n_particles, device=device)
+-
+-        self.i_pairs, self.j_pairs = torch.meshgrid(
+-            self.indices,
+-            self.indices,
+-            indexing="ij",
++        self.i_pairs, self.j_pairs = generate_indices(
++            n_particles, device=device, only_unique_pairs=True
+         )
+-
+-        mask = self.i_pairs < self.j_pairs
+-        self.i_pairs = self.i_pairs[mask]
+-        self.j_pairs = self.j_pairs[mask]
+-
+     def _build_nlist(self, positions: torch.Tensor, box_vectors: torch.Tensor):
+         r_ij, d_ij = self.displacement_function(
+             positions[self.i_pairs], positions[self.j_pairs], box_vectors

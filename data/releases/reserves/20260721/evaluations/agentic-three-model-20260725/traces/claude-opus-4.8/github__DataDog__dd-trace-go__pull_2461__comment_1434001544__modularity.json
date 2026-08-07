@@ -1,0 +1,97 @@
+[
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "// combineRCRulesUpdates updates the state of the given rulesManager with the combination of all the provided rules updates\nfunc combineRCRulesUpdates(r *rulesManager, updates map[string]remoteconfig.ProductUpdate) (statuses map[string]rc.ApplyStatus, err error) {",
+          "end_line": 51,
+          "start_line": 50
+        }
+      ]
+    },
+    "response_chars": 488,
+    "round": 1,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 51,
+          "replacement_lines": 2,
+          "start_line": 50
+        }
+      ],
+      "current_file_lines": 388,
+      "updated_excerpt": {
+        "content": "40: \treturn statuses\n41: }\n42: \n43: func mergeMaps[K comparable, V any](m1 map[K]V, m2 map[K]V) map[K]V {\n44: \tfor key, value := range m2 {\n45: \t\tm1[key] = value\n46: \t}\n47: \treturn m1\n48: }\n49: \n50: // combineRCRulesUpdates updates the state of the given rulesManager with the combination of all the provided rules updates\n51: func combineRCRulesUpdates(r *rulesManager, updates map[string]remoteconfig.ProductUpdate) (statuses map[string]rc.ApplyStatus, err error) {\n52: \tstatuses = make(map[string]rc.ApplyStatus, len(updates))\n53: \t// Set the default statuses for all updates to unacknowledged\n54: \tfor _, u := range updates {\n55: \t\tstatuses = mergeMaps(statuses, statusesFromUpdate(u, false, nil))\n56: \t}\n57: \n58: updateLoop:\n59: \t// Process rules related updates\n60: \tfor p, u := range updates {\n61: \t\tif u != nil && len(u) == 0 {\n62: \t\t\tcontinue\n63: \t\t}\n64: \t\tswitch p {\n65: \t\tcase rc.ProductASMData:\n66: \t\t\t// Merge all rules data entries together and store them as a rulesManager edit entry\n67: \t\t\trulesData, status := mergeRulesData(u)\n68: \t\t\tstatuses = mergeMaps(statuses, status)\n69: \t\t\tr.addEdit(\"asmdata\", rulesFragment{RulesData: rulesData})\n70: \t\tcase rc.ProductASMDD:\n71: \t\t\t// Switch the base rules of the rulesManager if the config received through ASM_DD is valid\n72: \t\t\t// If the config was removed, switch back to the static recommended rules\n73: \t\t\tif len(u) > 1 { // Don't process configs if more than one is received for ASM_DD\n74: \t\t\t\tlog.Debug(\"appsec: Remote config: more than one config received for ASM_DD. Updates won't be applied\")\n75: \t\t\t\terr = errors.New(\"more than one config received for ASM_DD\")\n76: \t\t\t\tstatuses = mergeMaps(statuses, statusesFromUpdate(u, true, err))\n77: \t\t\t\tbreak updateLoop\n78: \t\t\t}\n79: \t\t\tfor path, data := range u {\n80: \t\t\t\tif data == nil {",
+        "end_line": 80,
+        "path_lines": 388,
+        "start_line": 40
+      }
+    },
+    "usage": {
+      "completion_tokens": 529,
+      "prompt_tokens": 7524,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 8053
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\tstatuses, err := combineRCRulesUpdates(r, updates)",
+          "end_line": 148,
+          "start_line": 148
+        }
+      ]
+    },
+    "response_chars": 126,
+    "round": 2,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 148,
+          "replacement_lines": 1,
+          "start_line": 148
+        }
+      ],
+      "current_file_lines": 388,
+      "updated_excerpt": {
+        "content": "138: \n139: // onRCRulesUpdate is the RC callback called when security rules related RC updates are available\n140: func (a *appsec) onRCRulesUpdate(updates map[string]remoteconfig.ProductUpdate) map[string]rc.ApplyStatus {\n141: \t// If appsec was deactivated through RC, stop here\n142: \tif !a.started {\n143: \t\treturn map[string]rc.ApplyStatus{}\n144: \t}\n145: \n146: \t// Create a new local rulesManager\n147: \tr := a.cfg.rulesManager.clone()\n148: \tstatuses, err := combineRCRulesUpdates(r, updates)\n149: \tif err != nil {\n150: \t\tlog.Debug(\"appsec: Remote config: not applying any updates because of error: %v\", err)\n151: \t\treturn statuses\n152: \t}\n153: \n154: \t// Compile the final rules once all updates have been processed and no error occurred\n155: \tr.compile()\n156: \tlog.Debug(\"appsec: Remote config: final compiled rules: %s\", r)\n157: \n158: \t// If an error occurs while updating the WAF handle, don't swap the rulesManager and propagate the error\n159: \t// to all config statuses since we can't know which config is the faulty one\n160: \tif err = a.swapWAF(r.latest); err != nil {\n161: \t\tlog.Error(\"appsec: Remote config: could not apply the new security rules: %v\", err)\n162: \t\tfor k := range statuses {\n163: \t\t\tstatuses[k] = genApplyStatus(true, err)\n164: \t\t}\n165: \t\treturn statuses\n166: \t}\n167: \t// Replace the rulesManager with the new one holding the new state\n168: \ta.cfg.rulesManager = r\n169: \n170: \treturn statuses\n171: }\n172: \n173: // handleASMFeatures deserializes an ASM_FEATURES configuration received through remote config\n174: // and starts/stops appsec accordingly.\n175: func (a *appsec) handleASMFeatures(u remoteconfig.ProductUpdate) map[string]rc.ApplyStatus {\n176: \tstatuses := statusesFromUpdate(u, false, nil)\n177: \tif l := len(u); l > 1 {\n178: \t\tlog.Error(\"appsec: Remote config: %d configs received for ASM_FEATURES. Expected one at most, returning early\", l)",
+        "end_line": 178,
+        "path_lines": 388,
+        "start_line": 138
+      }
+    },
+    "usage": {
+      "completion_tokens": 89,
+      "prompt_tokens": 8721,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 8810
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 3,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/claude-opus-4.8/patches/github__DataDog__dd-trace-go__pull_2461__comment_1434001544__modularity.patch"
+    },
+    "usage": {
+      "completion_tokens": 11,
+      "prompt_tokens": 9767,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 9778
+    }
+  }
+]

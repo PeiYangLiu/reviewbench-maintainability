@@ -1,0 +1,62 @@
+--- a/pkg/receive/multitsdb.go
++++ b/pkg/receive/multitsdb.go
+@@ -548,21 +548,10 @@
+ 	// Extract tenant's external labels from hashring configs.
+ 	// If one tenant appears in multiple hashring configs,
+ 	// only the external label set from the first hashring config is applied.
+-hcLoop:
+-	for _, hc := range t.hashringConfigs {
+-		for _, tenant := range hc.Tenants {
+-			if tenant != tenantID {
+-				continue
+-			}
+-
+-			var err error
+-			lset, err = parseAndExtendSortedLabels(lset, hc.ExternalLabels, t.logger)
+-			if err != nil {
+-				return errors.Wrap(err, "failed to parse external labels for tenant "+tenantID)
+-			}
+-
+-			break hcLoop
+-		}
++	var err error
++	lset, err = t.extLabelsForTenant(tenantID, lset)
++	if err != nil {
++		return err
+ 	}
+ 
+ 	dataDir := t.defaultTenantDataDir(tenantID)
+@@ -601,6 +590,21 @@
+ 	return nil
+ }
+ 
++func (t *MultiTSDB) extLabelsForTenant(tenantID string, initialLabels labels.Labels) (labels.Labels, error) {
++	for _, hc := range t.hashringConfigs {
++		for _, tenant := range hc.Tenants {
++			if tenant == tenantID {
++				lset, err := parseAndExtendSortedLabels(initialLabels, hc.ExternalLabels, t.logger)
++				if err != nil {
++					return nil, errors.Wrap(err, "failed to parse external labels for tenant "+tenantID)
++				}
++				return lset, nil
++			}
++		}
++	}
++	return initialLabels, nil
++}
++
+ func (t *MultiTSDB) defaultTenantDataDir(tenantID string) string {
+ 	return path.Join(t.dataDir, tenantID)
+ }
+@@ -667,9 +671,9 @@
+ 
+ 				lset := labelpb.ExtendSortedLabels(t.labels, labels.FromStrings(t.tenantLabelName, tenantId))
+ 				var err error
+-				lset, err = parseAndExtendSortedLabels(lset, hc.ExternalLabels, t.logger)
++				lset, err = t.extLabelsForTenant(tenantId, lset)
+ 				if err != nil {
+-					return errors.Wrap(err, "failed to parse external labels for tenant "+tenantId)
++					return err
+ 				}
+ 
+ 				if t.tenants[tenantId].ship != nil {

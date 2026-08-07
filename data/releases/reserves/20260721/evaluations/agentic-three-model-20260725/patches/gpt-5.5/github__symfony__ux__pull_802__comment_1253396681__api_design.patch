@@ -1,0 +1,72 @@
+diff --git a/src/TwigComponent/src/ComponentFactory.php b/src/TwigComponent/src/ComponentFactory.php
+index 2f97212..1f4b868 100644
+--- a/src/TwigComponent/src/ComponentFactory.php
++++ b/src/TwigComponent/src/ComponentFactory.php
+@@ -26,18 +26,21 @@ use Twig\Environment;
+  */
+ final class ComponentFactory
+ {
++    private ComponentTemplateFinderInterface $templateFinder;
++
+     /**
+      * @param array<string, array>        $config
+      * @param array<class-string, string> $classMap
+      */
+     public function __construct(
+-        private Environment $environment,
++        Environment|ComponentTemplateFinderInterface $templateFinder,
+         private ServiceLocator $components,
+         private PropertyAccessorInterface $propertyAccessor,
+         private EventDispatcherInterface $eventDispatcher,
+         private array $config,
+         private array $classMap
+     ) {
++        $this->templateFinder = $templateFinder instanceof Environment ? new EnvironmentComponentTemplateFinder($templateFinder) : $templateFinder;
+     }
+ 
+     public function metadataFor(string $name): ComponentMetadata
+@@ -213,6 +216,31 @@ final class ComponentFactory
+         return null !== $this->findAnonymousComponentTemplate($name);
+     }
+ 
++    public function findAnonymousComponentTemplate(string $name): ?string
++    {
++        return $this->templateFinder->findAnonymousComponentTemplate($name);
++    }
++
++    /**
++     * @return never
++     */
++    private function throwUnknownComponentException(string $name): void
++    {
++        throw new \InvalidArgumentException(sprintf('Unknown component "%s". The registered components are: %s', $name, implode(', ', array_keys($this->config))));
++    }
++}
++
++interface ComponentTemplateFinderInterface
++{
++    public function findAnonymousComponentTemplate(string $name): ?string;
++}
++
++final class EnvironmentComponentTemplateFinder implements ComponentTemplateFinderInterface
++{
++    public function __construct(private Environment $environment)
++    {
++    }
++
+     public function findAnonymousComponentTemplate(string $name): ?string
+     {
+         $loader = $this->environment->getLoader();
+@@ -236,12 +264,4 @@ final class ComponentFactory
+ 
+         return null;
+     }
+-
+-    /**
+-     * @return never
+-     */
+-    private function throwUnknownComponentException(string $name): void
+-    {
+-        throw new \InvalidArgumentException(sprintf('Unknown component "%s". The registered components are: %s', $name, implode(', ', array_keys($this->config))));
+-    }
+ }

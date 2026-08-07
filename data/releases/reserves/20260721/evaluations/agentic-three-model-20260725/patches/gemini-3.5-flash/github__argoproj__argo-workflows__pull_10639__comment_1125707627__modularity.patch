@@ -1,0 +1,54 @@
+diff --git a/workflow/controller/exec_control.go b/workflow/controller/exec_control.go
+index c22a518..f22874d 100644
+--- a/workflow/controller/exec_control.go
++++ b/workflow/controller/exec_control.go
+@@ -82,6 +82,24 @@ func (woc *wfOperationCtx) handleExecutionControlError(nodeID string, wfNodesLoc
+ 	node := woc.wf.Status.Nodes[nodeID]
+ 	woc.markNodePhase(node.Name, wfv1.NodeFailed, errorMsg)
+ 
++	children := woc.getTransitiveChildren(nodeID)
++
++	// if node is a pod created from ContainerSet template
++	// then need to fail child nodes so they will not hang in Pending after pod deletion
++	for _, child := range children {
++		if !child.IsExitNode() && !child.Fulfilled() {
++			woc.markNodePhase(child.Name, wfv1.NodeFailed, errorMsg)
++		}
++	}
++}
++
++
++// getTransitiveChildren returns all transitive children (descendants) of a node, including itself
++func (woc *wfOperationCtx) getTransitiveChildren(nodeID string) []wfv1.NodeStatus {
++	node, ok := woc.wf.Status.Nodes[nodeID]
++	if !ok {
++		return nil
++	}
+ 	children := []wfv1.NodeStatus{}
+ 	q := []wfv1.NodeStatus{node}
+ 	for {
+@@ -90,21 +108,13 @@ func (woc *wfOperationCtx) handleExecutionControlError(nodeID string, wfNodesLoc
+ 		}
+ 		childNode := q[0]
+ 		q = q[1:]
+-		for _, nodeID := range childNode.Children {
+-			q = append(q, woc.wf.Status.Nodes[nodeID])
++		for _, childID := range childNode.Children {
++			q = append(q, woc.wf.Status.Nodes[childID])
+ 		}
+ 		children = append(children, childNode)
+ 	}
+-
+-	// if node is a pod created from ContainerSet template
+-	// then need to fail child nodes so they will not hang in Pending after pod deletion
+-	for _, child := range children {
+-		if !child.IsExitNode() && !child.Fulfilled() {
+-			woc.markNodePhase(child.Name, wfv1.NodeFailed, errorMsg)
+-		}
+-	}
++	return children
+ }
+-
+ // killDaemonedChildren kill any daemoned pods of a steps or DAG template node.
+ func (woc *wfOperationCtx) killDaemonedChildren(nodeID string) {
+ 	woc.log.Infof("Checking daemoned children of %s", nodeID)

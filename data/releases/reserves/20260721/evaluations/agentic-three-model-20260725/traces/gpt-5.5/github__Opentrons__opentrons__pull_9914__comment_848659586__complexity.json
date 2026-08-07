@@ -1,0 +1,240 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 114,
+      "path": "robot-server/robot_server/runs/router/actions_router.py",
+      "start_line": 1
+    },
+    "response_chars": 112,
+    "round": 1,
+    "tool_result": {
+      "content": "1: \"\"\"Router for /runs actions endpoints.\"\"\"\n2: import logging\n3: \n4: from fastapi import APIRouter, Depends, status\n5: from datetime import datetime\n6: from typing import Union\n7: from typing_extensions import Literal\n8: \n9: from opentrons.protocol_engine.errors import ProtocolEngineStoppedError\n10: \n11: from robot_server.errors import ErrorDetails, ErrorBody\n12: from robot_server.service.dependencies import get_current_time, get_unique_id\n13: from robot_server.service.json_api import RequestModel, SimpleBody, PydanticResponse\n14: from robot_server.service.task_runner import TaskRunner\n15: \n16: from ..run_store import RunStore, RunNotFoundError\n17: from ..run_view import RunView\n18: from ..action_models import RunAction, RunActionType, RunActionCreate\n19: from ..engine_store import EngineStore\n20: from ..dependencies import get_run_store, get_engine_store\n21: from .base_router import RunNotFound, RunStopped\n22: \n23: \n24: log = logging.getLogger(__name__)\n25: actions_router = APIRouter()\n26: \n27: \n28: class RunActionNotAllowed(ErrorDetails):\n29:     \"\"\"An error if one tries to issue an unsupported run action.\"\"\"\n30: \n31:     id: Literal[\"RunActionNotAllowed\"] = \"RunActionNotAllowed\"\n32:     title: str = \"Run Action Not Allowed\"\n33: \n34: \n35: @actions_router.post(  # noqa: C901\n36:     path=\"/runs/{runId}/actions\",\n37:     summary=\"Issue a control action to the run\",\n38:     description=\"Provide an action in order to control execution of the run.\",\n39:     status_code=status.HTTP_201_CREATED,\n40:     responses={\n41:         status.HTTP_201_CREATED: {\"model\": SimpleBody[RunAction]},\n42:         status.HTTP_409_CONFLICT: {\n43:             \"model\": ErrorBody[Union[RunActionNotAllowed, RunStopped]],\n44:         },\n45:         status.HTTP_404_NOT_FOUND: {\"model\": ErrorBody[RunNotFound]},\n46:     },\n47: )\n48: async def create_run_action(\n49:     runId: str,\n50:     request_body: RequestModel[RunActionCreate],\n51:     run_view: RunView = Depends(RunView),\n52:     run_store: RunStore = Depends(get_run_store),\n53:     engine_store: EngineStore = Depends(get_engine_store),\n54:     action_id: str = Depends(get_unique_id),\n55:     created_at: datetime = Depends(get_current_time),\n56:     task_runner: TaskRunner = Depends(TaskRunner),\n57: ) -> PydanticResponse[SimpleBody[RunAction]]:\n58:     \"\"\"Create a run control action.\n59: \n60:     Arguments:\n61:         runId: Run ID pulled from the URL.\n62:         request_body: Input payload from the request body.\n63:         run_view: Resource model builder.\n64:         run_store: Run storage interface.\n65:         engine_store: Protocol engine and runner storage.\n66:         action_id: Generated ID to assign to the control action.\n67:         created_at: Timestamp to attach to the control action.\n68:         task_runner: Background task runner.\n69:     \"\"\"\n70:     try:\n71:         prev_run = run_store.get(run_id=runId)\n72:     except RunNotFoundError as e:\n73:         raise RunNotFound(detail=str(e)).as_error(status.HTTP_404_NOT_FOUND)\n74: \n75:     if not prev_run.is_current:\n76:         raise RunStopped(detail=f\"Run {runId} is not the current run\").as_error(\n77:             status.HTTP_409_CONFLICT\n78:         )\n79: \n80:     action, next_run = run_view.with_action(\n81:         run=prev_run,\n82:         action_id=action_id,\n83:         action_data=request_body.data,\n84:         created_at=created_at,\n85:     )\n86: \n87:     try:\n88:         if action.actionType == RunActionType.PLAY:\n89:             # TODO(mc, 2022-01-11): this won't work very well for HTTP-only\n90:             # runs, which is ok at the time of writing but needs to be addressed\n91:             if engine_store.runner.was_started():\n92:                 log.info(f'Resuming run \"{runId}\".')\n93:                 engine_store.runner.play()\n94:             else:\n95:                 log.info(f'Starting run \"{runId}\".')\n96:                 task_runner.run(engine_store.runner.run)\n97: \n98:         elif action.actionType == RunActionType.PAUSE:\n99:             log.info(f'Pausing run \"{runId}\".')\n100:             engine_store.runner.pause()\n101: \n102:         elif action.actionType == RunActionType.STOP:\n103:             log.info(f'Stopping run \"{runId}\".')\n104:             task_runner.run(engine_store.runner.stop)\n105: \n106:     except ProtocolEngineStoppedError as e:\n107:         raise RunActionNotAllowed(detail=str(e)).as_error(status.HTTP_409_CONFLICT)\n108: \n109:     run_store.update(run=next_run)\n110: \n111:     return await PydanticResponse.create(\n112:         content=SimpleBody.construct(data=action),\n113:         status_code=status.HTTP_201_CREATED,\n114:     )",
+      "end_line": 114,
+      "path_lines": 114,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 1560,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 97,
+      "output_tokens_details": {
+        "reasoning_tokens": 62
+      },
+      "total_tokens": 1657
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 200,
+      "path": "robot-server/robot_server/runs/action_models.py",
+      "start_line": 1
+    },
+    "response_chars": 306,
+    "round": 2,
+    "tool_result": {
+      "content": "1: \"\"\"Request and response models for controlling runs with actions.\"\"\"\n2: from datetime import datetime\n3: from enum import Enum\n4: from pydantic import BaseModel, Field\n5: \n6: from robot_server.service.json_api import ResourceModel\n7: \n8: \n9: class RunActionType(str, Enum):\n10:     \"\"\"Types of run control actions.\n11: \n12:     Args:\n13:         PLAY: Start or resume a protocol run.\n14:         PAUSE: Pause a run.\n15:         STOP: Stop (cancel) a run.\n16:     \"\"\"\n17: \n18:     PLAY = \"play\"\n19:     PAUSE = \"pause\"\n20:     STOP = \"stop\"\n21: \n22: \n23: class RunActionCreate(BaseModel):\n24:     \"\"\"Request model for new control action creation.\"\"\"\n25: \n26:     actionType: RunActionType\n27: \n28: \n29: class RunAction(ResourceModel):\n30:     \"\"\"Run control action model.\n31: \n32:     A RunAction resource represents a client-provided command to\n33:     the run in order to control the execution of the run itself.\n34: \n35:     This is different than a protocol command, which represents an individual\n36:     robotic procedure to execute as part of a protocol.\n37:     \"\"\"\n38: \n39:     id: str = Field(..., description=\"A unique identifier to reference the command.\")\n40:     createdAt: datetime = Field(..., description=\"When the command was created.\")\n41:     actionType: RunActionType = Field(\n42:         ...,\n43:         description=\"Specific type of action, which determines behavior.\",\n44:     )",
+      "end_line": 44,
+      "path_lines": 44,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 2950,
+      "input_tokens_details": {
+        "cached_tokens": 1280
+      },
+      "output_tokens": 314,
+      "output_tokens_details": {
+        "reasoning_tokens": 210
+      },
+      "total_tokens": 3264
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 240,
+      "path": "robot-server/robot_server/runs/run_store.py",
+      "start_line": 1
+    },
+    "response_chars": 301,
+    "round": 3,
+    "tool_result": {
+      "content": "1: \"\"\"Runs' in-memory store.\"\"\"\n2: from dataclasses import dataclass\n3: from datetime import datetime\n4: from typing import Dict, List, Optional\n5: import sqlalchemy\n6: \n7: from .action_models import RunAction, RunActionType\n8: \n9: from robot_server.persistence import run_table, actions_table\n10: \n11: \n12: @dataclass(frozen=True)\n13: class RunResource:\n14:     \"\"\"An entry in the run store, used to construct response models.\n15: \n16:     This represents all run state that cannot be derived from another\n17:     location, such as a ProtocolEngine instance.\n18:     \"\"\"\n19: \n20:     run_id: str\n21:     protocol_id: Optional[str]\n22:     created_at: datetime\n23:     actions: List[RunAction]\n24:     is_current: bool\n25: \n26: \n27: class RunNotFoundError(ValueError):\n28:     \"\"\"Error raised when a given Run ID is not found in the store.\"\"\"\n29: \n30:     def __init__(self, run_id: str) -> None:\n31:         \"\"\"Initialize the error message from the missing ID.\"\"\"\n32:         super().__init__(f\"Run {run_id} was not found.\")\n33: \n34: \n35: class RunStore:\n36:     \"\"\"Methods for storing and retrieving run resources.\"\"\"\n37: \n38:     def __init__(self, sql_engine: sqlalchemy.engine.Engine) -> None:\n39:         \"\"\"Initialize a RunStore and its in-memory storage.\"\"\"\n40:         self._sql_engine = sql_engine\n41:         self.__active_run = \"\"\n42: \n43:     def update_actions(self, run_id: str, actions: List[RunAction]) -> None:\n44:         \"\"\"Update run actions in the db.\n45: \n46:         Arguments:\n47:             run_id: current run id to get\n48:             actions: a list of actions to store in the db\n49:         \"\"\"\n50:         with self._sql_engine.begin() as transaction:\n51:             transaction.execute(\n52:                 sqlalchemy.delete(actions_table).where(actions_table.c.run_id == run_id)\n53:             )\n54:             _insert_actions_no_transaction(run_id, actions, transaction)\n55: \n56:     def insert_actions(self, run_id: str, actions: List[RunAction]) -> None:\n57:         \"\"\"Insert run actions resource in the db.\n58: \n59:         Arguments:\n60:             run_id: current run id to get\n61:             actions: a list of actions to store in the db\n62:         \"\"\"\n63:         with self._sql_engine.begin() as transaction:\n64:             _insert_actions_no_transaction(run_id, actions, transaction)\n65: \n66:     def _get_actions(self, run_id: str) -> List[RunAction]:\n67:         with self._sql_engine.begin() as statement:\n68:             actions = _get_actions_no_transaction(run_id, statement)\n69:         return [_convert_sql_row_to_action(action) for action in actions]\n70: \n71:     def insert(self, run: RunResource) -> RunResource:\n72:         \"\"\"Insert run resource in the db.\n73: \n74:         Arguments:\n75:             run: Run resource to store.\n76: \n77:         Returns:\n78:             The resource that was added to the store.\n79:         \"\"\"\n80:         statement = sqlalchemy.insert(run_table).values(\n81:             _convert_run_to_sql_values(run=run)\n82:         )\n83:         with self._sql_engine.begin() as transaction:\n84:             transaction.execute(statement)\n85: \n86:         if run.is_current is True and self.__active_run != run.run_id:\n87:             self.__active_run = run.run_id\n88: \n89:         return run\n90: \n91:     def update(self, run: RunResource) -> RunResource:\n92:         \"\"\"Update a run resource in the db.\n93: \n94:         Arguments:\n95:             run: Run resource to store. Reads `run.id` to\n96:                 determine identity in storage.\n97: \n98:         Returns:\n99:             The resource that was added to the store.\n100:         \"\"\"\n101:         update_statement = (\n102:             sqlalchemy.update(run_table)\n103:             .where(run_table.c.id == run.run_id)\n104:             .values(_convert_run_to_sql_values(run))\n105:         )\n106:         with self._sql_engine.begin() as transaction:\n107:             try:\n108:                 transaction.execute(\n109:                     sqlalchemy.select(run_table).where(run_table.c.id == run.run_id)\n110:                 ).one()\n111:             except sqlalchemy.exc.NoResultFound as e:\n112:                 raise RunNotFoundError(run_id=run.run_id) from e\n113:             transaction.execute(update_statement)\n114: \n115:         if run.is_current is True and self.__active_run != run.run_id:\n116:             self.__active_run = run.run_id\n117: \n118:         if run.actions:\n119:             self.update_actions(run_id=run.run_id, actions=run.actions)\n120:         return run\n121: \n122:     def get(self, run_id: str) -> RunResource:\n123:         \"\"\"Get a specific run entry by its identifier.\n124: \n125:         Arguments:\n126:             run_id: Unique identifier of run entry to retrieve.\n127: \n128:         Returns:\n129:             The retrieved run entry from the db.\n130:         \"\"\"\n131:         statement = sqlalchemy.select(run_table).where(run_table.c.id == run_id)\n132:         with self._sql_engine.begin() as transaction:\n133:             try:\n134:                 row_run = transaction.execute(statement).one()\n135:             except sqlalchemy.exc.NoResultFound as e:\n136:                 raise RunNotFoundError(run_id) from e\n137: \n138:             actions = _get_actions_no_transaction(run_id, transaction)\n139:             run = _convert_sql_row_to_run(\n140:                 row_run,\n141:                 [_convert_sql_row_to_action(action) for action in actions],\n142:                 self.__active_run,\n143:             )\n144:         return run\n145: \n146:     def get_all(self) -> List[RunResource]:\n147:         \"\"\"Get all known run resources.\n148: \n149:         Returns:\n150:             All stored run entries.\n151:         \"\"\"\n152:         statement = sqlalchemy.select(run_table)\n153:         with self._sql_engine.begin() as transaction:\n154:             runs = transaction.execute(statement).all()\n155:         return [\n156:             _convert_sql_row_to_run(\n157:                 sql_row=row,\n158:                 actions=self._get_actions(row.id),\n159:                 current_run_id=self.__active_run,\n160:             )\n161:             for row in runs\n162:         ]\n163: \n164:     def remove(self, run_id: str) -> RunResource:\n165:         \"\"\"Remove a run by its unique identifier.\n166: \n167:         Arguments:\n168:             run_id: The run's unique identifier.\n169: \n170:         Returns:\n171:             The run entry that was deleted.\n172: \n173:         Raises:\n174:             RunNotFoundError: The specified run ID was not found.\n175:         \"\"\"\n176:         select_statement = sqlalchemy.select(run_table).where(run_table.c.id == run_id)\n177:         delete_statement = sqlalchemy.delete(run_table).where(run_table.c.id == run_id)\n178:         with self._sql_engine.begin() as transaction:\n179:             try:\n180:                 # SQLite <3.35.0 doesn't support the RETURNING clause,\n181:                 # so we do it ourselves with a separate SELECT.\n182:                 row_to_delete = transaction.execute(select_statement).one()\n183:             except sqlalchemy.exc.NoResultFound as e:\n184:                 raise RunNotFoundError(run_id) from e\n185:             transaction.execute(delete_statement)\n186: \n187:         return _convert_sql_row_to_run(row_to_delete, [], self.__active_run)\n188: \n189: \n190: def _get_actions_no_transaction(\n191:     run_id: str, transaction: sqlalchemy.engine.Connection\n192: ) -> List[sqlalchemy.engine.Row]:\n193:     statement = actions_table.select().where(actions_table.c.run_id == run_id)\n194:     return transaction.execute(statement).all()\n195: \n196: \n197: def _insert_actions_no_transaction(\n198:     run_id: str, actions: List[RunAction], transaction: sqlalchemy.engine.Connection\n199: ) -> None:\n200:     actions_to_insert = [\n201:         _convert_action_to_sql_values(action, run_id) for action in actions\n202:     ]\n203:     # TODO (tz): selecting to raise an error if a run does not exist.\n204:     # SQLite does not support FK by default. Need to add support\n205:     # https://docs.sqlalchemy.org/en/14/dialects/sqlite.html#foreign-key-support\n206:     transaction.execute(\n207:         sqlalchemy.select(run_table).where(run_table.c.id == run_id)\n208:     ).one()\n209:     transaction.execute(sqlalchemy.insert(actions_table), actions_to_insert)\n210: \n211: \n212: def _convert_sql_row_to_run(\n213:     sql_row: sqlalchemy.engine.Row, actions: List[RunAction], current_run_id: str\n214: ) -> RunResource:\n215:     run_id = sql_row.id\n216:     assert isinstance(run_id, str)\n217: \n218:     created_at = sql_row.created_at\n219:     assert isinstance(created_at, datetime)\n220: \n221:     protocol_id = sql_row.protocol_id\n222:     # key is optional in DB. If its not None assert type as string\n223:     if protocol_id is not None:\n224:         assert isinstance(protocol_id, str)\n225: \n226:     is_current = current_run_id == run_id\n227:     assert isinstance(is_current, bool)\n228: \n229:     return RunResource(\n230:         run_id=run_id,\n231:         created_at=created_at,\n232:         actions=actions,\n233:         protocol_id=protocol_id,\n234:         is_current=is_current,\n235:     )\n236: \n237: \n238: def _convert_run_to_sql_values(run: RunResource) -> Dict[str, object]:\n239:     return {\n240:         \"id\": run.run_id,",
+      "end_line": 240,
+      "path_lines": 267,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 3444,
+      "input_tokens_details": {
+        "cached_tokens": 2816
+      },
+      "output_tokens": 293,
+      "output_tokens_details": {
+        "reasoning_tokens": 189
+      },
+      "total_tokens": 3737
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 220,
+      "path": "robot-server/robot_server/runs/run_view.py",
+      "start_line": 1
+    },
+    "response_chars": 299,
+    "round": 4,
+    "tool_result": {
+      "content": "1: \"\"\"Run response model factory.\"\"\"\n2: from dataclasses import replace\n3: from datetime import datetime\n4: from typing import Tuple\n5: \n6: from .run_store import RunResource\n7: from .action_models import RunAction, RunActionCreate\n8: from .run_models import RunUpdate\n9: \n10: \n11: class RunView:\n12:     \"\"\"Interface to build run model instances from data.\n13: \n14:     Resources consumed and returned by this class will be treated as\n15:     immutable.\n16:     \"\"\"\n17: \n18:     @staticmethod\n19:     def with_update(run: RunResource, update: RunUpdate) -> RunResource:\n20:         \"\"\"Update a run resource with update request data.\n21: \n22:         Arguments:\n23:             run: Existing run resource.\n24:             update: Run update data.\n25: \n26:         Returns:\n27:             The updated run resource.\n28:         \"\"\"\n29:         is_current = update.current if update.current is not None else run.is_current\n30:         return replace(run, is_current=is_current)\n31: \n32:     @staticmethod\n33:     def with_action(\n34:         run: RunResource,\n35:         action_id: str,\n36:         action_data: RunActionCreate,\n37:         created_at: datetime,\n38:     ) -> Tuple[RunAction, RunResource]:\n39:         \"\"\"Create a new run control action resource instance.\n40: \n41:         Arguments:\n42:             run: The run resource to add the action to.\n43:             action_id: Unique ID to assign to the action resource.\n44:             action_data: Data used to create the action resource.\n45:             created_at: Resource creation timestamp.\n46: \n47:         Returns:\n48:             A tuple of the created RunAction resource and an\n49:             updated copy of the passed in RunResource.\n50: \n51:         \"\"\"\n52:         actions = RunAction.construct(\n53:             id=action_id,\n54:             createdAt=created_at,\n55:             actionType=action_data.actionType,\n56:         )\n57: \n58:         updated_run = replace(\n59:             run,\n60:             actions=run.actions + [actions],\n61:         )\n62: \n63:         return actions, updated_run",
+      "end_line": 63,
+      "path_lines": 63,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 6036,
+      "input_tokens_details": {
+        "cached_tokens": 3328
+      },
+      "output_tokens": 374,
+      "output_tokens_details": {
+        "reasoning_tokens": 270
+      },
+      "total_tokens": 6410
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "",
+          "end_line": 17,
+          "start_line": 17
+        },
+        {
+          "content": "",
+          "end_line": 51,
+          "start_line": 51
+        },
+        {
+          "content": "",
+          "end_line": 63,
+          "start_line": 63
+        },
+        {
+          "content": "    action = RunAction.construct(\n        id=action_id,\n        createdAt=created_at,\n        actionType=request_body.data.actionType,\n    )",
+          "end_line": 85,
+          "start_line": 80
+        },
+        {
+          "content": "    run_store.insert_actions(run_id=runId, actions=[action])",
+          "end_line": 109,
+          "start_line": 109
+        }
+      ]
+    },
+    "response_chars": 1034,
+    "round": 5,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 17,
+          "replacement_lines": 0,
+          "start_line": 17
+        },
+        {
+          "end_line": 51,
+          "replacement_lines": 0,
+          "start_line": 51
+        },
+        {
+          "end_line": 63,
+          "replacement_lines": 0,
+          "start_line": 63
+        },
+        {
+          "end_line": 85,
+          "replacement_lines": 5,
+          "start_line": 80
+        },
+        {
+          "end_line": 109,
+          "replacement_lines": 1,
+          "start_line": 109
+        }
+      ],
+      "current_file_lines": 110,
+      "updated_excerpt": {
+        "content": "7: from typing_extensions import Literal\n8: \n9: from opentrons.protocol_engine.errors import ProtocolEngineStoppedError\n10: \n11: from robot_server.errors import ErrorDetails, ErrorBody\n12: from robot_server.service.dependencies import get_current_time, get_unique_id\n13: from robot_server.service.json_api import RequestModel, SimpleBody, PydanticResponse\n14: from robot_server.service.task_runner import TaskRunner\n15: \n16: from ..run_store import RunStore, RunNotFoundError\n17: from ..action_models import RunAction, RunActionType, RunActionCreate\n18: from ..engine_store import EngineStore\n19: from ..dependencies import get_run_store, get_engine_store\n20: from .base_router import RunNotFound, RunStopped\n21: \n22: \n23: log = logging.getLogger(__name__)\n24: actions_router = APIRouter()\n25: \n26: \n27: class RunActionNotAllowed(ErrorDetails):\n28:     \"\"\"An error if one tries to issue an unsupported run action.\"\"\"\n29: \n30:     id: Literal[\"RunActionNotAllowed\"] = \"RunActionNotAllowed\"\n31:     title: str = \"Run Action Not Allowed\"\n32: \n33: \n34: @actions_router.post(  # noqa: C901\n35:     path=\"/runs/{runId}/actions\",\n36:     summary=\"Issue a control action to the run\",\n37:     description=\"Provide an action in order to control execution of the run.\",\n38:     status_code=status.HTTP_201_CREATED,\n39:     responses={\n40:         status.HTTP_201_CREATED: {\"model\": SimpleBody[RunAction]},\n41:         status.HTTP_409_CONFLICT: {\n42:             \"model\": ErrorBody[Union[RunActionNotAllowed, RunStopped]],\n43:         },\n44:         status.HTTP_404_NOT_FOUND: {\"model\": ErrorBody[RunNotFound]},\n45:     },\n46: )\n47: async def create_run_action(",
+        "end_line": 47,
+        "path_lines": 110,
+        "start_line": 7
+      }
+    },
+    "usage": {
+      "input_tokens": 6675,
+      "input_tokens_details": {
+        "cached_tokens": 5888
+      },
+      "output_tokens": 1079,
+      "output_tokens_details": {
+        "reasoning_tokens": 772
+      },
+      "total_tokens": 7754
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 130,
+      "path": "robot-server/robot_server/runs/router/actions_router.py",
+      "start_line": 1
+    },
+    "response_chars": 245,
+    "round": 6,
+    "tool_result": {
+      "content": "1: \"\"\"Router for /runs actions endpoints.\"\"\"\n2: import logging\n3: \n4: from fastapi import APIRouter, Depends, status\n5: from datetime import datetime\n6: from typing import Union\n7: from typing_extensions import Literal\n8: \n9: from opentrons.protocol_engine.errors import ProtocolEngineStoppedError\n10: \n11: from robot_server.errors import ErrorDetails, ErrorBody\n12: from robot_server.service.dependencies import get_current_time, get_unique_id\n13: from robot_server.service.json_api import RequestModel, SimpleBody, PydanticResponse\n14: from robot_server.service.task_runner import TaskRunner\n15: \n16: from ..run_store import RunStore, RunNotFoundError\n17: from ..action_models import RunAction, RunActionType, RunActionCreate\n18: from ..engine_store import EngineStore\n19: from ..dependencies import get_run_store, get_engine_store\n20: from .base_router import RunNotFound, RunStopped\n21: \n22: \n23: log = logging.getLogger(__name__)\n24: actions_router = APIRouter()\n25: \n26: \n27: class RunActionNotAllowed(ErrorDetails):\n28:     \"\"\"An error if one tries to issue an unsupported run action.\"\"\"\n29: \n30:     id: Literal[\"RunActionNotAllowed\"] = \"RunActionNotAllowed\"\n31:     title: str = \"Run Action Not Allowed\"\n32: \n33: \n34: @actions_router.post(  # noqa: C901\n35:     path=\"/runs/{runId}/actions\",\n36:     summary=\"Issue a control action to the run\",\n37:     description=\"Provide an action in order to control execution of the run.\",\n38:     status_code=status.HTTP_201_CREATED,\n39:     responses={\n40:         status.HTTP_201_CREATED: {\"model\": SimpleBody[RunAction]},\n41:         status.HTTP_409_CONFLICT: {\n42:             \"model\": ErrorBody[Union[RunActionNotAllowed, RunStopped]],\n43:         },\n44:         status.HTTP_404_NOT_FOUND: {\"model\": ErrorBody[RunNotFound]},\n45:     },\n46: )\n47: async def create_run_action(\n48:     runId: str,\n49:     request_body: RequestModel[RunActionCreate],\n50:     run_store: RunStore = Depends(get_run_store),\n51:     engine_store: EngineStore = Depends(get_engine_store),\n52:     action_id: str = Depends(get_unique_id),\n53:     created_at: datetime = Depends(get_current_time),\n54:     task_runner: TaskRunner = Depends(TaskRunner),\n55: ) -> PydanticResponse[SimpleBody[RunAction]]:\n56:     \"\"\"Create a run control action.\n57: \n58:     Arguments:\n59:         runId: Run ID pulled from the URL.\n60:         request_body: Input payload from the request body.\n61:         run_store: Run storage interface.\n62:         engine_store: Protocol engine and runner storage.\n63:         action_id: Generated ID to assign to the control action.\n64:         created_at: Timestamp to attach to the control action.\n65:         task_runner: Background task runner.\n66:     \"\"\"\n67:     try:\n68:         prev_run = run_store.get(run_id=runId)\n69:     except RunNotFoundError as e:\n70:         raise RunNotFound(detail=str(e)).as_error(status.HTTP_404_NOT_FOUND)\n71: \n72:     if not prev_run.is_current:\n73:         raise RunStopped(detail=f\"Run {runId} is not the current run\").as_error(\n74:             status.HTTP_409_CONFLICT\n75:         )\n76: \n77:     action = RunAction.construct(\n78:         id=action_id,\n79:         createdAt=created_at,\n80:         actionType=request_body.data.actionType,\n81:     )\n82: \n83:     try:\n84:         if action.actionType == RunActionType.PLAY:\n85:             # TODO(mc, 2022-01-11): this won't work very well for HTTP-only\n86:             # runs, which is ok at the time of writing but needs to be addressed\n87:             if engine_store.runner.was_started():\n88:                 log.info(f'Resuming run \"{runId}\".')\n89:                 engine_store.runner.play()\n90:             else:\n91:                 log.info(f'Starting run \"{runId}\".')\n92:                 task_runner.run(engine_store.runner.run)\n93: \n94:         elif action.actionType == RunActionType.PAUSE:\n95:             log.info(f'Pausing run \"{runId}\".')\n96:             engine_store.runner.pause()\n97: \n98:         elif action.actionType == RunActionType.STOP:\n99:             log.info(f'Stopping run \"{runId}\".')\n100:             task_runner.run(engine_store.runner.stop)\n101: \n102:     except ProtocolEngineStoppedError as e:\n103:         raise RunActionNotAllowed(detail=str(e)).as_error(status.HTTP_409_CONFLICT)\n104: \n105:     run_store.insert_actions(run_id=runId, actions=[action])\n106: \n107:     return await PydanticResponse.create(\n108:         content=SimpleBody.construct(data=action),\n109:         status_code=status.HTTP_201_CREATED,\n110:     )",
+      "end_line": 110,
+      "path_lines": 110,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 7451,
+      "input_tokens_details": {
+        "cached_tokens": 6400
+      },
+      "output_tokens": 706,
+      "output_tokens_details": {
+        "reasoning_tokens": 623
+      },
+      "total_tokens": 8157
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 7,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__Opentrons__opentrons__pull_9914__comment_848659586__complexity.patch"
+    },
+    "usage": {
+      "input_tokens": 8794,
+      "input_tokens_details": {
+        "cached_tokens": 6912
+      },
+      "output_tokens": 441,
+      "output_tokens_details": {
+        "reasoning_tokens": 430
+      },
+      "total_tokens": 9235
+    }
+  }
+]

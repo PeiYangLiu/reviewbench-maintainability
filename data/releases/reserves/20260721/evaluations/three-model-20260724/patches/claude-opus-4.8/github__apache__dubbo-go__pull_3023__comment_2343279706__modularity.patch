@@ -1,0 +1,61 @@
+--- a/filter/accesslog/filter.go
++++ b/filter/accesslog/filter.go
+@@ -276,16 +276,9 @@
+ // getOrOpenLogFile gets or opens the log file with proper caching and handle management
+ func (f *Filter) getOrOpenLogFile(accessLog string) (*os.File, error) {
+ 	f.fileLock.RLock()
+-	if logFile, exists := f.fileCache[accessLog]; exists {
+-		// Check if we need to rotate the log
+-		now := time.Now().Format(FileDateFormat)
+-		if fileInfo, err := logFile.Stat(); err == nil {
+-			last := fileInfo.ModTime().Format(FileDateFormat)
+-			if now == last {
+-				f.fileLock.RUnlock()
+-				return logFile, nil
+-			}
+-		}
++	if logFile, exists := f.fileCache[accessLog]; exists && isSameDay(logFile) {
++		f.fileLock.RUnlock()
++		return logFile, nil
+ 	}
+ 	f.fileLock.RUnlock()
+ 
+@@ -295,17 +288,14 @@
+ 
+ 	// Double-check after acquiring write lock
+ 	if logFile, exists := f.fileCache[accessLog]; exists {
+-		now := time.Now().Format(FileDateFormat)
+-		if fileInfo, err := logFile.Stat(); err == nil {
+-			last := fileInfo.ModTime().Format(FileDateFormat)
+-			if now == last {
+-				return logFile, nil
+-			}
++		if isSameDay(logFile) {
++			return logFile, nil
+ 		}
+ 		// Close the old file before rotation
+ 		logFile.Close()
+ 		delete(f.fileCache, accessLog)
+ 	}
++=======
+ 
+ 	logFile, err := f.openLogFile(accessLog)
+ 	if err != nil {
+@@ -314,6 +304,17 @@
+ 
+ 	f.fileCache[accessLog] = logFile
+ 	return logFile, nil
++}
++
++// isSameDay reports whether the given log file was last modified on the current day.
++func isSameDay(logFile *os.File) bool {
++	fileInfo, err := logFile.Stat()
++	if err != nil {
++		return false
++	}
++	now := time.Now().Format(FileDateFormat)
++	last := fileInfo.ModTime().Format(FileDateFormat)
++	return now == last
+ }
+ 
+ // openLogFile will open the log file with append mode.

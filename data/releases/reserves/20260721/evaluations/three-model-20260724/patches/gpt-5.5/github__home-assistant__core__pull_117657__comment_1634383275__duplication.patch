@@ -1,0 +1,97 @@
+--- a/homeassistant/components/homematicip_cloud/light.py
++++ b/homeassistant/components/homematicip_cloud/light.py
+@@ -174,16 +174,14 @@
+     _attr_supported_color_modes = {ColorMode.HS}
+     _attr_supported_features = LightEntityFeature.TRANSITION
+ 
+-    def __init__(self, hap: HomematicipHAP, device, channel: int) -> None:
++    def __init__(
++        self, hap: HomematicipHAP, device, channel: int, post: str | None = None
++    ) -> None:
+         """Initialize the notification light entity."""
+-        if channel == 2:
+-            super().__init__(
+-                hap, device, post="Top", channel=channel, is_multi_channel=True
+-            )
+-        else:
+-            super().__init__(
+-                hap, device, post="Bottom", channel=channel, is_multi_channel=True
+-            )
++        if post is None:
++            post = "Top" if channel == 2 else "Bottom"
++
++        super().__init__(hap, device, post=post, channel=channel, is_multi_channel=True)
+ 
+         self._color_switcher: dict[str, tuple[float, float]] = {
+             RGBColorState.WHITE: (0.0, 0.0),
+@@ -275,11 +273,10 @@
+         )
+ 
+ 
+-class HomematicipNotificationLightV2(HomematicipGenericEntity, LightEntity):
++class HomematicipNotificationLightV2(HomematicipNotificationLight):
+     """Representation of HomematicIP Cloud notification light."""
+ 
+-    _attr_color_mode = ColorMode.HS
+-    _attr_supported_color_modes = {ColorMode.HS}
++    _attr_supported_features = LightEntityFeature(0)
+     _effect_list = [
+         OpticalSignalBehaviour.BILLOW_MIDDLE,
+         OpticalSignalBehaviour.BLINKING_MIDDLE,
+@@ -290,33 +287,9 @@
+ 
+     def __init__(self, hap: HomematicipHAP, device, channel: int, post: str) -> None:
+         """Initialize the notification light entity."""
+-        super().__init__(hap, device, post=post, channel=channel, is_multi_channel=True)
++        super().__init__(hap, device, channel, post=post)
+ 
+         self._attr_supported_features |= LightEntityFeature.EFFECT
+-        self._color_switcher: dict[str, tuple[float, float]] = {
+-            RGBColorState.WHITE: (0.0, 0.0),
+-            RGBColorState.RED: (0.0, 100.0),
+-            RGBColorState.YELLOW: (60.0, 100.0),
+-            RGBColorState.GREEN: (120.0, 100.0),
+-            RGBColorState.TURQUOISE: (180.0, 100.0),
+-            RGBColorState.BLUE: (240.0, 100.0),
+-            RGBColorState.PURPLE: (300.0, 100.0),
+-        }
+-
+-    @property
+-    def _func_channel(self) -> NotificationLightChannel:
+-        return self._device.functionalChannels[self._channel]
+-
+-    @property
+-    def brightness(self) -> int:
+-        """Return the brightness of this light between 0..255."""
+-        return int((self._func_channel.dimLevel or 0.0) * 255)
+-
+-    @property
+-    def hs_color(self) -> tuple[float, float]:
+-        """Return the hue and saturation color value [float, float]."""
+-        simple_rgb_color = self._func_channel.simpleRGBColorState
+-        return self._color_switcher.get(simple_rgb_color, (0.0, 0.0))
+ 
+     @property
+     def effect_list(self) -> list[str] | None:
+@@ -332,21 +305,6 @@
+     def is_on(self) -> bool:
+         """Return true if light is on."""
+         return self._func_channel.on
+-
+-    @property
+-    def extra_state_attributes(self) -> dict[str, Any]:
+-        """Return the state attributes of the notification light sensor."""
+-        state_attr = super().extra_state_attributes
+-
+-        if self.is_on:
+-            state_attr[ATTR_COLOR_NAME] = self._func_channel.simpleRGBColorState
+-
+-        return state_attr
+-
+-    @property
+-    def unique_id(self) -> str:
+-        """Return a unique ID."""
+-        return f"{self.__class__.__name__}_{self._post}_{self._device.id}"
+ 
+     async def async_turn_on(self, **kwargs: Any) -> None:
+         """Turn the light on."""

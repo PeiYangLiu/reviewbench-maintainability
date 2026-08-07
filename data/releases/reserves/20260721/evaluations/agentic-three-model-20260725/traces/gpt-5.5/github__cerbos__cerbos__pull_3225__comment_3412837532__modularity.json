@@ -1,0 +1,236 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 220,
+      "path": "internal/auxdata/jwt.go",
+      "start_line": 1
+    },
+    "response_chars": 80,
+    "round": 1,
+    "tool_result": {
+      "content": "1: // Copyright 2021-2026 Zenauth Ltd.\n2: // SPDX-License-Identifier: Apache-2.0\n3: \n4: package auxdata\n5: \n6: import (\n7: \t\"context\"\n8: \t\"encoding/base64\"\n9: \t\"errors\"\n10: \t\"fmt\"\n11: \t\"io\"\n12: \t\"os\"\n13: \t\"time\"\n14: \n15: \t\"github.com/lestrrat-go/httprc/v3\"\n16: \t\"github.com/lestrrat-go/jwx/v3/jwa\"\n17: \t\"github.com/lestrrat-go/jwx/v3/jwk\"\n18: \t\"github.com/lestrrat-go/jwx/v3/jws\"\n19: \t\"github.com/lestrrat-go/jwx/v3/jwt\"\n20: \t\"go.uber.org/zap\"\n21: \t\"google.golang.org/protobuf/types/known/structpb\"\n22: \n23: \trequestv1 \"github.com/cerbos/cerbos/api/genpb/cerbos/request/v1\"\n24: \t\"github.com/cerbos/cerbos/internal/observability/logging\"\n25: \t\"github.com/cerbos/cerbos/internal/observability/tracing\"\n26: \t\"github.com/cerbos/cerbos/internal/util\"\n27: )\n28: \n29: var (\n30: \terrNilLocalKeySet   = errors.New(\"nil local keyset\")\n31: \terrNoKeySetToVerify = errors.New(\"cannot determine keyset to use for validating the JWT\")\n32: )\n33: \n34: type jwtHelper struct {\n35: \tkeySets        map[string]keySet\n36: \tverify         bool\n37: \tacceptableSkew time.Duration\n38: }\n39: \n40: func newJWTHelper(ctx context.Context, conf *JWTConf) *jwtHelper {\n41: \tjh := &jwtHelper{verify: true}\n42: \n43: \tif conf == nil {\n44: \t\treturn jh\n45: \t}\n46: \n47: \tjh.verify = !conf.DisableVerification\n48: \tjh.acceptableSkew = conf.AcceptableTimeSkew\n49: \n50: \tif jh.verify {\n51: \t\tlog := logging.FromContext(ctx).Named(\"auxdata\")\n52: \t\tjh.keySets = make(map[string]keySet, len(conf.KeySets))\n53: \n54: \t\tvar jwkCache *jwk.Cache\n55: \t\tfor _, ks := range conf.KeySets {\n56: \t\t\tvar opts []any\n57: \t\t\tif ks.Insecure.OptionalAlg {\n58: \t\t\t\tlog.Warn(\"[INSECURE CONFIG] Enabling optional alg field for key set\", zap.String(\"keySetID\", ks.ID))\n59: \t\t\t\topts = append(opts, jws.WithInferAlgorithmFromKey(true))\n60: \t\t\t}\n61: \n62: \t\t\tif ks.Insecure.OptionalKid {\n63: \t\t\t\tlog.Warn(\"[INSECURE CONFIG] Enabling optional kid field for key set\", zap.String(\"keySetID\", ks.ID))\n64: \t\t\t\topts = append(opts, jws.WithRequireKid(false))\n65: \t\t\t}\n66: \n67: \t\t\tswitch {\n68: \t\t\tcase ks.Remote != nil:\n69: \t\t\t\tif jwkCache == nil {\n70: \t\t\t\t\tjwkCache = newJWKCache(ctx, log)\n71: \t\t\t\t}\n72: \t\t\t\tjh.keySets[ks.ID] = newRemoteKeySet(ctx, jwkCache, ks.Remote, &ks.Insecure, opts)\n73: \t\t\tcase ks.Local != nil:\n74: \t\t\t\tjh.keySets[ks.ID] = newLocalKeySet(ks.Local, &ks.Insecure, opts)\n75: \t\t\t}\n76: \t\t}\n77: \t}\n78: \n79: \treturn jh\n80: }\n81: \n82: func newJWKCache(ctx context.Context, log *zap.Logger) *jwk.Cache {\n83: \tjwkCache, err := jwk.NewCache(ctx, httprc.NewClient(httprc.WithErrorSink(jwkErrSink{log: log})))\n84: \tif err != nil {\n85: \t\t// this should never happen; jwk.NewCache only returns an error if you pass it an httprc.Client that has already been started.\n86: \t\tpanic(fmt.Errorf(\"failed to create JWK cache: %w\", err))\n87: \t}\n88: \treturn jwkCache\n89: }\n90: \n91: type jwkErrSink struct {\n92: \tlog *zap.Logger\n93: }\n94: \n95: func (j jwkErrSink) Put(_ context.Context, err error) {\n96: \tj.log.Warn(\"Error refreshing keyset\", zap.Error(err))\n97: }\n98: \n99: func (j *jwtHelper) extract(ctx context.Context, auxJWT *requestv1.AuxData_JWT) (map[string]*structpb.Value, error) {\n100: \tif auxJWT == nil || auxJWT.Token == \"\" {\n101: \t\treturn nil, nil\n102: \t}\n103: \n104: \tctx, span := tracing.StartSpan(ctx, \"aux_data.ExtractJWT\")\n105: \tdefer span.End()\n106: \n107: \tparseOpts, err := j.parseOptions(ctx, auxJWT)\n108: \tif err != nil {\n109: \t\treturn nil, err\n110: \t}\n111: \n112: \treturn j.doExtract(ctx, auxJWT, parseOpts)\n113: }\n114: \n115: func (j *jwtHelper) parseOptions(ctx context.Context, auxJWT *requestv1.AuxData_JWT) (opts []jwt.ParseOption, _ error) {\n116: \tif j.acceptableSkew > 0 {\n117: \t\topts = []jwt.ParseOption{jwt.WithAcceptableSkew(j.acceptableSkew)}\n118: \t}\n119: \n120: \tif !j.verify {\n121: \t\treturn append(opts, jwt.WithVerify(false), jwt.WithValidate(true)), nil\n122: \t}\n123: \n124: \tvar ks keySet\n125: \t// if keyset ID is not provided and we only have one keyset configured, use that as the default.\n126: \tif auxJWT.KeySetId == \"\" {\n127: \t\tif len(j.keySets) != 1 {\n128: \t\t\treturn nil, errNoKeySetToVerify\n129: \t\t}\n130: \n131: \t\tfor _, ksDef := range j.keySets {\n132: \t\t\tks = ksDef\n133: \t\t}\n134: \t} else { // use the keyset specified in the request\n135: \t\tksDef, ok := j.keySets[auxJWT.KeySetId]\n136: \t\tif !ok {\n137: \t\t\treturn nil, fmt.Errorf(\"keyset not found: %s\", auxJWT.KeySetId)\n138: \t\t}\n139: \t\tks = ksDef\n140: \t}\n141: \n142: \tjwks, jwksOpts, err := ks.keySet(ctx)\n143: \tif err != nil {\n144: \t\treturn nil, fmt.Errorf(\"failed to retrieve keyset: %w\", err)\n145: \t}\n146: \n147: \treturn append(opts, jwt.WithKeySet(jwks, jwksOpts...), jwt.WithValidate(true)), nil\n148: }\n149: \n150: func (j *jwtHelper) doExtract(ctx context.Context, auxJWT *requestv1.AuxData_JWT, parseOpts []jwt.ParseOption) (map[string]*structpb.Value, error) {\n151: \ttoken, err := jwt.ParseString(auxJWT.Token, parseOpts...)\n152: \tif err != nil {\n153: \t\tswitch {\n154: \t\tcase errors.Is(err, jwt.InvalidAudienceError()):\n155: \t\t\treturn nil, fmt.Errorf(\"invalid audience ('aud')\")\n156: \t\tcase errors.Is(err, jwt.InvalidIssuedAtError()):\n157: \t\t\treturn nil, fmt.Errorf(\"issued at time is in the future ('iat')\")\n158: \t\tcase errors.Is(err, jwt.InvalidIssuerError()):\n159: \t\t\treturn nil, fmt.Errorf(\"invalid issuer ('iss')\")\n160: \t\tcase errors.Is(err, jwt.TokenExpiredError()):\n161: \t\t\treturn nil, fmt.Errorf(\"token has expired ('exp')\")\n162: \t\tcase errors.Is(err, jwt.TokenNotYetValidError()):\n163: \t\t\treturn nil, fmt.Errorf(\"token is not yet valid ('nbf')\")\n164: \t\tdefault:\n165: \t\t\treturn nil, fmt.Errorf(\"failed to parse: %w\", err)\n166: \t\t}\n167: \t}\n168: \n169: \tjwtPBMap := make(map[string]*structpb.Value)\n170: \tfor _, key := range token.Keys() {\n171: \t\tvar v any\n172: \t\terr := token.Get(key, &v)\n173: \t\tif err != nil {\n174: \t\t\tlogging.FromContext(ctx).Named(\"auxdata\").\n175: \t\t\t\tWarn(\"Ignoring JWT key-value pair because the value could not be read\", zap.String(\"key\", key), zap.Error(err))\n176: \t\t\tcontinue\n177: \t\t}\n178: \n179: \t\tvalue, err := util.ToStructPB(v)\n180: \t\tif err != nil {\n181: \t\t\tlogging.FromContext(ctx).Named(\"auxdata\").\n182: \t\t\t\tWarn(\"Ignoring JWT key-value pair because the value is not in a known format\", zap.String(\"key\", key), zap.Any(\"value\", v), zap.Error(err))\n183: \t\t\tcontinue\n184: \t\t}\n185: \n186: \t\tjwtPBMap[key] = value\n187: \t}\n188: \n189: \treturn jwtPBMap, nil\n190: }\n191: \n192: type keySet interface {\n193: \tkeySet(context.Context) (jwk.Set, []any, error)\n194: }\n195: \n196: // remoteKeySet holds an auto-refreshing remote keyset.\n197: type remoteKeySet struct {\n198: \t*jwk.Cache\n199: \tinsecure *InsecureKeySetOpt\n200: \turl      string\n201: \toptions  []any\n202: }\n203: \n204: func newRemoteKeySet(ctx context.Context, cache *jwk.Cache, src *RemoteSource, insecure *InsecureKeySetOpt, options []any) *remoteKeySet {\n205: \tif src.RefreshInterval > 0 {\n206: \t\t_ = cache.Register(ctx, src.URL, jwk.WithConstantInterval(src.RefreshInterval))\n207: \t} else {\n208: \t\t_ = cache.Register(ctx, src.URL)\n209: \t}\n210: \n211: \treturn &remoteKeySet{\n212: \t\tCache:    cache,\n213: \t\tinsecure: insecure,\n214: \t\turl:      src.URL,\n215: \t\toptions:  options,\n216: \t}\n217: }\n218: \n219: func (rks *remoteKeySet) keySet(ctx context.Context) (jwk.Set, []any, error) {\n220: \tks, err := rks.Lookup(ctx, rks.url)",
+      "end_line": 220,
+      "path_lines": 348,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 4001,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 82,
+      "output_tokens_details": {
+        "reasoning_tokens": 51
+      },
+      "total_tokens": 4083
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "internal/auxdata/jwt.go",
+      "query": "invalid audience"
+    },
+    "response_chars": 3421,
+    "round": 2,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 155,
+          "text": "\t\t\treturn nil, fmt.Errorf(\"invalid audience ('aud')\")"
+        }
+      ],
+      "query": "invalid audience",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 6906,
+      "input_tokens_details": {
+        "cached_tokens": 3840
+      },
+      "output_tokens": 3710,
+      "output_tokens_details": {
+        "reasoning_tokens": 2716
+      },
+      "total_tokens": 10616
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "internal/auxdata/jwt.go",
+      "query": "type AuxData"
+    },
+    "response_chars": 1436,
+    "round": 3,
+    "tool_result": {
+      "matches": [],
+      "query": "type AuxData",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 6982,
+      "input_tokens_details": {
+        "cached_tokens": 6400
+      },
+      "output_tokens": 1562,
+      "output_tokens_details": {
+        "reasoning_tokens": 1126
+      },
+      "total_tokens": 8544
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "type jwtValidationError struct {\n\tfriendly error\n\tactual   error\n}\n\nfunc newJWTValidationError(message string, actual error) error {\n\treturn &jwtValidationError{friendly: errors.New(message), actual: actual}\n}\n\nfunc (e *jwtValidationError) Error() string {\n\treturn e.friendly.Error()\n}\n\nfunc (e *jwtValidationError) Unwrap() error {\n\treturn e.actual\n}\n\nfunc (e *jwtValidationError) Friendly() error {\n\treturn e.friendly\n}\n\nfunc (e *jwtValidationError) Actual() error {\n\treturn e.actual\n}\n\n",
+          "end_line": 98,
+          "start_line": 99
+        },
+        {
+          "content": "\t\tswitch {\n\t\tcase errors.Is(err, jwt.InvalidAudienceError()):\n\t\t\treturn nil, newJWTValidationError(\"invalid audience ('aud')\", err)\n\t\tcase errors.Is(err, jwt.InvalidIssuedAtError()):\n\t\t\treturn nil, newJWTValidationError(\"issued at time is in the future ('iat')\", err)\n\t\tcase errors.Is(err, jwt.InvalidIssuerError()):\n\t\t\treturn nil, newJWTValidationError(\"invalid issuer ('iss')\", err)\n\t\tcase errors.Is(err, jwt.TokenExpiredError()):\n\t\t\treturn nil, newJWTValidationError(\"token has expired ('exp')\", err)\n\t\tcase errors.Is(err, jwt.TokenNotYetValidError()):\n\t\t\treturn nil, newJWTValidationError(\"token is not yet valid ('nbf')\", err)\n\t\tdefault:",
+          "end_line": 164,
+          "start_line": 153
+        }
+      ]
+    },
+    "response_chars": 2869,
+    "round": 4,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 98,
+          "replacement_lines": 25,
+          "start_line": 99
+        },
+        {
+          "end_line": 164,
+          "replacement_lines": 12,
+          "start_line": 153
+        }
+      ],
+      "current_file_lines": 373,
+      "updated_excerpt": {
+        "content": "89: }\n90: \n91: type jwkErrSink struct {\n92: \tlog *zap.Logger\n93: }\n94: \n95: func (j jwkErrSink) Put(_ context.Context, err error) {\n96: \tj.log.Warn(\"Error refreshing keyset\", zap.Error(err))\n97: }\n98: \n99: type jwtValidationError struct {\n100: \tfriendly error\n101: \tactual   error\n102: }\n103: \n104: func newJWTValidationError(message string, actual error) error {\n105: \treturn &jwtValidationError{friendly: errors.New(message), actual: actual}\n106: }\n107: \n108: func (e *jwtValidationError) Error() string {\n109: \treturn e.friendly.Error()\n110: }\n111: \n112: func (e *jwtValidationError) Unwrap() error {\n113: \treturn e.actual\n114: }\n115: \n116: func (e *jwtValidationError) Friendly() error {\n117: \treturn e.friendly\n118: }\n119: \n120: func (e *jwtValidationError) Actual() error {\n121: \treturn e.actual\n122: }\n123: \n124: func (j *jwtHelper) extract(ctx context.Context, auxJWT *requestv1.AuxData_JWT) (map[string]*structpb.Value, error) {\n125: \tif auxJWT == nil || auxJWT.Token == \"\" {\n126: \t\treturn nil, nil\n127: \t}\n128: \n129: \tctx, span := tracing.StartSpan(ctx, \"aux_data.ExtractJWT\")",
+        "end_line": 129,
+        "path_lines": 373,
+        "start_line": 89
+      }
+    },
+    "usage": {
+      "input_tokens": 7034,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 3326,
+      "output_tokens_details": {
+        "reasoning_tokens": 2481
+      },
+      "total_tokens": 10360
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 200,
+      "path": "internal/auxdata/jwt.go",
+      "start_line": 145
+    },
+    "response_chars": 167,
+    "round": 5,
+    "tool_result": {
+      "content": "145: \tif !j.verify {\n146: \t\treturn append(opts, jwt.WithVerify(false), jwt.WithValidate(true)), nil\n147: \t}\n148: \n149: \tvar ks keySet\n150: \t// if keyset ID is not provided and we only have one keyset configured, use that as the default.\n151: \tif auxJWT.KeySetId == \"\" {\n152: \t\tif len(j.keySets) != 1 {\n153: \t\t\treturn nil, errNoKeySetToVerify\n154: \t\t}\n155: \n156: \t\tfor _, ksDef := range j.keySets {\n157: \t\t\tks = ksDef\n158: \t\t}\n159: \t} else { // use the keyset specified in the request\n160: \t\tksDef, ok := j.keySets[auxJWT.KeySetId]\n161: \t\tif !ok {\n162: \t\t\treturn nil, fmt.Errorf(\"keyset not found: %s\", auxJWT.KeySetId)\n163: \t\t}\n164: \t\tks = ksDef\n165: \t}\n166: \n167: \tjwks, jwksOpts, err := ks.keySet(ctx)\n168: \tif err != nil {\n169: \t\treturn nil, fmt.Errorf(\"failed to retrieve keyset: %w\", err)\n170: \t}\n171: \n172: \treturn append(opts, jwt.WithKeySet(jwks, jwksOpts...), jwt.WithValidate(true)), nil\n173: }\n174: \n175: func (j *jwtHelper) doExtract(ctx context.Context, auxJWT *requestv1.AuxData_JWT, parseOpts []jwt.ParseOption) (map[string]*structpb.Value, error) {\n176: \ttoken, err := jwt.ParseString(auxJWT.Token, parseOpts...)\n177: \tif err != nil {\n178: \t\tswitch {\n179: \t\tcase errors.Is(err, jwt.InvalidAudienceError()):\n180: \t\t\treturn nil, newJWTValidationError(\"invalid audience ('aud')\", err)\n181: \t\tcase errors.Is(err, jwt.InvalidIssuedAtError()):\n182: \t\t\treturn nil, newJWTValidationError(\"issued at time is in the future ('iat')\", err)\n183: \t\tcase errors.Is(err, jwt.InvalidIssuerError()):\n184: \t\t\treturn nil, newJWTValidationError(\"invalid issuer ('iss')\", err)\n185: \t\tcase errors.Is(err, jwt.TokenExpiredError()):\n186: \t\t\treturn nil, newJWTValidationError(\"token has expired ('exp')\", err)\n187: \t\tcase errors.Is(err, jwt.TokenNotYetValidError()):\n188: \t\t\treturn nil, newJWTValidationError(\"token is not yet valid ('nbf')\", err)\n189: \t\tdefault:\n190: \t\t\treturn nil, fmt.Errorf(\"failed to parse: %w\", err)\n191: \t\t}\n192: \t}\n193: \n194: \tjwtPBMap := make(map[string]*structpb.Value)\n195: \tfor _, key := range token.Keys() {\n196: \t\tvar v any\n197: \t\terr := token.Get(key, &v)\n198: \t\tif err != nil {\n199: \t\t\tlogging.FromContext(ctx).Named(\"auxdata\").\n200: \t\t\t\tWarn(\"Ignoring JWT key-value pair because the value could not be read\", zap.String(\"key\", key), zap.Error(err))",
+      "end_line": 200,
+      "path_lines": 373,
+      "start_line": 145
+    },
+    "usage": {
+      "input_tokens": 7899,
+      "input_tokens_details": {
+        "cached_tokens": 6912
+      },
+      "output_tokens": 379,
+      "output_tokens_details": {
+        "reasoning_tokens": 308
+      },
+      "total_tokens": 8278
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "internal/auxdata",
+      "query": "Extract"
+    },
+    "response_chars": 401,
+    "round": 6,
+    "tool_result": {
+      "matches": [],
+      "query": "Extract",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 8802,
+      "input_tokens_details": {
+        "cached_tokens": 7424
+      },
+      "output_tokens": 1175,
+      "output_tokens_details": {
+        "reasoning_tokens": 1021
+      },
+      "total_tokens": 9977
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 220,
+      "path": "internal/auxdata/auxdata.go",
+      "start_line": 1
+    },
+    "response_chars": 84,
+    "round": 7,
+    "tool_result": {
+      "content": "1: // Copyright 2021-2026 Zenauth Ltd.\n2: // SPDX-License-Identifier: Apache-2.0\n3: \n4: package auxdata\n5: \n6: import (\n7: \t\"context\"\n8: \t\"errors\"\n9: \t\"fmt\"\n10: \n11: \tenginev1 \"github.com/cerbos/cerbos/api/genpb/cerbos/engine/v1\"\n12: \trequestv1 \"github.com/cerbos/cerbos/api/genpb/cerbos/request/v1\"\n13: \t\"github.com/cerbos/cerbos/internal/config\"\n14: \t\"github.com/cerbos/cerbos/internal/observability/tracing\"\n15: )\n16: \n17: var ErrFailedToExtractJWT = errors.New(\"failed to extract JWT\")\n18: \n19: type AuxData struct {\n20: \tjwt *jwtHelper\n21: }\n22: \n23: func New(ctx context.Context) (*AuxData, error) {\n24: \tconf := &Conf{}\n25: \tif err := config.GetSection(conf); err != nil {\n26: \t\treturn nil, err\n27: \t}\n28: \n29: \treturn NewFromConf(ctx, conf), nil\n30: }\n31: \n32: func NewFromConf(ctx context.Context, conf *Conf) *AuxData {\n33: \treturn &AuxData{jwt: newJWTHelper(ctx, conf.JWT)}\n34: }\n35: \n36: func NewWithoutVerification(ctx context.Context) *AuxData {\n37: \treturn &AuxData{jwt: newJWTHelper(ctx, &JWTConf{DisableVerification: true})}\n38: }\n39: \n40: // Extract auxiliary data and convert to format expected by the engine.\n41: func (ad *AuxData) Extract(ctx context.Context, adProto *requestv1.AuxData) (*enginev1.AuxData, error) {\n42: \tif adProto == nil {\n43: \t\treturn nil, nil\n44: \t}\n45: \n46: \tctx, span := tracing.StartSpan(ctx, \"aux_data.Extract\")\n47: \tdefer span.End()\n48: \n49: \tjwtPB, err := ad.jwt.extract(ctx, adProto.Jwt)\n50: \tif err != nil {\n51: \t\treturn nil, fmt.Errorf(\"%w: %w\", ErrFailedToExtractJWT, err)\n52: \t}\n53: \n54: \treturn &enginev1.AuxData{Jwt: jwtPB}, nil\n55: }",
+      "end_line": 55,
+      "path_lines": 55,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 8847,
+      "input_tokens_details": {
+        "cached_tokens": 8448
+      },
+      "output_tokens": 515,
+      "output_tokens_details": {
+        "reasoning_tokens": 476
+      },
+      "total_tokens": 9362
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 8,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__cerbos__cerbos__pull_3225__comment_3412837532__modularity.patch"
+    },
+    "usage": {
+      "input_tokens": 9531,
+      "input_tokens_details": {
+        "cached_tokens": 8448
+      },
+      "output_tokens": 275,
+      "output_tokens_details": {
+        "reasoning_tokens": 264
+      },
+      "total_tokens": 9806
+    }
+  }
+]

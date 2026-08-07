@@ -1,0 +1,206 @@
+--- a/scripts/its_select_tests.py
++++ b/scripts/its_select_tests.py
+@@ -88,7 +88,7 @@
+             file.write(f"{key}={value}\n")
+ 
+ 
+-def main() -> int:
++def parse_args() -> argparse.Namespace:
+     parser = argparse.ArgumentParser(
+         description="Select test targets based on changed files."
+     )
+@@ -109,38 +109,29 @@
+         default="",
+         help="Optional path to GitHub output file ($GITHUB_OUTPUT).",
+     )
+-    args = parser.parse_args()
+-
+-    with open(args.map_file, "r", encoding="utf-8") as file:
+-        config = yaml.safe_load(file)
+-
+-    changed_files = git_changed_files(args.base, args.head)
+-    ignore_patterns = compile_patterns(config.get("ignore_patterns", []))
+-    docs_patterns = compile_patterns(config.get("docs_only_patterns", []))
+-    fallback_patterns = compile_patterns(config.get("fallback_patterns", []))
+-    go_package_roots = load_go_package_roots(config)
+-
+-    considered_files = [
+-        path for path in changed_files if not matches_any(path, ignore_patterns)
+-    ]
+-    docs_only_change = bool(considered_files) and all(
+-        matches_any(path, docs_patterns) for path in considered_files
+-    )
+-
+-    selected_go_packages: set[str] = set()
+-    selected_pytest_files: set[str] = set()
+-    matched_rules: list[str] = []
+-    reasons: list[str] = []
+-
+-    smoke = config.get("smoke", {})
+-    smoke_go = set(smoke.get("go_packages", []))
+-    smoke_pytest = set(smoke.get("pytest_files", []))
+-
++    return parser.parse_args()
++
++
++def load_config(map_file: str) -> dict[str, Any]:
++    with open(map_file, "r", encoding="utf-8") as file:
++        return yaml.safe_load(file)
++
++
++def apply_rules(
++    config: dict[str, Any],
++    considered_files: list[str],
++    selected_go_packages: set[str],
++    selected_pytest_files: set[str],
++    matched_rules: list[str],
++    reasons: list[str],
++) -> dict[str, list[str]]:
+     rule_match_by_file: dict[str, list[str]] = {path: [] for path in considered_files}
+     for rule in config.get("rules", []):
+         compiled_rule_patterns = compile_patterns(rule.get("patterns", []))
+         matched = [
+-            path for path in considered_files if matches_any(path, compiled_rule_patterns)
++            path
++            for path in considered_files
++            if matches_any(path, compiled_rule_patterns)
+         ]
+         if not matched:
+             continue
+@@ -150,7 +141,17 @@
+         reasons.append(f"rule:{rule['id']}")
+         for path in matched:
+             rule_match_by_file[path].append(rule["id"])
+-
++    return rule_match_by_file
++
++
++def apply_direct_selections(
++    considered_files: list[str],
++    go_package_roots: set[str],
++    rule_match_by_file: dict[str, list[str]],
++    selected_go_packages: set[str],
++    selected_pytest_files: set[str],
++    reasons: list[str],
++) -> None:
+     for path in considered_files:
+         if path.startswith("integration-tests/test_") and path.endswith(".py"):
+             selected_pytest_files.add(path)
+@@ -160,6 +161,71 @@
+             selected_go_packages.add(package)
+             reasons.append(f"derived-go-package:{package}")
+ 
++
++def build_recommended_commands(
++    selected_go_packages: set[str],
++    selected_pytest_files: set[str],
++    run_full_integration: bool,
++) -> dict[str, str]:
++    return {
++        "go": (
++            f"go test {' '.join(sorted(selected_go_packages))}"
++            if selected_go_packages
++            else "go test ./..."
++        ),
++        "pytest": (
++            "pytest -v integration-tests"
++            if run_full_integration
++            else (
++                "pytest -v " + " ".join(sorted(selected_pytest_files))
++                if selected_pytest_files
++                else "pytest -v integration-tests/test_version.py"
++            )
++        ),
++    }
++
++
++def compute_selection(config: dict[str, Any], base: str, head: str) -> dict[str, Any]:
++    changed_files = git_changed_files(base, head)
++    ignore_patterns = compile_patterns(config.get("ignore_patterns", []))
++    docs_patterns = compile_patterns(config.get("docs_only_patterns", []))
++    fallback_patterns = compile_patterns(config.get("fallback_patterns", []))
++    go_package_roots = load_go_package_roots(config)
++
++    considered_files = [
++        path for path in changed_files if not matches_any(path, ignore_patterns)
++    ]
++    docs_only_change = bool(considered_files) and all(
++        matches_any(path, docs_patterns) for path in considered_files
++    )
++
++    selected_go_packages: set[str] = set()
++    selected_pytest_files: set[str] = set()
++    matched_rules: list[str] = []
++    reasons: list[str] = []
++
++    smoke = config.get("smoke", {})
++    smoke_go = set(smoke.get("go_packages", []))
++    smoke_pytest = set(smoke.get("pytest_files", []))
++
++    rule_match_by_file = apply_rules(
++        config,
++        considered_files,
++        selected_go_packages,
++        selected_pytest_files,
++        matched_rules,
++        reasons,
++    )
++
++    apply_direct_selections(
++        considered_files,
++        go_package_roots,
++        rule_match_by_file,
++        selected_go_packages,
++        selected_pytest_files,
++        reasons,
++    )
++
+     full_run_triggers = [
+         path for path in considered_files if matches_any(path, fallback_patterns)
+     ]
+@@ -185,9 +251,9 @@
+     else:
+         risk_level = "medium"
+ 
+-    selection = {
+-        "base": args.base,
+-        "head": args.head,
++    return {
++        "base": base,
++        "head": head,
+         "changed_files": changed_files,
+         "considered_files": considered_files,
+         "docs_only_change": docs_only_change,
+@@ -197,23 +263,16 @@
+         "run_full_integration": run_full_integration,
+         "risk_level": risk_level,
+         "reasons": sorted(set(reasons)),
+-        "recommended_commands": {
+-            "go": (
+-                f"go test {' '.join(sorted(selected_go_packages))}"
+-                if selected_go_packages
+-                else "go test ./..."
+-            ),
+-            "pytest": (
+-                "pytest -v integration-tests"
+-                if run_full_integration
+-                else (
+-                    "pytest -v " + " ".join(sorted(selected_pytest_files))
+-                    if selected_pytest_files
+-                    else "pytest -v integration-tests/test_version.py"
+-                )
+-            ),
+-        },
++        "recommended_commands": build_recommended_commands(
++            selected_go_packages, selected_pytest_files, run_full_integration
++        ),
+     }
++
++
++def main() -> int:
++    args = parse_args()
++    config = load_config(args.map_file)
++    selection = compute_selection(config, args.base, args.head)
+ 
+     with open(args.output_json, "w", encoding="utf-8") as file:
+         json.dump(selection, file, indent=2, sort_keys=True)

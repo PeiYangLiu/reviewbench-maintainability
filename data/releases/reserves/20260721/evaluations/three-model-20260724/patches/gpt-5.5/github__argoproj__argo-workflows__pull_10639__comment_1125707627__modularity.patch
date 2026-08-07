@@ -1,0 +1,56 @@
+--- a/workflow/controller/exec_control.go
++++ b/workflow/controller/exec_control.go
+@@ -82,27 +82,37 @@
+ 	node := woc.wf.Status.Nodes[nodeID]
+ 	woc.markNodePhase(node.Name, wfv1.NodeFailed, errorMsg)
+ 
+-	children := []wfv1.NodeStatus{}
+-	q := []wfv1.NodeStatus{node}
+-	for {
+-		if len(q) <= 0 {
+-			break
+-		}
+-		childNode := q[0]
+-		q = q[1:]
+-		for _, nodeID := range childNode.Children {
+-			q = append(q, woc.wf.Status.Nodes[nodeID])
+-		}
+-		children = append(children, childNode)
++	// if node is a pod created from ContainerSet template
++	// then need to fail child nodes so they will not hang in Pending after pod deletion
++	for _, child := range getTransientChildren(woc.wf.Status.Nodes, nodeID) {
++		woc.markNodePhase(child.Name, wfv1.NodeFailed, errorMsg)
++	}
++}
++
++// getTransientChildren returns the unfinished non-exit descendants of nodeID.
++func getTransientChildren(nodes wfv1.Nodes, nodeID string) []wfv1.NodeStatus {
++	node, ok := nodes[nodeID]
++	if !ok {
++		return nil
+ 	}
+ 
+-	// if node is a pod created from ContainerSet template
+-	// then need to fail child nodes so they will not hang in Pending after pod deletion
+-	for _, child := range children {
++	children := []wfv1.NodeStatus{}
++	q := append([]string(nil), node.Children...)
++	for len(q) > 0 {
++		childID := q[0]
++		q = q[1:]
++
++		child, ok := nodes[childID]
++		if !ok {
++			continue
++		}
++		q = append(q, child.Children...)
++
+ 		if !child.IsExitNode() && !child.Fulfilled() {
+-			woc.markNodePhase(child.Name, wfv1.NodeFailed, errorMsg)
++			children = append(children, child)
+ 		}
+ 	}
++	return children
+ }
+ 
+ // killDaemonedChildren kill any daemoned pods of a steps or DAG template node.

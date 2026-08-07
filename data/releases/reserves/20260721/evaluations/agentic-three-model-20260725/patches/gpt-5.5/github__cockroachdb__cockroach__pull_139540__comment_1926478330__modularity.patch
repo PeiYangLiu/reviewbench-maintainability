@@ -1,0 +1,54 @@
+diff --git a/pkg/cmd/drtprod/cli/commands/yamlprocessor.go b/pkg/cmd/drtprod/cli/commands/yamlprocessor.go
+index c751317..647abe2 100644
+--- a/pkg/cmd/drtprod/cli/commands/yamlprocessor.go
++++ b/pkg/cmd/drtprod/cli/commands/yamlprocessor.go
+@@ -65,6 +65,19 @@ type targetStatus struct {
+ 	statusRegistry map[string]int
+ }
+ 
++func (sr *targetStatus) getStatus(targetName string) (int, bool) {
++	sr.Lock()
++	defer sr.Unlock()
++	status, exists := sr.statusRegistry[targetName]
++	return status, exists
++}
++
++func (sr *targetStatus) setStatus(targetName string, status int) {
++	sr.Lock()
++	defer sr.Unlock()
++	sr.statusRegistry[targetName] = status
++}
++
+ // step represents an individual step in the YAML configuration.
+ // It can include an ActionStep and additional information for error handling and rollback.
+ type step struct {
+@@ -201,9 +214,7 @@ func processTargets(
+ 					//	if we reach here, the dependent target execution has finished. So, there will be an entry in the
+ 					// status registry for the dependent target. The only reason why an entry could be missing is that the
+ 					// dependent target is not selected by the user in -t option.
+-					sr.Lock()
+-					status, exists := sr.statusRegistry[dt]
+-					sr.Unlock()
++					status, exists := sr.getStatus(dt)
+ 					// We need to check if we need to ignore the dependent target failure
+ 					if !t.IgnoreDependentFailure && exists && status == targetResultFailure {
+ 						fmt.Printf("[%s] Not proceeding as the dependent target %s was not successful.", t.TargetName, dt)
+@@ -218,16 +229,12 @@ func processTargets(
+ 			if currentTargetStatus == targetResultSuccess {
+ 				err = executeCommands(ctx, t.TargetName, t.commands)
+ 			}
+-			// statusRegistry will get updated concurrently and so, we need to ensure we lock
+-			sr.Lock()
+-			defer sr.Unlock()
+-			// err can be nil if the commands were not executed as the dependent target has failed
+ 			if err != nil || currentTargetStatus == targetResultFailure {
+ 				fmt.Printf("[%s] Error executing commands: %v\n", t.TargetName, err)
+-				sr.statusRegistry[t.TargetName] = targetResultFailure
++				sr.setStatus(t.TargetName, targetResultFailure)
+ 				return
+ 			}
+-			sr.statusRegistry[t.TargetName] = targetResultSuccess
++			sr.setStatus(t.TargetName, targetResultSuccess)
+ 		}(t)
+ 	}
+ 	// final wait for all targets to complete

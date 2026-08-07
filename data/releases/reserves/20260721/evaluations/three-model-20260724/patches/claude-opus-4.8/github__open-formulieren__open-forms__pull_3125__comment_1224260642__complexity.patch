@@ -1,0 +1,154 @@
+--- a/src/openforms/prefill/contrib/haalcentraal/plugin.py
++++ b/src/openforms/prefill/contrib/haalcentraal/plugin.py
+@@ -29,16 +29,84 @@
+     return config
+ 
+ 
++class HaalCentraalClient:
++    """
++    Encapsulate the version-specific API/client implementation details.
++
++    The plugin only cares about "fetch the data for a BSN"; the concrete
++    subclasses hide how a specific Haal Centraal API version is queried and how
++    the resulting data is shaped.
++    """
++
++    version_attributes = Attributes
++
++    def __init__(self, client):
++        self.client = client
++
++    def find_person(self, bsn: str, attributes: Iterable[str]) -> Any:
++        raise NotImplementedError  # pragma: no cover
++
++    def extract_value(self, data: Any, attr: str) -> Any:
++        return glom(data, attr)
++
++
++class HaalCentraalV1Client(HaalCentraalClient):
++    version_attributes = Attributes
++
++    def find_person(self, bsn: str, attributes: Iterable[str]) -> Any:
++        return self.client.retrieve(
++            "ingeschrevenpersonen",
++            burgerservicenummer=bsn,
++            url=f"ingeschrevenpersonen/{bsn}",
++            request_kwargs=dict(headers={"Accept": "application/hal+json"}),
++        )
++
++
++class HaalCentraalV2Client(HaalCentraalClient):
++    version_attributes = AttributesV2
++
++    def find_person(self, bsn: str, attributes: Iterable[str]) -> Any:
++        return self.client.operation(
++            "Personen",
++            data={
++                "type": "RaadpleegMetBurgerservicenummer",
++                "burgerservicenummer": [bsn],
++                "fields": attributes,
++            },
++            url="personen",
++            request_kwargs=dict(
++                headers={"Content-Type": "application/json; charset=utf-8"}
++            ),
++        )
++
++    def extract_value(self, data: Any, attr: str) -> Any:
++        return glom(data["personen"][0], attr)
++
++
++VERSION_CLIENTS = {
++    HaalCentraalVersion.haalcentraal13: HaalCentraalV1Client,
++    HaalCentraalVersion.haalcentraal20: HaalCentraalV2Client,
++}
++
++
++def build_client(submission: Optional[Submission] = None):
++    config = get_config()
++    if not config:
++        return None
++
++    client = config.service.build_client()
++    if submission is not None:
++        client.context = PreRequestClientContext(submission=submission)
++
++    return VERSION_CLIENTS[config.version](client)
++
++
+ def get_correct_attributes():
+     config = get_config()
+     if not config:
+         return Attributes
+ 
+-    match config.version:
+-        case HaalCentraalVersion.haalcentraal13:
+-            return Attributes
+-        case HaalCentraalVersion.haalcentraal20:
+-            return AttributesV2
++    return VERSION_CLIENTS[config.version].version_attributes
+ 
+ 
+ @register("haalcentraal")
+@@ -54,54 +122,21 @@
+     def _get_values_for_bsn(
+         cls, submission: Submission, bsn: str, attributes: Iterable[str]
+     ) -> Dict[str, Any]:
+-        config = get_config()
+-
+-        if not config:
+-            return {}
+-
+-        client = config.service.build_client()
+-        client.context = PreRequestClientContext(submission=submission)
++        client = build_client(submission)
++
++        if client is None:
++            return {}
+ 
+         try:
+-            match config.version:
+-                case HaalCentraalVersion.haalcentraal13:
+-                    headers = dict(headers={"Accept": "application/hal+json"})
+-                    data = client.retrieve(
+-                        "ingeschrevenpersonen",
+-                        burgerservicenummer=bsn,
+-                        url=f"ingeschrevenpersonen/{bsn}",
+-                        request_kwargs=headers,
+-                    )
+-                case HaalCentraalVersion.haalcentraal20:
+-                    headers = dict(
+-                        headers={"Content-Type": "application/json; charset=utf-8"}
+-                    )
+-                    recource_body = {
+-                        "type": "RaadpleegMetBurgerservicenummer",
+-                        "burgerservicenummer": [bsn],
+-                        "fields": attributes,
+-                    }
+-                    data = client.operation(
+-                        "Personen",
+-                        data=recource_body,
+-                        url="personen",
+-                        request_kwargs=headers,
+-                    )
+-        except RequestException as e:
+-            logger.exception("exception while making request", exc_info=e)
+-            return {}
+-        except ClientError as e:
++            data = client.find_person(bsn, attributes)
++        except (RequestException, ClientError) as e:
+             logger.exception("exception while making request", exc_info=e)
+             return {}
+ 
+         values = dict()
+         for attr in attributes:
+             try:
+-                match config.version:
+-                    case HaalCentraalVersion.haalcentraal13:
+-                        values[attr] = glom(data, attr)
+-                    case HaalCentraalVersion.haalcentraal20:
+-                        values[attr] = glom(data["personen"][0], attr)
++                values[attr] = client.extract_value(data, attr)
+             except GlomError:
+                 logger.warning(
+                     f"missing expected attribute '{attr}' in backend response"

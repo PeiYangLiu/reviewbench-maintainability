@@ -1,0 +1,167 @@
+diff --git a/lightning/api_clnsocket.go b/lightning/api_clnsocket.go
+index 323595d..7bc33b5 100644
+--- a/lightning/api_clnsocket.go
++++ b/lightning/api_clnsocket.go
+@@ -515,10 +515,7 @@ func (l *ClnSocketLightningAPI) SubscribeForwards(ctx context.Context, since tim
+ 
+ // GetInvoicesRaw - API call
+ func (l *ClnSocketLightningAPI) GetInvoicesRaw(ctx context.Context, pendingOnly bool, pagination RawPagination) ([]RawMessage, *ResponseRawPagination, error) {
+-	var (
+-		reply   ClnRawInvoices
+-		gettime ClnRawInvoiceTime
+-	)
++	var reply ClnRawInvoices
+ 
+ 	respPagination := &ResponseRawPagination{UseTimestamp: true}
+ 
+@@ -527,51 +524,19 @@ func (l *ClnSocketLightningAPI) GetInvoicesRaw(ctx context.Context, pendingOnly
+ 		return nil, respPagination, err
+ 	}
+ 
+-	if err != nil {
+-		return nil, respPagination, err
+-	}
+-
+-	ret := make([]RawMessage, 0, len(reply.Entries))
+-
+-	minTime := time.Unix(1<<63-1, 0)
+-	maxTime := time.Unix(0, 0)
+-
+-	for _, one := range reply.Entries {
+-		err = json.Unmarshal(one, &gettime)
++	return l.processRawEntries(reply.Entries, func(one []byte) (time.Time, error) {
++		var gettime ClnRawInvoiceTime
++		err := json.Unmarshal(one, &gettime)
+ 		if err != nil {
+-			return nil, respPagination, err
+-		}
+-
+-		t := time.Unix(int64(gettime.Time), 0)
+-
+-		if t.Before(minTime) {
+-			minTime = t
+-		}
+-		if t.After(maxTime) {
+-			maxTime = t
++			return time.Time{}, err
+ 		}
+-
+-		m := RawMessage{
+-			Implementation: l.Name,
+-			Timestamp:      t,
+-			Message:        one,
+-		}
+-
+-		ret = append(ret, m)
+-	}
+-
+-	respPagination.FirstTime = minTime
+-	respPagination.LastTime = maxTime
+-
+-	return ret, respPagination, nil
++		return time.Unix(int64(gettime.Time), 0), nil
++	})
+ }
+ 
+ // GetPaymentsRaw - API call
+ func (l *ClnSocketLightningAPI) GetPaymentsRaw(ctx context.Context, includeIncomplete bool, pagination RawPagination) ([]RawMessage, *ResponseRawPagination, error) {
+-	var (
+-		reply   ClnRawPayments
+-		gettime ClnRawPayTime
+-	)
++	var reply ClnRawPayments
+ 
+ 	respPagination := &ResponseRawPagination{UseTimestamp: true}
+ 
+@@ -580,51 +545,19 @@ func (l *ClnSocketLightningAPI) GetPaymentsRaw(ctx context.Context, includeIncom
+ 		return nil, respPagination, err
+ 	}
+ 
+-	if err != nil {
+-		return nil, respPagination, err
+-	}
+-
+-	ret := make([]RawMessage, 0, len(reply.Entries))
+-
+-	minTime := time.Unix(1<<63-1, 0)
+-	maxTime := time.Unix(0, 0)
+-
+-	for _, one := range reply.Entries {
+-		err = json.Unmarshal(one, &gettime)
++	return l.processRawEntries(reply.Entries, func(one []byte) (time.Time, error) {
++		var gettime ClnRawPayTime
++		err := json.Unmarshal(one, &gettime)
+ 		if err != nil {
+-			return nil, respPagination, err
++			return time.Time{}, err
+ 		}
+-
+-		t := time.Unix(int64(gettime.Time), 0)
+-
+-		if t.Before(minTime) {
+-			minTime = t
+-		}
+-		if t.After(maxTime) {
+-			maxTime = t
+-		}
+-
+-		m := RawMessage{
+-			Implementation: l.Name,
+-			Timestamp:      t,
+-			Message:        one,
+-		}
+-
+-		ret = append(ret, m)
+-	}
+-
+-	respPagination.FirstTime = minTime
+-	respPagination.LastTime = maxTime
+-
+-	return ret, respPagination, nil
++		return time.Unix(int64(gettime.Time), 0), nil
++	})
+ }
+ 
+ // GetForwardsRaw - API call
+ func (l *ClnSocketLightningAPI) GetForwardsRaw(ctx context.Context, pagination RawPagination) ([]RawMessage, *ResponseRawPagination, error) {
+-	var (
+-		reply   ClnRawForwardEntries
+-		gettime ClnRawForwardsTime
+-	)
++	var reply ClnRawForwardEntries
+ 
+ 	respPagination := &ResponseRawPagination{UseTimestamp: true}
+ 
+@@ -633,17 +566,28 @@ func (l *ClnSocketLightningAPI) GetForwardsRaw(ctx context.Context, pagination R
+ 		return nil, respPagination, err
+ 	}
+ 
+-	ret := make([]RawMessage, 0, len(reply.Entries))
++	return l.processRawEntries(reply.Entries, func(one []byte) (time.Time, error) {
++		var gettime ClnRawForwardsTime
++		err := json.Unmarshal(one, &gettime)
++		if err != nil {
++			return time.Time{}, err
++		}
++		return time.Unix(int64(gettime.Time), 0), nil
++	})
++}
++
++func (l *ClnSocketLightningAPI) processRawEntries(entries [][]byte, unmarshalFunc func([]byte) (time.Time, error)) ([]RawMessage, *ResponseRawPagination, error) {
++	respPagination := &ResponseRawPagination{UseTimestamp: true}
++	ret := make([]RawMessage, 0, len(entries))
+ 
+ 	minTime := time.Unix(1<<63-1, 0)
+ 	maxTime := time.Unix(0, 0)
+ 
+-	for _, one := range reply.Entries {
+-		err = json.Unmarshal(one, &gettime)
++	for _, one := range entries {
++		t, err := unmarshalFunc(one)
+ 		if err != nil {
+ 			return nil, respPagination, err
+ 		}
+-		t := time.Unix(int64(gettime.Time), 0)
+ 
+ 		if t.Before(minTime) {
+ 			minTime = t

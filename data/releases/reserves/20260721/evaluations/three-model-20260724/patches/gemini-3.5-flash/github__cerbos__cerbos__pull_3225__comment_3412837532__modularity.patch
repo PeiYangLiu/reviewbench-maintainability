@@ -1,0 +1,44 @@
+--- a/internal/auxdata/jwt.go
++++ b/internal/auxdata/jwt.go
+@@ -147,22 +147,35 @@
+ 	return append(opts, jwt.WithKeySet(jwks, jwksOpts...), jwt.WithValidate(true)), nil
+ }
+ 
++type ValidationError struct {
++	Friendly error
++	Err      error
++}
++
++func (e *ValidationError) Error() string {
++	return e.Friendly.Error()
++}
++
++func (e *ValidationError) Unwrap() error {
++	return e.Err
++}
++
+ func (j *jwtHelper) doExtract(ctx context.Context, auxJWT *requestv1.AuxData_JWT, parseOpts []jwt.ParseOption) (map[string]*structpb.Value, error) {
+ 	token, err := jwt.ParseString(auxJWT.Token, parseOpts...)
+ 	if err != nil {
+ 		switch {
+ 		case errors.Is(err, jwt.InvalidAudienceError()):
+-			return nil, fmt.Errorf("invalid audience ('aud')")
++			return nil, &ValidationError{Friendly: errors.New("invalid audience ('aud')"), Err: err}
+ 		case errors.Is(err, jwt.InvalidIssuedAtError()):
+-			return nil, fmt.Errorf("issued at time is in the future ('iat')")
++			return nil, &ValidationError{Friendly: errors.New("issued at time is in the future ('iat')"), Err: err}
+ 		case errors.Is(err, jwt.InvalidIssuerError()):
+-			return nil, fmt.Errorf("invalid issuer ('iss')")
++			return nil, &ValidationError{Friendly: errors.New("invalid issuer ('iss')"), Err: err}
+ 		case errors.Is(err, jwt.TokenExpiredError()):
+-			return nil, fmt.Errorf("token has expired ('exp')")
++			return nil, &ValidationError{Friendly: errors.New("token has expired ('exp')"), Err: err}
+ 		case errors.Is(err, jwt.TokenNotYetValidError()):
+-			return nil, fmt.Errorf("token is not yet valid ('nbf')")
++			return nil, &ValidationError{Friendly: errors.New("token is not yet valid ('nbf')"), Err: err}
+ 		default:
+-			return nil, fmt.Errorf("failed to parse: %w", err)
++			return nil, &ValidationError{Friendly: fmt.Errorf("failed to parse: %w", err), Err: err}
+ 		}
+ 	}
+ 

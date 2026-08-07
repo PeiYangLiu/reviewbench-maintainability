@@ -1,0 +1,106 @@
+--- a/web-common/src/features/chat/core/messages/ToolMessage.svelte
++++ b/web-common/src/features/chat/core/messages/ToolMessage.svelte
+@@ -32,6 +32,16 @@
+     }
+   }
+ 
++  function getChartDataForToolCall(toolCall: any, toolResult: any) {
++    const isChartResult =
++      toolResult &&
++      !toolResult.isError &&
++      toolCall.name === "create_chart" &&
++      isChartToolResult(toolResult);
++
++    return isChartResult ? parseChartData(toolResult) : null;
++  }
++
+   // Group tool calls with their results within this message
+   function groupToolCallsWithResults(content: any[]) {
+     const groups: any[] = [];
+@@ -48,55 +58,39 @@
+     content.forEach((block, index) => {
+       if (block.text) {
+         groups.push({ type: "text", content: block.text, index });
+-      } else if (block.toolCall) {
+-        // Streaming merges tool results into toolCall blocks.
+-        // For initial fetch (GetConversation), calls/results are separate, so we attach via fallback.
+-        const toolResult =
+-          block.toolResult || toolResults.get(block.toolCall.id);
++        return;
++      }
+ 
+-        // Check if this is a chart tool result
+-        if (
+-          toolResult &&
+-          !toolResult.isError &&
+-          block.toolCall.name === "create_chart" &&
+-          isChartToolResult(toolResult)
+-        ) {
+-          const chartData = parseChartData(toolResult);
+-          if (chartData) {
+-            // Add both tool call+result block AND chart block
+-            groups.push({
+-              type: "tool",
+-              toolCall: block.toolCall,
+-              toolResult,
+-              index,
+-            });
+-            groups.push({
+-              type: "chart",
+-              chartType: chartData.chartType,
+-              chartSpec: chartData.chartSpec,
+-              toolCall: block.toolCall,
+-              toolResult,
+-              index,
+-            });
+-          } else {
+-            // Fallback to regular tool block if parsing fails
+-            groups.push({
+-              type: "tool",
+-              toolCall: block.toolCall,
+-              toolResult,
+-              index,
+-            });
+-          }
+-        } else {
+-          groups.push({
+-            type: "tool",
+-            toolCall: block.toolCall,
+-            toolResult,
+-            index,
+-          });
+-        }
++      if (!block.toolCall) {
++        // Skip standalone toolResult blocks as they should be merged with toolCalls
++        return;
+       }
+-      // Skip standalone toolResult blocks as they should be merged with toolCalls
++
++      // Streaming merges tool results into toolCall blocks.
++      // For initial fetch (GetConversation), calls/results are separate, so we attach via fallback.
++      const toolResult = block.toolResult || toolResults.get(block.toolCall.id);
++
++      groups.push({
++        type: "tool",
++        toolCall: block.toolCall,
++        toolResult,
++        index,
++      });
++
++      const chartData = getChartDataForToolCall(block.toolCall, toolResult);
++      if (!chartData) {
++        return;
++      }
++
++      // Add chart block alongside the tool call+result block.
++      groups.push({
++        type: "chart",
++        chartType: chartData.chartType,
++        chartSpec: chartData.chartSpec,
++        toolCall: block.toolCall,
++        toolResult,
++        index,
++      });
+     });
+ 
+     return groups;

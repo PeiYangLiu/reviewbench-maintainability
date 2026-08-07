@@ -1,0 +1,115 @@
+diff --git a/Lib/fnmatch.py b/Lib/fnmatch.py
+index a08b8d7..62b0c48 100644
+--- a/Lib/fnmatch.py
++++ b/Lib/fnmatch.py
+@@ -81,14 +81,45 @@ def translate(pat, sep=None):
+ 
+     There is no way to quote meta-characters.
+     """
++    if sep:
++        return _translate_full(pat, sep)
++    return _translate(pat)
++
+ 
++def _translate(pat):
+     STAR = object()
+-    if sep:
+-        SEP = re.escape(sep)
+-        DOT = f'[^{SEP}]'
+-    else:
+-        SEP = None
+-        DOT = '.'
++
++    def translate_star(h, i, n):
++        return (STAR,), i
++
++    parts = _translate_parts(pat, translate_star, '.')
++    res = _join_translated_parts(parts, STAR)
++    return fr'(?s:{res})\Z'
++
++
++def _translate_full(pat, sep):
++    SEP = re.escape(sep)
++    DOT = f'[^{SEP}]'
++
++    def translate_star(h, i, n):
++        star_count = i-h
++        is_segment = (h == 0 or pat[h-1] == sep) and (i == n or pat[i] == sep)
++        if star_count == 1:
++            if is_segment:
++                return (f'{DOT}+',), i
++            return (f'{DOT}*',), i
++        if star_count == 2 and is_segment:
++            if i == n:
++                return ('.*',), i
++            return (f'(.*{SEP})?',), i+1
++        raise ValueError("Invalid pattern: '**' can only be an entire path component")
++
++    parts = _translate_parts(pat, translate_star, DOT)
++    res = ''.join(parts)
++    return fr'(?s:{res})\Z'
++
++
++def _translate_parts(pat, translate_star, question_mark):
+     res = []
+     add = res.append
+     i, n = 0, len(pat)
+@@ -100,26 +131,10 @@ def translate(pat, sep=None):
+             h = i-1
+             while i < n and pat[i] == '*':
+                 i = i+1
+-            if sep:
+-                star_count = i-h
+-                is_segment = (h == 0 or pat[h-1] == sep) and (i == n or pat[i] == sep)
+-                if star_count == 1:
+-                    if is_segment:
+-                        add(f'{DOT}+')
+-                    else:
+-                        add(f'{DOT}*')
+-                elif star_count == 2 and is_segment:
+-                    if i == n:
+-                        add('.*')
+-                    else:
+-                        add(f'(.*{SEP})?')
+-                        i = i+1
+-                else:
+-                    raise ValueError("Invalid pattern: '**' can only be an entire path component")
+-            else:
+-                add(STAR)
++            star_parts, i = translate_star(h, i, n)
++            res.extend(star_parts)
+         elif c == '?':
+-            add(DOT)
++            add(question_mark)
+         elif c == '[':
+             j = i
+             if j < n and pat[j] == '!':
+@@ -166,7 +181,7 @@ def translate(pat, sep=None):
+                     add('(?!)')
+                 elif stuff == '!':
+                     # Negated empty range: match any character.
+-                    add(DOT)
++                    add(question_mark)
+                 else:
+                     if stuff[0] == '!':
+                         stuff = '^' + stuff[1:]
+@@ -176,9 +191,11 @@ def translate(pat, sep=None):
+         else:
+             add(re.escape(c))
+     assert i == n
++    return res
+ 
++
++def _join_translated_parts(inp, STAR):
+     # Deal with STARs.
+-    inp = res
+     res = []
+     add = res.append
+     i, n = 0, len(inp)
+@@ -211,5 +228,4 @@ def translate(pat, sep=None):
+         else:
+             add(f"(?>.*?{fixed})")
+     assert i == n
+-    res = "".join(res)
+-    return fr'(?s:{res})\Z'
++    return "".join(res)

@@ -1,0 +1,110 @@
+--- a/pkg/download/consistent_hashing.go
++++ b/pkg/download/consistent_hashing.go
+@@ -33,6 +33,30 @@
+ 	URL   *url.URL `hash:"string"`
+ 	Slice int64
+ 	Retry bool
++}
++
++func (m *ConsistentHashingMode) cacheKeyForRange(req *http.Request, start int64, end int64, retry bool) (CacheKey, error) {
++	if start/m.SliceSize != end/m.SliceSize {
++		return CacheKey{}, fmt.Errorf("can't make a range request across a slice boundary: %d-%d straddles a slice boundary (slice size is %d)", start, end, m.SliceSize)
++	}
++	slice := start / m.SliceSize
++	return CacheKey{URL: req.URL, Slice: slice, Retry: retry}, nil
++}
++
++func consistentHashBucket(key CacheKey, buckets int) (int, uint64, error) {
++	// we set IgnoreZeroValue so that we can add fields to the hash key
++	// later without breaking things.
++	// note that it's not safe to share a HashOptions so we create a fresh one each time.
++	hashopts := &hashstructure.HashOptions{IgnoreZeroValue: true}
++	hash, err := hashstructure.Hash(key, hashstructure.FormatV2, hashopts)
++	if err != nil {
++		return 0, 0, fmt.Errorf("error calculating hash of key: %w", err)
++	}
++
++	// jump is an implementation of Google's Jump Consistent Hash.
++	//
++	// See http://arxiv.org/abs/1406.2294 for details.
++	return int(jump.Hash(hash, buckets)), hash, nil
+ }
+ 
+ func GetConsistentHashingMode(opts Options) (*ConsistentHashingMode, error) {
+@@ -297,29 +321,19 @@
+ 	logger := logging.GetLogger()
+ 	for _, host := range m.DomainsToCache {
+ 		if host == req.URL.Host {
+-			if start/m.SliceSize != end/m.SliceSize {
+-				return 0, fmt.Errorf("can't make a range request across a slice boundary: %d-%d straddles a slice boundary (slice size is %d)", start, end, m.SliceSize)
+-			}
+-			slice := start / m.SliceSize
+-
+-			key := CacheKey{URL: req.URL, Slice: slice}
+-			// we set IgnoreZeroValue so that we can add fields to the hash key
+-			// later without breaking things.
+-			// note that it's not safe to share a HashOptions so we create a fresh one each time.
+-			hashopts := &hashstructure.HashOptions{IgnoreZeroValue: true}
++			key, keyErr := m.cacheKeyForRange(req, start, end, false)
++			if keyErr != nil {
++				return 0, keyErr
++			}
++
+ 			var hash uint64
+-			hash, err = hashstructure.Hash(key, hashstructure.FormatV2, hashopts)
+-			if err != nil {
+-				err = fmt.Errorf("error calculating hash of key: %w", err)
+-				return
++			cachePodIndex, hash, err = consistentHashBucket(key, len(m.CacheHosts))
++			if err != nil {
++				return 0, err
+ 			}
+ 
+ 			logger.Debug().Uint64("hash_sum", hash).Int("len_cache_hosts", len(m.CacheHosts)).Msg("consistent hashing")
+ 
+-			// jump is an implementation of Google's Jump Consistent Hash.
+-			//
+-			// See http://arxiv.org/abs/1406.2294 for details.
+-			cachePodIndex = int(jump.Hash(hash, len(m.CacheHosts)))
+ 			cacheHost := m.CacheHosts[cachePodIndex]
+ 			logger.Debug().Str("cache_key", fmt.Sprintf("%+v", key)).Int64("start", start).Int64("end", end).Int64("slice_size", m.SliceSize).Int("bucket", cachePodIndex).Msg("consistent hashing")
+ 			if cacheHost != "" {
+@@ -339,29 +353,20 @@
+ 	logger := logging.GetLogger()
+ 	for _, host := range m.DomainsToCache {
+ 		if host == req.URL.Host {
+-			if start/m.SliceSize != end/m.SliceSize {
+-				return fmt.Errorf("can't make a range request across a slice boundary: %d-%d straddles a slice boundary (slice size is %d)", start, end, m.SliceSize)
+-			}
+-			slice := start / m.SliceSize
+-
+-			key := CacheKey{URL: req.URL, Slice: slice, Retry: true}
+-			// we set IgnoreZeroValue so that we can add fields to the hash key
+-			// later without breaking things.
+-			// note that it's not safe to share a HashOptions so we create a fresh one each time.
+-			hashopts := &hashstructure.HashOptions{IgnoreZeroValue: true}
+-			hash, err := hashstructure.Hash(key, hashstructure.FormatV2, hashopts)
+-			if err != nil {
+-				return fmt.Errorf("error calculating hash of key: %w", err)
++			key, err := m.cacheKeyForRange(req, start, end, true)
++			if err != nil {
++				return err
++			}
++
++			displacement, hash, err := consistentHashBucket(key, len(m.CacheHosts)-1)
++			if err != nil {
++				return err
+ 			}
+ 
+ 			logger.Debug().Uint64("hash_sum", hash).Int("len_cache_hosts", len(m.CacheHosts)).Msg("consistent hashing")
+ 
+-			// jump is an implementation of Google's Jump Consistent Hash.
+-			//
+-			// See http://arxiv.org/abs/1406.2294 for details.
+-
+ 			// we advance around the ring by somewhere between 1 and n-1
+-			displacement := int(jump.Hash(hash, len(m.CacheHosts)-1)) + 1
++			displacement++
+ 			cachePodIndex := (originalIndex + displacement) % len(m.CacheHosts)
+ 			cacheHost := m.CacheHosts[cachePodIndex]
+ 			logger.Debug().Str("cache_key", fmt.Sprintf("%+v", key)).Int64("start", start).Int64("end", end).Int64("slice_size", m.SliceSize).Int("bucket", cachePodIndex).Int("original_bucket", originalIndex).Msg("consistent hashing retry")

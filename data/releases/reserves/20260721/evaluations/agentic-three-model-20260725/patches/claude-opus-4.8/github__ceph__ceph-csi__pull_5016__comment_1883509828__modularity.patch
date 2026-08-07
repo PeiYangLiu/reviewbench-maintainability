@@ -1,0 +1,53 @@
+diff --git a/internal/rbd/controllerserver.go b/internal/rbd/controllerserver.go
+index 442b713..646a293 100644
+--- a/internal/rbd/controllerserver.go
++++ b/internal/rbd/controllerserver.go
+@@ -232,19 +232,9 @@ func (cs *ControllerServer) parseVolCreateRequest(
+ 	}
+ 
+ 	// Get QosParameters from SC if qos configuration existing in SC
+-	baseQosVolSize := ""
+-	params := req.GetParameters()
+-	if v, ok := params[baseVolSizeBytes]; ok && v != "" {
+-		baseQosVolSize = v
+-	}
+-	rbdQosParameters := parseQosParams(params)
+-	for _, param := range rbdQosParameters {
+-		if param.provide {
+-			err = calcQosBasedOnCapacity(ctx, rbdVol, *param, baseQosVolSize)
+-			if err != nil {
+-				return nil, status.Error(codes.InvalidArgument, err.Error())
+-			}
+-		}
++	err = rbdVol.setQosParameters(ctx, req.GetParameters())
++	if err != nil {
++		return nil, status.Error(codes.InvalidArgument, err.Error())
+ 	}
+ 
+ 	err = rbdVol.Connect(cr)
+@@ -259,6 +249,25 @@ func (cs *ControllerServer) parseVolCreateRequest(
+ 	return rbdVol, nil
+ }
+ 
++// setQosParameters parses the QoS related parameters from the StorageClass
++// and, when provided, calculates the QoS limits based on the volume capacity.
++func (rbdVol *rbdVolume) setQosParameters(ctx context.Context, params map[string]string) error {
++	baseQosVolSize := ""
++	if v, ok := params[baseVolSizeBytes]; ok && v != "" {
++		baseQosVolSize = v
++	}
++	rbdQosParameters := parseQosParams(params)
++	for _, param := range rbdQosParameters {
++		if param.provide {
++			err := calcQosBasedOnCapacity(ctx, rbdVol, *param, baseQosVolSize)
++			if err != nil {
++				return err
++			}
++		}
++	}
++
++	return nil
++}
+ func parseQosParams(
+ 	params map[string]string,
+ ) map[string]*rbdQos {

@@ -1,0 +1,78 @@
+diff --git a/Objects/sliceobject.c b/Objects/sliceobject.c
+index e2512ef..892a1ce 100644
+--- a/Objects/sliceobject.c
++++ b/Objects/sliceobject.c
+@@ -106,10 +106,28 @@ void _PySlice_Fini(PyInterpreterState *interp)
+     }
+ }
+ 
++/* Allocate a slice object, reusing the per-interpreter cache if possible.
++   Returns NULL on allocation failure. */
++
++static PySliceObject *
++_PySlice_Alloc(void)
++{
++    PyInterpreterState *interp = _PyInterpreterState_GET();
++    PySliceObject *obj;
++    if (interp->slice_cache != NULL) {
++        obj = interp->slice_cache;
++        interp->slice_cache = NULL;
++        _Py_NewReference((PyObject *)obj);
++    }
++    else {
++        obj = PyObject_GC_New(PySliceObject, &PySlice_Type);
++    }
++    return obj;
++}
++
+ /* start, stop, and step are python objects with None indicating no
+    index is present.
+ */
+-
+ PyObject *
+ PySlice_New(PyObject *start, PyObject *stop, PyObject *step)
+ {
+@@ -123,18 +141,9 @@ PySlice_New(PyObject *start, PyObject *stop, PyObject *step)
+         stop = Py_None;
+     }
+ 
+-    PyInterpreterState *interp = _PyInterpreterState_GET();
+-    PySliceObject *obj;
+-    if (interp->slice_cache != NULL) {
+-        obj = interp->slice_cache;
+-        interp->slice_cache = NULL;
+-        _Py_NewReference((PyObject *)obj);
+-    }
+-    else {
+-        obj = PyObject_GC_New(PySliceObject, &PySlice_Type);
+-        if (obj == NULL) {
+-            return NULL;
+-        }
++    PySliceObject *obj = _PySlice_Alloc();
++    if (obj == NULL) {
++        return NULL;
+     }
+ 
+     Py_INCREF(step);
+@@ -153,18 +162,9 @@ _PyBuildSlice_Consume2(PyObject *start, PyObject *stop)
+ {
+     assert(start != NULL && stop != NULL);
+ 
+-    PyInterpreterState *interp = _PyInterpreterState_GET();
+-    PySliceObject *obj;
+-    if (interp->slice_cache != NULL) {
+-        obj = interp->slice_cache;
+-        interp->slice_cache = NULL;
+-        _Py_NewReference((PyObject *)obj);
+-    }
+-    else {
+-        obj = PyObject_GC_New(PySliceObject, &PySlice_Type);
+-        if (obj == NULL) {
+-            goto error;
+-        }
++    PySliceObject *obj = _PySlice_Alloc();
++    if (obj == NULL) {
++        goto error;
+     }
+ 
+     obj->start = start;

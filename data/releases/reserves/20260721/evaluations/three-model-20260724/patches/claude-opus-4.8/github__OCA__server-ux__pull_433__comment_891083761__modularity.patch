@@ -1,0 +1,97 @@
+--- a/base_binary_url_import/wizard/base_binary_url_import.py
++++ b/base_binary_url_import/wizard/base_binary_url_import.py
+@@ -95,20 +95,19 @@
+             "binary_url_to_import": url,
+         }
+ 
+-    def lines_sanity_check(self):
+-        """Check if IDs are existing for selected model and we don't have two
+-        lines matching same record"""
+-        self.ensure_one()
++    def _collect_line_identifiers(self):
++        """Split line identifiers into DB IDs and XML IDs."""
+         db_ids = []
+         xml_ids = []
+-        # Check target IDs are integers or XMLIDs
+         for wiz_line in self.line_ids:
+             id_type = wiz_line._get_identifier_type()
+             if id_type == "db_id":
+                 db_ids.append(int(wiz_line.target_record_identifier))
+             elif id_type == "xml_id":
+                 xml_ids.append(wiz_line.target_record_identifier)
+-        # Check DB IDs exist
++        return db_ids, xml_ids
++
++    def _check_db_ids_exist(self, db_ids):
+         db_ids_records = self.env[self.target_model_id.model].browse(db_ids).exists()
+         unexisting_ids = set(db_ids) - set(db_ids_records.ids)
+         if unexisting_ids:
+@@ -116,9 +115,9 @@
+                 _("Following IDs do not exist in database:\n %s")
+                 % LINE_BREAK_CHAR.join([str(db_id) for db_id in unexisting_ids])
+             )
+-        # Check we don't have two lines targeting same DB ID
+-        db_ids_set = set(db_ids)
+-        if len(db_ids_set) != len(db_ids):
++
++    def _check_db_ids_not_duplicated(self, db_ids):
++        if len(set(db_ids)) != len(db_ids):
+             db_ids_counter = Counter(db_ids)
+             duplicated_db_ids = [
+                 db_id for db_id in db_ids_counter.keys() if db_ids_counter[db_id] > 1
+@@ -127,7 +126,10 @@
+                 _("Same database IDs are duplicated:\n %s")
+                 % LINE_BREAK_CHAR.join([str(db_id) for db_id in duplicated_db_ids])
+             )
+-        # Check XML IDs exist and match target model
++
++    def _check_xml_ids_exist(self, xml_ids):
++        """Check XML IDs exist and match target model, returning a map of
++        XML ID to record ID."""
+         xml_ids_records_ids_map = {}
+         unexisting_xml_ids = []
+         for xml_id in xml_ids:
+@@ -146,9 +148,10 @@
+                 _("Following XML IDs do not exist in database:\n %s")
+                 % LINE_BREAK_CHAR.join(unexisting_xml_ids)
+             )
+-        # Check we don't have two lines targeting same XML ID
+-        xml_ids_set = set(xml_ids)
+-        if len(xml_ids_set) != len(xml_ids):
++        return xml_ids_records_ids_map
++
++    def _check_xml_ids_not_duplicated(self, xml_ids):
++        if len(set(xml_ids)) != len(xml_ids):
+             xml_ids_counter = Counter(xml_ids)
+             duplicated_xml_ids = [
+                 xml_id
+@@ -159,14 +162,27 @@
+                 _("Same XML IDs are duplicated:\n %s")
+                 % LINE_BREAK_CHAR.join(duplicated_xml_ids)
+             )
+-        # Check no intersection between XML IDs and DB IDs
++
++    def _check_db_xml_ids_no_intersection(self, db_ids, xml_ids_records_ids_map):
+         xml_ids_db_ids_set = set(xml_ids_records_ids_map.values())
+-        intersects = db_ids_set.intersection(xml_ids_db_ids_set)
++        intersects = set(db_ids).intersection(xml_ids_db_ids_set)
+         if intersects:
+             raise UserError(
+                 _("Following DB IDs intersect with XML IDs:\n %s")
+                 % LINE_BREAK_CHAR.join([str(db_id) for db_id in intersects])
+             )
++
++    def lines_sanity_check(self):
++        """Check if IDs are existing for selected model and we don't have two
++        lines matching same record"""
++        self.ensure_one()
++        # Check target IDs are integers or XMLIDs
++        db_ids, xml_ids = self._collect_line_identifiers()
++        self._check_db_ids_exist(db_ids)
++        self._check_db_ids_not_duplicated(db_ids)
++        xml_ids_records_ids_map = self._check_xml_ids_exist(xml_ids)
++        self._check_xml_ids_not_duplicated(xml_ids)
++        self._check_db_xml_ids_no_intersection(db_ids, xml_ids_records_ids_map)
+ 
+     def action_import_lines(self):
+         self.ensure_one()

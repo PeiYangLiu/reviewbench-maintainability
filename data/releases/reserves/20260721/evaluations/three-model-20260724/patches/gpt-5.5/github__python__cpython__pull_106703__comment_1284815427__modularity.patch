@@ -1,0 +1,137 @@
+--- a/Lib/fnmatch.py
++++ b/Lib/fnmatch.py
+@@ -71,6 +71,9 @@
+     return match(name) is not None
+ 
+ 
++_STAR = object()
++
++
+ def translate(pat, sep=None):
+     """Translate a shell PATTERN to a regular expression.
+ 
+@@ -81,14 +84,41 @@
+ 
+     There is no way to quote meta-characters.
+     """
+-
+-    STAR = object()
+     if sep:
+-        SEP = re.escape(sep)
+-        DOT = f'[^{SEP}]'
+-    else:
+-        SEP = None
+-        DOT = '.'
++        return translate_full(pat, sep)
++    return _translate(pat, _translate_star, '.')
++
++
++def translate_full(pat, sep):
++    """Translate a shell PATTERN to a regular expression, treating *sep* as a path separator."""
++    if not sep:
++        return translate(pat)
++    escaped_sep = re.escape(sep)
++    dot = f'[^{escaped_sep}]'
++    return _translate(pat, _translate_full_star(sep, escaped_sep, dot), dot)
++
++
++def _translate_star(pat, h, i, n):
++    return _STAR, i
++
++
++def _translate_full_star(sep, escaped_sep, dot):
++    def translate_star(pat, h, i, n):
++        star_count = i-h
++        is_segment = (h == 0 or pat[h-1] == sep) and (i == n or pat[i] == sep)
++        if star_count == 1:
++            if is_segment:
++                return f'{dot}+', i
++            return f'{dot}*', i
++        if star_count == 2 and is_segment:
++            if i == n:
++                return '.*', i
++            return f'(.*{escaped_sep})?', i+1
++        raise ValueError("Invalid pattern: '**' can only be an entire path component")
++    return translate_star
++
++
++def _translate(pat, translate_star, question_mark):
+     res = []
+     add = res.append
+     i, n = 0, len(pat)
+@@ -100,26 +130,10 @@
+             h = i-1
+             while i < n and pat[i] == '*':
+                 i = i+1
+-            if sep:
+-                star_count = i-h
+-                is_segment = (h == 0 or pat[h-1] == sep) and (i == n or pat[i] == sep)
+-                if star_count == 1:
+-                    if is_segment:
+-                        add(f'{DOT}+')
+-                    else:
+-                        add(f'{DOT}*')
+-                elif star_count == 2 and is_segment:
+-                    if i == n:
+-                        add('.*')
+-                    else:
+-                        add(f'(.*{SEP})?')
+-                        i = i+1
+-                else:
+-                    raise ValueError("Invalid pattern: '**' can only be an entire path component")
+-            else:
+-                add(STAR)
++            translated, i = translate_star(pat, h, i, n)
++            add(translated)
+         elif c == '?':
+-            add(DOT)
++            add(question_mark)
+         elif c == '[':
+             j = i
+             if j < n and pat[j] == '!':
+@@ -166,7 +180,7 @@
+                     add('(?!)')
+                 elif stuff == '!':
+                     # Negated empty range: match any character.
+-                    add(DOT)
++                    add(question_mark)
+                 else:
+                     if stuff[0] == '!':
+                         stuff = '^' + stuff[1:]
+@@ -177,13 +191,16 @@
+             add(re.escape(c))
+     assert i == n
+ 
++    return _join_translated_parts(res)
++
++
++def _join_translated_parts(inp):
+     # Deal with STARs.
+-    inp = res
+     res = []
+     add = res.append
+     i, n = 0, len(inp)
+     # Fixed pieces at the start?
+-    while i < n and inp[i] is not STAR:
++    while i < n and inp[i] is not _STAR:
+         add(inp[i])
+         i += 1
+     # Now deal with STAR fixed STAR fixed ...
+@@ -194,14 +211,14 @@
+     # translate() results together via "|" to build large regexps matching
+     # "one of many" shell patterns.
+     while i < n:
+-        assert inp[i] is STAR
++        assert inp[i] is _STAR
+         i += 1
+         if i == n:
+             add(".*")
+             break
+-        assert inp[i] is not STAR
++        assert inp[i] is not _STAR
+         fixed = []
+-        while i < n and inp[i] is not STAR:
++        while i < n and inp[i] is not _STAR:
+             fixed.append(inp[i])
+             i += 1
+         fixed = "".join(fixed)

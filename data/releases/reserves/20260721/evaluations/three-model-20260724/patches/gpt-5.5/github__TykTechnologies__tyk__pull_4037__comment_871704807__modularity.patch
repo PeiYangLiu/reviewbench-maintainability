@@ -1,0 +1,86 @@
+--- a/gateway/api.go
++++ b/gateway/api.go
+@@ -960,6 +960,14 @@
+ 
+ }
+ 
++func getAPIID(r *http.Request) string {
++	return mux.Vars(r)["apiID"]
++}
++
++func isPublicOASRequest(r *http.Request) bool {
++	return r.URL.Query().Get("mode") == "public"
++}
++
+ func (gw *Gateway) handleAddOrUpdateApi(apiID string, r *http.Request, fs afero.Fs, oasTyped bool) (interface{}, int) {
+ 	if gw.GetConfig().UseDBAppConfigs {
+ 		log.Error("Rejected new API Definition due to UseDBAppConfigs = true")
+@@ -1169,33 +1177,42 @@
+ 	doJSONWrite(w, code, obj)
+ }
+ 
+-func (gw *Gateway) apiOASHandler(w http.ResponseWriter, r *http.Request) {
+-	var (
+-		apiID       = mux.Vars(r)["apiID"]
+-		scopePublic = r.URL.Query().Get("mode") == "public"
+-		obj         interface{}
+-		code        int
+-	)
+-
+-	switch r.Method {
+-	case http.MethodGet:
+-		if apiID != "" {
+-			log.Debugf("Requesting API definition for %q", apiID)
+-			obj, code = gw.handleGetAPIOAS(apiID, scopePublic)
+-		} else {
+-			log.Debug("Requesting API list")
+-			obj, code = gw.handleGetAPIListOAS(scopePublic)
+-		}
+-	case http.MethodPost:
+-		log.Debug("Creating new definition file")
++func (gw *Gateway) getAPIOASHandler(w http.ResponseWriter, r *http.Request) {
++	apiID := getAPIID(r)
++	scopePublic := isPublicOASRequest(r)
++
++	var obj interface{}
++	var code int
++
++	if apiID != "" {
++		log.Debugf("Requesting API definition for %q", apiID)
++		obj, code = gw.handleGetAPIOAS(apiID, scopePublic)
++	} else {
++		log.Debug("Requesting API list")
++		obj, code = gw.handleGetAPIListOAS(scopePublic)
++	}
++
++	doJSONWrite(w, code, obj)
++}
++
++func (gw *Gateway) createAPIOASHandler(w http.ResponseWriter, r *http.Request) {
++	log.Debug("Creating new definition file")
++	obj, code := gw.handleAddOrUpdateApi(getAPIID(r), r, afero.NewOsFs(), true)
++
++	doJSONWrite(w, code, obj)
++}
++
++func (gw *Gateway) updateAPIOASHandler(w http.ResponseWriter, r *http.Request) {
++	apiID := getAPIID(r)
++
++	var obj interface{}
++	var code int
++
++	if apiID != "" {
++		log.Debugf("Updating existing API: %q", apiID)
+ 		obj, code = gw.handleAddOrUpdateApi(apiID, r, afero.NewOsFs(), true)
+-	case http.MethodPut:
+-		if apiID != "" {
+-			log.Debugf("Updating existing API: %q", apiID)
+-			obj, code = gw.handleAddOrUpdateApi(apiID, r, afero.NewOsFs(), true)
+-		} else {
+-			obj, code = apiError("Must specify an apiID to update"), http.StatusBadRequest
+-		}
++	} else {
++		obj, code = apiError("Must specify an apiID to update"), http.StatusBadRequest
+ 	}
+ 
+ 	doJSONWrite(w, code, obj)

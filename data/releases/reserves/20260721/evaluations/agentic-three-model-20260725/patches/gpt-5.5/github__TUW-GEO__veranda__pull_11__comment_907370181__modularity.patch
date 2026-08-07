@@ -1,0 +1,63 @@
+diff --git a/src/veranda/raster/native/netcdf.py b/src/veranda/raster/native/netcdf.py
+index 35d1cde..c66b17a 100644
+--- a/src/veranda/raster/native/netcdf.py
++++ b/src/veranda/raster/native/netcdf.py
+@@ -152,10 +152,8 @@ class NetCdf4File:
+             self._chunksizes[variable] = chunksizes.get(variable, None)
+             self._var_chunk_caches[variable] = var_chunk_caches.get(variable, None)
+             if variable in self.data_variables:
+-                self.scale_factors[variable] = scale_factors.get(variable, 1)
+-                self.offsets[variable] = offsets.get(variable, 0)
+-                self.nodatavals[variable] = nodatavals.get(variable, 127)
+-                self.dtypes[variable] = dtypes.get(variable, 'int8')
++                self._set_data_variable_properties(variable, scale_factors, offsets, nodatavals, dtypes,
++                                                   dtype='int8')
+ 
+         if self.mode == 'r':
+             self._open()
+@@ -191,13 +189,8 @@ class NetCdf4File:
+             self._var_chunk_caches[variable] = self._var_chunk_caches.get(variable, src_var.get_var_chunk_cache())
+             if variable in self.data_variables:
+                 src_var_md = self.get_metadata(src_var)
+-                def_scale_factor = self.scale_factors.get(variable, 1)
+-                self.scale_factors[variable] = src_var_md.get('scale_factor', def_scale_factor)
+-                def_offset = self.offsets.get(variable, 0)
+-                self.offsets[variable] = src_var_md.get('add_offset', def_offset)
+-                def_nodataval = self.nodatavals.get(variable, 127)
+-                self.nodatavals[variable] = src_var_md.get('_FillValue', def_nodataval)
+-                self.dtypes[variable] = self.dtypes.get(variable, src_var.dtype)
++                self._set_data_variable_properties(variable, self.scale_factors, self.offsets, self.nodatavals,
++                                                   self.dtypes, attrs=src_var_md, dtype=src_var.dtype)
+ 
+     def _reset_from_ds(self, ds):
+         """ Resets internal class variables with properties from an in-memory xarray dataset. """
+@@ -217,13 +210,22 @@ class NetCdf4File:
+             self._chunksizes[variable] = self._chunksizes.get(variable, dar.chunks)
+             self._var_chunk_caches[variable] = self._var_chunk_caches.get(variable, None)
+             if variable in ds.data_vars:
+-                def_scale_factor = self.scale_factors.get(variable, 1)
+-                self.scale_factors[variable] = src_var_md.get('scale_factor', def_scale_factor)
+-                def_offset = self.offsets.get(variable, 0)
+-                self.offsets[variable] = src_var_md.get('add_offset', def_offset)
+-                def_nodataval = self.nodatavals.get(variable, 127)
+-                self.nodatavals[variable] = src_var_md.get('_FillValue', def_nodataval)
+-                self.dtypes[variable] = self.dtypes.get(variable, dar.dtype.name)
++                self._set_data_variable_properties(variable, self.scale_factors, self.offsets, self.nodatavals,
++                                                   self.dtypes, attrs=src_var_md, dtype=dar.dtype.name)
++
++    def _set_data_variable_properties(self, variable, scale_factors, offsets, nodatavals, dtypes, attrs=None,
++                                      dtype=None):
++        """
++        Sets encoding properties for a data variable, optionally overriding defaults with metadata attributes.
++        """
++        attrs = attrs or dict()
++        def_scale_factor = scale_factors.get(variable, 1)
++        self.scale_factors[variable] = attrs.get('scale_factor', def_scale_factor)
++        def_offset = offsets.get(variable, 0)
++        self.offsets[variable] = attrs.get('add_offset', def_offset)
++        def_nodataval = nodatavals.get(variable, 127)
++        self.nodatavals[variable] = attrs.get('_FillValue', def_nodataval)
++        self.dtypes[variable] = dtypes.get(variable, dtype)
+ 
+     def _open(self):
+         """ Internal method for opening a NetCDF file. """

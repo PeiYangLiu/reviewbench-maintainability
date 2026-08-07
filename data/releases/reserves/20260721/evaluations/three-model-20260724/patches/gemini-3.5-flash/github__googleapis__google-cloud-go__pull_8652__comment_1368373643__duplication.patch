@@ -1,0 +1,137 @@
+--- a/spanner/client.go
++++ b/spanner/client.go
+@@ -99,6 +99,7 @@
+ 	qo                   QueryOptions
+ 	ro                   ReadOptions
+ 	ao                   []ApplyOption
++	bwo                  []BatchWriteOption
+ 	txo                  TransactionOptions
+ 	ct                   *commonTags
+ 	disableRouteToLeader bool
+@@ -137,6 +138,9 @@
+ 
+ 	// ApplyOptions is the configuration for applying
+ 	ApplyOptions []ApplyOption
++
++	// BatchWriteOptions is the configuration for BatchWrite
++	BatchWriteOptions []BatchWriteOption
+ 
+ 	// TransactionOptions is the configuration for a transaction.
+ 	TransactionOptions TransactionOptions
+@@ -283,6 +287,7 @@
+ 		qo:                   getQueryOptions(config.QueryOptions),
+ 		ro:                   config.ReadOptions,
+ 		ao:                   config.ApplyOptions,
++		bwo:                  config.BatchWriteOptions,
+ 		txo:                  config.TransactionOptions,
+ 		ct:                   getCommonTags(sc),
+ 		disableRouteToLeader: config.DisableRouteToLeader,
+@@ -612,7 +617,28 @@
+ }
+ 
+ // An ApplyOption is an optional argument to Apply.
+-type ApplyOption func(*applyOption)
++type ApplyOption interface {
++	apply(*applyOption)
++}
++
++// batchWriteOption controls the behavior of Client.BatchWrite.
++type batchWriteOption struct {
++	// transactionTag will be included with the BatchWriteRequest.
++	transactionTag string
++	// priority is the RPC priority that is used for the batch write operation.
++	priority sppb.RequestOptions_Priority
++}
++
++// A BatchWriteOption is an optional argument to BatchWrite.
++type BatchWriteOption interface {
++	batchWrite(*batchWriteOption)
++}
++
++type applyAtLeastOnce struct{}
++
++func (applyAtLeastOnce) apply(ao *applyOption) {
++	ao.atLeastOnce = true
++}
+ 
+ // ApplyAtLeastOnce returns an ApplyOption that removes replay protection.
+ //
+@@ -626,25 +652,45 @@
+ // option may be appropriate for latency sensitive and/or high throughput blind
+ // writing.
+ func ApplyAtLeastOnce() ApplyOption {
+-	return func(ao *applyOption) {
+-		ao.atLeastOnce = true
+-	}
+-}
+-
+-// TransactionTag returns an ApplyOption that will include the given tag as a
+-// transaction tag for a write-only transaction.
+-func TransactionTag(tag string) ApplyOption {
+-	return func(ao *applyOption) {
+-		ao.transactionTag = tag
+-	}
+-}
+-
+-// Priority returns an ApplyOptions that sets the RPC priority to use for the
+-// commit operation.
+-func Priority(priority sppb.RequestOptions_Priority) ApplyOption {
+-	return func(ao *applyOption) {
+-		ao.priority = priority
+-	}
++	return applyAtLeastOnce{}
++}
++
++type transactionTag string
++
++func (t transactionTag) apply(ao *applyOption) {
++	ao.transactionTag = string(t)
++}
++
++func (t transactionTag) batchWrite(bwo *batchWriteOption) {
++	bwo.transactionTag = string(t)
++}
++
++// TransactionTag returns an option that can be used as both an ApplyOption and a BatchWriteOption.
++// It will include the given tag as a transaction tag for a write-only transaction or a batch write.
++func TransactionTag(tag string) interface {
++	ApplyOption
++	BatchWriteOption
++} {
++	return transactionTag(tag)
++}
++
++type priority sppb.RequestOptions_Priority
++
++func (p priority) apply(ao *applyOption) {
++	ao.priority = sppb.RequestOptions_Priority(p)
++}
++
++func (p priority) batchWrite(bwo *batchWriteOption) {
++	bwo.priority = sppb.RequestOptions_Priority(p)
++}
++
++// Priority returns an option that can be used as both an ApplyOption and a BatchWriteOption.
++// It sets the RPC priority to use for the commit or batch write operation.
++func Priority(p sppb.RequestOptions_Priority) interface {
++	ApplyOption
++	BatchWriteOption
++} {
++	return priority(p)
+ }
+ 
+ // Apply applies a list of mutations atomically to the database.
+@@ -652,11 +698,11 @@
+ 	ao := &applyOption{}
+ 
+ 	for _, opt := range c.ao {
+-		opt(ao)
++		opt.apply(ao)
+ 	}
+ 
+ 	for _, opt := range opts {
+-		opt(ao)
++		opt.apply(ao)
+ 	}
+ 
+ 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/spanner.Apply")

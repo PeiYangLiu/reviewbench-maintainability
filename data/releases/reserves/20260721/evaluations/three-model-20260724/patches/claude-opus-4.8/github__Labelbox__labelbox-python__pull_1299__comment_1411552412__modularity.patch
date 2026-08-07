@@ -1,0 +1,90 @@
+--- a/labelbox/client.py
++++ b/labelbox/client.py
+@@ -47,9 +47,41 @@
+ 
+ from labelbox.schema.media_type import MediaType, get_media_type_validation_error
+ 
++try:
++    from typing import TypedDict
++except ImportError:  # Python 3.7 compatibility
++    from typing_extensions import TypedDict
++
+ logger = logging.getLogger(__name__)
+ 
+ _LABELBOX_API_KEY = "LABELBOX_API_KEY"
++
++
++class SendToAnnotateFromCatalogParams(TypedDict, total=False):
++    """
++    Encapsulates the optional configuration parameters used when sending data
++    rows to annotate. Grouping these parameters into a single object keeps the
++    ``send_to_annotate`` function signatures small and allows new configuration
++    options to be added in the future without breaking the public interface.
++
++    Attributes:
++        source_model_run_id: The ID of the model run to import annotations
++            (predictions) from.
++        source_project_id: The ID of the project to import annotations from.
++        exclude_data_rows_in_project: Whether to exclude data rows that are
++            already in the destination project.
++        ontology_mapping: A mapping of feature schema ids from the source to
++            destination ontology.
++        override_existing_annotations_rule: The strategy for resolving conflicts
++            between existing and imported annotations.
++        priority: The priority of the batch in the destination project.
++    """
++    source_model_run_id: Optional[str]
++    source_project_id: Optional[str]
++    exclude_data_rows_in_project: bool
++    ontology_mapping: Dict[str, str]
++    override_existing_annotations_rule: ConflictResolutionStrategy
++    priority: int
+ 
+ 
+ def python_version_info():
+@@ -1792,17 +1824,37 @@
+ 
+     def send_to_annotate_from_catalog(
+             self,
++            destination_project: str,
+             batch_name: str,
+             data_rows: DataRowIdentifiers,
+-            source_model_run_id: Optional[str],
+-            source_project_id: Optional[str],
+-            destination_project: str,
+             task_queue_id: Optional[str],
+-            exclude_data_rows_in_project: bool = False,
+-            ontology_mapping: Dict[str, str] = None,
+-            override_existing_annotations_rule:
+-        ConflictResolutionStrategy = ConflictResolutionStrategy.KeepExisting,
+-            priority: int = 5):
++            params: SendToAnnotateFromCatalogParams):
++        """
++        Sends data rows from catalog to a specified project for annotation.
++
++        Args:
++            destination_project: The ID of the project to send the data rows to.
++            batch_name: The name of the batch to create in the destination
++                project.
++            data_rows: The data rows to send, as either UniqueIds or GlobalKeys.
++            task_queue_id: The ID of the task queue to send the data rows to. If
++                not specified, the data rows will be sent to the "Done" queue.
++            params: Additional configuration parameters. See
++                `SendToAnnotateFromCatalogParams` for the available options.
++
++        Returns:
++            The created task for this operation.
++        """
++
++        source_model_run_id = params.get("source_model_run_id")
++        source_project_id = params.get("source_project_id")
++        exclude_data_rows_in_project = params.get(
++            "exclude_data_rows_in_project", False)
++        ontology_mapping = params.get("ontology_mapping")
++        override_existing_annotations_rule = params.get(
++            "override_existing_annotations_rule",
++            ConflictResolutionStrategy.KeepExisting)
++        priority = params.get("priority", 5)
+ 
+         mutation_str = """mutation SendToAnnotateFromCatalogPyApi($input: SendToAnnotateFromCatalogInput!) {
+                             sendToAnnotateFromCatalog(input: $input) {

@@ -1,0 +1,149 @@
+diff --git a/labelbox/client.py b/labelbox/client.py
+index 9382c24..6249f9f 100644
+--- a/labelbox/client.py
++++ b/labelbox/client.py
+@@ -3,6 +3,7 @@ import random
+ from datetime import datetime, timezone
+ import json
+ from typing import Any, List, Dict, Union, Optional
++from typing_extensions import TypedDict
+ from collections import defaultdict
+ 
+ import logging
+@@ -58,6 +59,34 @@ def python_version_info():
+     return f"{version_info.major}.{version_info.minor}.{version_info.micro}-{version_info.releaselevel}"
+ 
+ 
++class SendToAnnotateFromCatalogParams(TypedDict):
++    """
++    Extra parameters for sending data rows to a project through catalog. At least one of
++    source_model_run_id or source_project_id must be provided.
++
++    :param source_model_run_id: Optional[str] - The model run to use for predictions. Defaults to None.
++    :param predictions_ontology_mapping: Optional[Dict[str, str]] - A mapping of feature schema ids to feature
++        schema ids. Defaults to an empty dictionary.
++    :param source_project_id: Optional[str] - The project to use for predictions. Defaults to None.
++    :param annotations_ontology_mapping: Optional[Dict[str, str]] - A mapping of feature schema ids to feature
++        schema ids. Defaults to an empty dictionary.
++    :param exclude_data_rows_in_project: Optional[bool] - Exclude data rows that are already in the project.
++        Defaults to False.
++    :param override_existing_annotations_rule: Optional[ConflictResolutionStrategy] - The strategy defining how to
++        handle conflicts in classifications between the data rows that already exist in the project and the newly
++        imported ones. Defaults to ConflictResolutionStrategy.KEEP_EXISTING.
++    :param batch_priority: Optional[int] - The priority of the batch. Defaults to 5.
++    """
++
++    source_model_run_id: Optional[str]
++    predictions_ontology_mapping: Optional[Dict[str, str]]
++    source_project_id: Optional[str]
++    annotations_ontology_mapping: Optional[Dict[str, str]]
++    exclude_data_rows_in_project: Optional[bool]
++    override_existing_annotations_rule: Optional[ConflictResolutionStrategy]
++    batch_priority: Optional[int]
++
++
+ class Client:
+     """ A Labelbox client.
+ 
+@@ -1791,18 +1820,36 @@ class Client:
+         return Entity.Batch(self, project_id, batch)
+ 
+     def send_to_annotate_from_catalog(
+-            self,
+-            batch_name: str,
+-            data_rows: DataRowIdentifiers,
+-            source_model_run_id: Optional[str],
+-            source_project_id: Optional[str],
+-            destination_project: str,
+-            task_queue_id: Optional[str],
+-            exclude_data_rows_in_project: bool = False,
+-            ontology_mapping: Dict[str, str] = None,
+-            override_existing_annotations_rule:
+-        ConflictResolutionStrategy = ConflictResolutionStrategy.KeepExisting,
+-            priority: int = 5):
++            self, destination_project_id: str, task_queue_id: Optional[str],
++            batch_name: str, data_rows: DataRowIdentifiers,
++            params: SendToAnnotateFromCatalogParams):
++        """
++        Sends data rows from catalog to a specified project for annotation.
++
++        Example usage:
++            >>> task = client.send_to_annotate_from_catalog(
++            >>>     destination_project_id="<project_id>",
++            >>>     task_queue_id="<task_queue_id>", # ID of the task queue to send data rows to
++            >>>     batch_name="batch_name",
++            >>>     data_rows=UniqueIds(["<data_row_id>", "<data_row_id>"]),
++            >>>     params={
++            >>>         "source_project_id": "<project_id>",
++            >>>         "override_existing_annotations_rule": ConflictResolutionStrategy.OverrideWithAnnotations
++            >>>     })
++            >>> task.wait_till_done()
++
++        Args:
++            destination_project_id: The ID of the project to send the data rows to.
++            task_queue_id: The ID of the task queue to send the data rows to. If not specified, the data rows will be
++                sent to the Done workflow state.
++            batch_name: The name of the batch to create. If more than one batch is created, additional batches will be
++                named with a monotonically increasing numerical suffix, starting at "_1".
++            data_rows: The data rows to send to the project.
++            params: Additional parameters to configure the job. See SendToAnnotateFromCatalogParams for more details.
++
++        Returns: The created task for this operation.
++
++        """
+ 
+         mutation_str = """mutation SendToAnnotateFromCatalogPyApi($input: SendToAnnotateFromCatalogInput!) {
+                             sendToAnnotateFromCatalog(input: $input) {
+@@ -1818,24 +1865,31 @@ class Client:
+             "type": "done"
+         }
+ 
++        source_project_id = params.get("source_project_id")
++        annotations_ontology_mapping = params.get(
++            "annotations_ontology_mapping", {})
+         annotations_input = {
+-            "projectId":
+-                source_project_id,
+-            "featureSchemaIdsMapping":
+-                ontology_mapping if ontology_mapping else {},
++            "projectId": source_project_id,
++            "featureSchemaIdsMapping": annotations_ontology_mapping,
+         } if source_project_id else None
+ 
++        source_model_run_id = params.get("source_model_run_id")
++        predictions_ontology_mapping = params.get(
++            "predictions_ontology_mapping", {})
+         predictions_input = {
+-            "featureSchemaIdsMapping":
+-                ontology_mapping if ontology_mapping else {},
+-            "modelRunId":
+-                source_model_run_id,
+-            "minConfidence":
+-                0,
+-            "maxConfidence":
+-                1
++            "featureSchemaIdsMapping": predictions_ontology_mapping,
++            "modelRunId": source_model_run_id,
++            "minConfidence": 0,
++            "maxConfidence": 1
+         } if source_model_run_id else None
+ 
++        exclude_data_rows_in_project = params.get(
++            "exclude_data_rows_in_project", False)
++        override_existing_annotations_rule = params.get(
++            "override_existing_annotations_rule",
++            ConflictResolutionStrategy.KeepExisting)
++        priority = params.get("batch_priority", 5)
++
+         if isinstance(data_rows, UniqueIds):
+             data_rows_query = {
+                 "type": "data_row_id",
+@@ -1856,7 +1910,7 @@ class Client:
+             mutation_str, {
+                 "input": {
+                     "destinationProjectId":
+-                        destination_project,
++                        destination_project_id,
+                     "batchInput": {
+                         "batchName": batch_name,
+                         "batchPriority": priority

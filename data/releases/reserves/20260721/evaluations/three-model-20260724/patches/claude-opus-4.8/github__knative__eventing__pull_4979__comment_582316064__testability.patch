@@ -1,0 +1,33 @@
+--- a/pkg/reconciler/mtbroker/trigger/controller.go
++++ b/pkg/reconciler/mtbroker/trigger/controller.go
+@@ -78,11 +78,7 @@
+ 	brokerFilter := pkgreconciler.AnnotationFilterFunc(brokerreconciler.ClassAnnotationKey, eventing.MTChannelBrokerClassValue, false /*allowUnset*/)
+ 	brokerInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
+ 		FilterFunc: brokerFilter,
+-		Handler: controller.HandleAll(func(obj interface{}) {
+-			for _, t := range getBrokerTriggers(logger, triggerLister, obj) {
+-				impl.Enqueue(t)
+-			}
+-		}),
++		Handler:    controller.HandleAll(enqueueBrokerTriggers(logger, triggerLister, impl.Enqueue)),
+ 	})
+ 
+ 	// Reconcile Trigger when my Subscription changes
+@@ -92,6 +88,17 @@
+ 	})
+ 
+ 	return impl
++}
++
++// enqueueBrokerTriggers returns an event handler function that, given a Broker
++// object, enqueues all the Triggers belonging to it using the provided enqueue
++// function. It is extracted into its own function to make it unit testable.
++func enqueueBrokerTriggers(logger *zap.SugaredLogger, triggerLister v1.TriggerLister, enqueue func(obj interface{})) func(obj interface{}) {
++	return func(obj interface{}) {
++		for _, t := range getBrokerTriggers(logger, triggerLister, obj) {
++			enqueue(t)
++		}
++	}
+ }
+ 
+ // getBrokerTriggers makes sure the object passed in is a Broker, and gets all

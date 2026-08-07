@@ -1,0 +1,136 @@
+diff --git a/builder/vmware/common/driver_workstation9.go b/builder/vmware/common/driver_workstation9.go
+index 11bce82..da397a7 100644
+--- a/builder/vmware/common/driver_workstation9.go
++++ b/builder/vmware/common/driver_workstation9.go
+@@ -212,10 +212,22 @@ func (d *Workstation9Driver) Verify() error {
+ 	d.VmwareDriver.NetworkMapper = func() (NetworkNameMapper, error) {
+ 		// Check if the network mapper configuration file exists.
+ 		mapper, err := checkNetmapConfExists()
++		if err == nil {
++			return mapper, nil
++		}
++
++		if runtime.GOOS != "windows" || !errors.Is(err, os.ErrNotExist) {
++			return nil, fmt.Errorf("error reading network mapper configuration: %w", err)
++		}
++
++		pathNetmap := workstationNetmapConfPath()
++		log.Printf("Generating a network mapper configuration file in the default path: %s", pathNetmap)
++		pathNetmap, err = generateNetmapConfig()
+ 		if err != nil {
+-			return nil, fmt.Errorf("error reading network mapper configuration: %v", err)
++			return nil, fmt.Errorf("error generating the absent network configuration file: %w", err)
+ 		}
+-		return mapper, nil
++
++		return ReadNetmapConfig(pathNetmap)
+ 	}
+ 	return nil
+ }
+@@ -233,54 +245,37 @@ func (d *Workstation9Driver) GetVmwareDriver() VmwareDriver {
+ }
+ 
+ // checkNetmapConfExists checks if the network mapper configuration file exists.
+-// If not, if attempts to generate the file using generateNetmapConfig.
+ func checkNetmapConfExists() (NetworkNameMapper, error) {
+ 	pathNetmap := workstationNetmapConfPath()
+ 
+ 	// Check if the default network mapper configuration file exists.
+-	if _, err := os.Stat(pathNetmap); os.IsNotExist(err) {
+-		log.Printf("A network mapper configuration file does not exist in the default path: %s", pathNetmap)
+-
+-		// The file does not exist, check the alternate configuration path.
+-		libpath, _ := workstationVMwareRoot()
+-		pathNetworking := filepath.Join(libpath, "networking")
+-		log.Printf("Checking alternate path for network mapper configuration file: %s", pathNetworking)
+-		if _, err := os.Stat(pathNetworking); err == nil {
+-			// Alternate networking configuration path exists. Using this path.
+-			log.Printf("Located the network mapper configuration file: %s", pathNetworking)
+-			fd, err := os.Open(pathNetworking)
+-			if err != nil {
+-				return nil, err
+-			}
+-			defer fd.Close()
+-
+-			// Then we pass the handle to the networking configuration parser.
+-			return ReadNetworkingConfig(fd)
+-		} else if runtime.GOOS == "windows" {
+-			// Neither the default nor alternate exists.
+-			// Generate the network mapper configuration file in the default path.
+-			log.Printf("Generating a network mapper configuration file in the default path: %s", pathNetmap)
+-			pathNetmap, err := generateNetmapConfig()
+-			if err != nil {
+-				log.Fatalf("error generating the absent network configuration file: %v", err)
+-				return nil, err
+-			}
+-			// If the file exists, attempt to read the newly generated
+-			// network mapper configuration file.
+-			return ReadNetmapConfig(pathNetmap)
+-		} else {
+-			// For non-Windows, if neither the default nor alternate
+-			// configuration paths exist, return an error.
+-			return nil, fmt.Errorf("error determining network mappings from files in path: %s", libpath)
+-		}
+-	} else if err != nil {
+-		// There was an error other than the file not existing.
++	if _, err := os.Stat(pathNetmap); err == nil {
++		log.Printf("Located the network mapper configuration file: %s", pathNetmap)
++		return ReadNetmapConfig(pathNetmap)
++	} else if !errors.Is(err, os.ErrNotExist) {
+ 		return nil, err
+ 	}
+ 
+-	// If the default network mapper configuration file exists, read the configuration.
+-	log.Printf("Located the network mapper configuration file: %s", pathNetmap)
+-	return ReadNetmapConfig(pathNetmap)
++	log.Printf("A network mapper configuration file does not exist in the default path: %s", pathNetmap)
++
++	// The file does not exist, check the alternate configuration path.
++	libpath, _ := workstationVMwareRoot()
++	pathNetworking := filepath.Join(libpath, "networking")
++	log.Printf("Checking alternate path for network mapper configuration file: %s", pathNetworking)
++	if _, err := os.Stat(pathNetworking); err != nil {
++		return nil, fmt.Errorf("error determining network mappings from files in path: %s: %w", libpath, err)
++	}
++
++	// Alternate networking configuration path exists. Using this path.
++	log.Printf("Located the network mapper configuration file: %s", pathNetworking)
++	fd, err := os.Open(pathNetworking)
++	if err != nil {
++		return nil, fmt.Errorf("error opening network mapper configuration file %s: %w", pathNetworking, err)
++	}
++	defer fd.Close()
++
++	// Then we pass the handle to the networking configuration parser.
++	return ReadNetworkingConfig(fd)
+ }
+ 
+ // generateNetmapConfig creates the network mapper configuration file in the
+@@ -317,7 +312,6 @@ func generateNetmapConfig() (string, error) {
+ 	}
+ 	netmapContent := []byte(sb.String())
+ 
+-	var pathNetmap string
+ 	for _, basePath := range paths {
+ 		path := filepath.Join(basePath, "netmap.conf")
+ 		if err := os.MkdirAll(basePath, 0755); err != nil {
+@@ -327,16 +321,11 @@ func generateNetmapConfig() (string, error) {
+ 			continue // Skip to the next path on error.
+ 		}
+ 
+-		// If the file exists, set pathNetmap and break the loop.
++		// If the file exists, return the path since it was successfully created.
+ 		if _, err := os.Stat(path); err == nil {
+-			pathNetmap = path
+-			break // Exit the loop since the file was successfully created.
++			return path, nil
+ 		}
+ 	}
+ 
+-	if pathNetmap != "" {
+-		return pathNetmap, nil
+-	} else {
+-		return "", fmt.Errorf("no valid path found for generating the network mapper configuration file")
+-	}
++	return "", fmt.Errorf("no valid path found for generating the network mapper configuration file")
+ }

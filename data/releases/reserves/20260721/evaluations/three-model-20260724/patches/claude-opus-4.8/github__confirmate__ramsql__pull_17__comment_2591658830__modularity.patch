@@ -1,0 +1,121 @@
+--- a/engine/agnostic/transaction.go
++++ b/engine/agnostic/transaction.go
+@@ -343,54 +343,8 @@
+ 	// For each candidate tuple, ensure no referencing rows exist in any relation
+ 	for _, e := range candidates {
+ 		tup := e.Value.(*Tuple)
+-
+-		// iterate all schemas and relations to find FKs referencing schema.relation
+-		for schName, sch := range t.e.schemas {
+-			// skip information_schema
+-			for childName, childRel := range sch.relations {
+-				for _, at := range childRel.attributes {
+-					if at.fk == nil {
+-						continue
+-					}
+-					refSchema := at.fk.RefSchema()
+-					if refSchema == "" {
+-						refSchema = schName // referencing default schema is child's schema? If empty, assume same as child schema; default to current schema if needed
+-					}
+-					if refSchema == s.name && at.fk.RefRelation() == relation {
+-						// Determine referenced column
+-						refCols := at.fk.RefColumns()
+-						var refCol string
+-						if len(refCols) > 0 {
+-							refCol = refCols[0]
+-						} else {
+-							// use parent PK (single-column only)
+-							if len(r.pk) != 1 {
+-								return nil, nil, t.abort(fmt.Errorf("delete restrict not supported for composite primary key on %s.%s", s.name, relation))
+-							}
+-							refCol = r.attributes[r.pk[0]].name
+-						}
+-						// parent value
+-						pidx := r.attrIndex[refCol]
+-						pval := tup.values[pidx]
+-						if pval == nil {
+-							continue
+-						}
+-						// Build predicate on child: child.at.name = parent value
+-						cond := NewEqPredicate(NewAttributeValueFunctor(childName, at.name), NewConstValueFunctor(pval))
+-						n2, err := t.Plan(schName, nil, cond, nil, nil)
+-						if err != nil {
+-							return nil, nil, t.abort(err)
+-						}
+-						_, rows2, err := n2.Exec()
+-						if err != nil {
+-							return nil, nil, t.abort(err)
+-						}
+-						if len(rows2) > 0 {
+-							return nil, nil, t.abort(fmt.Errorf("delete violates foreign key: %s.%s is referenced by %s.%s", s.name, relation, schName, childName))
+-						}
+-					}
+-				}
+-			}
++		if err := t.checkDeleteRestrict(s, r, relation, tup); err != nil {
++			return nil, nil, err
+ 		}
+ 	}
+ 
+@@ -413,6 +367,61 @@
+ 	}
+ 
+ 	return cols, res, nil
++}
++
++// checkDeleteRestrict ensures no referencing rows exist in any relation for the
++// given parent tuple before it is deleted. It returns an aborting error if a
++// foreign key constraint would be violated.
++func (t *Transaction) checkDeleteRestrict(s *Schema, r *Relation, relation string, tup *Tuple) error {
++	// iterate all schemas and relations to find FKs referencing schema.relation
++	for schName, sch := range t.e.schemas {
++		// skip information_schema
++		for childName, childRel := range sch.relations {
++			for _, at := range childRel.attributes {
++				if at.fk == nil {
++					continue
++				}
++				refSchema := at.fk.RefSchema()
++				if refSchema == "" {
++					refSchema = schName // referencing default schema is child's schema? If empty, assume same as child schema; default to current schema if needed
++				}
++				if refSchema == s.name && at.fk.RefRelation() == relation {
++					// Determine referenced column
++					refCols := at.fk.RefColumns()
++					var refCol string
++					if len(refCols) > 0 {
++						refCol = refCols[0]
++					} else {
++						// use parent PK (single-column only)
++						if len(r.pk) != 1 {
++							return t.abort(fmt.Errorf("delete restrict not supported for composite primary key on %s.%s", s.name, relation))
++						}
++						refCol = r.attributes[r.pk[0]].name
++					}
++					// parent value
++					pidx := r.attrIndex[refCol]
++					pval := tup.values[pidx]
++					if pval == nil {
++						continue
++					}
++					// Build predicate on child: child.at.name = parent value
++					cond := NewEqPredicate(NewAttributeValueFunctor(childName, at.name), NewConstValueFunctor(pval))
++					n2, err := t.Plan(schName, nil, cond, nil, nil)
++					if err != nil {
++						return t.abort(err)
++					}
++					_, rows2, err := n2.Exec()
++					if err != nil {
++						return t.abort(err)
++					}
++					if len(rows2) > 0 {
++						return t.abort(fmt.Errorf("delete violates foreign key: %s.%s is referenced by %s.%s", s.name, relation, schName, childName))
++					}
++				}
++			}
++		}
++	}
++	return nil
+ }
+ 
+ // Update relation with given values.

@@ -1,0 +1,103 @@
+--- a/engine/agnostic/transaction.go
++++ b/engine/agnostic/transaction.go
+@@ -327,17 +327,43 @@
+ 	}
+ 
+ 	// Pre-check RESTRICT: evaluate target rows on a separate, fresh plan to avoid consuming the main plan
++	if err := t.checkDeleteRestrictions(schema, relation, s, r, selectors, p); err != nil {
++		return nil, nil, t.abort(err)
++	}
++
++	un := NewDeleterNode(r, t.changes)
++
++	snode.child, un.child = un, snode.child
++
++	log.Debug("DELETE(%s, %s, %s, %s)", schema, relation, selectors, p)
++	PrintQueryPlan(n, 0, nil)
++
++	// (4), (5), (6)
++	cols, eres, err := n.Exec()
++	if err != nil {
++		return nil, nil, t.abort(err)
++	}
++
++	res := make([]*Tuple, len(eres))
++	for i, e := range eres {
++		res[i] = e.Value.(*Tuple)
++	}
++
++	return cols, res, nil
++}
++
++func (t *Transaction) checkDeleteRestrictions(schema, relation string, s *Schema, r *Relation, selectors []Selector, p Predicate) error {
+ 	n2preview, err := t.Plan(schema, selectors, p, nil, nil)
+ 	if err != nil {
+-		return nil, nil, t.abort(err)
++		return err
+ 	}
+ 	sn2, ok2 := n2preview.(*SelectorNode)
+ 	if !ok2 {
+-		return nil, nil, t.abort(fmt.Errorf("could not find selector node in preview"))
++		return fmt.Errorf("could not find selector node in preview")
+ 	}
+ 	_, candidates, err := sn2.child.Exec()
+ 	if err != nil {
+-		return nil, nil, t.abort(err)
++		return err
+ 	}
+ 
+ 	// For each candidate tuple, ensure no referencing rows exist in any relation
+@@ -365,7 +391,7 @@
+ 						} else {
+ 							// use parent PK (single-column only)
+ 							if len(r.pk) != 1 {
+-								return nil, nil, t.abort(fmt.Errorf("delete restrict not supported for composite primary key on %s.%s", s.name, relation))
++								return fmt.Errorf("delete restrict not supported for composite primary key on %s.%s", s.name, relation)
+ 							}
+ 							refCol = r.attributes[r.pk[0]].name
+ 						}
+@@ -379,40 +405,21 @@
+ 						cond := NewEqPredicate(NewAttributeValueFunctor(childName, at.name), NewConstValueFunctor(pval))
+ 						n2, err := t.Plan(schName, nil, cond, nil, nil)
+ 						if err != nil {
+-							return nil, nil, t.abort(err)
++							return err
+ 						}
+ 						_, rows2, err := n2.Exec()
+ 						if err != nil {
+-							return nil, nil, t.abort(err)
++							return err
+ 						}
+ 						if len(rows2) > 0 {
+-							return nil, nil, t.abort(fmt.Errorf("delete violates foreign key: %s.%s is referenced by %s.%s", s.name, relation, schName, childName))
++							return fmt.Errorf("delete violates foreign key: %s.%s is referenced by %s.%s", s.name, relation, schName, childName)
+ 						}
+ 					}
+ 				}
+ 			}
+ 		}
+ 	}
+-
+-	un := NewDeleterNode(r, t.changes)
+-
+-	snode.child, un.child = un, snode.child
+-
+-	log.Debug("DELETE(%s, %s, %s, %s)", schema, relation, selectors, p)
+-	PrintQueryPlan(n, 0, nil)
+-
+-	// (4), (5), (6)
+-	cols, eres, err := n.Exec()
+-	if err != nil {
+-		return nil, nil, t.abort(err)
+-	}
+-
+-	res := make([]*Tuple, len(eres))
+-	for i, e := range eres {
+-		res[i] = e.Value.(*Tuple)
+-	}
+-
+-	return cols, res, nil
++	return nil
+ }
+ 
+ // Update relation with given values.

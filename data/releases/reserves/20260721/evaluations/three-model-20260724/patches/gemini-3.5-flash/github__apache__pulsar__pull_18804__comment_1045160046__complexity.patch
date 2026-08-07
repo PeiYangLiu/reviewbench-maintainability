@@ -1,0 +1,86 @@
+--- a/pulsar-broker/src/main/java/org/apache/pulsar/broker/service/SystemTopicBasedTopicPoliciesService.java
++++ b/pulsar-broker/src/main/java/org/apache/pulsar/broker/service/SystemTopicBasedTopicPoliciesService.java
+@@ -106,18 +106,13 @@
+             return CompletableFuture.failedFuture(
+                     new BrokerServiceException.NotAllowedException("Not allowed to send event to health check topic"));
+         }
+-        CompletableFuture<Void> result = new CompletableFuture<>();
+         return pulsarService.getPulsarResources().getNamespaceResources()
+                 .getPoliciesAsync(topicName.getNamespaceObject())
+                 .thenCompose(namespacePolicies -> {
+                     if (namespacePolicies.isPresent() && namespacePolicies.get().deleted) {
+                         log.debug("[{}] skip sending topic policy event since the namespace is deleted", topicName);
+-                        result.complete(null);
+-                        return new CompletableFuture<>();
+-                    }
+-                    return CompletableFuture.completedFuture(null);
+-                })
+-                .thenCompose(ignore -> {
++                        return CompletableFuture.completedFuture(null);
++                    }
+                     try {
+                         createSystemTopicFactoryIfNeeded();
+                     } catch (PulsarServerException e) {
+@@ -126,35 +121,34 @@
+                     SystemTopicClient<PulsarEvent> systemTopicClient =
+                             namespaceEventsSystemTopicFactory.createTopicPoliciesSystemTopicClient(
+                                     topicName.getNamespaceObject());
+-                    return systemTopicClient.newWriterAsync();
+-                }).thenCompose((SystemTopicClient.Writer writer) -> {
+-                    PulsarEvent event = getPulsarEvent(topicName, actionType, policies);
+-                    final CompletableFuture<MessageId> writeFuture = ActionType.DELETE.equals(actionType)
+-                            ? writer.deleteAsync(getEventKey(event), event) :
+-                            writer.writeAsync(getEventKey(event), event);
+-                    return writeFuture
+-                            .handle((messageId, e) -> {
+-                                if (e != null) {
+-                                    return CompletableFuture.failedFuture(e);
+-                                }
+-                                if (messageId != null) {
+-                                    return CompletableFuture.completedFuture(null);
+-                                } else {
+-                                    return CompletableFuture.failedFuture(
+-                                            new RuntimeException("Got message id is null."));
+-                                }
+-                            })
+-                            .thenRun(() -> writer.closeAsync().whenComplete((v, cause) -> {
+-                                if (cause != null) {
+-                                    log.error("[{}] Close writer error.", topicName, cause);
+-                                } else {
+-                                    if (log.isDebugEnabled()) {
+-                                        log.debug("[{}] Close writer success.", topicName);
++                    return systemTopicClient.newWriterAsync().thenCompose((SystemTopicClient.Writer writer) -> {
++                        PulsarEvent event = getPulsarEvent(topicName, actionType, policies);
++                        final CompletableFuture<MessageId> writeFuture = ActionType.DELETE.equals(actionType)
++                                ? writer.deleteAsync(getEventKey(event), event) :
++                                writer.writeAsync(getEventKey(event), event);
++                        return writeFuture
++                                .handle((messageId, e) -> {
++                                    if (e != null) {
++                                        return CompletableFuture.failedFuture(e);
+                                     }
+-                                }
+-                            }));
+-                })
+-                .applyToEither(result, Function.identity());
++                                    if (messageId != null) {
++                                        return CompletableFuture.completedFuture(null);
++                                    } else {
++                                        return CompletableFuture.failedFuture(
++                                                new RuntimeException("Got message id is null."));
++                                    }
++                                })
++                                .thenRun(() -> writer.closeAsync().whenComplete((v, cause) -> {
++                                    if (cause != null) {
++                                        log.error("[{}] Close writer error.", topicName, cause);
++                                    } else {
++                                        if (log.isDebugEnabled()) {
++                                            log.debug("[{}] Close writer success.", topicName);
++                                        }
++                                    }
++                                }));
++                    });
++                });
+     }
+ 
+     private PulsarEvent getPulsarEvent(TopicName topicName, ActionType actionType, TopicPolicies policies) {

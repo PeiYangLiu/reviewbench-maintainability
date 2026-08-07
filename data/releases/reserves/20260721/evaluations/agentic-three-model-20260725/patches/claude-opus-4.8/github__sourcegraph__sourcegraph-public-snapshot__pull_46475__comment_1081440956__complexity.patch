@@ -1,0 +1,99 @@
+diff --git a/cmd/frontend/graphqlbackend/site_config_change_connection.go b/cmd/frontend/graphqlbackend/site_config_change_connection.go
+index 1d08c3e..c26fb1a 100644
+--- a/cmd/frontend/graphqlbackend/site_config_change_connection.go
++++ b/cmd/frontend/graphqlbackend/site_config_change_connection.go
+@@ -75,28 +75,40 @@ func (s *SiteConfigurationChangeConnectionStore) ComputeNodes(ctx context.Contex
+ 		return []*SiteConfigurationChangeResolver{}, nil
+ 	}
+ 
+-	resolvers := []*SiteConfigurationChangeResolver{}
+-	for i := 0; i < totalFetched; i++ {
++	var resolvers []*SiteConfigurationChangeResolver
++	// If First is used then "history" is in descending order: 5, 4, 3, 2, 1. So look ahead for the
++	// "previousSiteConfig". If Last is used then "history" is in ascending order: 1, 2, 3, 4, 5. So
++	// look behind for the "previousSiteConfig".
++	//
++	// In either case the item at the boundary of the slice has a nil "previousSiteConfig" and that
++	// is okay, because we will truncate it from the end result being returned. The user did not
++	// request this. _We_ fetched an extra item to determine the "previousSiteConfig" of all the
++	// items.
++	if paginationArgs.Last != nil {
++		resolvers = s.resolversForAscendingHistory(history)
++	} else {
++		resolvers = s.resolversForDescendingHistory(history)
++	}
++
++	if isModifiedPaginationArgs {
++		if paginationArgs.Last != nil {
++			resolvers = resolvers[1:]
++		} else if paginationArgs.First != nil && totalFetched == *paginationArgs.First {
++			resolvers = resolvers[:len(resolvers)-1]
++		}
++	}
++
++	return resolvers, nil
++}
++
++// resolversForDescendingHistory builds resolvers when "history" is in descending order
++// (e.g. 5, 4, 3, 2, 1), looking ahead for each item's "previousSiteConfig".
++func (s *SiteConfigurationChangeConnectionStore) resolversForDescendingHistory(history []*database.SiteConfig) []*SiteConfigurationChangeResolver {
++	resolvers := make([]*SiteConfigurationChangeResolver, 0, len(history))
++	for i := 0; i < len(history); i++ {
+ 		var previousSiteConfig *database.SiteConfig
+-		// If First is used then "history" is in descending order: 5, 4, 3, 2, 1. So look ahead for
+-		// the "previousSiteConfig", but also only if we're not at the end of the slice yet.
+-		//
+-		// "previousSiteConfig" for the last item in "history" will be nil and that is okay, because
+-		// we will truncate it from the end result being returned. The user did not request this.
+-		// _We_ fetched an extra item to determine the "previousSiteConfig" of all the items.
+-		//
+-		// Similarly, if Last is used then history is in ascending order: 1, 2, 3, 4, 5. So look
+-		// behind for the "previousSiteConfig", but also only if we're not at the start of the
+-		// slice.
+-		//
+-		// "previousSiteConfig" will be nil for the first item in history in this case and that is
+-		// okay, because we will truncate it from the end result being returned. The user did not
+-		// request this. _We_ fetched an extra item to determine the "previousSiteConfig" of all the
+-		// items.
+-		if paginationArgs.First != nil && i != totalFetched-1 {
++		if i != len(history)-1 {
+ 			previousSiteConfig = history[i+1]
+-		} else if paginationArgs.Last != nil && i > 0 {
+-			previousSiteConfig = history[i-1]
+ 		}
+ 
+ 		resolvers = append(resolvers, &SiteConfigurationChangeResolver{
+@@ -106,15 +118,27 @@ func (s *SiteConfigurationChangeConnectionStore) ComputeNodes(ctx context.Contex
+ 		})
+ 	}
+ 
+-	if isModifiedPaginationArgs {
+-		if paginationArgs.Last != nil {
+-			resolvers = resolvers[1:]
+-		} else if paginationArgs.First != nil && totalFetched == *paginationArgs.First {
+-			resolvers = resolvers[:len(resolvers)-1]
++	return resolvers
++}
++
++// resolversForAscendingHistory builds resolvers when "history" is in ascending order
++// (e.g. 1, 2, 3, 4, 5), looking behind for each item's "previousSiteConfig".
++func (s *SiteConfigurationChangeConnectionStore) resolversForAscendingHistory(history []*database.SiteConfig) []*SiteConfigurationChangeResolver {
++	resolvers := make([]*SiteConfigurationChangeResolver, 0, len(history))
++	for i := 0; i < len(history); i++ {
++		var previousSiteConfig *database.SiteConfig
++		if i > 0 {
++			previousSiteConfig = history[i-1]
+ 		}
++
++		resolvers = append(resolvers, &SiteConfigurationChangeResolver{
++			db:                 s.db,
++			siteConfig:         history[i],
++			previousSiteConfig: previousSiteConfig,
++		})
+ 	}
+ 
+-	return resolvers, nil
++	return resolvers
+ }
+ 
+ func (s *SiteConfigurationChangeConnectionStore) MarshalCursor(node *SiteConfigurationChangeResolver) (*string, error) {

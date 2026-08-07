@@ -1,0 +1,107 @@
+--- a/cmd/server/storage/storage.go
++++ b/cmd/server/storage/storage.go
+@@ -21,12 +21,7 @@
+ }
+ 
+ func (m *MemStorage) SaveData(filePath string) error {
+-	data := map[string]interface{}{
+-		"gauges":   m.Gauges,
+-		"counters": m.Counters,
+-	}
+-
+-	fileData, err := json.Marshal(data)
++	fileData, err := marshalMemStorage(m)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -34,45 +29,59 @@
+ 	return os.WriteFile(filePath, fileData, 0644)
+ }
+ 
++func marshalMemStorage(storage *MemStorage) ([]byte, error) {
++	data := map[string]interface{}{
++		"gauges":   storage.Gauges,
++		"counters": storage.Counters,
++	}
++
++	return json.Marshal(data)
++}
++
+ func NewMemStorage(config MemStorageConfig) *MemStorage {
+ 	if config.Restore {
+-		file, err := os.OpenFile(config.FileStoragePath, os.O_RDONLY|os.O_CREATE, 0666)
+-		defer func() {
+-			err := file.Close()
+-			if err != nil {
+-				logger.GetLogger().Fatal("Failed to close file", zap.Error(err))
+-			}
+-		}()
+-
+-		if err != nil {
+-			logger.GetLogger().Fatal("Can't open file.", zap.Error(err))
+-		}
+-
+-		fileData, err := io.ReadAll(file)
+-		if err != nil {
+-			logger.GetLogger().Fatal("Can't read file.", zap.Error(err))
+-		}
+-		if len(fileData) == 0 {
+-			logger.GetLogger().Info("Storage file is empty, nothing to load.", zap.String("file", config.FileStoragePath))
+-			return &MemStorage{
+-				Gauges:   make(map[string]float64),
+-				Counters: make(map[string]int64),
+-			}
+-		}
+-
+-		var storage MemStorage
+-
+-		err = json.Unmarshal(fileData, &storage)
+-		if err != nil {
+-			logger.GetLogger().Fatal("Can't read json.", zap.Error(err))
+-		}
+-		return &storage
++		return restoreMemStorage(config.FileStoragePath)
+ 	}
+ 
++	return newMemStorage()
++}
++
++func newMemStorage() *MemStorage {
+ 	return &MemStorage{
+ 		Gauges:   make(map[string]float64),
+ 		Counters: make(map[string]int64),
+ 	}
++}
++
++func restoreMemStorage(filePath string) *MemStorage {
++	file, err := os.OpenFile(filePath, os.O_RDONLY|os.O_CREATE, 0666)
++	defer func() {
++		err := file.Close()
++		if err != nil {
++			logger.GetLogger().Fatal("Failed to close file", zap.Error(err))
++		}
++	}()
++
++	if err != nil {
++		logger.GetLogger().Fatal("Can't open file.", zap.Error(err))
++	}
++
++	fileData, err := io.ReadAll(file)
++	if err != nil {
++		logger.GetLogger().Fatal("Can't read file.", zap.Error(err))
++	}
++	if len(fileData) == 0 {
++		logger.GetLogger().Info("Storage file is empty, nothing to load.", zap.String("file", filePath))
++		return newMemStorage()
++	}
++
++	var storage MemStorage
++
++	err = json.Unmarshal(fileData, &storage)
++	if err != nil {
++		logger.GetLogger().Fatal("Can't read json.", zap.Error(err))
++	}
++	return &storage
+ }
+ 
+ func (m *MemStorage) SetGauge(metricName string, value float64) {

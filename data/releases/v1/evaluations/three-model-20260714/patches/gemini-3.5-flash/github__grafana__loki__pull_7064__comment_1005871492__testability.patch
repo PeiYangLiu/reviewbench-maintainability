@@ -1,0 +1,98 @@
+--- a/operator/internal/certrotation/rotation.go
++++ b/operator/internal/certrotation/rotation.go
+@@ -22,6 +22,14 @@
+ 
+ type signerRotation struct {
+ 	Issuer string
++	Now    func() time.Time
++}
++
++func (r *signerRotation) now() time.Time {
++	if r.Now != nil {
++		return r.Now()
++	}
++	return time.Now()
+ }
+ 
+ func (r *signerRotation) NewCertificate(validity time.Duration) (*crypto.TLSCertificateConfig, error) {
+@@ -29,12 +37,12 @@
+ 		return nil, errMissingIssuer
+ 	}
+ 
+-	signerName := fmt.Sprintf("%s@%d", r.Issuer, time.Now().Unix())
++	signerName := fmt.Sprintf("%s@%d", r.Issuer, r.now().Unix())
+ 	return crypto.MakeSelfSignedCAConfigForDuration(signerName, validity)
+ }
+ 
+ func (r *signerRotation) NeedNewCertificate(annotations map[string]string, refresh time.Duration) string {
+-	return needNewCertificate(annotations, refresh, nil)
++	return needNewCertificate(r.now(), annotations, refresh, nil)
+ }
+ 
+ func (r *signerRotation) SetAnnotations(ca *crypto.TLSCertificateConfig, annotations map[string]string) {
+@@ -46,6 +54,14 @@
+ type certificateRotation struct {
+ 	UserInfo  user.Info
+ 	Hostnames []string
++	Now       func() time.Time
++}
++
++func (r *certificateRotation) now() time.Time {
++	if r.Now != nil {
++		return r.Now()
++	}
++	return time.Now()
+ }
+ 
+ func (r *certificateRotation) NewCertificate(signer *crypto.CA, validity time.Duration) (*crypto.TLSCertificateConfig, error) {
+@@ -74,7 +90,7 @@
+ }
+ 
+ func (r *certificateRotation) NeedNewCertificate(annotations map[string]string, signer *crypto.CA, caBundleCerts []*x509.Certificate, refresh time.Duration) string {
+-	reason := needNewCertificate(annotations, refresh, signer)
++	reason := needNewCertificate(r.now(), annotations, refresh, signer)
+ 	if len(reason) > 0 {
+ 		return reason
+ 	}
+@@ -124,7 +140,7 @@
+ 	annotations[CertificateHostnames] = strings.Join(hostnames.List(), ",")
+ }
+ 
+-func needNewCertificate(annotations map[string]string, refresh time.Duration, signer *crypto.CA) string {
++func needNewCertificate(now time.Time, annotations map[string]string, refresh time.Duration, signer *crypto.CA) string {
+ 	notAfterString := annotations[CertificateNotAfterAnnotation]
+ 	if len(notAfterString) == 0 {
+ 		return "missing notAfter"
+@@ -144,7 +160,7 @@
+ 	}
+ 
+ 	// Is cert expired?
+-	if time.Now().After(notAfter) {
++	if now.After(notAfter) {
+ 		return "already expired"
+ 	}
+ 
+@@ -156,20 +172,20 @@
+ 
+ 	// Are we at 80% of validity?
+ 	at80Percent := notAfter.Add(-validity / 5)
+-	if time.Now().After(at80Percent) {
++	if now.After(at80Percent) {
+ 		return fmt.Sprintf("past its latest possible time %v", at80Percent)
+ 	}
+ 
+ 	// If Certificate is past its refresh time, we may have action to take. We only do this if the signer is old enough.
+ 	developerSpecifiedRefresh := notBefore.Add(refresh)
+-	if time.Now().After(developerSpecifiedRefresh) {
++	if now.After(developerSpecifiedRefresh) {
+ 		if signer == nil {
+ 			return fmt.Sprintf("past its refresh time %v", developerSpecifiedRefresh)
+ 		}
+ 
+ 		// make sure the signer has been valid for more than 10% of the target's refresh time.
+ 		timeToWaitForTrustRotation := refresh / 10
+-		if time.Now().After(signer.Config.Certs[0].NotBefore.Add(timeToWaitForTrustRotation)) {
++		if now.After(signer.Config.Certs[0].NotBefore.Add(timeToWaitForTrustRotation)) {
+ 			return fmt.Sprintf("past its refresh time %v", developerSpecifiedRefresh)
+ 		}
+ 	}

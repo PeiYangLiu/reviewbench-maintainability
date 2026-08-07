@@ -1,0 +1,77 @@
+--- a/components/director/internal/nsadapter/handler/exposed_systems_handler.go
++++ b/components/director/internal/nsadapter/handler/exposed_systems_handler.go
+@@ -61,6 +61,15 @@
+ 	tntSvc         tenantService
+ 	transact       persistence.Transactioner
+ }
++
++const (
++	// FullReportType represents full report type
++	FullReportType = "full"
++	// DeltaReportType represents delta report type
++	DeltaReportType = "delta"
++)
++
++type reportHandlerFunc func(ctx context.Context, rw http.ResponseWriter, reportData nsmodel.Report, filteredSccs []*nsmodel.SCC, details *[]httputil.Detail)
+ 
+ // Description - Bulk create-or-update operation on exposed on-premise systems. This handler supports two types of reports - full and delta.
+ // This handler takes a list of fully described SCCs together with the exposed systems.
+@@ -94,7 +103,13 @@
+ 	}()
+ 
+ 	reportType := req.URL.Query().Get("reportType")
+-	if reportType != "full" && reportType != "delta" {
++	handlers := map[string]reportHandlerFunc{
++		DeltaReportType: a.handleDeltaReport,
++		FullReportType:  a.handleFullReport,
++	}
++
++	reportHandler, ok := handlers[reportType]
++	if !ok {
+ 		httputil.RespondWithError(ctx, rw, http.StatusBadRequest, httputil.Error{
+ 			Code:    http.StatusBadRequest,
+ 			Message: "missing or invalid required report type query parameter",
+@@ -150,26 +165,26 @@
+ 	details := make([]httputil.Detail, 0)
+ 	filteredSccs := filterSccsByInternalID(ctx, sccs, &details)
+ 
+-	if reportType == "delta" {
+-		a.processDelta(ctx, filteredSccs, &details)
+-		if len(details) == 0 {
+-			httputils.RespondWithBody(ctx, rw, http.StatusNoContent, struct{}{})
+-			return
+-		}
+-		httputil.RespondWithError(ctx, rw, http.StatusOK, httputil.DetailedError{
+-			Code:    http.StatusOK,
+-			Message: "Update/create failed for some on-premise systems",
+-			Details: details,
+-		})
+-		return
+-	}
+-
+-	if reportType == "full" {
+-		a.processDelta(ctx, filteredSccs, &details)
+-		a.handleUnreachableScc(ctx, reportData)
++	reportHandler(ctx, rw, reportData, filteredSccs, &details)
++}
++
++func (a *Handler) handleDeltaReport(ctx context.Context, rw http.ResponseWriter, _ nsmodel.Report, filteredSccs []*nsmodel.SCC, details *[]httputil.Detail) {
++	a.processDelta(ctx, filteredSccs, details)
++	if len(*details) == 0 {
+ 		httputils.RespondWithBody(ctx, rw, http.StatusNoContent, struct{}{})
+ 		return
+ 	}
++	httputil.RespondWithError(ctx, rw, http.StatusOK, httputil.DetailedError{
++		Code:    http.StatusOK,
++		Message: "Update/create failed for some on-premise systems",
++		Details: *details,
++	})
++}
++
++func (a *Handler) handleFullReport(ctx context.Context, rw http.ResponseWriter, reportData nsmodel.Report, filteredSccs []*nsmodel.SCC, details *[]httputil.Detail) {
++	a.processDelta(ctx, filteredSccs, details)
++	a.handleUnreachableScc(ctx, reportData)
++	httputils.RespondWithBody(ctx, rw, http.StatusNoContent, struct{}{})
+ }
+ 
+ func (a *Handler) listTenantsByExternalIDs(ctx context.Context, ids []string) ([]*model.BusinessTenantMapping, error) {

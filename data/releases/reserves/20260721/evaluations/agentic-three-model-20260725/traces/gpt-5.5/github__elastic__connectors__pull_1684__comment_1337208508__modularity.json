@@ -1,0 +1,955 @@
+[
+  {
+    "action": {
+      "action": "read",
+      "end_line": 1150,
+      "path": "connectors/sources/microsoft_teams.py",
+      "start_line": 744
+    },
+    "response_chars": 295,
+    "round": 1,
+    "tool_result": {
+      "content": "744:     def format_doc(self, item, document_type, **kwargs):\n745:         document = {}\n746:         for elasticsearch_field, sharepoint_field in kwargs[\"document\"].items():\n747:             document[elasticsearch_field] = sharepoint_field\n748:         self.map_document_with_schema(\n749:             document=document, item=item, document_type=document_type\n750:         )\n751:         return document\n752: \n753:     def format_user_chat_meeting_recording(self, item, url):\n754:         document = {\"type\": UserEndpointName.MEETING_RECORDING.value}\n755:         document.update(\n756:             {\n757:                 \"_id\": item.get(\"eventDetail\", {}).get(\"callId\"),\n758:                 \"title\": item.get(\"eventDetail\", {}).get(\"callRecordingDisplayName\"),\n759:                 \"url\": url,\n760:                 \"_timestamp\": item.get(\"lastModifiedDateTime\"),\n761:             }\n762:         )\n763:         return document\n764: \n765:     def get_calendar_detail(self, calendar):\n766:         body = \"\"\n767:         organizer = calendar.get(\"organizer\", {}).get(\"emailAddress\").get(\"name\")\n768:         calendar_recurrence = calendar.get(\"recurrence\")\n769:         if calendar_recurrence:\n770:             recurrence_range = calendar_recurrence.get(\"range\")\n771:             pattern = calendar_recurrence.get(\"pattern\")\n772:             occurrence = f\"{pattern['interval']}\" if pattern.get(\"interval\") else \"\"\n773:             pattern_type = pattern.get(\"type\", \"\")\n774: \n775:             # In case type of meeting is daily so body will be: Recurrence: Occurs every 1 day starting {startdate}\n776:             # until {enddate}\n777:             if pattern_type == \"daily\":\n778:                 days = f\"{occurrence} day\"\n779: \n780:             # If type of meeting  is yearly so body will be: Recurrence: Occurs every year on day 5 of march starting\n781:             # {date} until {enddate}\n782:             elif pattern_type in [\"absoluteYearly\", \"relativeYearly\"]:\n783:                 day_pattern = (\n784:                     f\"on day {pattern['dayOfMonth']}\"\n785:                     if pattern.get(\"dayOfMonth\")\n786:                     else f\"on {pattern['index']} {','.join(pattern['daysOfWeek'])}\"\n787:                 )\n788:                 days = f\"year {day_pattern} of {month_name[pattern['month']]}\"\n789: \n790:             # If type of meeting  is monthly so body will be: Recurrence: Occurs every month on day 5 of march\n791:             # starting {date} until {enddate}\n792:             elif pattern_type in [\"absoluteMonthly\", \"relativeMonthly\"]:\n793:                 days_pattern = (\n794:                     f\"on day {pattern['dayOfMonth']}\"\n795:                     if pattern.get(\"dayOfMonth\")\n796:                     else f\"on {pattern['index']} {','.join(pattern['daysOfWeek'])}\"\n797:                 )\n798:                 days = f\"{occurrence} month {days_pattern}\"\n799: \n800:             # Else goes in weekly situation where body will be: Recurrence: Occurs Every 3 week on monday,tuesday,\n801:             # wednesday starting {date} until {enddate}\n802:             else:\n803:                 week = \",\".join(pattern.get(\"daysOfWeek\"))\n804:                 days = f\"{occurrence} week on {week}\"\n805: \n806:             date = (\n807:                 f\"{recurrence_range.get('startDate')}\"\n808:                 if recurrence_range.get(\"type\", \"\") == \"noEnd\"\n809:                 else f\"{recurrence_range.get('startDate')} until {recurrence_range.get('endDate')}\"\n810:             )\n811:             recurrence = f\"Occurs Every {days} starting {date}\"\n812:             body = f\"Recurrence: {recurrence} Organizer: {organizer}\"\n813: \n814:         else:\n815:             start_time = datetime.strptime(\n816:                 calendar[\"start\"][\"dateTime\"][:-4], USER_MEETING_DATETIME_FORMAT\n817:             ).strftime(\"%d %b, %Y at %H:%M\")\n818:             end_time = datetime.strptime(\n819:                 calendar[\"end\"][\"dateTime\"][:-4], USER_MEETING_DATETIME_FORMAT\n820:             ).strftime(\"%d %b, %Y at %H:%M\")\n821:             body = f\"Schedule: {start_time} to {end_time} Organizer: {organizer}\"\n822:         return body\n823: \n824:     def format_user_calendars(self, item):\n825:         document = {\"type\": UserEndpointName.MEETING.value}\n826:         attendee_list = (\n827:             [\n828:                 f\"{attendee.get('emailAddress', {}).get('name')}({attendee.get('emailAddress', {}).get('address')})\"\n829:                 for attendee in item[\"attendees\"]\n830:             ]\n831:             if item.get(\"attendees\")\n832:             else []\n833:         )\n834:         document.update(\n835:             {  # pyright: ignore\n836:                 \"attendees\": attendee_list,\n837:                 \"online_meeting_url\": item[\"onlineMeeting\"].get(\"joinUrl\")\n838:                 if item.get(\"onlineMeeting\")\n839:                 else \"\",\n840:                 \"description\": item.get(\"bodyPreview\"),\n841:                 \"meeting_detail\": self.get_calendar_detail(calendar=item),\n842:                 \"location\": [\n843:                     f\"{location['displayName']}\" for location in item[\"locations\"]\n844:                 ]\n845:                 if item.get(\"locations\")\n846:                 else [],\n847:             }\n848:         )\n849:         self.map_document_with_schema(\n850:             document=document, item=item, document_type=self.schema.meeting\n851:         )\n852:         return document\n853: \n854:     def format_channel_message(self, item, channel_name, message_content):\n855:         document = {\"type\": TeamEndpointName.MESSAGE.value}\n856:         document.update(\n857:             {  # pyright: ignore\n858:                 \"sender\": item[\"from\"][\"user\"].get(\"displayName\")\n859:                 if item.get(\"from\") and item[\"from\"].get(\"user\")\n860:                 else \"\",\n861:                 \"channel\": channel_name,\n862:                 \"message\": message_content,\n863:                 \"attached_documents\": self.format_attachment_names(\n864:                     attachments=item[\"attachments\"]\n865:                 )\n866:                 if item.get(\"attachments\")\n867:                 else \"\",\n868:             }\n869:         )\n870:         self.map_document_with_schema(\n871:             document=document, item=item, document_type=self.schema.channel_message\n872:         )\n873:         return document\n874: \n875:     def format_channel_meeting(self, reply):\n876:         document = {\"type\": TeamEndpointName.MEETING.value}\n877:         event = reply[\"eventDetail\"]\n878:         if event.get(\"@odata.type\") == \"#microsoft.graph.callEndedEventMessageDetail\":\n879:             participant_list = []\n880:             for participant in event.get(\"callParticipants\", []):\n881:                 user = participant.get(\"participant\", {}).get(\"user\")\n882:                 if user:\n883:                     participant_list.append(user.get(\"displayName\"))\n884:             participant_names = \", \".join(participant_list)\n885:             document.update(\n886:                 {\n887:                     \"_id\": event.get(\"callId\"),\n888:                     \"_timestamp\": reply.get(\"lastModifiedDateTime\"),\n889:                     \"participants\": participant_names,\n890:                 }\n891:             )\n892:         elif (\n893:             event.get(\"@odata.type\")\n894:             == \"#microsoft.graph.callRecordingEventMessageDetail\"\n895:         ):\n896:             if event.get(\"callRecordingUrl\") and (\n897:                 \".sharepoint.com\" in event[\"callRecordingUrl\"]\n898:             ):\n899:                 document.update(\n900:                     {\n901:                         \"title\": event.get(\"callRecordingDisplayName\"),\n902:                         \"recording_url\": event.get(\"callRecordingUrl\"),\n903:                     }\n904:                 )\n905:         return document\n906: \n907:     async def format_user_chat_messages(self, chat, message, message_content, members):\n908:         if chat.get(\"topic\"):\n909:             message.update({\"title\": chat[\"topic\"]})\n910:         else:\n911:             message.update({\"title\": members})\n912:         message.update(\n913:             {\n914:                 \"webUrl\": chat.get(\"webUrl\"),\n915:                 \"chatType\": chat.get(\"chatType\"),\n916:                 \"sender\": message[\"from\"][\"user\"].get(\"displayName\")\n917:                 if message.get(\"from\") and message[\"from\"].get(\"user\")\n918:                 else \"\",\n919:                 \"message\": message_content,\n920:             }\n921:         )\n922:         return message\n923: \n924:     async def format_user_chat_attachments(self, **kwargs):\n925:         async for attachments in self.client.get_user_chat_attachments(\n926:             sender_id=kwargs[\"sender_id\"],\n927:             attachment_name=kwargs[\"attachment_name\"],\n928:         ):\n929:             for attachment in attachments:\n930:                 format_attachment = self.format_doc(\n931:                     item=attachment,\n932:                     document_type=self.schema.chat_attachments,\n933:                     document={\n934:                         \"type\": UserEndpointName.ATTACHMENT.value,\n935:                         \"members\": kwargs.get(\"members\", \"\"),\n936:                     },\n937:                 )\n938:                 download_url = attachment.get(\"@microsoft.graph.downloadUrl\")\n939:                 await self.queue.put(\n940:                     (\n941:                         format_attachment,\n942:                         partial(\n943:                             self.get_content,\n944:                             user_attachment=format_attachment,\n945:                             download_url=download_url,\n946:                         ),\n947:                     )\n948:                 )\n949: \n950:     async def get_content(\n951:         self, user_attachment, download_url, timestamp=None, doit=False\n952:     ):\n953:         \"\"\"Extracts the content for allowed file types.\n954: \n955:         Args:\n956:             user_attachment (dictionary): Attachment object dictionary\n957:             download_url (str): Attachment downloadable url\n958:             timestamp (timestamp, optional): Timestamp of attachment last modified. Defaults to None.\n959:             doit (boolean, optional): Boolean value for whether to get content or not. Defaults to False.\n960: \n961:         Returns:\n962:             dictionary: Content document with _id, _timestamp and attachment content\n963:         \"\"\"\n964:         document_size = int(user_attachment[\"size_in_bytes\"])\n965: \n966:         if not (doit and document_size):\n967:             return\n968:         filename = user_attachment[\"name\"]\n969:         if not self.verify_filename_for_extraction(filename=filename):\n970:             return\n971:         if user_attachment[\"size_in_bytes\"] > MAX_FILE_SIZE:\n972:             self._logger.warning(\n973:                 f\"File size {document_size} of file {filename} is larger than {MAX_FILE_SIZE} bytes. Discarding file content\"\n974:             )\n975:             return\n976:         document = {\n977:             \"_id\": user_attachment[\"id\"],\n978:             \"_timestamp\": user_attachment[\"_timestamp\"],\n979:         }\n980:         self._logger.debug(f\"Downloading {filename}\")\n981:         attachment_content = await self._download_content_for_attachment(\n982:             partial(self.client.download_item, download_url),\n983:             original_filename=filename,\n984:         )\n985:         document[\"_attachment\"] = attachment_content\n986: \n987:         return document\n988: \n989:     def format_attachment_names(self, attachments):\n990:         return \",\".join(\n991:             attachment.get(\"name\")\n992:             for attachment in attachments\n993:             if attachment.get(\"name\", \"\")\n994:         )\n995: \n996:     async def get_messages(\n997:         self, message, document_type=None, chat=None, channel_name=None, members=None\n998:     ):\n999:         if not message.get(\"deletedDateTime\") and (\n1000:             \"unknownFutureValue\" not in message.get(\"messageType\")\n1001:         ):\n1002:             if message_content := html_to_text(\n1003:                 html=message.get(\"body\", {}).get(\"content\")\n1004:             ):\n1005:                 if document_type == UserEndpointName.CHATS_MESSAGE.value:\n1006:                     message_document = await self.format_user_chat_messages(\n1007:                         chat=chat,\n1008:                         message=message,\n1009:                         message_content=message_content,\n1010:                         members=members,\n1011:                     )\n1012:                     await self.queue.put(\n1013:                         (\n1014:                             self.format_doc(\n1015:                                 item=message_document,\n1016:                                 document_type=self.schema.chat_messages,\n1017:                                 document={\"type\": document_type},\n1018:                             ),\n1019:                             None,\n1020:                         )\n1021:                     )\n1022:                 else:\n1023:                     await self.queue.put(\n1024:                         (\n1025:                             self.format_channel_message(\n1026:                                 item=message,\n1027:                                 channel_name=channel_name,\n1028:                                 message_content=message_content,\n1029:                             ),\n1030:                             None,\n1031:                         )\n1032:                     )\n1033: \n1034:     async def user_chat_meeting_recording(self, message):\n1035:         if (\n1036:             message.get(\"eventDetail\")\n1037:             and message[\"eventDetail\"].get(\"@odata.type\")\n1038:             == \"#microsoft.graph.callRecordingEventMessageDetail\"\n1039:         ):\n1040:             url = message[\"eventDetail\"].get(\"callRecordingUrl\")\n1041: \n1042:             if url and \".sharepoint.com\" in url:\n1043:                 await self.queue.put(\n1044:                     (\n1045:                         self.format_user_chat_meeting_recording(item=message, url=url),\n1046:                         None,\n1047:                     )\n1048:                 )\n1049: \n1050:     def get_chat_members(self, members):\n1051:         return \",\".join(\n1052:             member.get(\"displayName\")\n1053:             for member in members\n1054:             if member.get(\"displayName\", \"\")\n1055:         )\n1056: \n1057:     async def user_chat_producer(self, chat):\n1058:         members = self.get_chat_members(chat.get(\"members\", []))\n1059:         async for messages in self.client.get_user_chat_messages(chat_id=chat[\"id\"]):\n1060:             for message in messages:\n1061:                 await self.get_messages(\n1062:                     message=message,\n1063:                     document_type=UserEndpointName.CHATS_MESSAGE.value,\n1064:                     chat=chat,\n1065:                     members=members,\n1066:                 )\n1067: \n1068:                 await self.user_chat_meeting_recording(message=message)\n1069: \n1070:                 if message.get(\"from\") and message[\"from\"].get(\"user\"):\n1071:                     for attachment in message.get(\"attachments\", []):\n1072:                         if (\n1073:                             attachment.get(\"name\")\n1074:                             and attachment.get(\"contentType\") == \"reference\"\n1075:                         ):\n1076:                             await self.format_user_chat_attachments(\n1077:                                 sender_id=message[\"from\"][\"user\"][\"id\"],\n1078:                                 attachment_name=attachment[\"name\"],\n1079:                                 members=members,\n1080:                             )\n1081: \n1082:         async for tabs in self.client.get_user_chat_tabs(chat_id=chat[\"id\"]):\n1083:             for tab in tabs:\n1084:                 await self.queue.put(\n1085:                     (\n1086:                         self.format_doc(\n1087:                             item=tab,\n1088:                             document_type=self.schema.chat_tabs,\n1089:                             document={\n1090:                                 \"type\": UserEndpointName.TABS.value,\n1091:                                 \"url\": tab.get(\"configuration\", {}).get(\"websiteUrl\"),\n1092:                                 \"_timestamp\": chat[\"lastUpdatedDateTime\"],\n1093:                                 \"members\": members,\n1094:                             },\n1095:                         ),\n1096:                         None,\n1097:                     )\n1098:                 )\n1099:         await self.queue.put(EndSignal.USER_CHAT_TASK_FINISHED)\n1100: \n1101:     async def get_channel_messages(self, message, channel_name):\n1102:         await self.get_messages(message=message, channel_name=channel_name)\n1103:         meeting_document = {}\n1104:         for reply in message.get(\"replies\", []):\n1105:             message_content = html_to_text(html=reply.get(\"body\", {}).get(\"content\"))\n1106:             if (\n1107:                 not reply.get(\"deletedDateTime\")\n1108:                 and (\"unknownFutureValue\" not in reply.get(\"messageType\"))\n1109:                 and message_content\n1110:             ):\n1111:                 await self.queue.put(\n1112:                     (\n1113:                         self.format_channel_message(\n1114:                             item=reply,\n1115:                             channel_name=channel_name,\n1116:                             message_content=message_content,\n1117:                         ),\n1118:                         None,\n1119:                     )\n1120:                 )\n1121: \n1122:             elif reply.get(\"eventDetail\"):\n1123:                 call_id = reply[\"eventDetail\"].get(\"callId\")\n1124:                 if call_id not in meeting_document:\n1125:                     meeting_document[call_id] = {}\n1126:                 document = self.format_channel_meeting(reply=reply)\n1127:                 meeting_document[call_id].update(document)\n1128:         for document in meeting_document.values():\n1129:             await self.queue.put((document, None))\n1130: \n1131:     async def team_channel_producer(self, channel, team_id, team_name):\n1132:         channel_name = channel.get(\"displayName\")\n1133:         await self.queue.put(\n1134:             (\n1135:                 self.format_doc(\n1136:                     item=channel,\n1137:                     document_type=self.schema.channel,\n1138:                     document={\n1139:                         \"type\": TeamEndpointName.CHANNEL.value,\n1140:                         \"_timestamp\": datetime.utcnow(),\n1141:                         \"team_name\": team_name,\n1142:                     },\n1143:                 ),",
+      "end_line": 1143,
+      "path_lines": 1316,
+      "start_line": 744
+    },
+    "usage": {
+      "input_tokens": 8005,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens": 276,
+      "output_tokens_details": {
+        "reasoning_tokens": 170
+      },
+      "total_tokens": 8281
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 1316,
+      "path": "connectors/sources/microsoft_teams.py",
+      "start_line": 1131
+    },
+    "response_chars": 379,
+    "round": 2,
+    "tool_result": {
+      "content": "1131:     async def team_channel_producer(self, channel, team_id, team_name):\n1132:         channel_name = channel.get(\"displayName\")\n1133:         await self.queue.put(\n1134:             (\n1135:                 self.format_doc(\n1136:                     item=channel,\n1137:                     document_type=self.schema.channel,\n1138:                     document={\n1139:                         \"type\": TeamEndpointName.CHANNEL.value,\n1140:                         \"_timestamp\": datetime.utcnow(),\n1141:                         \"team_name\": team_name,\n1142:                     },\n1143:                 ),\n1144:                 None,\n1145:             )\n1146:         )\n1147: \n1148:         async for tabs in self.client.get_channel_tabs(\n1149:             team_id=team_id, channel_id=channel.get(\"id\")\n1150:         ):\n1151:             for tab in tabs:\n1152:                 await self.queue.put(\n1153:                     (\n1154:                         self.format_doc(\n1155:                             item=tab,\n1156:                             document_type=self.schema.channel_tab,\n1157:                             document={\n1158:                                 \"type\": TeamEndpointName.TAB.value,\n1159:                                 \"_timestamp\": datetime.utcnow(),\n1160:                                 \"team_name\": team_name,\n1161:                                 \"channel_name\": channel_name,\n1162:                             },\n1163:                         ),\n1164:                         None,\n1165:                     )\n1166:                 )\n1167: \n1168:         async for messages in self.client.get_channel_messages(\n1169:             team_id=team_id, channel_id=channel.get(\"id\")\n1170:         ):\n1171:             for message in messages:\n1172:                 await self.get_channel_messages(\n1173:                     message=message, channel_name=channel_name\n1174:                 )\n1175: \n1176:         file = await self.client.get_channel_file(\n1177:             team_id=team_id, channel_id=channel.get(\"id\")\n1178:         )\n1179:         drive_id = file.get(\"parentReference\", {}).get(\"driveId\")\n1180:         await self.get_channel_drive_producer(\n1181:             drive_id=drive_id,\n1182:             item_id=file.get(\"id\"),\n1183:             team_name=team_name,\n1184:             channel_name=channel_name,\n1185:         )\n1186: \n1187:         await self.queue.put(EndSignal.CHANNEL_TASK_FINISHED)\n1188: \n1189:     async def get_channel_drive_producer(\n1190:         self, drive_id, item_id, team_name, channel_name\n1191:     ):\n1192:         async for drive_child in self.client.get_channel_drive_childrens(\n1193:             drive_id=drive_id,\n1194:             item_id=item_id,\n1195:         ):\n1196:             if drive_child.get(\"file\"):\n1197:                 format_attachment = self.format_doc(\n1198:                     item=drive_child,\n1199:                     document_type=self.schema.channel_attachment,\n1200:                     document={\n1201:                         \"type\": TeamEndpointName.ATTACHMENT.value,\n1202:                         \"team_name\": team_name,\n1203:                         \"channel_name\": channel_name,\n1204:                     },\n1205:                 )\n1206:                 await self.queue.put(\n1207:                     (\n1208:                         format_attachment,\n1209:                         partial(\n1210:                             self.get_content,\n1211:                             user_attachment=format_attachment,\n1212:                             download_url=drive_child.get(\n1213:                                 \"@microsoft.graph.downloadUrl\"\n1214:                             ),\n1215:                         ),\n1216:                     )\n1217:                 )\n1218: \n1219:     async def teams_producer(self, team):\n1220:         team_id = team.get(\"id\")\n1221:         team_name = team.get(\"displayName\")\n1222:         await self.queue.put(\n1223:             (\n1224:                 self.format_doc(\n1225:                     item=team,\n1226:                     document_type=self.schema.teams,\n1227:                     document={\n1228:                         \"type\": TeamEndpointName.TEAMS.value,\n1229:                         \"_timestamp\": datetime.utcnow(),\n1230:                     },\n1231:                 ),\n1232:                 None,\n1233:             )\n1234:         )\n1235: \n1236:         async for channels in self.client.get_team_channels(team_id=team[\"id\"]):\n1237:             for channel in channels:\n1238:                 await self.fetchers.put(\n1239:                     partial(self.team_channel_producer, channel, team_id, team_name)\n1240:                 )\n1241:                 self.tasks += 1\n1242: \n1243:         await self.queue.put(EndSignal.TEAM_TASK_FINISHED)\n1244: \n1245:     async def get_docs(self, filtering=None):\n1246:         \"\"\"Executes the logic to fetch Microsoft Teams objects in async manner\n1247: \n1248:         Args:\n1249:             filtering (Filtering): Object of class Filtering\n1250: \n1251:         Yields:\n1252:             dictionary: dictionary containing meta-data of the files.\n1253:         \"\"\"\n1254:         async for chats in self.client.get_user_chats():\n1255:             for chat in chats:\n1256:                 await self.fetchers.put(partial(self.user_chat_producer, chat))\n1257:                 self.tasks += 1\n1258: \n1259:         async for users in self.client.users():\n1260:             for user in users:\n1261:                 if user.get(\"mail\"):\n1262:                     async for events in self.client.get_calendars(user_id=user[\"id\"]):\n1263:                         for event in events:\n1264:                             if not event.get(\"isCancelled\"):\n1265:                                 yield self.format_user_calendars(item=event), None\n1266: \n1267:         async for teams in self.client.get_teams():\n1268:             for team in teams:\n1269:                 await self.fetchers.put(partial(self.teams_producer, team))\n1270:                 self.tasks += 1\n1271: \n1272:         async for item in self._consumer():\n1273:             yield item\n1274: \n1275:         await self.fetchers.join()\n1276: \n1277:     async def close(self):\n1278:         \"\"\"Closes unclosed client session\"\"\"\n1279:         await self.client.close()\n1280: \n1281:     @classmethod\n1282:     def get_default_configuration(cls):\n1283:         \"\"\"Get the default configuration for Microsoft Teams.\n1284: \n1285:         Returns:\n1286:             dictionary: Default configuration.\n1287:         \"\"\"\n1288:         return {\n1289:             \"tenant_id\": {\n1290:                 \"label\": \"Tenant ID\",\n1291:                 \"order\": 1,\n1292:                 \"type\": \"str\",\n1293:             },\n1294:             \"client_id\": {\n1295:                 \"label\": \"Client ID\",\n1296:                 \"order\": 2,\n1297:                 \"type\": \"str\",\n1298:             },\n1299:             \"secret_value\": {\n1300:                 \"label\": \"Secret value\",\n1301:                 \"order\": 3,\n1302:                 \"sensitive\": True,\n1303:                 \"type\": \"str\",\n1304:             },\n1305:             \"username\": {\n1306:                 \"label\": \"Username\",\n1307:                 \"order\": 4,\n1308:                 \"type\": \"str\",\n1309:             },\n1310:             \"password\": {\n1311:                 \"label\": \"Password\",\n1312:                 \"order\": 5,\n1313:                 \"sensitive\": True,\n1314:                 \"type\": \"str\",\n1315:             },\n1316:         }",
+      "end_line": 1316,
+      "path_lines": 1316,
+      "start_line": 1131
+    },
+    "usage": {
+      "input_tokens": 12752,
+      "input_tokens_details": {
+        "cached_tokens": 7424
+      },
+      "output_tokens": 381,
+      "output_tokens_details": {
+        "reasoning_tokens": 245
+      },
+      "total_tokens": 13133
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 202,
+      "path": "connectors/sources/microsoft_teams.py",
+      "start_line": 1
+    },
+    "response_chars": 379,
+    "round": 3,
+    "tool_result": {
+      "content": "1: #\n2: # Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one\n3: # or more contributor license agreements. Licensed under the Elastic License 2.0;\n4: # you may not use this file except in compliance with the Elastic License 2.0.\n5: #\n6: \"\"\"Microsoft Teams source module responsible to fetch documents from Microsoft Teams.\n7: \"\"\"\n8: import asyncio\n9: import os\n10: from calendar import month_name\n11: from datetime import datetime, timedelta\n12: from enum import Enum\n13: from functools import cached_property, partial\n14: \n15: import aiofiles\n16: import aiohttp\n17: from aiofiles.os import remove\n18: from aiofiles.tempfile import NamedTemporaryFile\n19: from aiohttp.client_exceptions import ClientResponseError\n20: from msal import ConfidentialClientApplication\n21: \n22: from connectors.logger import logger\n23: from connectors.source import BaseDataSource\n24: from connectors.utils import (\n25:     TIKA_SUPPORTED_FILETYPES,\n26:     CacheWithTimeout,\n27:     CancellableSleeps,\n28:     ConcurrentTasks,\n29:     MemQueue,\n30:     RetryStrategy,\n31:     convert_to_b64,\n32:     html_to_text,\n33:     retryable,\n34:     url_encode,\n35: )\n36: \n37: QUEUE_MEM_SIZE = 5 * 1024 * 1024  # Size in Megabytes\n38: MAX_CONCURRENCY = 80\n39: FILE_WRITE_CHUNK_SIZE = 1024 * 64  # 64KB default SSD page size\n40: MAX_FILE_SIZE = 10485760\n41: TOKEN_EXPIRES = 3599\n42: RETRY_COUNT = 3\n43: RETRY_SECONDS = 30\n44: RETRY_INTERVAL = 2\n45: \n46: RUNNING_FTEST = (\n47:     \"RUNNING_FTEST\" in os.environ\n48: )  # Flag to check if a connector is run for ftest or not.\n49: \n50: if \"OVERRIDE_URL\" in os.environ:\n51:     logger.warning(\"x\" * 50)\n52:     logger.warning(\n53:         f\"MICROSOFT TEAMS CONNECTOR CALLS ARE REDIRECTED TO {os.environ['OVERRIDE_URL']}\"\n54:     )\n55:     logger.warning(\"IT'S SUPPOSED TO BE USED ONLY FOR TESTING\")\n56:     logger.warning(\"x\" * 50)\n57:     override_url = os.environ[\"OVERRIDE_URL\"]\n58:     BASE_URL = override_url\n59:     GRAPH_API_AUTH_URL = override_url\n60:     GRAPH_ACQUIRE_TOKEN_URL = override_url\n61: else:\n62:     GRAPH_API_AUTH_URL = \"https://login.microsoftonline.com\"\n63:     GRAPH_ACQUIRE_TOKEN_URL = \"https://graph.microsoft.com/.default\"\n64:     BASE_URL = \"https://graph.microsoft.com/v1.0\"\n65: \n66: SCOPE = [\n67:     \"User.Read.All\",\n68:     \"TeamMember.Read.All\",\n69:     \"ChannelMessage.Read.All\",\n70:     \"Chat.Read\",\n71:     \"Chat.ReadBasic\",\n72:     \"Calendars.Read\",\n73: ]\n74: USER_MEETING_DATETIME_FORMAT = \"%Y-%m-%dT%H:%M:%S.%f\"\n75: \n76: \n77: class UserEndpointName(Enum):\n78:     PING = \"Ping\"\n79:     USERS = \"Users\"\n80:     CHAT = \"User Chat\"\n81:     CHATS_MESSAGE = \"User Chat Messages\"\n82:     MEETING_RECORDING = \"User Chat Meeting Recording\"\n83:     TABS = \"User Chat Tabs\"\n84:     DRIVE = \"User Drive\"\n85:     DRIVE_CHILDREN = \"User Drive Children\"\n86:     ATTACHMENT = \"User Chat Attachment\"\n87:     MEETING = \"User Meeting\"\n88: \n89: \n90: class TeamEndpointName(Enum):\n91:     TEAMS = \"Teams\"\n92:     CHANNEL = \"Team Channel\"\n93:     TAB = \"Channel Tab\"\n94:     MESSAGE = \"Channel Message\"\n95:     MEETING = \"Channel Meeting\"\n96:     ATTACHMENT = \"Channel Attachment\"\n97:     FILE = \"File\"\n98:     ROOT_DRIVE_CHILDREN = \"Root Drive Children\"\n99: \n100: \n101: class EndSignal(Enum):\n102:     USER_CHAT_TASK_FINISHED = \"USER_CHAT_TASK_FINISHED\"\n103:     TEAM_TASK_FINISHED = \"TEAM_TASK_FINISHED\"\n104:     CHANNEL_TASK_FINISHED = \"CHANNEL_TASK_FINISHED\"\n105: \n106: \n107: URLS = {\n108:     UserEndpointName.PING.value: \"{base_url}/me\",\n109:     UserEndpointName.USERS.value: \"{base_url}/users?$top=999\",\n110:     UserEndpointName.CHAT.value: \"{base_url}/chats?$expand=members&$top=50\",\n111:     UserEndpointName.CHATS_MESSAGE.value: \"{base_url}/chats/{chat_id}/messages?$top=50\",\n112:     UserEndpointName.TABS.value: \"{base_url}/chats/{chat_id}/tabs\",\n113:     UserEndpointName.DRIVE.value: \"{base_url}/users/{sender_id}/drive\",\n114:     UserEndpointName.DRIVE_CHILDREN.value: \"{base_url}/drives/{drive_id}/items/root/children\",\n115:     UserEndpointName.ATTACHMENT.value: \"{base_url}/drives/{drive_id}/items/{child_id}/children?$filter=name eq '{attachment_name}'\",\n116:     UserEndpointName.MEETING.value: \"{base_url}/users/{user_id}/events?$top=50\",\n117:     TeamEndpointName.TEAMS.value: \"{base_url}/teams?$top=999\",\n118:     TeamEndpointName.CHANNEL.value: \"{base_url}/teams/{team_id}/channels\",\n119:     TeamEndpointName.TAB.value: \"{base_url}/teams/{team_id}/channels/{channel_id}/tabs\",\n120:     TeamEndpointName.MESSAGE.value: \"{base_url}/teams/{team_id}/channels/{channel_id}/messages?$expand=replies\",\n121:     TeamEndpointName.FILE.value: \"{base_url}/teams/{team_id}/channels/{channel_id}/filesFolder\",\n122:     TeamEndpointName.ROOT_DRIVE_CHILDREN.value: \"{base_url}/drives/{drive_id}/items/{item_id}/children?$top=5000\",\n123: }\n124: \n125: \n126: class Schema:\n127:     def chat_messages(self):\n128:         return {\n129:             \"_id\": \"id\",\n130:             \"_timestamp\": \"lastModifiedDateTime\",\n131:             \"creation_time\": \"createdDateTime\",\n132:             \"webUrl\": \"webUrl\",\n133:             \"title\": \"title\",\n134:             \"chatType\": \"chatType\",\n135:             \"sender\": \"sender\",\n136:             \"message\": \"message\",\n137:         }\n138: \n139:     def chat_tabs(self):\n140:         return {\n141:             \"_id\": \"id\",\n142:             \"title\": \"displayName\",\n143:         }\n144: \n145:     def chat_attachments(self):\n146:         return {\n147:             \"_id\": \"id\",\n148:             \"name\": \"name\",\n149:             \"weburl\": \"webUrl\",\n150:             \"size_in_bytes\": \"size\",\n151:             \"_timestamp\": \"lastModifiedDateTime\",\n152:             \"creation_time\": \"createdDateTime\",\n153:         }\n154: \n155:     def meeting(self):\n156:         return {\n157:             \"_id\": \"id\",\n158:             \"creation_time\": \"createdDateTime\",\n159:             \"_timestamp\": \"lastModifiedDateTime\",\n160:             \"title\": \"subject\",\n161:             \"Cancelled_status\": \"isCancelled\",\n162:             \"web_link\": \"webLink\",\n163:             \"reminder\": \"isReminderOn\",\n164:             \"reminder_time\": \"reminderMinutesBeforeStart\",\n165:             \"categories\": \"categories\",\n166:             \"original_start_timezone\": \"originalStartTimeZone\",\n167:             \"original_end_timezone\": \"originalEndTimeZone\",\n168:         }\n169: \n170:     def teams(self):\n171:         return {\n172:             \"_id\": \"id\",\n173:             \"title\": \"displayName\",\n174:             \"description\": \"description\",\n175:         }\n176: \n177:     def channel(self):\n178:         return {\n179:             \"_id\": \"id\",\n180:             \"url\": \"webUrl\",\n181:             \"title\": \"displayName\",\n182:             \"description\": \"description\",\n183:             \"creation_time\": \"createdDateTime\",\n184:         }\n185: \n186:     def channel_tab(self):\n187:         return {\"_id\": \"id\", \"title\": \"displayName\", \"url\": \"webUrl\"}\n188: \n189:     def channel_message(self):\n190:         return {\n191:             \"_id\": \"id\",\n192:             \"url\": \"webUrl\",\n193:             \"_timestamp\": \"lastModifiedDateTime\",\n194:             \"creation_time\": \"createdDateTime\",\n195:         }\n196: \n197:     def channel_attachment(self):\n198:         return {\n199:             \"_id\": \"id\",\n200:             \"name\": \"name\",\n201:             \"weburl\": \"webUrl\",\n202:             \"size_in_bytes\": \"size\",",
+      "end_line": 202,
+      "path_lines": 1316,
+      "start_line": 1
+    },
+    "usage": {
+      "input_tokens": 14781,
+      "input_tokens_details": {
+        "cached_tokens": 12544
+      },
+      "output_tokens": 534,
+      "output_tokens_details": {
+        "reasoning_tokens": 399
+      },
+      "total_tokens": 15315
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "class MicrosoftTeamsFormatter:\n    \"\"\"Formats Microsoft Teams API objects for indexing.\"\"\"\n\n    def __init__(self, schema=None):\n        self.schema = schema or Schema()\n\n    def map_document_with_schema(\n        self,\n        document,\n        item,\n        document_type,\n    ):\n        \"\"\"Prepare key mappings for documents\n\n        Args:\n            document(dictionary): Modified document\n            item (dictionary): Document from Microsoft Teams.\n            document_type(string): Name of function to be called for fetching the mapping.\n\n        Returns:\n            dictionary: Modified document with the help of adapter schema.\n        \"\"\"\n        for elasticsearch_field, sharepoint_field in document_type().items():\n            document[elasticsearch_field] = item.get(sharepoint_field)\n\n    def format_doc(self, item, document_type, **kwargs):\n        document = {}\n        for elasticsearch_field, sharepoint_field in kwargs[\"document\"].items():\n            document[elasticsearch_field] = sharepoint_field\n        self.map_document_with_schema(\n            document=document, item=item, document_type=document_type\n        )\n        return document\n\n    def format_user_chat_meeting_recording(self, item, url):\n        document = {\"type\": UserEndpointName.MEETING_RECORDING.value}\n        document.update(\n            {\n                \"_id\": item.get(\"eventDetail\", {}).get(\"callId\"),\n                \"title\": item.get(\"eventDetail\", {}).get(\"callRecordingDisplayName\"),\n                \"url\": url,\n                \"_timestamp\": item.get(\"lastModifiedDateTime\"),\n            }\n        )\n        return document\n\n    def get_calendar_detail(self, calendar):\n        body = \"\"\n        organizer = calendar.get(\"organizer\", {}).get(\"emailAddress\").get(\"name\")\n        calendar_recurrence = calendar.get(\"recurrence\")\n        if calendar_recurrence:\n            recurrence_range = calendar_recurrence.get(\"range\")\n            pattern = calendar_recurrence.get(\"pattern\")\n            occurrence = f\"{pattern['interval']}\" if pattern.get(\"interval\") else \"\"\n            pattern_type = pattern.get(\"type\", \"\")\n\n            # In case type of meeting is daily so body will be: Recurrence: Occurs every 1 day starting {startdate}\n            # until {enddate}\n            if pattern_type == \"daily\":\n                days = f\"{occurrence} day\"\n\n            # If type of meeting  is yearly so body will be: Recurrence: Occurs every year on day 5 of march starting\n            # {date} until {enddate}\n            elif pattern_type in [\"absoluteYearly\", \"relativeYearly\"]:\n                day_pattern = (\n                    f\"on day {pattern['dayOfMonth']}\"\n                    if pattern.get(\"dayOfMonth\")\n                    else f\"on {pattern['index']} {','.join(pattern['daysOfWeek'])}\"\n                )\n                days = f\"year {day_pattern} of {month_name[pattern['month']]}\"\n\n            # If type of meeting  is monthly so body will be: Recurrence: Occurs every month on day 5 of march\n            # starting {date} until {enddate}\n            elif pattern_type in [\"absoluteMonthly\", \"relativeMonthly\"]:\n                days_pattern = (\n                    f\"on day {pattern['dayOfMonth']}\"\n                    if pattern.get(\"dayOfMonth\")\n                    else f\"on {pattern['index']} {','.join(pattern['daysOfWeek'])}\"\n                )\n                days = f\"{occurrence} month {days_pattern}\"\n\n            # Else goes in weekly situation where body will be: Recurrence: Occurs Every 3 week on monday,tuesday,\n            # wednesday starting {date} until {enddate}\n            else:\n                week = \",\".join(pattern.get(\"daysOfWeek\"))\n                days = f\"{occurrence} week on {week}\"\n\n            date = (\n                f\"{recurrence_range.get('startDate')}\"\n                if recurrence_range.get(\"type\", \"\") == \"noEnd\"\n                else f\"{recurrence_range.get('startDate')} until {recurrence_range.get('endDate')}\"\n            )\n            recurrence = f\"Occurs Every {days} starting {date}\"\n            body = f\"Recurrence: {recurrence} Organizer: {organizer}\"\n\n        else:\n            start_time = datetime.strptime(\n                calendar[\"start\"][\"dateTime\"][:-4], USER_MEETING_DATETIME_FORMAT\n            ).strftime(\"%d %b, %Y at %H:%M\")\n            end_time = datetime.strptime(\n                calendar[\"end\"][\"dateTime\"][:-4], USER_MEETING_DATETIME_FORMAT\n            ).strftime(\"%d %b, %Y at %H:%M\")\n            body = f\"Schedule: {start_time} to {end_time} Organizer: {organizer}\"\n        return body\n\n    def format_user_calendars(self, item):\n        document = {\"type\": UserEndpointName.MEETING.value}\n        attendee_list = (\n            [\n                f\"{attendee.get('emailAddress', {}).get('name')}({attendee.get('emailAddress', {}).get('address')})\"\n                for attendee in item[\"attendees\"]\n            ]\n            if item.get(\"attendees\")\n            else []\n        )\n        document.update(\n            {  # pyright: ignore\n                \"attendees\": attendee_list,\n                \"online_meeting_url\": item[\"onlineMeeting\"].get(\"joinUrl\")\n                if item.get(\"onlineMeeting\")\n                else \"\",\n                \"description\": item.get(\"bodyPreview\"),\n                \"meeting_detail\": self.get_calendar_detail(calendar=item),\n                \"location\": [\n                    f\"{location['displayName']}\" for location in item[\"locations\"]\n                ]\n                if item.get(\"locations\")\n                else [],\n            }\n        )\n        self.map_document_with_schema(\n            document=document, item=item, document_type=self.schema.meeting\n        )\n        return document\n\n    def format_channel_message(self, item, channel_name, message_content):\n        document = {\"type\": TeamEndpointName.MESSAGE.value}\n        document.update(\n            {  # pyright: ignore\n                \"sender\": item[\"from\"][\"user\"].get(\"displayName\")\n                if item.get(\"from\") and item[\"from\"].get(\"user\")\n                else \"\",\n                \"channel\": channel_name,\n                \"message\": message_content,\n                \"attached_documents\": self.format_attachment_names(\n                    attachments=item[\"attachments\"]\n                )\n                if item.get(\"attachments\")\n                else \"\",\n            }\n        )\n        self.map_document_with_schema(\n            document=document, item=item, document_type=self.schema.channel_message\n        )\n        return document\n\n    def format_channel_meeting(self, reply):\n        document = {\"type\": TeamEndpointName.MEETING.value}\n        event = reply[\"eventDetail\"]\n        if event.get(\"@odata.type\") == \"#microsoft.graph.callEndedEventMessageDetail\":\n            participant_list = []\n            for participant in event.get(\"callParticipants\", []):\n                user = participant.get(\"participant\", {}).get(\"user\")\n                if user:\n                    participant_list.append(user.get(\"displayName\"))\n            participant_names = \", \".join(participant_list)\n            document.update(\n                {\n                    \"_id\": event.get(\"callId\"),\n                    \"_timestamp\": reply.get(\"lastModifiedDateTime\"),\n                    \"participants\": participant_names,\n                }\n            )\n        elif (\n            event.get(\"@odata.type\")\n            == \"#microsoft.graph.callRecordingEventMessageDetail\"\n        ):\n            if event.get(\"callRecordingUrl\") and (\n                \".sharepoint.com\" in event[\"callRecordingUrl\"]\n            ):\n                document.update(\n                    {\n                        \"title\": event.get(\"callRecordingDisplayName\"),\n                        \"recording_url\": event.get(\"callRecordingUrl\"),\n                    }\n                )\n        return document\n\n    def format_user_chat_messages(self, chat, message, message_content, members):\n        if chat.get(\"topic\"):\n            message.update({\"title\": chat[\"topic\"]})\n        else:\n            message.update({\"title\": members})\n        message.update(\n            {\n                \"webUrl\": chat.get(\"webUrl\"),\n                \"chatType\": chat.get(\"chatType\"),\n                \"sender\": message[\"from\"][\"user\"].get(\"displayName\")\n                if message.get(\"from\") and message[\"from\"].get(\"user\")\n                else \"\",\n                \"message\": message_content,\n            }\n        )\n        return message\n\n    def format_attachment_names(self, attachments):\n        return \",\".join(\n            attachment.get(\"name\")\n            for attachment in attachments\n            if attachment.get(\"name\", \"\")\n        )\n\n    def get_chat_members(self, members):\n        return \",\".join(\n            member.get(\"displayName\")\n            for member in members\n            if member.get(\"displayName\", \"\")\n        )\n\n\n",
+          "end_line": 622,
+          "start_line": 623
+        },
+        {
+          "content": "        self.schema = Schema()\n        self.formatter = MicrosoftTeamsFormatter(self.schema)",
+          "end_line": 640,
+          "start_line": 640
+        },
+        {
+          "content": "",
+          "end_line": 728,
+          "start_line": 710
+        },
+        {
+          "content": "",
+          "end_line": 923,
+          "start_line": 744
+        },
+        {
+          "content": "    async def queue_user_chat_attachments(self, **kwargs):\n        async for attachments in self.client.get_user_chat_attachments(\n            sender_id=kwargs[\"sender_id\"],\n            attachment_name=kwargs[\"attachment_name\"],\n        ):\n            for attachment in attachments:\n                format_attachment = self.formatter.format_doc(\n                    item=attachment,\n                    document_type=self.schema.chat_attachments,\n                    document={\n                        \"type\": UserEndpointName.ATTACHMENT.value,\n                        \"members\": kwargs.get(\"members\", \"\"),\n                    },\n                )\n                download_url = attachment.get(\"@microsoft.graph.downloadUrl\")\n                await self.queue.put(\n                    (\n                        format_attachment,\n                        partial(\n                            self.get_content,\n                            user_attachment=format_attachment,\n                            download_url=download_url,\n                        ),\n                    )\n                )",
+          "end_line": 949,
+          "start_line": 924
+        }
+      ]
+    },
+    "response_chars": 11154,
+    "round": 4,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 622,
+          "replacement_lines": 220,
+          "start_line": 623
+        },
+        {
+          "end_line": 640,
+          "replacement_lines": 2,
+          "start_line": 640
+        },
+        {
+          "end_line": 728,
+          "replacement_lines": 0,
+          "start_line": 710
+        },
+        {
+          "end_line": 923,
+          "replacement_lines": 0,
+          "start_line": 744
+        },
+        {
+          "end_line": 949,
+          "replacement_lines": 25,
+          "start_line": 924
+        }
+      ],
+      "current_file_lines": 1337,
+      "updated_excerpt": {
+        "content": "613:                         drive_id=drive_id, item_id=child[\"id\"]\n614:                     ):\n615:                         yield documents\n616:                 yield child\n617: \n618:     async def close(self):\n619:         self._sleeps.cancel()\n620:         await self._http_session.close()\n621: \n622: \n623: class MicrosoftTeamsFormatter:\n624:     \"\"\"Formats Microsoft Teams API objects for indexing.\"\"\"\n625: \n626:     def __init__(self, schema=None):\n627:         self.schema = schema or Schema()\n628: \n629:     def map_document_with_schema(\n630:         self,\n631:         document,\n632:         item,\n633:         document_type,\n634:     ):\n635:         \"\"\"Prepare key mappings for documents\n636: \n637:         Args:\n638:             document(dictionary): Modified document\n639:             item (dictionary): Document from Microsoft Teams.\n640:             document_type(string): Name of function to be called for fetching the mapping.\n641: \n642:         Returns:\n643:             dictionary: Modified document with the help of adapter schema.\n644:         \"\"\"\n645:         for elasticsearch_field, sharepoint_field in document_type().items():\n646:             document[elasticsearch_field] = item.get(sharepoint_field)\n647: \n648:     def format_doc(self, item, document_type, **kwargs):\n649:         document = {}\n650:         for elasticsearch_field, sharepoint_field in kwargs[\"document\"].items():\n651:             document[elasticsearch_field] = sharepoint_field\n652:         self.map_document_with_schema(\n653:             document=document, item=item, document_type=document_type",
+        "end_line": 653,
+        "path_lines": 1337,
+        "start_line": 613
+      }
+    },
+    "usage": {
+      "input_tokens": 17121,
+      "input_tokens_details": {
+        "cached_tokens": 14592
+      },
+      "output_tokens": 4726,
+      "output_tokens_details": {
+        "reasoning_tokens": 2158
+      },
+      "total_tokens": 21847
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 1100,
+      "path": "connectors/sources/microsoft_teams.py",
+      "start_line": 620
+    },
+    "response_chars": 293,
+    "round": 5,
+    "tool_result": {
+      "content": "620:         await self._http_session.close()\n621: \n622: \n623: class MicrosoftTeamsFormatter:\n624:     \"\"\"Formats Microsoft Teams API objects for indexing.\"\"\"\n625: \n626:     def __init__(self, schema=None):\n627:         self.schema = schema or Schema()\n628: \n629:     def map_document_with_schema(\n630:         self,\n631:         document,\n632:         item,\n633:         document_type,\n634:     ):\n635:         \"\"\"Prepare key mappings for documents\n636: \n637:         Args:\n638:             document(dictionary): Modified document\n639:             item (dictionary): Document from Microsoft Teams.\n640:             document_type(string): Name of function to be called for fetching the mapping.\n641: \n642:         Returns:\n643:             dictionary: Modified document with the help of adapter schema.\n644:         \"\"\"\n645:         for elasticsearch_field, sharepoint_field in document_type().items():\n646:             document[elasticsearch_field] = item.get(sharepoint_field)\n647: \n648:     def format_doc(self, item, document_type, **kwargs):\n649:         document = {}\n650:         for elasticsearch_field, sharepoint_field in kwargs[\"document\"].items():\n651:             document[elasticsearch_field] = sharepoint_field\n652:         self.map_document_with_schema(\n653:             document=document, item=item, document_type=document_type\n654:         )\n655:         return document\n656: \n657:     def format_user_chat_meeting_recording(self, item, url):\n658:         document = {\"type\": UserEndpointName.MEETING_RECORDING.value}\n659:         document.update(\n660:             {\n661:                 \"_id\": item.get(\"eventDetail\", {}).get(\"callId\"),\n662:                 \"title\": item.get(\"eventDetail\", {}).get(\"callRecordingDisplayName\"),\n663:                 \"url\": url,\n664:                 \"_timestamp\": item.get(\"lastModifiedDateTime\"),\n665:             }\n666:         )\n667:         return document\n668: \n669:     def get_calendar_detail(self, calendar):\n670:         body = \"\"\n671:         organizer = calendar.get(\"organizer\", {}).get(\"emailAddress\").get(\"name\")\n672:         calendar_recurrence = calendar.get(\"recurrence\")\n673:         if calendar_recurrence:\n674:             recurrence_range = calendar_recurrence.get(\"range\")\n675:             pattern = calendar_recurrence.get(\"pattern\")\n676:             occurrence = f\"{pattern['interval']}\" if pattern.get(\"interval\") else \"\"\n677:             pattern_type = pattern.get(\"type\", \"\")\n678: \n679:             # In case type of meeting is daily so body will be: Recurrence: Occurs every 1 day starting {startdate}\n680:             # until {enddate}\n681:             if pattern_type == \"daily\":\n682:                 days = f\"{occurrence} day\"\n683: \n684:             # If type of meeting  is yearly so body will be: Recurrence: Occurs every year on day 5 of march starting\n685:             # {date} until {enddate}\n686:             elif pattern_type in [\"absoluteYearly\", \"relativeYearly\"]:\n687:                 day_pattern = (\n688:                     f\"on day {pattern['dayOfMonth']}\"\n689:                     if pattern.get(\"dayOfMonth\")\n690:                     else f\"on {pattern['index']} {','.join(pattern['daysOfWeek'])}\"\n691:                 )\n692:                 days = f\"year {day_pattern} of {month_name[pattern['month']]}\"\n693: \n694:             # If type of meeting  is monthly so body will be: Recurrence: Occurs every month on day 5 of march\n695:             # starting {date} until {enddate}\n696:             elif pattern_type in [\"absoluteMonthly\", \"relativeMonthly\"]:\n697:                 days_pattern = (\n698:                     f\"on day {pattern['dayOfMonth']}\"\n699:                     if pattern.get(\"dayOfMonth\")\n700:                     else f\"on {pattern['index']} {','.join(pattern['daysOfWeek'])}\"\n701:                 )\n702:                 days = f\"{occurrence} month {days_pattern}\"\n703: \n704:             # Else goes in weekly situation where body will be: Recurrence: Occurs Every 3 week on monday,tuesday,\n705:             # wednesday starting {date} until {enddate}\n706:             else:\n707:                 week = \",\".join(pattern.get(\"daysOfWeek\"))\n708:                 days = f\"{occurrence} week on {week}\"\n709: \n710:             date = (\n711:                 f\"{recurrence_range.get('startDate')}\"\n712:                 if recurrence_range.get(\"type\", \"\") == \"noEnd\"\n713:                 else f\"{recurrence_range.get('startDate')} until {recurrence_range.get('endDate')}\"\n714:             )\n715:             recurrence = f\"Occurs Every {days} starting {date}\"\n716:             body = f\"Recurrence: {recurrence} Organizer: {organizer}\"\n717: \n718:         else:\n719:             start_time = datetime.strptime(\n720:                 calendar[\"start\"][\"dateTime\"][:-4], USER_MEETING_DATETIME_FORMAT\n721:             ).strftime(\"%d %b, %Y at %H:%M\")\n722:             end_time = datetime.strptime(\n723:                 calendar[\"end\"][\"dateTime\"][:-4], USER_MEETING_DATETIME_FORMAT\n724:             ).strftime(\"%d %b, %Y at %H:%M\")\n725:             body = f\"Schedule: {start_time} to {end_time} Organizer: {organizer}\"\n726:         return body\n727: \n728:     def format_user_calendars(self, item):\n729:         document = {\"type\": UserEndpointName.MEETING.value}\n730:         attendee_list = (\n731:             [\n732:                 f\"{attendee.get('emailAddress', {}).get('name')}({attendee.get('emailAddress', {}).get('address')})\"\n733:                 for attendee in item[\"attendees\"]\n734:             ]\n735:             if item.get(\"attendees\")\n736:             else []\n737:         )\n738:         document.update(\n739:             {  # pyright: ignore\n740:                 \"attendees\": attendee_list,\n741:                 \"online_meeting_url\": item[\"onlineMeeting\"].get(\"joinUrl\")\n742:                 if item.get(\"onlineMeeting\")\n743:                 else \"\",\n744:                 \"description\": item.get(\"bodyPreview\"),\n745:                 \"meeting_detail\": self.get_calendar_detail(calendar=item),\n746:                 \"location\": [\n747:                     f\"{location['displayName']}\" for location in item[\"locations\"]\n748:                 ]\n749:                 if item.get(\"locations\")\n750:                 else [],\n751:             }\n752:         )\n753:         self.map_document_with_schema(\n754:             document=document, item=item, document_type=self.schema.meeting\n755:         )\n756:         return document\n757: \n758:     def format_channel_message(self, item, channel_name, message_content):\n759:         document = {\"type\": TeamEndpointName.MESSAGE.value}\n760:         document.update(\n761:             {  # pyright: ignore\n762:                 \"sender\": item[\"from\"][\"user\"].get(\"displayName\")\n763:                 if item.get(\"from\") and item[\"from\"].get(\"user\")\n764:                 else \"\",\n765:                 \"channel\": channel_name,\n766:                 \"message\": message_content,\n767:                 \"attached_documents\": self.format_attachment_names(\n768:                     attachments=item[\"attachments\"]\n769:                 )\n770:                 if item.get(\"attachments\")\n771:                 else \"\",\n772:             }\n773:         )\n774:         self.map_document_with_schema(\n775:             document=document, item=item, document_type=self.schema.channel_message\n776:         )\n777:         return document\n778: \n779:     def format_channel_meeting(self, reply):\n780:         document = {\"type\": TeamEndpointName.MEETING.value}\n781:         event = reply[\"eventDetail\"]\n782:         if event.get(\"@odata.type\") == \"#microsoft.graph.callEndedEventMessageDetail\":\n783:             participant_list = []\n784:             for participant in event.get(\"callParticipants\", []):\n785:                 user = participant.get(\"participant\", {}).get(\"user\")\n786:                 if user:\n787:                     participant_list.append(user.get(\"displayName\"))\n788:             participant_names = \", \".join(participant_list)\n789:             document.update(\n790:                 {\n791:                     \"_id\": event.get(\"callId\"),\n792:                     \"_timestamp\": reply.get(\"lastModifiedDateTime\"),\n793:                     \"participants\": participant_names,\n794:                 }\n795:             )\n796:         elif (\n797:             event.get(\"@odata.type\")\n798:             == \"#microsoft.graph.callRecordingEventMessageDetail\"\n799:         ):\n800:             if event.get(\"callRecordingUrl\") and (\n801:                 \".sharepoint.com\" in event[\"callRecordingUrl\"]\n802:             ):\n803:                 document.update(\n804:                     {\n805:                         \"title\": event.get(\"callRecordingDisplayName\"),\n806:                         \"recording_url\": event.get(\"callRecordingUrl\"),\n807:                     }\n808:                 )\n809:         return document\n810: \n811:     def format_user_chat_messages(self, chat, message, message_content, members):\n812:         if chat.get(\"topic\"):\n813:             message.update({\"title\": chat[\"topic\"]})\n814:         else:\n815:             message.update({\"title\": members})\n816:         message.update(\n817:             {\n818:                 \"webUrl\": chat.get(\"webUrl\"),\n819:                 \"chatType\": chat.get(\"chatType\"),\n820:                 \"sender\": message[\"from\"][\"user\"].get(\"displayName\")\n821:                 if message.get(\"from\") and message[\"from\"].get(\"user\")\n822:                 else \"\",\n823:                 \"message\": message_content,\n824:             }\n825:         )\n826:         return message\n827: \n828:     def format_attachment_names(self, attachments):\n829:         return \",\".join(\n830:             attachment.get(\"name\")\n831:             for attachment in attachments\n832:             if attachment.get(\"name\", \"\")\n833:         )\n834: \n835:     def get_chat_members(self, members):\n836:         return \",\".join(\n837:             member.get(\"displayName\")\n838:             for member in members\n839:             if member.get(\"displayName\", \"\")\n840:         )\n841: \n842: \n843: class MicrosoftTeamsDataSource(BaseDataSource):\n844:     \"\"\"Microsoft Teams\"\"\"\n845: \n846:     name = \"Microsoft Teams\"\n847:     service_type = \"microsoft_teams\"\n848: \n849:     def __init__(self, configuration):\n850:         \"\"\"Set up the connection to the Microsoft Teams.\n851: \n852:         Args:\n853:             configuration (DataSourceConfiguration): Object of DataSourceConfiguration class.\n854:         \"\"\"\n855:         super().__init__(configuration=configuration)\n856:         self.tasks = 0\n857:         self.queue = MemQueue(maxmemsize=QUEUE_MEM_SIZE, refresh_timeout=120)\n858:         self.fetchers = ConcurrentTasks(max_concurrency=MAX_CONCURRENCY)\n859:         self.schema = Schema()\n860:         self.schema = Schema()\n861:         self.formatter = MicrosoftTeamsFormatter(self.schema)\n862:     def _set_internal_logger(self):\n863:         self.client.set_logger(self._logger)\n864: \n865:     @cached_property\n866:     def client(self):\n867:         tenant_id = self.configuration[\"tenant_id\"]\n868:         client_id = self.configuration[\"client_id\"]\n869:         client_secret = self.configuration[\"secret_value\"]\n870:         username = self.configuration[\"username\"]\n871:         password = self.configuration[\"password\"]\n872: \n873:         return MicrosoftTeamsClient(\n874:             tenant_id, client_id, client_secret, username, password\n875:         )\n876: \n877:     async def _consumer(self):\n878:         \"\"\"Async generator to process entries of the queue\n879: \n880:         Yields:\n881:             dictionary: Documents from Microsoft Teams.\n882:         \"\"\"\n883:         while self.tasks > 0:\n884:             _, item = await self.queue.get()\n885: \n886:             if isinstance(item, EndSignal):\n887:                 self.tasks -= 1\n888:             else:\n889:                 yield item\n890: \n891:     def verify_filename_for_extraction(self, filename):\n892:         attachment_extension = list(os.path.splitext(filename))\n893:         if \"\" in attachment_extension:\n894:             self._logger.debug(\n895:                 f\"Files without extension are not supported, skipping {filename}.\"\n896:             )\n897:             return\n898:         if attachment_extension[-1].lower() not in TIKA_SUPPORTED_FILETYPES:\n899:             self._logger.debug(\n900:                 f\"Files with the extension {attachment_extension[-1]} are not supported, skipping {filename}.\"\n901:             )\n902:             return\n903:         return True\n904: \n905:     async def _download_content_for_attachment(self, download_func, original_filename):\n906:         attachment = None\n907:         source_file_name = \"\"\n908: \n909:         try:\n910:             async with NamedTemporaryFile(mode=\"wb\", delete=False) as async_buffer:\n911:                 source_file_name = async_buffer.name\n912:                 await download_func(async_buffer)\n913: \n914:             self._logger.debug(\n915:                 f\"Download completed for file: {original_filename}. Calling convert_to_b64\"\n916:             )\n917:             await asyncio.to_thread(\n918:                 convert_to_b64,\n919:                 source=source_file_name,\n920:             )\n921:             async with aiofiles.open(file=source_file_name, mode=\"r\") as target_file:\n922:                 # base64 on macOS will add a EOL, so we strip() here\n923:                 attachment = (await target_file.read()).strip()\n924: \n925:         finally:\n926:             if source_file_name:\n927:                 await remove(str(source_file_name))\n928: \n929:         return attachment\n930: \n931:     async def validate_config(self):\n932:         await super().validate_config()\n933: \n934:         # Check that we can log in into Graph API\n935:         await self.client._api_token.get_with_username_password()\n936: \n937:     async def ping(self):\n938:         \"\"\"Verify the connection with Microsoft Teams\"\"\"\n939:         try:\n940:             await self.client.ping()\n941:             self._logger.info(\"Successfully connected to Microsoft Teams\")\n942:         except Exception:\n943:             self._logger.exception(\"Error while connecting to Microsoft Teams\")\n944:             raise\n945: \n946:     async def queue_user_chat_attachments(self, **kwargs):\n947:         async for attachments in self.client.get_user_chat_attachments(\n948:             sender_id=kwargs[\"sender_id\"],\n949:             attachment_name=kwargs[\"attachment_name\"],\n950:         ):\n951:             for attachment in attachments:\n952:                 format_attachment = self.formatter.format_doc(\n953:                     item=attachment,\n954:                     document_type=self.schema.chat_attachments,\n955:                     document={\n956:                         \"type\": UserEndpointName.ATTACHMENT.value,\n957:                         \"members\": kwargs.get(\"members\", \"\"),\n958:                     },\n959:                 )\n960:                 download_url = attachment.get(\"@microsoft.graph.downloadUrl\")\n961:                 await self.queue.put(\n962:                     (\n963:                         format_attachment,\n964:                         partial(\n965:                             self.get_content,\n966:                             user_attachment=format_attachment,\n967:                             download_url=download_url,\n968:                         ),\n969:                     )\n970:                 )\n971:     async def get_content(\n972:         self, user_attachment, download_url, timestamp=None, doit=False\n973:     ):\n974:         \"\"\"Extracts the content for allowed file types.\n975: \n976:         Args:\n977:             user_attachment (dictionary): Attachment object dictionary\n978:             download_url (str): Attachment downloadable url\n979:             timestamp (timestamp, optional): Timestamp of attachment last modified. Defaults to None.\n980:             doit (boolean, optional): Boolean value for whether to get content or not. Defaults to False.\n981: \n982:         Returns:\n983:             dictionary: Content document with _id, _timestamp and attachment content\n984:         \"\"\"\n985:         document_size = int(user_attachment[\"size_in_bytes\"])\n986: \n987:         if not (doit and document_size):\n988:             return\n989:         filename = user_attachment[\"name\"]\n990:         if not self.verify_filename_for_extraction(filename=filename):\n991:             return\n992:         if user_attachment[\"size_in_bytes\"] > MAX_FILE_SIZE:\n993:             self._logger.warning(\n994:                 f\"File size {document_size} of file {filename} is larger than {MAX_FILE_SIZE} bytes. Discarding file content\"\n995:             )\n996:             return\n997:         document = {\n998:             \"_id\": user_attachment[\"id\"],\n999:             \"_timestamp\": user_attachment[\"_timestamp\"],\n1000:         }\n1001:         self._logger.debug(f\"Downloading {filename}\")\n1002:         attachment_content = await self._download_content_for_attachment(\n1003:             partial(self.client.download_item, download_url),\n1004:             original_filename=filename,\n1005:         )\n1006:         document[\"_attachment\"] = attachment_content\n1007: \n1008:         return document\n1009: \n1010:     def format_attachment_names(self, attachments):\n1011:         return \",\".join(\n1012:             attachment.get(\"name\")\n1013:             for attachment in attachments\n1014:             if attachment.get(\"name\", \"\")\n1015:         )\n1016: \n1017:     async def get_messages(\n1018:         self, message, document_type=None, chat=None, channel_name=None, members=None\n1019:     ):",
+      "end_line": 1019,
+      "path_lines": 1337,
+      "start_line": 620
+    },
+    "usage": {
+      "input_tokens": 20162,
+      "input_tokens_details": {
+        "cached_tokens": 16640
+      },
+      "output_tokens": 197,
+      "output_tokens_details": {
+        "reasoning_tokens": 93
+      },
+      "total_tokens": 20359
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "connectors/sources/microsoft_teams.py",
+      "query": "self.format"
+    },
+    "response_chars": 277,
+    "round": 6,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 767,
+          "text": "                \"attached_documents\": self.format_attachment_names("
+        },
+        {
+          "line": 861,
+          "text": "        self.formatter = MicrosoftTeamsFormatter(self.schema)"
+        },
+        {
+          "line": 952,
+          "text": "                format_attachment = self.formatter.format_doc("
+        },
+        {
+          "line": 1027,
+          "text": "                    message_document = await self.format_user_chat_messages("
+        },
+        {
+          "line": 1035,
+          "text": "                            self.format_doc("
+        },
+        {
+          "line": 1046,
+          "text": "                            self.format_channel_message("
+        },
+        {
+          "line": 1066,
+          "text": "                        self.format_user_chat_meeting_recording(item=message, url=url),"
+        },
+        {
+          "line": 1097,
+          "text": "                            await self.format_user_chat_attachments("
+        },
+        {
+          "line": 1107,
+          "text": "                        self.format_doc("
+        },
+        {
+          "line": 1134,
+          "text": "                        self.format_channel_message("
+        },
+        {
+          "line": 1147,
+          "text": "                document = self.format_channel_meeting(reply=reply)"
+        },
+        {
+          "line": 1156,
+          "text": "                self.format_doc("
+        },
+        {
+          "line": 1175,
+          "text": "                        self.format_doc("
+        },
+        {
+          "line": 1218,
+          "text": "                format_attachment = self.format_doc("
+        },
+        {
+          "line": 1245,
+          "text": "                self.format_doc("
+        },
+        {
+          "line": 1286,
+          "text": "                                yield self.format_user_calendars(item=event), None"
+        }
+      ],
+      "query": "self.format",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 24738,
+      "input_tokens_details": {
+        "cached_tokens": 19712
+      },
+      "output_tokens": 296,
+      "output_tokens_details": {
+        "reasoning_tokens": 207
+      },
+      "total_tokens": 25034
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 1290,
+      "path": "connectors/sources/microsoft_teams.py",
+      "start_line": 1017
+    },
+    "response_chars": 395,
+    "round": 7,
+    "tool_result": {
+      "content": "1017:     async def get_messages(\n1018:         self, message, document_type=None, chat=None, channel_name=None, members=None\n1019:     ):\n1020:         if not message.get(\"deletedDateTime\") and (\n1021:             \"unknownFutureValue\" not in message.get(\"messageType\")\n1022:         ):\n1023:             if message_content := html_to_text(\n1024:                 html=message.get(\"body\", {}).get(\"content\")\n1025:             ):\n1026:                 if document_type == UserEndpointName.CHATS_MESSAGE.value:\n1027:                     message_document = await self.format_user_chat_messages(\n1028:                         chat=chat,\n1029:                         message=message,\n1030:                         message_content=message_content,\n1031:                         members=members,\n1032:                     )\n1033:                     await self.queue.put(\n1034:                         (\n1035:                             self.format_doc(\n1036:                                 item=message_document,\n1037:                                 document_type=self.schema.chat_messages,\n1038:                                 document={\"type\": document_type},\n1039:                             ),\n1040:                             None,\n1041:                         )\n1042:                     )\n1043:                 else:\n1044:                     await self.queue.put(\n1045:                         (\n1046:                             self.format_channel_message(\n1047:                                 item=message,\n1048:                                 channel_name=channel_name,\n1049:                                 message_content=message_content,\n1050:                             ),\n1051:                             None,\n1052:                         )\n1053:                     )\n1054: \n1055:     async def user_chat_meeting_recording(self, message):\n1056:         if (\n1057:             message.get(\"eventDetail\")\n1058:             and message[\"eventDetail\"].get(\"@odata.type\")\n1059:             == \"#microsoft.graph.callRecordingEventMessageDetail\"\n1060:         ):\n1061:             url = message[\"eventDetail\"].get(\"callRecordingUrl\")\n1062: \n1063:             if url and \".sharepoint.com\" in url:\n1064:                 await self.queue.put(\n1065:                     (\n1066:                         self.format_user_chat_meeting_recording(item=message, url=url),\n1067:                         None,\n1068:                     )\n1069:                 )\n1070: \n1071:     def get_chat_members(self, members):\n1072:         return \",\".join(\n1073:             member.get(\"displayName\")\n1074:             for member in members\n1075:             if member.get(\"displayName\", \"\")\n1076:         )\n1077: \n1078:     async def user_chat_producer(self, chat):\n1079:         members = self.get_chat_members(chat.get(\"members\", []))\n1080:         async for messages in self.client.get_user_chat_messages(chat_id=chat[\"id\"]):\n1081:             for message in messages:\n1082:                 await self.get_messages(\n1083:                     message=message,\n1084:                     document_type=UserEndpointName.CHATS_MESSAGE.value,\n1085:                     chat=chat,\n1086:                     members=members,\n1087:                 )\n1088: \n1089:                 await self.user_chat_meeting_recording(message=message)\n1090: \n1091:                 if message.get(\"from\") and message[\"from\"].get(\"user\"):\n1092:                     for attachment in message.get(\"attachments\", []):\n1093:                         if (\n1094:                             attachment.get(\"name\")\n1095:                             and attachment.get(\"contentType\") == \"reference\"\n1096:                         ):\n1097:                             await self.format_user_chat_attachments(\n1098:                                 sender_id=message[\"from\"][\"user\"][\"id\"],\n1099:                                 attachment_name=attachment[\"name\"],\n1100:                                 members=members,\n1101:                             )\n1102: \n1103:         async for tabs in self.client.get_user_chat_tabs(chat_id=chat[\"id\"]):\n1104:             for tab in tabs:\n1105:                 await self.queue.put(\n1106:                     (\n1107:                         self.format_doc(\n1108:                             item=tab,\n1109:                             document_type=self.schema.chat_tabs,\n1110:                             document={\n1111:                                 \"type\": UserEndpointName.TABS.value,\n1112:                                 \"url\": tab.get(\"configuration\", {}).get(\"websiteUrl\"),\n1113:                                 \"_timestamp\": chat[\"lastUpdatedDateTime\"],\n1114:                                 \"members\": members,\n1115:                             },\n1116:                         ),\n1117:                         None,\n1118:                     )\n1119:                 )\n1120:         await self.queue.put(EndSignal.USER_CHAT_TASK_FINISHED)\n1121: \n1122:     async def get_channel_messages(self, message, channel_name):\n1123:         await self.get_messages(message=message, channel_name=channel_name)\n1124:         meeting_document = {}\n1125:         for reply in message.get(\"replies\", []):\n1126:             message_content = html_to_text(html=reply.get(\"body\", {}).get(\"content\"))\n1127:             if (\n1128:                 not reply.get(\"deletedDateTime\")\n1129:                 and (\"unknownFutureValue\" not in reply.get(\"messageType\"))\n1130:                 and message_content\n1131:             ):\n1132:                 await self.queue.put(\n1133:                     (\n1134:                         self.format_channel_message(\n1135:                             item=reply,\n1136:                             channel_name=channel_name,\n1137:                             message_content=message_content,\n1138:                         ),\n1139:                         None,\n1140:                     )\n1141:                 )\n1142: \n1143:             elif reply.get(\"eventDetail\"):\n1144:                 call_id = reply[\"eventDetail\"].get(\"callId\")\n1145:                 if call_id not in meeting_document:\n1146:                     meeting_document[call_id] = {}\n1147:                 document = self.format_channel_meeting(reply=reply)\n1148:                 meeting_document[call_id].update(document)\n1149:         for document in meeting_document.values():\n1150:             await self.queue.put((document, None))\n1151: \n1152:     async def team_channel_producer(self, channel, team_id, team_name):\n1153:         channel_name = channel.get(\"displayName\")\n1154:         await self.queue.put(\n1155:             (\n1156:                 self.format_doc(\n1157:                     item=channel,\n1158:                     document_type=self.schema.channel,\n1159:                     document={\n1160:                         \"type\": TeamEndpointName.CHANNEL.value,\n1161:                         \"_timestamp\": datetime.utcnow(),\n1162:                         \"team_name\": team_name,\n1163:                     },\n1164:                 ),\n1165:                 None,\n1166:             )\n1167:         )\n1168: \n1169:         async for tabs in self.client.get_channel_tabs(\n1170:             team_id=team_id, channel_id=channel.get(\"id\")\n1171:         ):\n1172:             for tab in tabs:\n1173:                 await self.queue.put(\n1174:                     (\n1175:                         self.format_doc(\n1176:                             item=tab,\n1177:                             document_type=self.schema.channel_tab,\n1178:                             document={\n1179:                                 \"type\": TeamEndpointName.TAB.value,\n1180:                                 \"_timestamp\": datetime.utcnow(),\n1181:                                 \"team_name\": team_name,\n1182:                                 \"channel_name\": channel_name,\n1183:                             },\n1184:                         ),\n1185:                         None,\n1186:                     )\n1187:                 )\n1188: \n1189:         async for messages in self.client.get_channel_messages(\n1190:             team_id=team_id, channel_id=channel.get(\"id\")\n1191:         ):\n1192:             for message in messages:\n1193:                 await self.get_channel_messages(\n1194:                     message=message, channel_name=channel_name\n1195:                 )\n1196: \n1197:         file = await self.client.get_channel_file(\n1198:             team_id=team_id, channel_id=channel.get(\"id\")\n1199:         )\n1200:         drive_id = file.get(\"parentReference\", {}).get(\"driveId\")\n1201:         await self.get_channel_drive_producer(\n1202:             drive_id=drive_id,\n1203:             item_id=file.get(\"id\"),\n1204:             team_name=team_name,\n1205:             channel_name=channel_name,\n1206:         )\n1207: \n1208:         await self.queue.put(EndSignal.CHANNEL_TASK_FINISHED)\n1209: \n1210:     async def get_channel_drive_producer(\n1211:         self, drive_id, item_id, team_name, channel_name\n1212:     ):\n1213:         async for drive_child in self.client.get_channel_drive_childrens(\n1214:             drive_id=drive_id,\n1215:             item_id=item_id,\n1216:         ):\n1217:             if drive_child.get(\"file\"):\n1218:                 format_attachment = self.format_doc(\n1219:                     item=drive_child,\n1220:                     document_type=self.schema.channel_attachment,\n1221:                     document={\n1222:                         \"type\": TeamEndpointName.ATTACHMENT.value,\n1223:                         \"team_name\": team_name,\n1224:                         \"channel_name\": channel_name,\n1225:                     },\n1226:                 )\n1227:                 await self.queue.put(\n1228:                     (\n1229:                         format_attachment,\n1230:                         partial(\n1231:                             self.get_content,\n1232:                             user_attachment=format_attachment,\n1233:                             download_url=drive_child.get(\n1234:                                 \"@microsoft.graph.downloadUrl\"\n1235:                             ),\n1236:                         ),\n1237:                     )\n1238:                 )\n1239: \n1240:     async def teams_producer(self, team):\n1241:         team_id = team.get(\"id\")\n1242:         team_name = team.get(\"displayName\")\n1243:         await self.queue.put(\n1244:             (\n1245:                 self.format_doc(\n1246:                     item=team,\n1247:                     document_type=self.schema.teams,\n1248:                     document={\n1249:                         \"type\": TeamEndpointName.TEAMS.value,\n1250:                         \"_timestamp\": datetime.utcnow(),\n1251:                     },\n1252:                 ),\n1253:                 None,\n1254:             )\n1255:         )\n1256: \n1257:         async for channels in self.client.get_team_channels(team_id=team[\"id\"]):\n1258:             for channel in channels:\n1259:                 await self.fetchers.put(\n1260:                     partial(self.team_channel_producer, channel, team_id, team_name)\n1261:                 )\n1262:                 self.tasks += 1\n1263: \n1264:         await self.queue.put(EndSignal.TEAM_TASK_FINISHED)\n1265: \n1266:     async def get_docs(self, filtering=None):\n1267:         \"\"\"Executes the logic to fetch Microsoft Teams objects in async manner\n1268: \n1269:         Args:\n1270:             filtering (Filtering): Object of class Filtering\n1271: \n1272:         Yields:\n1273:             dictionary: dictionary containing meta-data of the files.\n1274:         \"\"\"\n1275:         async for chats in self.client.get_user_chats():\n1276:             for chat in chats:\n1277:                 await self.fetchers.put(partial(self.user_chat_producer, chat))\n1278:                 self.tasks += 1\n1279: \n1280:         async for users in self.client.users():\n1281:             for user in users:\n1282:                 if user.get(\"mail\"):\n1283:                     async for events in self.client.get_calendars(user_id=user[\"id\"]):\n1284:                         for event in events:\n1285:                             if not event.get(\"isCancelled\"):\n1286:                                 yield self.format_user_calendars(item=event), None\n1287: \n1288:         async for teams in self.client.get_teams():\n1289:             for team in teams:\n1290:                 await self.fetchers.put(partial(self.teams_producer, team))",
+      "end_line": 1290,
+      "path_lines": 1337,
+      "start_line": 1017
+    },
+    "usage": {
+      "input_tokens": 25116,
+      "input_tokens_details": {
+        "cached_tokens": 24320
+      },
+      "output_tokens": 358,
+      "output_tokens_details": {
+        "reasoning_tokens": 215
+      },
+      "total_tokens": 25474
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "        self.schema = Schema()\n        self.formatter = MicrosoftTeamsFormatter(self.schema)\n\n    def _set_internal_logger(self):",
+          "end_line": 862,
+          "start_line": 859
+        },
+        {
+          "content": "",
+          "end_line": 1015,
+          "start_line": 1010
+        },
+        {
+          "content": "                    message_document = self.formatter.format_user_chat_messages(",
+          "end_line": 1027,
+          "start_line": 1027
+        },
+        {
+          "content": "                            self.formatter.format_doc(",
+          "end_line": 1035,
+          "start_line": 1035
+        },
+        {
+          "content": "                            self.formatter.format_channel_message(",
+          "end_line": 1046,
+          "start_line": 1046
+        },
+        {
+          "content": "                        self.formatter.format_user_chat_meeting_recording(item=message, url=url),",
+          "end_line": 1066,
+          "start_line": 1066
+        },
+        {
+          "content": "",
+          "end_line": 1076,
+          "start_line": 1071
+        },
+        {
+          "content": "        members = self.formatter.get_chat_members(chat.get(\"members\", []))",
+          "end_line": 1079,
+          "start_line": 1079
+        },
+        {
+          "content": "                            await self.queue_user_chat_attachments(",
+          "end_line": 1097,
+          "start_line": 1097
+        },
+        {
+          "content": "                        self.formatter.format_doc(",
+          "end_line": 1107,
+          "start_line": 1107
+        },
+        {
+          "content": "                        self.formatter.format_channel_message(",
+          "end_line": 1134,
+          "start_line": 1134
+        },
+        {
+          "content": "                document = self.formatter.format_channel_meeting(reply=reply)",
+          "end_line": 1147,
+          "start_line": 1147
+        },
+        {
+          "content": "                self.formatter.format_doc(",
+          "end_line": 1156,
+          "start_line": 1156
+        },
+        {
+          "content": "                        self.formatter.format_doc(",
+          "end_line": 1175,
+          "start_line": 1175
+        },
+        {
+          "content": "                format_attachment = self.formatter.format_doc(",
+          "end_line": 1218,
+          "start_line": 1218
+        },
+        {
+          "content": "                self.formatter.format_doc(",
+          "end_line": 1245,
+          "start_line": 1245
+        },
+        {
+          "content": "                                yield self.formatter.format_user_calendars(item=event), None",
+          "end_line": 1286,
+          "start_line": 1286
+        }
+      ]
+    },
+    "response_chars": 3902,
+    "round": 8,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 862,
+          "replacement_lines": 4,
+          "start_line": 859
+        },
+        {
+          "end_line": 1015,
+          "replacement_lines": 0,
+          "start_line": 1010
+        },
+        {
+          "end_line": 1027,
+          "replacement_lines": 1,
+          "start_line": 1027
+        },
+        {
+          "end_line": 1035,
+          "replacement_lines": 1,
+          "start_line": 1035
+        },
+        {
+          "end_line": 1046,
+          "replacement_lines": 1,
+          "start_line": 1046
+        },
+        {
+          "end_line": 1066,
+          "replacement_lines": 1,
+          "start_line": 1066
+        },
+        {
+          "end_line": 1076,
+          "replacement_lines": 0,
+          "start_line": 1071
+        },
+        {
+          "end_line": 1079,
+          "replacement_lines": 1,
+          "start_line": 1079
+        },
+        {
+          "end_line": 1097,
+          "replacement_lines": 1,
+          "start_line": 1097
+        },
+        {
+          "end_line": 1107,
+          "replacement_lines": 1,
+          "start_line": 1107
+        },
+        {
+          "end_line": 1134,
+          "replacement_lines": 1,
+          "start_line": 1134
+        },
+        {
+          "end_line": 1147,
+          "replacement_lines": 1,
+          "start_line": 1147
+        },
+        {
+          "end_line": 1156,
+          "replacement_lines": 1,
+          "start_line": 1156
+        },
+        {
+          "end_line": 1175,
+          "replacement_lines": 1,
+          "start_line": 1175
+        },
+        {
+          "end_line": 1218,
+          "replacement_lines": 1,
+          "start_line": 1218
+        },
+        {
+          "end_line": 1245,
+          "replacement_lines": 1,
+          "start_line": 1245
+        },
+        {
+          "end_line": 1286,
+          "replacement_lines": 1,
+          "start_line": 1286
+        }
+      ],
+      "current_file_lines": 1325,
+      "updated_excerpt": {
+        "content": "849:     def __init__(self, configuration):\n850:         \"\"\"Set up the connection to the Microsoft Teams.\n851: \n852:         Args:\n853:             configuration (DataSourceConfiguration): Object of DataSourceConfiguration class.\n854:         \"\"\"\n855:         super().__init__(configuration=configuration)\n856:         self.tasks = 0\n857:         self.queue = MemQueue(maxmemsize=QUEUE_MEM_SIZE, refresh_timeout=120)\n858:         self.fetchers = ConcurrentTasks(max_concurrency=MAX_CONCURRENCY)\n859:         self.schema = Schema()\n860:         self.formatter = MicrosoftTeamsFormatter(self.schema)\n861: \n862:     def _set_internal_logger(self):\n863:         self.client.set_logger(self._logger)\n864: \n865:     @cached_property\n866:     def client(self):\n867:         tenant_id = self.configuration[\"tenant_id\"]\n868:         client_id = self.configuration[\"client_id\"]\n869:         client_secret = self.configuration[\"secret_value\"]\n870:         username = self.configuration[\"username\"]\n871:         password = self.configuration[\"password\"]\n872: \n873:         return MicrosoftTeamsClient(\n874:             tenant_id, client_id, client_secret, username, password\n875:         )\n876: \n877:     async def _consumer(self):\n878:         \"\"\"Async generator to process entries of the queue\n879: \n880:         Yields:\n881:             dictionary: Documents from Microsoft Teams.\n882:         \"\"\"\n883:         while self.tasks > 0:\n884:             _, item = await self.queue.get()\n885: \n886:             if isinstance(item, EndSignal):\n887:                 self.tasks -= 1\n888:             else:\n889:                 yield item",
+        "end_line": 889,
+        "path_lines": 1325,
+        "start_line": 849
+      }
+    },
+    "usage": {
+      "input_tokens": 28216,
+      "input_tokens_details": {
+        "cached_tokens": 24832
+      },
+      "output_tokens": 1742,
+      "output_tokens_details": {
+        "reasoning_tokens": 824
+      },
+      "total_tokens": 29958
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "connectors/sources/microsoft_teams.py",
+      "query": "self.format"
+    },
+    "response_chars": 260,
+    "round": 9,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 767,
+          "text": "                \"attached_documents\": self.format_attachment_names("
+        },
+        {
+          "line": 860,
+          "text": "        self.formatter = MicrosoftTeamsFormatter(self.schema)"
+        },
+        {
+          "line": 952,
+          "text": "                format_attachment = self.formatter.format_doc("
+        },
+        {
+          "line": 1021,
+          "text": "                    message_document = self.formatter.format_user_chat_messages("
+        },
+        {
+          "line": 1029,
+          "text": "                            self.formatter.format_doc("
+        },
+        {
+          "line": 1040,
+          "text": "                            self.formatter.format_channel_message("
+        },
+        {
+          "line": 1060,
+          "text": "                        self.formatter.format_user_chat_meeting_recording(item=message, url=url),"
+        },
+        {
+          "line": 1067,
+          "text": "        members = self.formatter.get_chat_members(chat.get(\"members\", []))"
+        },
+        {
+          "line": 1095,
+          "text": "                        self.formatter.format_doc("
+        },
+        {
+          "line": 1122,
+          "text": "                        self.formatter.format_channel_message("
+        },
+        {
+          "line": 1135,
+          "text": "                document = self.formatter.format_channel_meeting(reply=reply)"
+        },
+        {
+          "line": 1144,
+          "text": "                self.formatter.format_doc("
+        },
+        {
+          "line": 1163,
+          "text": "                        self.formatter.format_doc("
+        },
+        {
+          "line": 1206,
+          "text": "                format_attachment = self.formatter.format_doc("
+        },
+        {
+          "line": 1233,
+          "text": "                self.formatter.format_doc("
+        },
+        {
+          "line": 1274,
+          "text": "                                yield self.formatter.format_user_calendars(item=event), None"
+        }
+      ],
+      "query": "self.format",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 29604,
+      "input_tokens_details": {
+        "cached_tokens": 27904
+      },
+      "output_tokens": 204,
+      "output_tokens_details": {
+        "reasoning_tokens": 118
+      },
+      "total_tokens": 29808
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 1280,
+      "path": "connectors/sources/microsoft_teams.py",
+      "start_line": 930
+    },
+    "response_chars": 195,
+    "round": 10,
+    "tool_result": {
+      "content": "930: \n931:     async def validate_config(self):\n932:         await super().validate_config()\n933: \n934:         # Check that we can log in into Graph API\n935:         await self.client._api_token.get_with_username_password()\n936: \n937:     async def ping(self):\n938:         \"\"\"Verify the connection with Microsoft Teams\"\"\"\n939:         try:\n940:             await self.client.ping()\n941:             self._logger.info(\"Successfully connected to Microsoft Teams\")\n942:         except Exception:\n943:             self._logger.exception(\"Error while connecting to Microsoft Teams\")\n944:             raise\n945: \n946:     async def queue_user_chat_attachments(self, **kwargs):\n947:         async for attachments in self.client.get_user_chat_attachments(\n948:             sender_id=kwargs[\"sender_id\"],\n949:             attachment_name=kwargs[\"attachment_name\"],\n950:         ):\n951:             for attachment in attachments:\n952:                 format_attachment = self.formatter.format_doc(\n953:                     item=attachment,\n954:                     document_type=self.schema.chat_attachments,\n955:                     document={\n956:                         \"type\": UserEndpointName.ATTACHMENT.value,\n957:                         \"members\": kwargs.get(\"members\", \"\"),\n958:                     },\n959:                 )\n960:                 download_url = attachment.get(\"@microsoft.graph.downloadUrl\")\n961:                 await self.queue.put(\n962:                     (\n963:                         format_attachment,\n964:                         partial(\n965:                             self.get_content,\n966:                             user_attachment=format_attachment,\n967:                             download_url=download_url,\n968:                         ),\n969:                     )\n970:                 )\n971:     async def get_content(\n972:         self, user_attachment, download_url, timestamp=None, doit=False\n973:     ):\n974:         \"\"\"Extracts the content for allowed file types.\n975: \n976:         Args:\n977:             user_attachment (dictionary): Attachment object dictionary\n978:             download_url (str): Attachment downloadable url\n979:             timestamp (timestamp, optional): Timestamp of attachment last modified. Defaults to None.\n980:             doit (boolean, optional): Boolean value for whether to get content or not. Defaults to False.\n981: \n982:         Returns:\n983:             dictionary: Content document with _id, _timestamp and attachment content\n984:         \"\"\"\n985:         document_size = int(user_attachment[\"size_in_bytes\"])\n986: \n987:         if not (doit and document_size):\n988:             return\n989:         filename = user_attachment[\"name\"]\n990:         if not self.verify_filename_for_extraction(filename=filename):\n991:             return\n992:         if user_attachment[\"size_in_bytes\"] > MAX_FILE_SIZE:\n993:             self._logger.warning(\n994:                 f\"File size {document_size} of file {filename} is larger than {MAX_FILE_SIZE} bytes. Discarding file content\"\n995:             )\n996:             return\n997:         document = {\n998:             \"_id\": user_attachment[\"id\"],\n999:             \"_timestamp\": user_attachment[\"_timestamp\"],\n1000:         }\n1001:         self._logger.debug(f\"Downloading {filename}\")\n1002:         attachment_content = await self._download_content_for_attachment(\n1003:             partial(self.client.download_item, download_url),\n1004:             original_filename=filename,\n1005:         )\n1006:         document[\"_attachment\"] = attachment_content\n1007: \n1008:         return document\n1009: \n1010: \n1011:     async def get_messages(\n1012:         self, message, document_type=None, chat=None, channel_name=None, members=None\n1013:     ):\n1014:         if not message.get(\"deletedDateTime\") and (\n1015:             \"unknownFutureValue\" not in message.get(\"messageType\")\n1016:         ):\n1017:             if message_content := html_to_text(\n1018:                 html=message.get(\"body\", {}).get(\"content\")\n1019:             ):\n1020:                 if document_type == UserEndpointName.CHATS_MESSAGE.value:\n1021:                     message_document = self.formatter.format_user_chat_messages(\n1022:                         chat=chat,\n1023:                         message=message,\n1024:                         message_content=message_content,\n1025:                         members=members,\n1026:                     )\n1027:                     await self.queue.put(\n1028:                         (\n1029:                             self.formatter.format_doc(\n1030:                                 item=message_document,\n1031:                                 document_type=self.schema.chat_messages,\n1032:                                 document={\"type\": document_type},\n1033:                             ),\n1034:                             None,\n1035:                         )\n1036:                     )\n1037:                 else:\n1038:                     await self.queue.put(\n1039:                         (\n1040:                             self.formatter.format_channel_message(\n1041:                                 item=message,\n1042:                                 channel_name=channel_name,\n1043:                                 message_content=message_content,\n1044:                             ),\n1045:                             None,\n1046:                         )\n1047:                     )\n1048: \n1049:     async def user_chat_meeting_recording(self, message):\n1050:         if (\n1051:             message.get(\"eventDetail\")\n1052:             and message[\"eventDetail\"].get(\"@odata.type\")\n1053:             == \"#microsoft.graph.callRecordingEventMessageDetail\"\n1054:         ):\n1055:             url = message[\"eventDetail\"].get(\"callRecordingUrl\")\n1056: \n1057:             if url and \".sharepoint.com\" in url:\n1058:                 await self.queue.put(\n1059:                     (\n1060:                         self.formatter.format_user_chat_meeting_recording(item=message, url=url),\n1061:                         None,\n1062:                     )\n1063:                 )\n1064: \n1065: \n1066:     async def user_chat_producer(self, chat):\n1067:         members = self.formatter.get_chat_members(chat.get(\"members\", []))\n1068:         async for messages in self.client.get_user_chat_messages(chat_id=chat[\"id\"]):\n1069:             for message in messages:\n1070:                 await self.get_messages(\n1071:                     message=message,\n1072:                     document_type=UserEndpointName.CHATS_MESSAGE.value,\n1073:                     chat=chat,\n1074:                     members=members,\n1075:                 )\n1076: \n1077:                 await self.user_chat_meeting_recording(message=message)\n1078: \n1079:                 if message.get(\"from\") and message[\"from\"].get(\"user\"):\n1080:                     for attachment in message.get(\"attachments\", []):\n1081:                         if (\n1082:                             attachment.get(\"name\")\n1083:                             and attachment.get(\"contentType\") == \"reference\"\n1084:                         ):\n1085:                             await self.queue_user_chat_attachments(\n1086:                                 sender_id=message[\"from\"][\"user\"][\"id\"],\n1087:                                 attachment_name=attachment[\"name\"],\n1088:                                 members=members,\n1089:                             )\n1090: \n1091:         async for tabs in self.client.get_user_chat_tabs(chat_id=chat[\"id\"]):\n1092:             for tab in tabs:\n1093:                 await self.queue.put(\n1094:                     (\n1095:                         self.formatter.format_doc(\n1096:                             item=tab,\n1097:                             document_type=self.schema.chat_tabs,\n1098:                             document={\n1099:                                 \"type\": UserEndpointName.TABS.value,\n1100:                                 \"url\": tab.get(\"configuration\", {}).get(\"websiteUrl\"),\n1101:                                 \"_timestamp\": chat[\"lastUpdatedDateTime\"],\n1102:                                 \"members\": members,\n1103:                             },\n1104:                         ),\n1105:                         None,\n1106:                     )\n1107:                 )\n1108:         await self.queue.put(EndSignal.USER_CHAT_TASK_FINISHED)\n1109: \n1110:     async def get_channel_messages(self, message, channel_name):\n1111:         await self.get_messages(message=message, channel_name=channel_name)\n1112:         meeting_document = {}\n1113:         for reply in message.get(\"replies\", []):\n1114:             message_content = html_to_text(html=reply.get(\"body\", {}).get(\"content\"))\n1115:             if (\n1116:                 not reply.get(\"deletedDateTime\")\n1117:                 and (\"unknownFutureValue\" not in reply.get(\"messageType\"))\n1118:                 and message_content\n1119:             ):\n1120:                 await self.queue.put(\n1121:                     (\n1122:                         self.formatter.format_channel_message(\n1123:                             item=reply,\n1124:                             channel_name=channel_name,\n1125:                             message_content=message_content,\n1126:                         ),\n1127:                         None,\n1128:                     )\n1129:                 )\n1130: \n1131:             elif reply.get(\"eventDetail\"):\n1132:                 call_id = reply[\"eventDetail\"].get(\"callId\")\n1133:                 if call_id not in meeting_document:\n1134:                     meeting_document[call_id] = {}\n1135:                 document = self.formatter.format_channel_meeting(reply=reply)\n1136:                 meeting_document[call_id].update(document)\n1137:         for document in meeting_document.values():\n1138:             await self.queue.put((document, None))\n1139: \n1140:     async def team_channel_producer(self, channel, team_id, team_name):\n1141:         channel_name = channel.get(\"displayName\")\n1142:         await self.queue.put(\n1143:             (\n1144:                 self.formatter.format_doc(\n1145:                     item=channel,\n1146:                     document_type=self.schema.channel,\n1147:                     document={\n1148:                         \"type\": TeamEndpointName.CHANNEL.value,\n1149:                         \"_timestamp\": datetime.utcnow(),\n1150:                         \"team_name\": team_name,\n1151:                     },\n1152:                 ),\n1153:                 None,\n1154:             )\n1155:         )\n1156: \n1157:         async for tabs in self.client.get_channel_tabs(\n1158:             team_id=team_id, channel_id=channel.get(\"id\")\n1159:         ):\n1160:             for tab in tabs:\n1161:                 await self.queue.put(\n1162:                     (\n1163:                         self.formatter.format_doc(\n1164:                             item=tab,\n1165:                             document_type=self.schema.channel_tab,\n1166:                             document={\n1167:                                 \"type\": TeamEndpointName.TAB.value,\n1168:                                 \"_timestamp\": datetime.utcnow(),\n1169:                                 \"team_name\": team_name,\n1170:                                 \"channel_name\": channel_name,\n1171:                             },\n1172:                         ),\n1173:                         None,\n1174:                     )\n1175:                 )\n1176: \n1177:         async for messages in self.client.get_channel_messages(\n1178:             team_id=team_id, channel_id=channel.get(\"id\")\n1179:         ):\n1180:             for message in messages:\n1181:                 await self.get_channel_messages(\n1182:                     message=message, channel_name=channel_name\n1183:                 )\n1184: \n1185:         file = await self.client.get_channel_file(\n1186:             team_id=team_id, channel_id=channel.get(\"id\")\n1187:         )\n1188:         drive_id = file.get(\"parentReference\", {}).get(\"driveId\")\n1189:         await self.get_channel_drive_producer(\n1190:             drive_id=drive_id,\n1191:             item_id=file.get(\"id\"),\n1192:             team_name=team_name,\n1193:             channel_name=channel_name,\n1194:         )\n1195: \n1196:         await self.queue.put(EndSignal.CHANNEL_TASK_FINISHED)\n1197: \n1198:     async def get_channel_drive_producer(\n1199:         self, drive_id, item_id, team_name, channel_name\n1200:     ):\n1201:         async for drive_child in self.client.get_channel_drive_childrens(\n1202:             drive_id=drive_id,\n1203:             item_id=item_id,\n1204:         ):\n1205:             if drive_child.get(\"file\"):\n1206:                 format_attachment = self.formatter.format_doc(\n1207:                     item=drive_child,\n1208:                     document_type=self.schema.channel_attachment,\n1209:                     document={\n1210:                         \"type\": TeamEndpointName.ATTACHMENT.value,\n1211:                         \"team_name\": team_name,\n1212:                         \"channel_name\": channel_name,\n1213:                     },\n1214:                 )\n1215:                 await self.queue.put(\n1216:                     (\n1217:                         format_attachment,\n1218:                         partial(\n1219:                             self.get_content,\n1220:                             user_attachment=format_attachment,\n1221:                             download_url=drive_child.get(\n1222:                                 \"@microsoft.graph.downloadUrl\"\n1223:                             ),\n1224:                         ),\n1225:                     )\n1226:                 )\n1227: \n1228:     async def teams_producer(self, team):\n1229:         team_id = team.get(\"id\")\n1230:         team_name = team.get(\"displayName\")\n1231:         await self.queue.put(\n1232:             (\n1233:                 self.formatter.format_doc(\n1234:                     item=team,\n1235:                     document_type=self.schema.teams,\n1236:                     document={\n1237:                         \"type\": TeamEndpointName.TEAMS.value,\n1238:                         \"_timestamp\": datetime.utcnow(),\n1239:                     },\n1240:                 ),\n1241:                 None,\n1242:             )\n1243:         )\n1244: \n1245:         async for channels in self.client.get_team_channels(team_id=team[\"id\"]):\n1246:             for channel in channels:\n1247:                 await self.fetchers.put(\n1248:                     partial(self.team_channel_producer, channel, team_id, team_name)\n1249:                 )\n1250:                 self.tasks += 1\n1251: \n1252:         await self.queue.put(EndSignal.TEAM_TASK_FINISHED)\n1253: \n1254:     async def get_docs(self, filtering=None):\n1255:         \"\"\"Executes the logic to fetch Microsoft Teams objects in async manner\n1256: \n1257:         Args:\n1258:             filtering (Filtering): Object of class Filtering\n1259: \n1260:         Yields:\n1261:             dictionary: dictionary containing meta-data of the files.\n1262:         \"\"\"\n1263:         async for chats in self.client.get_user_chats():\n1264:             for chat in chats:\n1265:                 await self.fetchers.put(partial(self.user_chat_producer, chat))\n1266:                 self.tasks += 1\n1267: \n1268:         async for users in self.client.users():\n1269:             for user in users:\n1270:                 if user.get(\"mail\"):\n1271:                     async for events in self.client.get_calendars(user_id=user[\"id\"]):\n1272:                         for event in events:\n1273:                             if not event.get(\"isCancelled\"):\n1274:                                 yield self.formatter.format_user_calendars(item=event), None\n1275: \n1276:         async for teams in self.client.get_teams():\n1277:             for team in teams:\n1278:                 await self.fetchers.put(partial(self.teams_producer, team))\n1279:                 self.tasks += 1\n1280: ",
+      "end_line": 1280,
+      "path_lines": 1325,
+      "start_line": 930
+    },
+    "usage": {
+      "input_tokens": 30012,
+      "input_tokens_details": {
+        "cached_tokens": 29440
+      },
+      "output_tokens": 166,
+      "output_tokens_details": {
+        "reasoning_tokens": 97
+      },
+      "total_tokens": 30178
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "connectors/sources/microsoft_teams.py",
+      "query": "def format_"
+    },
+    "response_chars": 276,
+    "round": 11,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 648,
+          "text": "    def format_doc(self, item, document_type, **kwargs):"
+        },
+        {
+          "line": 657,
+          "text": "    def format_user_chat_meeting_recording(self, item, url):"
+        },
+        {
+          "line": 728,
+          "text": "    def format_user_calendars(self, item):"
+        },
+        {
+          "line": 758,
+          "text": "    def format_channel_message(self, item, channel_name, message_content):"
+        },
+        {
+          "line": 779,
+          "text": "    def format_channel_meeting(self, reply):"
+        },
+        {
+          "line": 811,
+          "text": "    def format_user_chat_messages(self, chat, message, message_content, members):"
+        },
+        {
+          "line": 828,
+          "text": "    def format_attachment_names(self, attachments):"
+        }
+      ],
+      "query": "def format_",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 33939,
+      "input_tokens_details": {
+        "cached_tokens": 29440
+      },
+      "output_tokens": 390,
+      "output_tokens_details": {
+        "reasoning_tokens": 295
+      },
+      "total_tokens": 34329
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "connectors/sources/microsoft_teams.py",
+      "query": "self.get_calendar_detail"
+    },
+    "response_chars": 199,
+    "round": 12,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 745,
+          "text": "                \"meeting_detail\": self.get_calendar_detail(calendar=item),"
+        }
+      ],
+      "query": "self.get_calendar_detail",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 34160,
+      "input_tokens_details": {
+        "cached_tokens": 33536
+      },
+      "output_tokens": 511,
+      "output_tokens_details": {
+        "reasoning_tokens": 450
+      },
+      "total_tokens": 34671
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "connectors/sources/microsoft_teams.py",
+      "query": "format_user_chat_attachments"
+    },
+    "response_chars": 311,
+    "round": 13,
+    "tool_result": {
+      "matches": [],
+      "query": "format_user_chat_attachments",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 34239,
+      "input_tokens_details": {
+        "cached_tokens": 34048
+      },
+      "output_tokens": 248,
+      "output_tokens_details": {
+        "reasoning_tokens": 153
+      },
+      "total_tokens": 34487
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "connectors/sources/microsoft_teams.py",
+      "query": "self.map_document_with_schema"
+    },
+    "response_chars": 314,
+    "round": 14,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 652,
+          "text": "        self.map_document_with_schema("
+        },
+        {
+          "line": 753,
+          "text": "        self.map_document_with_schema("
+        },
+        {
+          "line": 774,
+          "text": "        self.map_document_with_schema("
+        }
+      ],
+      "query": "self.map_document_with_schema",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 34297,
+      "input_tokens_details": {
+        "cached_tokens": 34048
+      },
+      "output_tokens": 205,
+      "output_tokens_details": {
+        "reasoning_tokens": 110
+      },
+      "total_tokens": 34502
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 1325,
+      "path": "connectors/sources/microsoft_teams.py",
+      "start_line": 1280
+    },
+    "response_chars": 197,
+    "round": 15,
+    "tool_result": {
+      "content": "1280: \n1281:         async for item in self._consumer():\n1282:             yield item\n1283: \n1284:         await self.fetchers.join()\n1285: \n1286:     async def close(self):\n1287:         \"\"\"Closes unclosed client session\"\"\"\n1288:         await self.client.close()\n1289: \n1290:     @classmethod\n1291:     def get_default_configuration(cls):\n1292:         \"\"\"Get the default configuration for Microsoft Teams.\n1293: \n1294:         Returns:\n1295:             dictionary: Default configuration.\n1296:         \"\"\"\n1297:         return {\n1298:             \"tenant_id\": {\n1299:                 \"label\": \"Tenant ID\",\n1300:                 \"order\": 1,\n1301:                 \"type\": \"str\",\n1302:             },\n1303:             \"client_id\": {\n1304:                 \"label\": \"Client ID\",\n1305:                 \"order\": 2,\n1306:                 \"type\": \"str\",\n1307:             },\n1308:             \"secret_value\": {\n1309:                 \"label\": \"Secret value\",\n1310:                 \"order\": 3,\n1311:                 \"sensitive\": True,\n1312:                 \"type\": \"str\",\n1313:             },\n1314:             \"username\": {\n1315:                 \"label\": \"Username\",\n1316:                 \"order\": 4,\n1317:                 \"type\": \"str\",\n1318:             },\n1319:             \"password\": {\n1320:                 \"label\": \"Password\",\n1321:                 \"order\": 5,\n1322:                 \"sensitive\": True,\n1323:                 \"type\": \"str\",\n1324:             },\n1325:         }",
+      "end_line": 1325,
+      "path_lines": 1325,
+      "start_line": 1280
+    },
+    "usage": {
+      "input_tokens": 34408,
+      "input_tokens_details": {
+        "cached_tokens": 34048
+      },
+      "output_tokens": 634,
+      "output_tokens_details": {
+        "reasoning_tokens": 563
+      },
+      "total_tokens": 35042
+    }
+  },
+  {
+    "action": {
+      "action": "edit",
+      "edits": [
+        {
+          "content": "\n    async def get_content(",
+          "end_line": 971,
+          "start_line": 971
+        },
+        {
+          "content": "                        self.formatter.format_user_chat_meeting_recording(\n                            item=message, url=url\n                        ),",
+          "end_line": 1060,
+          "start_line": 1060
+        }
+      ]
+    },
+    "response_chars": 598,
+    "round": 16,
+    "tool_result": {
+      "applied": [
+        {
+          "end_line": 971,
+          "replacement_lines": 2,
+          "start_line": 971
+        },
+        {
+          "end_line": 1060,
+          "replacement_lines": 3,
+          "start_line": 1060
+        }
+      ],
+      "current_file_lines": 1328,
+      "updated_excerpt": {
+        "content": "961:                 await self.queue.put(\n962:                     (\n963:                         format_attachment,\n964:                         partial(\n965:                             self.get_content,\n966:                             user_attachment=format_attachment,\n967:                             download_url=download_url,\n968:                         ),\n969:                     )\n970:                 )\n971: \n972:     async def get_content(\n973:         self, user_attachment, download_url, timestamp=None, doit=False\n974:     ):\n975:         \"\"\"Extracts the content for allowed file types.\n976: \n977:         Args:\n978:             user_attachment (dictionary): Attachment object dictionary\n979:             download_url (str): Attachment downloadable url\n980:             timestamp (timestamp, optional): Timestamp of attachment last modified. Defaults to None.\n981:             doit (boolean, optional): Boolean value for whether to get content or not. Defaults to False.\n982: \n983:         Returns:\n984:             dictionary: Content document with _id, _timestamp and attachment content\n985:         \"\"\"\n986:         document_size = int(user_attachment[\"size_in_bytes\"])\n987: \n988:         if not (doit and document_size):\n989:             return\n990:         filename = user_attachment[\"name\"]\n991:         if not self.verify_filename_for_extraction(filename=filename):\n992:             return\n993:         if user_attachment[\"size_in_bytes\"] > MAX_FILE_SIZE:\n994:             self._logger.warning(\n995:                 f\"File size {document_size} of file {filename} is larger than {MAX_FILE_SIZE} bytes. Discarding file content\"\n996:             )\n997:             return\n998:         document = {\n999:             \"_id\": user_attachment[\"id\"],\n1000:             \"_timestamp\": user_attachment[\"_timestamp\"],\n1001:         }",
+        "end_line": 1001,
+        "path_lines": 1328,
+        "start_line": 961
+      }
+    },
+    "usage": {
+      "input_tokens": 34921,
+      "input_tokens_details": {
+        "cached_tokens": 34048
+      },
+      "output_tokens": 843,
+      "output_tokens_details": {
+        "reasoning_tokens": 663
+      },
+      "total_tokens": 35764
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "connectors/sources/microsoft_teams.py",
+      "query": "self.format_"
+    },
+    "response_chars": 279,
+    "round": 17,
+    "tool_result": {
+      "matches": [
+        {
+          "line": 767,
+          "text": "                \"attached_documents\": self.format_attachment_names("
+        }
+      ],
+      "query": "self.format_",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 35527,
+      "input_tokens_details": {
+        "cached_tokens": 34560
+      },
+      "output_tokens": 420,
+      "output_tokens_details": {
+        "reasoning_tokens": 329
+      },
+      "total_tokens": 35947
+    }
+  },
+  {
+    "action": {
+      "action": "read",
+      "end_line": 1280,
+      "path": "connectors/sources/microsoft_teams.py",
+      "start_line": 1048
+    },
+    "response_chars": 296,
+    "round": 18,
+    "tool_result": {
+      "content": "1048:                     )\n1049: \n1050:     async def user_chat_meeting_recording(self, message):\n1051:         if (\n1052:             message.get(\"eventDetail\")\n1053:             and message[\"eventDetail\"].get(\"@odata.type\")\n1054:             == \"#microsoft.graph.callRecordingEventMessageDetail\"\n1055:         ):\n1056:             url = message[\"eventDetail\"].get(\"callRecordingUrl\")\n1057: \n1058:             if url and \".sharepoint.com\" in url:\n1059:                 await self.queue.put(\n1060:                     (\n1061:                         self.formatter.format_user_chat_meeting_recording(\n1062:                             item=message, url=url\n1063:                         ),\n1064:                         None,\n1065:                     )\n1066:                 )\n1067: \n1068: \n1069:     async def user_chat_producer(self, chat):\n1070:         members = self.formatter.get_chat_members(chat.get(\"members\", []))\n1071:         async for messages in self.client.get_user_chat_messages(chat_id=chat[\"id\"]):\n1072:             for message in messages:\n1073:                 await self.get_messages(\n1074:                     message=message,\n1075:                     document_type=UserEndpointName.CHATS_MESSAGE.value,\n1076:                     chat=chat,\n1077:                     members=members,\n1078:                 )\n1079: \n1080:                 await self.user_chat_meeting_recording(message=message)\n1081: \n1082:                 if message.get(\"from\") and message[\"from\"].get(\"user\"):\n1083:                     for attachment in message.get(\"attachments\", []):\n1084:                         if (\n1085:                             attachment.get(\"name\")\n1086:                             and attachment.get(\"contentType\") == \"reference\"\n1087:                         ):\n1088:                             await self.queue_user_chat_attachments(\n1089:                                 sender_id=message[\"from\"][\"user\"][\"id\"],\n1090:                                 attachment_name=attachment[\"name\"],\n1091:                                 members=members,\n1092:                             )\n1093: \n1094:         async for tabs in self.client.get_user_chat_tabs(chat_id=chat[\"id\"]):\n1095:             for tab in tabs:\n1096:                 await self.queue.put(\n1097:                     (\n1098:                         self.formatter.format_doc(\n1099:                             item=tab,\n1100:                             document_type=self.schema.chat_tabs,\n1101:                             document={\n1102:                                 \"type\": UserEndpointName.TABS.value,\n1103:                                 \"url\": tab.get(\"configuration\", {}).get(\"websiteUrl\"),\n1104:                                 \"_timestamp\": chat[\"lastUpdatedDateTime\"],\n1105:                                 \"members\": members,\n1106:                             },\n1107:                         ),\n1108:                         None,\n1109:                     )\n1110:                 )\n1111:         await self.queue.put(EndSignal.USER_CHAT_TASK_FINISHED)\n1112: \n1113:     async def get_channel_messages(self, message, channel_name):\n1114:         await self.get_messages(message=message, channel_name=channel_name)\n1115:         meeting_document = {}\n1116:         for reply in message.get(\"replies\", []):\n1117:             message_content = html_to_text(html=reply.get(\"body\", {}).get(\"content\"))\n1118:             if (\n1119:                 not reply.get(\"deletedDateTime\")\n1120:                 and (\"unknownFutureValue\" not in reply.get(\"messageType\"))\n1121:                 and message_content\n1122:             ):\n1123:                 await self.queue.put(\n1124:                     (\n1125:                         self.formatter.format_channel_message(\n1126:                             item=reply,\n1127:                             channel_name=channel_name,\n1128:                             message_content=message_content,\n1129:                         ),\n1130:                         None,\n1131:                     )\n1132:                 )\n1133: \n1134:             elif reply.get(\"eventDetail\"):\n1135:                 call_id = reply[\"eventDetail\"].get(\"callId\")\n1136:                 if call_id not in meeting_document:\n1137:                     meeting_document[call_id] = {}\n1138:                 document = self.formatter.format_channel_meeting(reply=reply)\n1139:                 meeting_document[call_id].update(document)\n1140:         for document in meeting_document.values():\n1141:             await self.queue.put((document, None))\n1142: \n1143:     async def team_channel_producer(self, channel, team_id, team_name):\n1144:         channel_name = channel.get(\"displayName\")\n1145:         await self.queue.put(\n1146:             (\n1147:                 self.formatter.format_doc(\n1148:                     item=channel,\n1149:                     document_type=self.schema.channel,\n1150:                     document={\n1151:                         \"type\": TeamEndpointName.CHANNEL.value,\n1152:                         \"_timestamp\": datetime.utcnow(),\n1153:                         \"team_name\": team_name,\n1154:                     },\n1155:                 ),\n1156:                 None,\n1157:             )\n1158:         )\n1159: \n1160:         async for tabs in self.client.get_channel_tabs(\n1161:             team_id=team_id, channel_id=channel.get(\"id\")\n1162:         ):\n1163:             for tab in tabs:\n1164:                 await self.queue.put(\n1165:                     (\n1166:                         self.formatter.format_doc(\n1167:                             item=tab,\n1168:                             document_type=self.schema.channel_tab,\n1169:                             document={\n1170:                                 \"type\": TeamEndpointName.TAB.value,\n1171:                                 \"_timestamp\": datetime.utcnow(),\n1172:                                 \"team_name\": team_name,\n1173:                                 \"channel_name\": channel_name,\n1174:                             },\n1175:                         ),\n1176:                         None,\n1177:                     )\n1178:                 )\n1179: \n1180:         async for messages in self.client.get_channel_messages(\n1181:             team_id=team_id, channel_id=channel.get(\"id\")\n1182:         ):\n1183:             for message in messages:\n1184:                 await self.get_channel_messages(\n1185:                     message=message, channel_name=channel_name\n1186:                 )\n1187: \n1188:         file = await self.client.get_channel_file(\n1189:             team_id=team_id, channel_id=channel.get(\"id\")\n1190:         )\n1191:         drive_id = file.get(\"parentReference\", {}).get(\"driveId\")\n1192:         await self.get_channel_drive_producer(\n1193:             drive_id=drive_id,\n1194:             item_id=file.get(\"id\"),\n1195:             team_name=team_name,\n1196:             channel_name=channel_name,\n1197:         )\n1198: \n1199:         await self.queue.put(EndSignal.CHANNEL_TASK_FINISHED)\n1200: \n1201:     async def get_channel_drive_producer(\n1202:         self, drive_id, item_id, team_name, channel_name\n1203:     ):\n1204:         async for drive_child in self.client.get_channel_drive_childrens(\n1205:             drive_id=drive_id,\n1206:             item_id=item_id,\n1207:         ):\n1208:             if drive_child.get(\"file\"):\n1209:                 format_attachment = self.formatter.format_doc(\n1210:                     item=drive_child,\n1211:                     document_type=self.schema.channel_attachment,\n1212:                     document={\n1213:                         \"type\": TeamEndpointName.ATTACHMENT.value,\n1214:                         \"team_name\": team_name,\n1215:                         \"channel_name\": channel_name,\n1216:                     },\n1217:                 )\n1218:                 await self.queue.put(\n1219:                     (\n1220:                         format_attachment,\n1221:                         partial(\n1222:                             self.get_content,\n1223:                             user_attachment=format_attachment,\n1224:                             download_url=drive_child.get(\n1225:                                 \"@microsoft.graph.downloadUrl\"\n1226:                             ),\n1227:                         ),\n1228:                     )\n1229:                 )\n1230: \n1231:     async def teams_producer(self, team):\n1232:         team_id = team.get(\"id\")\n1233:         team_name = team.get(\"displayName\")\n1234:         await self.queue.put(\n1235:             (\n1236:                 self.formatter.format_doc(\n1237:                     item=team,\n1238:                     document_type=self.schema.teams,\n1239:                     document={\n1240:                         \"type\": TeamEndpointName.TEAMS.value,\n1241:                         \"_timestamp\": datetime.utcnow(),\n1242:                     },\n1243:                 ),\n1244:                 None,\n1245:             )\n1246:         )\n1247: \n1248:         async for channels in self.client.get_team_channels(team_id=team[\"id\"]):\n1249:             for channel in channels:\n1250:                 await self.fetchers.put(\n1251:                     partial(self.team_channel_producer, channel, team_id, team_name)\n1252:                 )\n1253:                 self.tasks += 1\n1254: \n1255:         await self.queue.put(EndSignal.TEAM_TASK_FINISHED)\n1256: \n1257:     async def get_docs(self, filtering=None):\n1258:         \"\"\"Executes the logic to fetch Microsoft Teams objects in async manner\n1259: \n1260:         Args:\n1261:             filtering (Filtering): Object of class Filtering\n1262: \n1263:         Yields:\n1264:             dictionary: dictionary containing meta-data of the files.\n1265:         \"\"\"\n1266:         async for chats in self.client.get_user_chats():\n1267:             for chat in chats:\n1268:                 await self.fetchers.put(partial(self.user_chat_producer, chat))\n1269:                 self.tasks += 1\n1270: \n1271:         async for users in self.client.users():\n1272:             for user in users:\n1273:                 if user.get(\"mail\"):\n1274:                     async for events in self.client.get_calendars(user_id=user[\"id\"]):\n1275:                         for event in events:\n1276:                             if not event.get(\"isCancelled\"):\n1277:                                 yield self.formatter.format_user_calendars(item=event), None\n1278: \n1279:         async for teams in self.client.get_teams():\n1280:             for team in teams:",
+      "end_line": 1280,
+      "path_lines": 1328,
+      "start_line": 1048
+    },
+    "usage": {
+      "input_tokens": 35600,
+      "input_tokens_details": {
+        "cached_tokens": 35072
+      },
+      "output_tokens": 524,
+      "output_tokens_details": {
+        "reasoning_tokens": 417
+      },
+      "total_tokens": 36124
+    }
+  },
+  {
+    "action": {
+      "action": "find",
+      "path": "connectors/sources/microsoft_teams.py",
+      "query": "await self.formatter"
+    },
+    "response_chars": 191,
+    "round": 19,
+    "tool_result": {
+      "matches": [],
+      "query": "await self.formatter",
+      "truncated": false
+    },
+    "usage": {
+      "input_tokens": 38271,
+      "input_tokens_details": {
+        "cached_tokens": 35072
+      },
+      "output_tokens": 629,
+      "output_tokens_details": {
+        "reasoning_tokens": 568
+      },
+      "total_tokens": 38900
+    }
+  },
+  {
+    "action": {
+      "action": "finish"
+    },
+    "response_chars": 19,
+    "round": 20,
+    "tool_result": {
+      "ok": true,
+      "patch_file": "${REVIEWBENCH_SESSION_FILES}/model_eval_agentic_306/gpt-5.5/patches/github__elastic__connectors__pull_1684__comment_1337208508__modularity.patch"
+    },
+    "usage": {
+      "input_tokens": 38327,
+      "input_tokens_details": {
+        "cached_tokens": 38144
+      },
+      "output_tokens": 534,
+      "output_tokens_details": {
+        "reasoning_tokens": 516
+      },
+      "total_tokens": 38861
+    }
+  }
+]

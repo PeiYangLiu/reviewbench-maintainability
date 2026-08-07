@@ -1,0 +1,56 @@
+--- a/pkg/receive/multitsdb.go
++++ b/pkg/receive/multitsdb.go
+@@ -543,26 +543,9 @@
+ 	reg := prometheus.WrapRegistererWith(prometheus.Labels{"tenant": tenantID}, t.reg)
+ 	reg = NewUnRegisterer(reg)
+ 
+-	lset := labelpb.ExtendSortedLabels(t.labels, labels.FromStrings(t.tenantLabelName, tenantID))
+-
+-	// Extract tenant's external labels from hashring configs.
+-	// If one tenant appears in multiple hashring configs,
+-	// only the external label set from the first hashring config is applied.
+-hcLoop:
+-	for _, hc := range t.hashringConfigs {
+-		for _, tenant := range hc.Tenants {
+-			if tenant != tenantID {
+-				continue
+-			}
+-
+-			var err error
+-			lset, err = parseAndExtendSortedLabels(lset, hc.ExternalLabels, t.logger)
+-			if err != nil {
+-				return errors.Wrap(err, "failed to parse external labels for tenant "+tenantID)
+-			}
+-
+-			break hcLoop
+-		}
++	lset, err := t.labelSetForTenant(tenantID)
++	if err != nil {
++		return errors.Wrap(err, "failed to parse external labels for tenant "+tenantID)
+ 	}
+ 
+ 	dataDir := t.defaultTenantDataDir(tenantID)
+@@ -601,6 +584,23 @@
+ 	return nil
+ }
+ 
++func (t *MultiTSDB) labelSetForTenant(tenantID string) (labels.Labels, error) {
++	lset := labelpb.ExtendSortedLabels(t.labels, labels.FromStrings(t.tenantLabelName, tenantID))
++
++	// Extract tenant's external labels from hashring configs.
++	// If one tenant appears in multiple hashring configs,
++	// only the external label set from the first hashring config is applied.
++	for _, hc := range t.hashringConfigs {
++		if !slices.Contains(hc.Tenants, tenantID) {
++			continue
++		}
++
++		return parseAndExtendSortedLabels(lset, hc.ExternalLabels, t.logger)
++	}
++
++	return lset, nil
++}
++
+ func (t *MultiTSDB) defaultTenantDataDir(tenantID string) string {
+ 	return path.Join(t.dataDir, tenantID)
+ }

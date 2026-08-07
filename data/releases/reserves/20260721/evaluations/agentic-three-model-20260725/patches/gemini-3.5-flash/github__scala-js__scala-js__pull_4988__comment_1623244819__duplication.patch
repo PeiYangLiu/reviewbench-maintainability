@@ -1,0 +1,158 @@
+diff --git a/linker/shared/src/main/scala/org/scalajs/linker/backend/webassembly/FunctionBuilder.scala b/linker/shared/src/main/scala/org/scalajs/linker/backend/webassembly/FunctionBuilder.scala
+index 5a5847c..8b44e09 100644
+--- a/linker/shared/src/main/scala/org/scalajs/linker/backend/webassembly/FunctionBuilder.scala
++++ b/linker/shared/src/main/scala/org/scalajs/linker/backend/webassembly/FunctionBuilder.scala
+@@ -98,81 +98,52 @@ final class FunctionBuilder(
+       BlockType.FunctionType(moduleBuilder.functionTypeToTypeID(sig))
+   }
+ 
+-  def ifThenElse(blockType: BlockType)(thenp: => Unit)(elsep: => Unit): Unit = {
+-    instrs += If(blockType)
++  private def toBlockType[T](value: T)(implicit ev: AsBlockType[T]): BlockType = {
++    ev.toBlockType(value, this)
++  }
++
++  def ifThenElse[T : AsBlockType](blockType: T)(thenp: => Unit)(elsep: => Unit): Unit = {
++    instrs += If(toBlockType(blockType))
+     thenp
+     instrs += Else
+     elsep
+     instrs += End
+   }
+ 
+-  def ifThenElse(resultType: Type)(thenp: => Unit)(elsep: => Unit): Unit =
+-    ifThenElse(BlockType.ValueType(resultType))(thenp)(elsep)
+-
+-  def ifThenElse(sig: FunctionType)(thenp: => Unit)(elsep: => Unit): Unit =
+-    ifThenElse(sigToBlockType(sig))(thenp)(elsep)
+-
+-  def ifThenElse(resultTypes: List[Type])(thenp: => Unit)(elsep: => Unit): Unit =
+-    ifThenElse(FunctionType(Nil, resultTypes))(thenp)(elsep)
+-
+   def ifThenElse()(thenp: => Unit)(elsep: => Unit): Unit =
+     ifThenElse(BlockType.ValueType())(thenp)(elsep)
+ 
+-  def ifThen(blockType: BlockType)(thenp: => Unit): Unit = {
+-    instrs += If(blockType)
++  def ifThen[T : AsBlockType](blockType: T)(thenp: => Unit): Unit = {
++    instrs += If(toBlockType(blockType))
+     thenp
+     instrs += End
+   }
+ 
+-  def ifThen(sig: FunctionType)(thenp: => Unit): Unit =
+-    ifThen(sigToBlockType(sig))(thenp)
+-
+-  def ifThen(resultTypes: List[Type])(thenp: => Unit): Unit =
+-    ifThen(FunctionType(Nil, resultTypes))(thenp)
+-
+   def ifThen()(thenp: => Unit): Unit =
+     ifThen(BlockType.ValueType())(thenp)
+ 
+-  def block[A](blockType: BlockType)(body: LabelID => A): A = {
++  def block[T : AsBlockType, A](blockType: T)(body: LabelID => A): A = {
+     val label = genLabel()
+-    instrs += Block(blockType, Some(label))
++    instrs += Block(toBlockType(blockType), Some(label))
+     val result = body(label)
+     instrs += End
+     result
+   }
+ 
+-  def block[A](resultType: Type)(body: LabelID => A): A =
+-    block(BlockType.ValueType(resultType))(body)
+-
+   def block[A]()(body: LabelID => A): A =
+     block(BlockType.ValueType())(body)
+ 
+-  def block[A](sig: FunctionType)(body: LabelID => A): A =
+-    block(sigToBlockType(sig))(body)
+-
+-  def block[A](resultTypes: List[Type])(body: LabelID => A): A =
+-    block(FunctionType(Nil, resultTypes))(body)
+-
+-  def loop[A](blockType: BlockType)(body: LabelID => A): A = {
++  def loop[T : AsBlockType, A](blockType: T)(body: LabelID => A): A = {
+     val label = genLabel()
+-    instrs += Loop(blockType, Some(label))
++    instrs += Loop(toBlockType(blockType), Some(label))
+     val result = body(label)
+     instrs += End
+     result
+   }
+ 
+-  def loop[A](resultType: Type)(body: LabelID => A): A =
+-    loop(BlockType.ValueType(resultType))(body)
+-
+   def loop[A]()(body: LabelID => A): A =
+     loop(BlockType.ValueType())(body)
+ 
+-  def loop[A](sig: FunctionType)(body: LabelID => A): A =
+-    loop(sigToBlockType(sig))(body)
+-
+-  def loop[A](resultTypes: List[Type])(body: LabelID => A): A =
+-    loop(FunctionType(Nil, resultTypes))(body)
+-
+   def whileLoop()(cond: => Unit)(body: => Unit): Unit = {
+     loop() { loopLabel =>
+       cond
+@@ -183,25 +154,16 @@ final class FunctionBuilder(
+     }
+   }
+ 
+-  def tryTable[A](blockType: BlockType)(clauses: List[CatchClause])(body: => A): A = {
+-    instrs += TryTable(blockType, clauses)
++  def tryTable[T : AsBlockType, A](blockType: T)(clauses: List[CatchClause])(body: => A): A = {
++    instrs += TryTable(toBlockType(blockType), clauses)
+     val result = body
+     instrs += End
+     result
+   }
+ 
+-  def tryTable[A](resultType: Type)(clauses: List[CatchClause])(body: => A): A =
+-    tryTable(BlockType.ValueType(resultType))(clauses)(body)
+-
+   def tryTable[A]()(clauses: List[CatchClause])(body: => A): A =
+     tryTable(BlockType.ValueType())(clauses)(body)
+ 
+-  def tryTable[A](sig: FunctionType)(clauses: List[CatchClause])(body: => A): A =
+-    tryTable(sigToBlockType(sig))(clauses)(body)
+-
+-  def tryTable[A](resultTypes: List[Type])(clauses: List[CatchClause])(body: => A): A =
+-    tryTable(FunctionType(Nil, resultTypes))(clauses)(body)
+-
+   /** Builds a `switch` over a scrutinee using a `br_table` instruction.
+    *
+    *  This function produces code that encodes the following control-flow:
+@@ -386,6 +348,31 @@ final class FunctionBuilder(
+ }
+ 
+ object FunctionBuilder {
++  trait AsBlockType[T] {
++    def toBlockType(value: T, builder: FunctionBuilder): BlockType
++  }
++
++  object AsBlockType {
++    implicit val blockTypeInstance: AsBlockType[BlockType] = new AsBlockType[BlockType] {
++      def toBlockType(value: BlockType, builder: FunctionBuilder): BlockType = value
++    }
++
++    implicit val typeInstance: AsBlockType[Type] = new AsBlockType[Type] {
++      def toBlockType(value: Type, builder: FunctionBuilder): BlockType =
++        BlockType.ValueType(value)
++    }
++
++    implicit val functionTypeInstance: AsBlockType[FunctionType] = new AsBlockType[FunctionType] {
++      def toBlockType(value: FunctionType, builder: FunctionBuilder): BlockType =
++        builder.sigToBlockType(value)
++    }
++
++    implicit val resultTypesInstance: AsBlockType[List[Type]] = new AsBlockType[List[Type]] {
++      def toBlockType(value: List[Type], builder: FunctionBuilder): BlockType =
++        builder.sigToBlockType(FunctionType(Nil, value))
++    }
++  }
++
+   private final class ParamIDImpl(index: Int, originalName: OriginalName) extends LocalID {
+     override def toString(): String =
+       if (originalName.isDefined) originalName.get.toString()

@@ -1,0 +1,83 @@
+--- a/google-cloud-storage/src/main/java/com/google/cloud/storage/GrpcStorageImpl.java
++++ b/google-cloud-storage/src/main/java/com/google/cloud/storage/GrpcStorageImpl.java
+@@ -79,7 +79,22 @@
+ import java.util.Map;
+ import java.util.Set;
+ import java.util.concurrent.TimeUnit;
+-import java.util.function.Function;
++>>>>>>> REPLACE
++
++<<<<<<< SEARCH
++    ListBucketsPagedResponse call =
++        listBucketsRequestListBucketsPagedResponseUnaryCallable.call(builder.build());
++    ListBucketsPage page = call.getPage();
++    Function<com.google.storage.v2.Bucket, BucketInfo> decode = codecs.bucketInfo()::decode;
++
++    Function<com.google.storage.v2.Bucket, Bucket> translator =
++        decode.andThen(bucketInfo -> bucketInfo.asBucket(this));
++    return new TransformPageDecorator<>(page, translator);
++=======
++    ListBucketsPagedResponse call =
++        listBucketsRequestListBucketsPagedResponseUnaryCallable.call(builder.build());
++    ListBucketsPage page = call.getPage();
++    return new TransformPageDecorator<>(page, syntaxDecoders.bucket);
+ 
+ final class GrpcStorageImpl extends BaseService<StorageOptions> implements Storage {
+ 
+@@ -295,10 +310,7 @@
+     // TODO(sydmunro) StorageRpc.Option.Fields
+     ListObjectsPagedResponse call = listObjectsPagedResponseUnaryCallable.call(builder.build());
+     ListObjectsPage page = call.getPage();
+-    Function<com.google.storage.v2.Object, BlobInfo> decode = codecs.blobInfo()::decode;
+-    Function<com.google.storage.v2.Object, Blob> translator =
+-        decode.andThen(blobInfo -> blobInfo.asBlob(this));
+-    return new TransformPageDecorator<>(page, translator);
++    return new TransformPageDecorator<>(page, syntaxDecoders.blob);
+   }
+ 
+   @Override
+@@ -633,9 +645,7 @@
+     ListHmacKeysPagedResponse call =
+         listBucketsRequestListHmacKeysPagedResponseUnaryCallable.call(builder.build());
+     ListHmacKeysPage page = call.getPage();
+-    Function<com.google.storage.v2.HmacKeyMetadata, HmacKey.HmacKeyMetadata> decode =
+-        codecs.hmacKeyMetadata()::decode;
+-    return new TransformPageDecorator<>(page, decode);
++    return new TransformPageDecorator<>(page, codecs.hmacKeyMetadata());
+   }
+ 
+   @Override
+@@ -766,11 +776,11 @@
+       implements Page<ModelT> {
+ 
+     private final PageT page;
+-    private final Function<ResourceT, ModelT> translator;
+-
+-    public TransformPageDecorator(PageT page, Function<ResourceT, ModelT> translator) {
++    private final Decoder<ResourceT, ModelT> decoder;
++
++    public TransformPageDecorator(PageT page, Decoder<ResourceT, ModelT> decoder) {
+       this.page = page;
+-      this.translator = translator;
++      this.decoder = decoder;
+     }
+ 
+     @Override
+@@ -785,7 +795,7 @@
+ 
+     @Override
+     public Page<ModelT> getNextPage() {
+-      return new TransformPageDecorator<>(page.getNextPage(), translator);
++      return new TransformPageDecorator<>(page.getNextPage(), decoder);
+     }
+ 
+     @Override
+@@ -820,7 +830,7 @@
+       @Override
+       public ModelT next() {
+         ResourceT next = iter.next();
+-        return translator.apply(next);
++        return decoder.decode(next);
+       }
+     }
+   }

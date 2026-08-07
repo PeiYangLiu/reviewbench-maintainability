@@ -1,0 +1,78 @@
+--- a/ddtrace/tracer/textmap.go
++++ b/ddtrace/tracer/textmap.go
+@@ -265,27 +265,30 @@
+ 	// propagate trace tags
+ 	var sb strings.Builder
+ 	if ctx.trace != nil {
+-		ctx.trace.mu.Lock()
+-		for k, v := range ctx.trace.propagatingTags {
+-			if err := isValidPropagatableTraceTag(k, v); err != nil {
+-				log.Warn("won't propagate tag '%s' (err: %s)", k, err.Error())
+-				ctx.trace.setTag(propagationErrorKey, "encoding_error")
+-				continue
+-			}
+-			if sb.Len()+len(k)+len(v) > p.cfg.MaxTagsHeaderLen {
+-				sb.Reset()
+-				log.Warn("won't propagate trace tags (err: max trace tags header len (%d) reached)", p.cfg.MaxTagsHeaderLen)
+-				ctx.trace.setTag(propagationErrorKey, "max_size")
+-				break
+-			}
+-			if sb.Len() > 0 {
+-				sb.WriteByte(',')
+-			}
+-			sb.WriteString(k)
+-			sb.WriteByte('=')
+-			sb.WriteString(v)
+-		}
+-		ctx.trace.mu.Unlock()
++		func() {
++			ctx.trace.mu.Lock()
++			defer ctx.trace.mu.Unlock()
++
++			for k, v := range ctx.trace.propagatingTags {
++				if err := isValidPropagatableTraceTag(k, v); err != nil {
++					log.Warn("won't propagate tag '%s' (err: %s)", k, err.Error())
++					ctx.trace.setTag(propagationErrorKey, "encoding_error")
++					continue
++				}
++				if sb.Len()+len(k)+len(v) > p.cfg.MaxTagsHeaderLen {
++					sb.Reset()
++					log.Warn("won't propagate trace tags (err: max trace tags header len (%d) reached)", p.cfg.MaxTagsHeaderLen)
++					ctx.trace.setTag(propagationErrorKey, "max_size")
++					break
++				}
++				if sb.Len() > 0 {
++					sb.WriteByte(',')
++				}
++				sb.WriteString(k)
++				sb.WriteByte('=')
++				sb.WriteString(v)
++			}
++		}()
+ 		if sb.Len() > 0 {
+ 			writer.Set(traceTagsHeader, sb.String())
+ 		}
+@@ -330,13 +333,16 @@
+ 			if ctx.trace == nil {
+ 				ctx.trace = newTrace()
+ 			}
+-			ctx.trace.mu.Lock()
+-			ctx.trace.propagatingTags, err = parsePropagatableTraceTags(v)
+-			if err != nil {
+-				log.Warn("did not extract trace tags (err: %s)", err.Error())
+-				ctx.trace.setTag(propagationErrorKey, "decoding_error")
+-			}
+-			ctx.trace.mu.Unlock()
++			func() {
++				ctx.trace.mu.Lock()
++				defer ctx.trace.mu.Unlock()
++
++				ctx.trace.propagatingTags, err = parsePropagatableTraceTags(v)
++				if err != nil {
++					log.Warn("did not extract trace tags (err: %s)", err.Error())
++					ctx.trace.setTag(propagationErrorKey, "decoding_error")
++				}
++			}()
+ 		default:
+ 			if strings.HasPrefix(key, p.cfg.BaggagePrefix) {
+ 				ctx.setBaggageItem(strings.TrimPrefix(key, p.cfg.BaggagePrefix), v)
