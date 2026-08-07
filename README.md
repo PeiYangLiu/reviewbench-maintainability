@@ -4,6 +4,161 @@ Prototype tooling for constructing a maintainability benchmark from real GitHub 
 
 The benchmark idea is to mine merged PRs where reviewers asked for maintainability improvements, localize each task to the review comment's file/region, and use the final PR evolution as evidence that the concern was addressed. This is intentionally closer to SWE-bench than to synthetic "make this code cleaner" prompts: tasks come from real repositories, real reviewer comments, and real accepted changes.
 
+## Documentation
+
+- [`docs/CODEBASE_GUIDE.md`](docs/CODEBASE_GUIDE.md): current code map, authoritative entry points, tests, and legacy boundaries
+- [`docs/DATA_PROVENANCE.md`](docs/DATA_PROVENANCE.md): complete data lineage from mining through release and model evaluation
+- [`docs/PROGRESS_20260728.md`](docs/PROGRESS_20260728.md): current detailed status, 475-task cumulative release, storage migration, active evaluation, risks, and next work
+- [`docs/WEEKLY_REPORT_20260805.md`](docs/WEEKLY_REPORT_20260805.md): ICLR 2027-oriented weekly report covering the calibrated 475-task leaderboard, human-golden ceiling, backlog processing, hard-task expansion, and distributed Oracle recovery
+- [`docs/PROGRESS_20260714.md`](docs/PROGRESS_20260714.md): historical v1 and first-reserve progress snapshot
+- [`docs/PIPELINE.md`](docs/PIPELINE.md): detailed construction methodology and historical funnel
+- [`docs/PITFALLS.md`](docs/PITFALLS.md): failures, root causes, fixes, and methodological lessons
+
+## v1 strict release
+
+The first strict release is complete:
+
+- **100** executable tasks from **86 repositories** and **97 pull requests**
+- **11 hard** and **89 medium** tasks under the conservative two-judge rule
+- **52 Go**, **36 Python**, **5 TypeScript**, and 7 tasks across PHP, C, C++, Java, and Rust
+- two independent quality judgments per task
+- stable start/golden PASS_TO_PASS tests
+- changed-old-source-line coverage for every task
+- semantic reference-patch deduplication
+
+Release files are in [`data/releases/v1`](data/releases/v1/):
+
+| File | Purpose |
+|---|---|
+| `tasks.jsonl` | Final tasks, evidence, quality judgments, and release validation |
+| `oracles.jsonl` | Runnable-oracle and recovery metadata keyed by task ID |
+| `report.json` | Aggregate release statistics |
+| `manifest.json` | Versioned gates, counts, and hashes |
+| `SHA256SUMS` | Integrity checks for generated data |
+
+Re-run the release gate:
+
+```bash
+reviewbench-release \
+  --tasks data/releases/v1/tasks.jsonl \
+  --evaluations data/releases/v1/oracles.jsonl \
+  --target 100 \
+  --out /tmp/reviewbench-v1-tasks.jsonl \
+  --report /tmp/reviewbench-v1-report.json
+
+cmp data/releases/v1/tasks.jsonl /tmp/reviewbench-v1-tasks.jsonl
+sha256sum -c data/releases/v1/SHA256SUMS
+```
+
+### Non-agentic baseline model evaluation
+
+The complete 100-task evaluation of Claude Opus 4.8, Gemini 3.5 Flash, and
+GPT-5.5 is in
+[`data/releases/v1/evaluations/three-model-20260714`](data/releases/v1/evaluations/three-model-20260714/).
+This frozen baseline uses the original SEARCH/REPLACE text protocol.
+
+| Model | Resolved@1 | Hard |
+|---|---:|---:|
+| Gemini 3.5 Flash | **66/100** | 6/11 |
+| Claude Opus 4.8 | **63/100** | 5/11 |
+| GPT-5.5 | **61/100** | **7/11** |
+
+Resolved@1 requires a successfully generated in-scope patch, the verified correctness
+oracle, and a strict blind maintainability judgment. The evaluation directory
+contains every generated patch and all per-task gate results.
+
+### Post-v1 strict reserve
+
+The first dated post-v1 reserve is frozen at
+[`data/releases/reserves/20260721`](data/releases/reserves/20260721/):
+
+- 206 new strict tasks from 178 repositories
+- 15 hard and 191 medium
+- complete dual-model quality judgments, stable P2P, golden correctness, and
+  changed-old-line coverage
+- no semantic duplicates with v1
+- a cumulative v2 preview of 306 tasks
+
+This is a reserve rather than a final v2 release because continuous mining and
+the remaining 13,647 eligible quality candidates are still being processed.
+
+The cumulative 306-task three-model evaluation is available at
+[`data/releases/reserves/20260721/evaluations/three-model-20260724`](data/releases/reserves/20260721/evaluations/three-model-20260724/):
+
+| Model | Resolved@1 | Hard |
+|---|---:|---:|
+| GPT-5.5 | **184/306** | **12/26** |
+| Gemini 3.5 Flash | **182/306** | **12/26** |
+| Claude Opus 4.8 | **180/306** | 10/26 |
+
+### Agentic line-edit protocol
+
+`scripts/generate_agentic_patches.py` provides the protocol-independent
+successor to SEARCH/REPLACE. A model operates on the exact `start_sha` through
+four host actions:
+
+- `read` and `find` inspect repository files;
+- `edit` applies 1-based line-range edits to the single allowed production
+  file;
+- `finish` asks the host to materialize the candidate;
+- Git computes the final patch with `git diff --binary`.
+
+The model never writes a diff and never has to copy old source text into a
+SEARCH block. The host rejects path traversal, cross-file edits, overlapping
+line ranges, empty changes, and invalid checkpoint traces. If the round budget
+expires after valid edits, the host materializes the last worktree state;
+`finish` is only an early-stop action. The original
+SEARCH/REPLACE results remain frozen as the non-agentic baseline; agentic
+results must be generated and evaluated separately rather than filling only
+the baseline's protocol failures.
+
+The complete 306-task agentic evaluation is available at
+[`data/releases/reserves/20260721/evaluations/agentic-three-model-20260725`](data/releases/reserves/20260721/evaluations/agentic-three-model-20260725/):
+
+| Model | Generated | Correctness | Maintainability | Resolved@1 | Hard |
+|---|---:|---:|---:|---:|---:|
+| GPT-5.5 | **306/306** | **249/306** | **233/306** | **198/306** | 10/26 |
+| Claude Opus 4.8 | 305/306 | 240/306 | 221/306 | **187/306** | **11/26** |
+| Gemini 3.5 Flash | 255/306 | 196/306 | 172/306 | **157/306** | 7/26 |
+
+Relative to the frozen SEARCH/REPLACE baseline, GPT-5.5 gains 14 resolved
+tasks and Claude gains 7. Gemini loses 25 because it frequently fails to
+complete the multi-turn agent loop; this is a generation failure rather than
+a Git patch-application failure. Full action traces and protocol-failure
+records are included in the evaluation directory.
+
+### Second strict reserve
+
+The next dated reserve is frozen at
+[`data/releases/reserves/20260728`](data/releases/reserves/20260728/):
+
+- 169 new strict tasks from 160 repositories and 164 pull requests
+- 14 hard and 155 medium
+- complete dual-model quality judgments
+- start/source-only-golden stability, non-empty P2P, and real changed-old
+  production coverage for every released task
+- 11 same-solution review-comment duplicates excluded
+- no ID or semantic fix overlap with the previous 306 tasks
+
+The cumulative preview now contains **475 tasks**:
+
+- 40 hard
+- 435 medium
+- 410 repositories
+
+Construction funnel:
+
+`109,619 mined candidates → 70,939 quality-eligible → 3,000 priority evidence
+tasks → 2,581 complete evidence → 533 GPT strict passes → 280 dual-model
+passes → 268 semantic-unique Oracle candidates → 180 Oracle passes → 169
+released after duplicate exclusion`.
+
+The final audit invalidated an initial set of 35 Native oracles because they
+tested toy reimplementations and used `#line` probes instead of real production
+coverage. All Native tasks were rebuilt from scratch against real repository
+sources; 33/35 passed the corrected Oracle. The invalid artifacts are not part
+of the release.
+
 ## What this prototype does
 
 - Searches or accepts merged GitHub PRs.
@@ -28,6 +183,67 @@ The benchmark idea is to mine merged PRs where reviewers asked for maintainabili
 4. **Correctness gate**: generated patches should pass the repository's original tests. This prototype records the candidate; production benchmark curation should add per-repo test commands and FAIL_TO_PASS/PASS_TO_PASS-style selection.
 5. **Maintainability gate**: use automatic static gates only for categories with measurable signals, currently complexity, duplication, and dead code. Other categories are retained as `manual_or_llm_calibrated` candidates and should be separately calibrated by human labels.
 6. **Reproducibility**: save API snapshots with `--snapshot-dir` and rebuild datasets from those snapshots with `--from-snapshot`.
+
+## Strict quality-improvement release gate
+
+The legacy `CLEAN` criterion only established that the human patch passed tests
+and addressed a reviewer comment. It did not prove that every task was a
+substantive maintainability improvement. A strict release now requires all of
+the following:
+
+1. complete before/reference evidence from the exact task commits;
+2. unanimous judgments from at least two distinct judge models;
+3. a concrete code smell and a substantive, attributable quality improvement;
+4. maintainability as the primary goal, not a bug fix, feature, or style-only edit;
+5. independently judged intrinsic difficulty of at least medium;
+6. stable PASS_TO_PASS tests at both start and golden revisions;
+7. execution coverage of at least one changed source line; and
+8. semantic deduplication of tasks backed by the same local reference fix.
+
+`partial` judgments, low-confidence judgments, truncated evidence, judge errors,
+and uncovered changes fail closed. The release command exits non-zero until the
+requested target count is reached. The checked-in v1 release reaches the target
+of 100 and returns zero.
+
+Quality tasks that fail setup, build, baseline, PASS_TO_PASS, or coverage are
+not discarded. `reviewbench-recovery` writes them to a persistent recovery
+queue for per-repository Docker/toolchain work; only structural failures such as
+test anchors are marked ineligible.
+
+```bash
+reviewbench-curate \
+  --in data/difficulty/combined_v3.jsonl data/difficulty/expanded.jsonl \
+  --out /tmp/reviewbench/curation_pool.jsonl \
+  --report /tmp/reviewbench/curation_pool_report.json
+
+reviewbench-evidence \
+  --in /tmp/reviewbench/curation_pool.jsonl \
+  --out /tmp/reviewbench/evidence.jsonl \
+  --repo-cache /tmp/reviewbench/repos
+
+reviewbench-quality \
+  --in /tmp/reviewbench/evidence.jsonl \
+  --judgments judge_a.jsonl judge_b.jsonl \
+  --out /tmp/reviewbench/quality_gated.jsonl
+
+python scripts/validate_oracles.py \
+  --in /tmp/reviewbench/quality_gated.jsonl \
+  --out /tmp/reviewbench/oracles.jsonl \
+  --repos-dir /tmp/reviewbench/repos
+
+reviewbench-release \
+  --tasks /tmp/reviewbench/quality_gated.jsonl \
+  --evaluations /tmp/reviewbench/oracles.jsonl \
+  --target 100 \
+  --out data/releases/v1/tasks.jsonl \
+  --report data/releases/v1/report.json
+
+reviewbench-recovery \
+  --tasks /tmp/reviewbench/quality_gated.jsonl \
+  --evaluations /tmp/reviewbench/oracles.jsonl \
+  --out /tmp/reviewbench/recovery_queue.jsonl \
+  --report /tmp/reviewbench/recovery_report.json
+```
 
 ## Install for local development
 
@@ -205,3 +421,6 @@ Each line is a JSON object:
 - Review comments can include exact suggested code; this prototype strips suggestion blocks but also flags whether one was present.
 - Static metrics are directional evidence, not universal definitions of maintainability.
 - Multi-language support is intentionally conservative; Python has richer AST metrics, other languages fall back to text metrics.
+- Repository environments remain the main scaling bottleneck; a candidate does
+  not count toward a release until its exact historical environment and covered
+  PASS_TO_PASS oracle run successfully.

@@ -316,3 +316,67 @@
 - **claude 的 Go 短板坐实**：Go 4/9(44%) vs Python 6/7(86%)——同一模型跨语言差 40+ 个百分点。gpt-5.5/gemini 两边都强。**这是 ReviewBench 的一个有意思的发现：维护性修复能力有显著的语言依赖性，且因模型而异。**
 - **Go 选题教训（再确认）**：重仓库(etcd/vitess/temporal/nats-server)setup 慢且常挂；有效产出集中在中等大小、测试包独立的仓库(thanos 子包、opa、teleport 部分包、traefik)。
 - **累计 leaderboard**：原 ~9 + Docker(sklearn16+scipy3+plotly2=21) + 新 Go 9 + 新 Python 7 = **约 46 个干净有效 hard 题**，覆盖 ~15 个仓库、4 大类生态。
+
+### P45. `CLEAN` 不等于实质代码质量提升
+- **现象**：旧 28 道 CLEAN 里会混入功能修复、纯 style、机械 import/rename，以及没有完整质量证据的题。
+- **根因**：旧门只检查 golden correctness 和 reviewer concern addressed，没有强制原代码 smell、实质改善、维护性主目标、本质难度或无质量回退。
+- **解决**：新增 `quality-improvement/v1`。每题必须有完整 before/local/full patch，两个不同模型一致严格通过，score≥4、confidence≥0.8、难度至少 medium，不接受 partial。
+- **影响**：1,763 道完整证据题最初只有 46 道双模型通过，说明旧 CLEAN 不能作为最终发布口径。
+- **代码**：`quality_gate.py`、`evidence.py`、`release.py`。
+
+### P46. 环境失败不能当成题目失败
+- **现象**：双模型质量通过题最初大量死在 env、baseline、P2P 或 coverage。
+- **根因**：历史仓库需要精确 Python/Go、nested project root、SCM tags、Cython/Meson、Fortran、sidecar、build tags 或专用容器。
+- **解决**：所有非结构性失败进入持久 recovery queue。第二轮 39 道 recoverable 任务最终 39/39 回收。
+- **影响**：严格池从 21 增到 60。环境工程是数据构建的一部分，不是可选清理。
+- **代码**：`recovery.py`、`validate_oracles.py`、`trackA_filter.py`、`trackA_go.py`。
+
+### P47. Session-only oracle 也会锁死 golden 实现
+- **现象**：CPython 模型补丁保持公开行为，但因 private `_translate` helper 参数数量不同而失败。
+- **根因**：oracle 直接调用 golden 私有 helper。随后审计又发现 AST 抽取、MRO、源码字符串、内部调用次数和替代签名等 12 类同类问题。
+- **解决**：13 道 oracle 改为完整模块或公开入口的可观察行为断言，不检查私有 helper 名、签名、源码位置、继承布局或调用序列。全部重新跑 start/golden 各 3 次并确认 changed-old coverage。
+- **影响**：避免排行榜惩罚合法等价重构。修复记录进入 `oracles.jsonl` 的 `oracle_independence_fix`。
+- **数据**：`data/releases/v1/oracles.jsonl`。
+
+### P48. Gemini 的空 content 可能只是 reasoning 用尽输出预算
+- **现象**：Gemini 3.5 Flash 返回 `content=""`，容易误判为模型没有答案。
+- **根因**：`max_tokens` 同时容纳 reasoning 和正文。32 token 探针里 reasoning 用掉 27；复杂任务的 16K 调用也可能被 reasoning 全部耗尽。
+- **解决**：检查 `finish_reason` 和 `reasoning_tokens`。常规评测用 16K；XRMocap 三次均因预算截断后，单题用 32K 恢复。
+- **影响**：Gemini 最终可应用补丁从 96 增到 97。不能把 token-budget truncation 记成能力失败。
+- **代码**：`generate_release_patches.py`。
+
+### P49. 长时间 GPT-5.5 批量调用必须刷新 Copilot token
+- **现象**：100 题生成到第 53 题后，后续 48 题全部 HTTP 401。
+- **根因**：缓存的 IDE token 在长任务中到期。
+- **解决**：responses 请求遇到 401/403 时重新调用本机 `/token`，只续跑失败项。
+- **影响**：GPT-5.5 从 52/100 恢复到 98/100；剩余 2 道是真实 SEARCH/REPLACE 不可应用。
+- **代码**：`generate_release_patches.py`。
+
+### P50. 异构 oracle 执行器必须先归一化再汇总
+- **现象**：12 个 correctness 分片产生了 `models` list、`models` mapping、`results`、`model_results`、flat per-model 等多种 schema。第一次汇总把三个完整分片误记为 `oracle_replayed=false`。
+- **根因**：环境 recovery 由不同执行器完成，字段名包括 `patch_apply`、`patch_applied`、`patch_apply_ok`、`apply_ok` 以及多种 correctness 表达。
+- **解决**：`summarize_release_evaluation.py` 统一解析所有已出现 schema，并用 8 个单测锁定归一化行为。汇总前必须验证 300 个唯一 task-model 对。
+- **影响**：纠正后的 Resolved@1 为 Gemini 66、Claude 63、GPT-5.5 61，错误汇总会低估约 20 题。
+
+### P51. 单文件 solver scope 会低估多文件重构
+- **现象**：部分题的自然修法需要在另一个文件定义 helper 或同时改两个调用点，模型只看到锚点文件或 100K excerpt。
+- **根因**：当前 solver 为防止 PR bundled change 和答案泄露，限定锚点生产文件。
+- **影响**：scope 更干净，但多文件 modularity/API 题可能被系统性低估。TiDB 57553 的模型多块编辑就是典型例子。
+- **后续**：v2 应提供经过 concern 隔离的多文件 context 和多文件 patch 协议，同时维持 file allowlist。
+
+### P52. SEARCH/REPLACE 失败不是 Git patch 应用失败
+- **现象**：页面显示部分模型“补丁无法应用”，容易理解成 `git apply` 无法处理模型生成的 `.patch`。
+- **核对**：306 题三模型基线实际生成了 911 个 patch，correctness 阶段 911/911 均可由 Git 应用。7 个失败都发生在 patch 文件生成之前，原因是模型给出的 SEARCH 文本无法在 `start_sha` 源码中定位。
+- **根因**：旧流程先用自定义 SEARCH/REPLACE 协议构造 after 文件，再由 Git 计算 diff。Git 只负责第二步，无法修复第一步的文本定位失败。
+- **解决**：保留旧结果作为 non-agentic baseline，新增 `agentic-line-edit/v1`。模型通过 `read`、`find`、`edit`、`finish` 操作受限 worktree；host 按行应用编辑，最终统一运行 `git diff --binary`。
+- **公平性**：协议变化会影响模型的观察和行动方式，因此必须重跑全部 306 题及三个模型，不能只回收旧协议的 7 个失败。
+- **代码**：`scripts/generate_agentic_patches.py`、`tests/test_generate_agentic_patches.py`。
+
+### P53. JSON agent 会回显 tool transcript，首个或末个 action 都不一定是下一步
+- **现象**：Gemini 在 agentic smoke 中能编辑，但全量任务大量连续 32 轮只做同一批 `read/find`，没有任何 edit。
+- **根因**：模型有时返回整个 transcript continuation，其中包含多个 `assistant_action/tool_result` 对。旧解析器从响应中取第一个有效 JSON action，实际取到的是最早的历史 action，而真正的下一步 action位于响应末尾。
+- **二次现象**：部分响应不只回显旧 transcript，还一次生成 `edit → 伪造 tool result → finish`。单纯取最后 action 会跳过 edit，host 随后拒绝无改动 finish。
+- **解决**：先接受严格的单对象响应；否则按原始文本位置提取所有平衡 JSON 对象并解包 wrapper。常规选择最后有效 action；若当前 worktree 尚无改动、最后 action 是 `finish` 且同一响应含 `edit`，优先执行最后一个 edit。多对象响应记录 object count 和 raw tail。
+- **验证**：同一 DataDog 任务从旧解析器的 32 轮纯读取失败，恢复为 17 轮完成编辑并由 Git 生成 patch。
+- **影响**：旧 Gemini 产物整体归档为无效 parser run，正式 Gemini 结果从头生成。后续审计又恢复 gRPC 与 Nomad 两道 hard 的 adapter failure；两道 patch 均未通过维护性盲裁，排行榜分数不变。
+- **代码**：`generate_agentic_patches.py::object_candidates`、`parse_action`。
