@@ -3,7 +3,10 @@ from pathlib import Path
 import unittest
 
 from reviewbench_maintainability.build_dataset import build_dataset, patch_touches_line
-from reviewbench_maintainability.github_client import PullRequestMaterials
+from reviewbench_maintainability.github_client import (
+    GitHubClientError,
+    PullRequestMaterials,
+)
 from reviewbench_maintainability.models import PullRequestRef
 
 
@@ -73,3 +76,47 @@ class BuildDatasetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LoadMaterialsTests(unittest.TestCase):
+    def test_skips_a_pull_request_github_cannot_serve(self):
+        from reviewbench_maintainability import build_dataset as module
+
+        class StubClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def search_merged_prs(self, query, limit):
+                return [PullRequestRef("o", "r", 1), PullRequestRef("o", "r", 2)]
+
+            def fetch_pull_request(self, ref, **kwargs):
+                if ref.number == 1:
+                    raise GitHubClientError(
+                        "gh: Server Error: Sorry, this diff is taking too long "
+                        "to generate. (HTTP 422)"
+                    )
+                return "materials-2"
+
+        original = module.GitHubClient
+        module.GitHubClient = StubClient
+        try:
+            args = Namespace(
+                from_snapshot=None,
+                gh="gh",
+                pr=[],
+                query="is:pr is:merged refactor",
+                repo=None,
+                org=None,
+                limit=2,
+                no_review_threads=True,
+                fetch_issue_comments=False,
+                fetch_commits=False,
+                snapshot_dir=None,
+            )
+            materials = module.load_materials(args)
+        finally:
+            module.GitHubClient = original
+
+        self.assertEqual(materials, ["materials-2"])
+        self.assertEqual(len(args.skipped_pull_requests), 1)
+        self.assertEqual(args.skipped_pull_requests[0]["pr"], "o/r#1")

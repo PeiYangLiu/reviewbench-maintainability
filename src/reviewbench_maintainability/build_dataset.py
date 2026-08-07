@@ -95,16 +95,34 @@ def load_materials(args: argparse.Namespace) -> list[PullRequestMaterials]:
         refs = client.search_merged_prs(query, args.limit)
 
     materials: list[PullRequestMaterials] = []
+    skipped: list[dict[str, str]] = []
     for ref in refs:
-        item = client.fetch_pull_request(
-            ref,
-            include_threads=not args.no_review_threads,
-            include_issue_comments=args.fetch_issue_comments,
-            include_commits=args.fetch_commits,
-        )
+        try:
+            item = client.fetch_pull_request(
+                ref,
+                include_threads=not args.no_review_threads,
+                include_issue_comments=args.fetch_issue_comments,
+                include_commits=args.fetch_commits,
+            )
+        except GitHubClientError as error:
+            # A single pathological pull request must not abort the batch.
+            # GitHub refuses to generate diffs for very large pull requests
+            # ("this diff is taking too long to generate", HTTP 422), and one
+            # such pull request used to fail the whole mining batch, which then
+            # never completed and was retried forever.
+            skipped.append({"pr": ref.full_name + f"#{ref.number}", "error": str(error)[:300]})
+            continue
         if args.snapshot_dir:
             item.write_snapshot(args.snapshot_dir)
         materials.append(item)
+    if skipped:
+        print(
+            f"skipped {len(skipped)} unreachable pull request(s): "
+            + "; ".join(item["pr"] for item in skipped[:10]),
+            file=sys.stderr,
+            flush=True,
+        )
+    args.skipped_pull_requests = skipped
     return materials
 
 
@@ -157,6 +175,7 @@ def build_dataset(
                 candidates.append(task)
 
     report["candidates_kept"] = len(candidates)
+    report["skipped_pull_requests"] = getattr(args, "skipped_pull_requests", [])
     return candidates, report
 
 
