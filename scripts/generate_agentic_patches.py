@@ -520,12 +520,22 @@ def generate_one(
                 for event in transcript
             )
         prompt += "\n\nReturn the next JSON action only."
-        round_result: dict[str, Any] = {"round": round_number}
+        round_result: dict[str, Any] = {
+            "round": round_number,
+            "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+        }
         text = ""
         try:
             text, usage = invoke(model, prompt, args)
             action = parse_action(text, prefer_edit=not edited)
-            round_result.update({"action": action, "usage": usage, "response_chars": len(text)})
+            round_result.update(
+                {
+                    "action": action,
+                    "usage": usage,
+                    "response_chars": len(text),
+                    "raw_response": text,
+                }
+            )
             object_count = len(object_candidates(text))
             round_result["response_object_count"] = object_count
             if object_count > 1:
