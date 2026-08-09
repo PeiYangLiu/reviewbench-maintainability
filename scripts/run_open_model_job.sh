@@ -13,6 +13,10 @@ set -euo pipefail
 work="${AMLT_DIRSYNC_DIR:-/scratch/reviewbench-openmodels/${AMLT_JOB_NAME:-job}}"
 generation_root="$work/run"
 mkdir -p "$generation_root" "$AMLT_OUTPUT_DIR"
+trust_args=()
+if [ "${TRUST_REMOTE_CODE:-0}" = "1" ]; then
+  trust_args+=(--trust-remote-code)
+fi
 
 persist() {
   status="$?"
@@ -46,6 +50,7 @@ python3 scripts/run_open_model_agentic.py \
   --max-output-tokens 4096 \
   --server-timeout 7200 \
   --download-dir "/scratch/hf-cache/${AMLT_JOB_NAME:-job}" \
+  "${trust_args[@]}" \
   --vllm-extra-arg=--enable-prefix-caching \
   --vllm-extra-arg=--max-num-seqs \
   --vllm-extra-arg="$MAX_NUM_SEQS"

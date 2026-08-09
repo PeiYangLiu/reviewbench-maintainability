@@ -134,3 +134,102 @@ patches/traces. GPU model inference is not repeated.
 The five jobs were accepted by `msrresrchbasicvc` on 2026-08-09 and entered
 `preparing`. Status, failures, retries, and final artifact hashes will be
 appended here as the experiment progresses.
+
+## 7. Correctness orchestration
+
+`scripts/run_open_model_correctness.py` prepares the seven strict correctness
+lanes without assuming the closed-model tuple. Model IDs are preserved exactly,
+including Hugging Face IDs containing `/`.
+
+Preflight does not require generation artifacts:
+
+```bash
+python scripts/run_open_model_correctness.py preflight \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --repo-cache "$REVIEWBENCH_SESSION_FILES/repos" \
+  --output "$REVIEWBENCH_HARD_ORACLE/open-model-correctness-preflight" \
+  --model-id Qwen/Qwen2.5-Coder-7B-Instruct \
+  --model-id Qwen/Qwen2.5-Coder-32B-Instruct \
+  --model-id Qwen/Qwen3-Coder-30B-A3B-Instruct \
+  --model-id Qwen/Qwen3-Coder-Next-FP8 \
+  --model-id Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8
+```
+
+After inference, stage one exact generation JSONL per model:
+
+```bash
+python scripts/run_open_model_correctness.py prepare \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --repo-cache "$REVIEWBENCH_SESSION_FILES/repos" \
+  --output "$CORRECTNESS_OUTPUT" \
+  --model 'Qwen/Qwen2.5-Coder-7B-Instruct=/path/generation_results.jsonl' \
+  --model 'Qwen/Qwen2.5-Coder-32B-Instruct=/path/generation_results.jsonl'
+```
+
+Repeat `--model` for every solver. Preparation rejects duplicate or incomplete
+task-model sets, stale task fingerprints, start-SHA mismatches, stale completion
+markers, and patch checksum mismatches. Cluster-local patch and trace paths are
+rebased into a durable input tree without changing the source generation file.
+
+`run` invokes copied, checksum-recorded variants of the proven lane runners.
+Only path, task-count, execution-host, and model-cardinality assumptions are
+adapted; frozen wave sources and outputs are not modified:
+
+```bash
+python scripts/run_open_model_correctness.py run \
+  --output "$CORRECTNESS_OUTPUT"
+```
+
+Runs are sequential by lane by default to avoid uncontrolled cross-lane load.
+Use `--jobs LANE=N` to tune a lane. Existing terminal records resume, while
+infrastructure-shaped records remain retryable.
+
+Finalization validates the exact `(task ID, model)` matrix:
+
+```bash
+python scripts/run_open_model_correctness.py finalize \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --output "$CORRECTNESS_OUTPUT"
+```
+
+Durable outputs include:
+
+- `correctness-raw/{lane}.jsonl`: complete heterogeneous runner records;
+- `correctness-normalized/{lane}.jsonl`: common fields plus the complete raw
+  record, raw status, coverage provenance, artifact/log paths, and raw hash;
+- `correctness-manifest.json`: per-lane counts, statuses, pair-set hash, input
+  hashes, missing pairs, and retryable infrastructure pairs;
+- `SHA256SUMS` and `correctness.complete.json`;
+- `release/{tasks,oracles}.jsonl`: the exact complete release inputs;
+- copied generation records, patches, traces, adapted runner sources,
+  provenance, checkpoints, and raw runner logs.
+
+No candidate replay should start until all generation archives have passed
+`prepare`.
+
+### 7.1 Published-hard replay gap
+
+The portable 414-task release contains 374 wave tasks with
+`lane_results_source` and 40 previously published hard tasks without the modern
+lane replay contract. The compact records certify the strict Oracle but usually
+omit the exact executable command/environment needed for a new candidate.
+The orchestrator assigns all 40 to a lane but fails closed instead of replacing
+behavioral replay with source-shape checks:
+
+| Lane | Modern ready | Published contract missing | Total |
+|---|---:|---:|---:|
+| Go/Python | 73 | 15 | 88 |
+| Scripted | 53 | 4 | 57 |
+| TS/JS | 42 | 4 | 46 |
+| C# | 18 | 0 | 18 |
+| JVM | 52 | 6 | 58 |
+| Rust | 71 | 2 | 73 |
+| Native | 65 | 9 | 74 |
+
+Full 2,070-pair execution remains blocked until those 40 original per-task
+replay contracts are recovered into the seven-lane format. For development
+only, `prepare` and `run` accept `--allow-partial-modern`; such an artifact is
+explicitly marked partial and cannot produce a complete manifest.
