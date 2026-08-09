@@ -24,7 +24,7 @@ uncalibrated cross-model confidence values as a hard threshold.
 
 | Model | Generation | Scope | Correctness | Maintainability | Resolved@1 |
 |---|---:|---:|---:|---:|---:|
-| claude-opus-4.8 | 392 | 383 | 340 | 206 | **168/414 (40.6%)** |
+| claude-opus-4.8 | 411 | 401 | 357 | 216 | **177/414 (42.8%)** |
 | gemini-3.5-flash | 340 | 323 | 242 | 179 | **143/414 (34.5%)** |
 | gpt-5.5 | 413 | 392 | 341 | 263 | **212/414 (51.2%)** |
 
@@ -58,6 +58,7 @@ sha256sum -c SHA256SUMS
 
 - The three waves predate runtime fingerprints. Their legacy-continuity attestations verify current task, patch, correctness, judgment, and summary consistency, but do not claim cryptographic proof of the original invocation inputs.
 - Wave-003 Claude generation recovered 94 of 95 aggregate-proxy failures with a fresh direct-endpoint run; one genuine max-round failure remained.
+- A frozen audit of 21 wave-001 Claude failures recovered 19 generations and 9 Resolved results on the direct endpoint; corrections are published as an overlay without rewriting the source wave.
 - Wave-001 replay cleared four judge transport errors and repaired six OpenAssetIO correctness infrastructure rows.
 - The published Sniffy/Gemini API timeout was regenerated, judged, and replayed; the real candidate failed scope (737 changed lines) and compilation.
 - The release uses strongest validated Oracle evidence; two earlier strict passes are retained after later flaky reruns produced weaker failures.

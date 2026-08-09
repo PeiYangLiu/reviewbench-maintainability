@@ -37,7 +37,7 @@ project now contains **849 unique strict tasks: 414 hard and 435 medium**.
 | Model | Generated | Scope | Correctness | Maintainability | Resolved@1 |
 |---|---:|---:|---:|---:|---:|
 | **GPT-5.5** | 413 | 392 | 341 | 263 | **212/414 (51.2%)** |
-| **Claude Opus 4.8** | 392 | 383 | 340 | 206 | **168/414 (40.6%)** |
+| **Claude Opus 4.8** | 411 | 401 | 357 | 216 | **177/414 (42.8%)** |
 | **Gemini 3.5 Flash** | 340 | 323 | 242 | 179 | **143/414 (34.5%)** |
 
 Resolved@1 requires generation/apply, single-file scope, executable
