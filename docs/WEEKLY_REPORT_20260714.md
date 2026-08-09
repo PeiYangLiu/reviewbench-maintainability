@@ -1,5 +1,8 @@
 # ReviewBench-Maintainability 周报
 
+> 历史周报。当前权威状态见
+> [`PROGRESS_20260808.md`](PROGRESS_20260808.md)。
+
 **周期：2026.07.08 至 2026.07.14**
 
 ## 一、本周重点

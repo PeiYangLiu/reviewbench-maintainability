@@ -380,3 +380,117 @@
 - **验证**：同一 DataDog 任务从旧解析器的 32 轮纯读取失败，恢复为 17 轮完成编辑并由 Git 生成 patch。
 - **影响**：旧 Gemini 产物整体归档为无效 parser run，正式 Gemini 结果从头生成。后续审计又恢复 gRPC 与 Nomad 两道 hard 的 adapter failure；两道 patch 均未通过维护性盲裁，排行榜分数不变。
 - **代码**：`generate_agentic_patches.py::object_candidates`、`parse_action`。
+
+### P54. Aggregate proxy failure 不能记成模型 generation failure
+- **现象**：wave-003 的 Claude 在 8787 aggregate proxy 上恰好 95/190
+  generated、95/190 failed，失败率远高于相邻 wave。
+- **核对**：把同一 95 道失败任务送到已验证的 4141 direct endpoint，从原始
+  source fresh-run，得到 94/95 generated；只剩 Timefold 一道真实耗尽 32 轮。
+- **根因**：aggregate proxy 的路由/输出问题被上层包装成正常的 agent failure。
+  失败形状看似符合 schema，但不是模型能力。
+- **解决**：Claude generation 默认走 direct endpoint；发布前核对 endpoint
+  identity、失败率和响应形状。异常批次必须同 task fresh A/B。
+- **影响**：wave-003 Claude 从 43/190 Resolved 修正为 81/190。
+- **原则**：transport、routing、empty content 和 protocol failure 必须与模型
+  quality failure 分开报告。
+
+### P55. 已耗尽轮次的 failed trace 不能普通 resume
+- **现象**：对 32 轮无有效 edit 的失败结果运行 `--resume`，95 道立即原样失败，
+  没有发生任何新调用。
+- **根因**：resume 正确恢复 prior rounds；但 prior rounds 已等于
+  `max_rounds`，剩余预算为零。
+- **解决**：新增 `--restart-failed`。成功项仍复用；`status=failed` 的 terminal
+  记录不再传入 `resume_agent_state`，而是从 start source fresh-run。
+- **边界**：`status=in_progress` 的真实 checkpoint 仍继续恢复，不能一律丢弃。
+- **公平性**：默认 wrapper 不启用。只重采样失败、保留成功会产生 success-only
+  selection bias；必须有独立 infrastructure 证据、冻结 recovery IDs，并发布
+  correction provenance。
+- **代码**：`generate_agentic_patches.py::previous_result_for_retry`。
+
+### P56. Kill `docker run --rm` 的父进程不会保证容器退出
+- **现象**：停止 Rust lane runner 后，kcl LLVM14 容器继续运行 8 小时，
+  测试二进制成为孤儿，task 状态长期停在 `recoverable_running`。
+- **根因**：`--rm` 只在容器退出后删除；杀掉 client/wrapper 不等于停止 daemon
+  管理的容器。
+- **解决**：runner 使用可预测的唯一 container name；中断时按精确 name
+  `docker rm -f`；禁止 `pkill`/全局清理。checkpoint 恢复前检查进程和容器双侧。
+- **原则**：后台任务的 cleanup 要覆盖 process tree 和 external daemon object。
+
+### P57. Shared image 不能自动摊薄每个重仓库的构建成本
+- **假设**：一个 deal.II、LLVM 或 ROS2 镜像可以一次解锁 6–12 道任务。
+- **结果**：假设不成立。共享依赖正是该 cluster 昂贵的原因；镜像能摊薄环境
+  setup，却不能消除每个历史仓库的多小时 per-repo build。
+- **第二个阻塞**：重度重构经常让 tests 与 production 一起演进。start tests
+  对 source-only target production 无法编译，不是装齐依赖就能解决。
+- **有效杠杆**：稳定 public API + bespoke behavior harness + 既有 package
+  manager warm cache。BSMPT 用 Conan warm cache 和单目标 build 是成功例子。
+- **原则**：建共享镜像前先证明至少 2–3 道任务只缺同一依赖栈，并检查 target
+  production 是否仍与 start tests 兼容。
+
+### P58. Judge 空响应是 transport error，不是 maintainability reject
+- **现象**：12-worker 8787 judge 产生 110 个空 raw file，解析错误统一为
+  `invalid addressed value: ''`。
+- **根因**：高并发网关返回空 content。若 fail-closed 直接算 reject，会系统性
+  压低三个 solver，且失败与代码质量无关。
+- **解决**：保留 `judge_error`，降低并发，切换 direct endpoint，使用
+  `--resume` 只重试错误项。最终所有可生成 candidate 都得到合法 rubric-v2
+  verdict。
+- **原则**：空 response、invalid JSON、schema error 不能 success-shaped
+  fallback，也不能冒充真实 reject。
+
+### P59. Structural 任务不补录会虚增 recoverable backlog
+- **现象**：Oracle agent 证明 7 道任务没有 solution-independent public route，
+  但为避免“伪造测试”没有写 plan，结果仍显示
+  `recoverable_pending_curation`。
+- **问题**：报表会把永远不可恢复的任务解释为尚未投入工程，错误估算剩余工作量。
+- **解决**：能稳定构建的任务用 `structural_if_uncovered` 让 runner 正式记录
+  `structural_*`；连 build 都到不了 structural branch 的任务另存证据，不能手改
+  pass。
+- **额外发现**：chainflip 删除两个公开 dispatchable，属于 feature removal，
+  不是 behavior-preserving maintainability refactor，应反馈给上游质量门。
+
+### P60. Correctness 工作目录不能直接作为汇总输入
+- **现象**：wave-003 汇总报 duplicate correctness key。
+- **根因**：工作目录除七个权威 lane JSONL 外，还有
+  `csharp-before-exact-dependency-rerun.jsonl` 等备份。汇总器按 `*.jsonl`
+  全部读取。
+- **解决**：建立 `correctness-canonical/`，精确复制七个权威文件；零任务 lane
+  写空 JSONL。generation/judgment 写内容哈希 completion marker；
+  correctness marker 额外核对 start revision 和 candidate patch hash；
+  judgment 绑定 task/generation fingerprint、rubric、judge model 和 context
+  window；summary 从上游四门重建每一行并重算 leaderboard/pairwise。只有整条
+  attestation chain 与当前 artifact 一致时才汇总。
+- **代码**：`validate_hard_wave.py`、`run_hard_wave_summary_when_ready.sh`。
+
+### P61. Oracle evidence 不能简单 last-write-wins
+- **现象**：后续全量重跑把两个此前 strict-pass 任务覆盖成瞬时环境失败，当前
+  snapshot 从 374 降为 372。
+- **根因**：异构历史环境有 flaky build/cache/service；一次晚到的弱失败不应撤销
+  已经完成的 3x start、3x golden、非空 P2P 和 coverage 证据。
+- **解决**：release union 选择 strongest validated evidence。覆盖旧 strict pass
+  必须提供更强的结构性反证或确认行为回退，不能仅凭一次环境失败。
+- **影响**：最终新 hard 为 374，不是最后 snapshot 的 372。
+
+### P62. Oracle metadata 里的绝对路径会泄漏机器布局并破坏可移植性
+- **现象**：414 release 初稿中有 967 个 machine-specific path，分布在 command、
+  coverage header、matched source、artifact 和 lane source 字段。
+- **根因**：七条 lane 保留最丰富执行记录，天然引用 worktree、cache、venv 和
+  session artifact。
+- **解决**：`package_hard_release.py` 对所有 nested string 递归替换最长 path
+  prefix，并在写完后扫描发布文件。占位符：
+  `${REVIEWBENCH_SESSION_FILES}`、`${REVIEWBENCH_REPOSITORY}`、`${HOME}`。
+- **门**：任何原始 root 残留都使打包失败；`SHA256SUMS` 在替换完成后生成。
+- **代码/测试**：`scripts/package_hard_release.py`、
+  `tests/test_package_hard_release.py`。
+
+### P63. 事后补 hash 只能叫 continuity audit，不能冒充 runtime provenance
+- **现象**：旧 wave 完成时 generation/judgment 记录没有 task、patch、prompt
+  fingerprint。事后可以核对当前 patch 与 judgment 引用一致，但无法证明原始
+  API 调用当时输入从未变化。
+- **错误做法**：把当前文件 hash 写进普通 completion marker，并宣称原始 run
+  已被密码学绑定。
+- **解决**：旧 wave 显式标记 `legacy-continuity`；它只保证当前 artifact chain
+  内部一致。新 wave 的 `runtime` marker 在 generation/judgment 完成时立即写入
+  task、patch、rubric、judge model、context 和 output-budget fingerprint。
+- **发布**：manifest 逐 wave 保存 attestation mode，论文和复现说明不得混用两种
+  provenance 强度。

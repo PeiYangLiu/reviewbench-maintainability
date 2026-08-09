@@ -8,11 +8,62 @@ The benchmark idea is to mine merged PRs where reviewers asked for maintainabili
 
 - [`docs/CODEBASE_GUIDE.md`](docs/CODEBASE_GUIDE.md): current code map, authoritative entry points, tests, and legacy boundaries
 - [`docs/DATA_PROVENANCE.md`](docs/DATA_PROVENANCE.md): complete data lineage from mining through release and model evaluation
-- [`docs/PROGRESS_20260728.md`](docs/PROGRESS_20260728.md): current detailed status, 475-task cumulative release, storage migration, active evaluation, risks, and next work
-- [`docs/WEEKLY_REPORT_20260805.md`](docs/WEEKLY_REPORT_20260805.md): ICLR 2027-oriented weekly report covering the calibrated 475-task leaderboard, human-golden ceiling, backlog processing, hard-task expansion, and distributed Oracle recovery
+- [`docs/PROGRESS_20260808.md`](docs/PROGRESS_20260808.md): current authoritative status, 414-task hard release, corrected three-model evaluation, and final artifact map
+- [`docs/WEEKLY_REPORT_20260805.md`](docs/WEEKLY_REPORT_20260805.md): historical ICLR 2027-oriented weekly report before the hard-task Oracle campaign completed
+- [`docs/PROGRESS_20260728.md`](docs/PROGRESS_20260728.md): historical 475-task cumulative release snapshot
 - [`docs/PROGRESS_20260714.md`](docs/PROGRESS_20260714.md): historical v1 and first-reserve progress snapshot
 - [`docs/PIPELINE.md`](docs/PIPELINE.md): detailed construction methodology and historical funnel
 - [`docs/PITFALLS.md`](docs/PITFALLS.md): failures, root causes, fixes, and methodological lessons
+
+## 414-task hard release
+
+The current hard benchmark is frozen at
+[`data/releases/hard/20260808`](data/releases/hard/20260808/):
+
+- **414** strict hard maintainability tasks from **340 repositories** and
+  **385 pull requests**;
+- 40 hard tasks from the calibrated 475-task release plus 374 new,
+  semantically non-overlapping hard tasks;
+- 17 language labels and 8 maintainability categories;
+- exact start and source-only-golden revisions;
+- three stable runs on both sides, non-empty PASS_TO_PASS, and real
+  changed-old production coverage;
+- 1,242 task-model evaluations under `agentic-line-edit/v1`;
+- the human-golden-calibrated maintainability rubric v2.
+
+Together with the 435 medium tasks in the previous cumulative release, the
+project now contains **849 unique strict tasks: 414 hard and 435 medium**.
+
+| Model | Generated | Scope | Correctness | Maintainability | Resolved@1 |
+|---|---:|---:|---:|---:|---:|
+| **GPT-5.5** | 413 | 392 | 341 | 263 | **212/414 (51.2%)** |
+| **Claude Opus 4.8** | 392 | 383 | 340 | 206 | **168/414 (40.6%)** |
+| **Gemini 3.5 Flash** | 340 | 323 | 242 | 179 | **143/414 (34.5%)** |
+
+Resolved@1 requires generation/apply, single-file scope, executable
+correctness, and the calibrated maintainability judgment. Release contents:
+
+| File | Purpose |
+|---|---|
+| `tasks.jsonl` | 414 strict hard tasks and construction evidence |
+| `oracles.jsonl` | One strict executable Oracle record per task |
+| `results.jsonl` | 1,242 normalized four-gate model results |
+| `result-overrides.jsonl` | Sanitized runner-derived infrastructure corrections |
+| `report.json` | Leaderboard, language/category breakdowns, and pairwise outcomes |
+| `manifest.json` | Release contract, source waves, counts, placeholders, and hashes |
+| `SHA256SUMS` | Integrity hashes for all release files |
+
+Rebuild the compact release from the calibrated 475-task results and the three
+new hard waves with `scripts/package_hard_release.py`. Machine-specific roots
+are replaced by `${REVIEWBENCH_SESSION_FILES}`,
+`${REVIEWBENCH_REPOSITORY}`, and `${HOME}`.
+
+The hard-task definition has two historical layers. The original 40 tasks use
+the conservative published difficulty field. The 374-task expansion requires
+a strict GPT quality pass and at least one independent hard verdict; this
+avoids treating uncalibrated cross-model confidence scores as a hard filter.
+See [`docs/PROGRESS_20260808.md`](docs/PROGRESS_20260808.md) for the exact
+selection and Oracle funnel.
 
 ## v1 strict release
 
@@ -159,6 +210,12 @@ coverage. All Native tasks were rebuilt from scratch against real repository
 sources; 33/35 passed the corrected Oracle. The invalid artifacts are not part
 of the release.
 
+## Historical general release
+
+The sections below describe the original v1 and 475-task general release.
+Those artifacts remain frozen and are not rewritten by the 414-task hard
+release.
+
 ## What this prototype does
 
 - Searches or accepts merged GitHub PRs.
@@ -248,7 +305,6 @@ reviewbench-recovery \
 ## Install for local development
 
 ```bash
-cd /home/v-peiyangliu/reviewbench-maintainability
 python -m pip install -e .
 ```
 

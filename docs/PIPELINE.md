@@ -513,6 +513,126 @@ oracle_candidate / needs_review 那 ~19,700 条**还没打分**。
 
 ---
 
+## 11. 严格规模化终态：475 general + 414 hard
+
+上面的 28 题是早期 selective prototype 漏斗。后续代码和数据已经改用更严格、
+可恢复的规模化管线：
+
+```text
+mine_scale
+→ curate_pool
+→ quality-evidence/v2
+→ dual-model quality-improvement/v1
+→ semantic dedup
+→ language-lane Oracle engineering
+→ strict pass collection
+→ hard wave freeze
+→ three-model agentic generation
+→ seven-lane correctness replay
+→ calibrated rubric-v2 judgment
+→ cumulative release packaging
+```
+
+### 11.1 General release
+
+```text
+v1 100
++ reserve 20260721 206
++ reserve 20260728 169
+= 475 strict tasks
+```
+
+其中 40 hard、435 medium。
+
+### 11.2 Hard expansion
+
+```text
+67,939 backlog candidates
+→ 56,508 complete evidence
+→ 5,892 GPT strict pass
+→ 797 hard-selected
+→ 792 novel IDs
+→ 739 semantic-unique Oracle tasks
+→ 374 new strict hard
++ 40 published hard
+= 414 hard release
+```
+
+374 道新 hard 按 strongest validated Oracle evidence 合并：
+
+| Lane | Pass |
+|---|---:|
+| gopy | 73 |
+| native | 65 |
+| rust | 71 |
+| scripted | 53 |
+| jvm | 52 |
+| tsjs | 42 |
+| csharp | 18 |
+
+### 11.3 Wave 协议
+
+每个 wave 固定：
+
+1. `tasks.jsonl` 与 `oracles.jsonl`；
+2. 三模型 `agentic-line-edit/v1` generation；
+3. 七条 lane correctness；
+4. rubric-v2 blind judgment；
+5. normalized results 和 report。
+
+`validate_hard_wave.py correctness` 从 Oracle 自动推导各 lane 应有的
+task-model pair 数，不再写死某一波的 477 条结果。汇总前检查：
+
+- generation completion marker 的 hash 与当前文件一致；
+- correctness 的精确 `(task_id, model)` 集与 task/Oracle 一致；
+- correctness marker 绑定当前 generation hash；
+- judgment completion marker 的 hash 与当前文件一致；
+- canonical correctness 目录只含七个权威文件。
+
+`run_hard_wave_summary_when_ready.sh` 只在 `validate_hard_wave.py ready` 返回
+成功后执行汇总。仅有相同行数但内容仍是旧版本的 artifact 不再算 ready。
+
+### 11.4 Terminal failure fresh-retry
+
+Agent trace 的普通 resume 用于继续未完成状态。若 trace 已耗尽 32 轮且没有
+有效编辑，继续 resume 只会立即再次失败。此时必须：
+
+```bash
+--resume --restart-failed
+```
+
+它保留已成功 candidate，但从原始 start source 重新采样 terminal failure。
+**它不能用于普通模型失败。** 默认 hard-wave wrapper 不启用该选项，否则会保留
+成功样本、反复重采样失败样本，造成 success-only selection bias。
+
+只有存在独立基础设施证据、预先冻结 recovery task ID、并把 correction 记录进
+release provenance 时才允许启用。该机制在 wave-003 恢复了 94 个被 aggregate
+proxy 错误记为失败的 Claude candidate。
+
+### 11.5 Compact release
+
+```bash
+python scripts/package_hard_release.py \
+  --published-tasks data/releases/reserves/20260728/cumulative_preview.jsonl \
+  --published-results /path/to/calibrated-475-results.jsonl \
+  --published-oracles data/releases/v1/oracles.jsonl \
+  --published-oracles data/releases/reserves/20260721/oracles.jsonl \
+  --published-oracles data/releases/reserves/20260728/oracles.jsonl \
+  --wave /path/to/wave-001 \
+  --wave /path/to/wave-003 \
+  --wave /path/to/wave-004 \
+  --result-override /path/to/result-override.jsonl \
+  --out-dir data/releases/hard/20260808 \
+  --sanitize-root REVIEWBENCH_SESSION_FILES=/path/to/session \
+  --sanitize-root REVIEWBENCH_REPOSITORY=/path/to/repository \
+  --sanitize-root HOME="$HOME"
+```
+
+打包器验证 task/Oracle/result ID 集、三模型矩阵、重复 ID、路径可移植性和
+SHA-256，然后生成 self-contained README、manifest 和 `SHA256SUMS`。
+
+---
+
 ## 附：相关脚本
 
 | 阶段 | 脚本 |
@@ -522,6 +642,11 @@ oracle_candidate / needs_review 那 ~19,700 条**还没打分**。
 | ③ 难度打分 | `scripts/score_difficulty.py`（复用 `enrich_cases.py` 抓 diff） |
 | ④⑤⑥ 可跑/评测（Go/轻 Python） | `scripts/evaluate_e2e.py`（复用 `trackA_filter.py` / `trackA_go.py` / `judge_prototype.py`） |
 | ④⑤⑥ 可跑/评测（编译型 Python） | `scripts/evaluate_docker.py`（复用 `docker_harness.py`） |
+| 严格 hard 收集 | `collect_hard_oracle_passes.py` → `freeze_hard_oracle_pool.py` |
+| Agentic generation | `run_hard_wave_generation.sh` → `generate_agentic_patches.py` |
+| Blind maintainability | `judge_release_patches.py --rubric v2` |
+| Wave 汇总 | `run_hard_wave_summary_when_ready.sh` → `summarize_release_evaluation.py` |
+| Hard release | `package_hard_release.py` |
 | 案例可视化（HTML） | `build_review_items.py` → `enrich_cases.py` → `summarize_cases.py` → `render_review_page.py` |
 
-工程踩坑实录见 `docs/PITFALLS.md`（P1–P44）。
+工程踩坑实录见 `docs/PITFALLS.md`（P1–P63）。

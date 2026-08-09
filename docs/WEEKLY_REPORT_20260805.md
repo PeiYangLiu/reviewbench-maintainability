@@ -1,5 +1,8 @@
 # ReviewBench-Maintainability 周报：面向 ICLR 2027
 
+> 历史周报（状态截至 2026-08-05）。414-task hard release 和修正后的模型结果见
+> [`PROGRESS_20260808.md`](PROGRESS_20260808.md)。
+
 **周期：2026.07.29 至 2026.08.05**  
 **状态截点：2026-08-05 00:35 PDT**
 

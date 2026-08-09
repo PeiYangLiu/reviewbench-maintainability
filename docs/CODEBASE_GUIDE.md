@@ -1,8 +1,8 @@
 # ReviewBench-Maintainability 代码地图
 
-更新时间：2026-07-14
+更新时间：2026-08-08
 
-本文说明当前代码的职责边界、权威入口、输入输出、测试覆盖和历史脚本关系。数据血缘见 `docs/DATA_PROVENANCE.md`，当前里程碑和未完成事项见 `docs/PROGRESS_20260714.md`。
+本文说明当前代码的职责边界、权威入口、输入输出、测试覆盖和历史脚本关系。数据血缘见 `docs/DATA_PROVENANCE.md`，当前里程碑和未完成事项见 `docs/PROGRESS_20260808.md`。
 
 ## 1. 权威入口
 
@@ -10,9 +10,10 @@
 
 1. `src/reviewbench_maintainability/`：可安装、可复用的核心库和 CLI。
 2. `scripts/`：环境相关、实验相关或批处理脚本。
-3. `data/releases/v1/`：唯一允许进入版本控制的最终数据。
+3. `data/releases/`：经过 manifest、完整性和可移植性检查的冻结数据。
 
-最终 v1 任务不从旧 `data/trackA/`、`data/difficulty/` 或任意 `data/runs/` 文件直接读取。权威入口是：
+最终任务不从旧 `data/trackA/`、`data/difficulty/` 或任意
+`data/runs/` 文件直接读取。权威入口是：
 
 | 用途 | 权威文件 |
 |---|---|
@@ -22,6 +23,12 @@
 | 发布统计 | `data/releases/v1/report.json` |
 | 发布口径 | `data/releases/v1/manifest.json` |
 | 三模型评测 | `data/releases/v1/evaluations/three-model-20260714/` |
+| 475 题 general preview | `data/releases/reserves/20260728/cumulative_preview.jsonl` |
+| 414 道 hard | `data/releases/hard/20260808/tasks.jsonl` |
+| 414 条 hard Oracle | `data/releases/hard/20260808/oracles.jsonl` |
+| 1,242 条 hard 评测 | `data/releases/hard/20260808/results.jsonl` |
+| hard 总榜 | `data/releases/hard/20260808/report.json` |
+| hard 发布口径 | `data/releases/hard/20260808/manifest.json` |
 
 ## 2. 核心库
 
@@ -445,9 +452,81 @@ Go 默认 harness。
 
 测试：`tests/test_package_agentic_evaluation.py`
 
+### 5.7 `package_hard_release.py`
+
+职责：把已发布 hard slice 和多个新 hard wave 合并成单一可移植发布。
+
+输入：
+
+- 475 题累计 task metadata；
+- calibrated cumulative results；
+- v1 和两个 reserve 的 Oracle；
+- 一个或多个已经完成 generation/correctness/judgment/summary 的 hard wave。
+
+硬校验：
+
+- task ID 全局唯一；
+- Oracle ID 与 task ID 集完全一致；
+- 每题恰好三个模型结果；
+- published 与新 wave 不重叠；
+- 模型集合固定；
+- 所有 machine-specific root 都被占位符替换。
+
+输出：
+
+- `tasks.jsonl`
+- `oracles.jsonl`
+- `results.jsonl`
+- `published-hard-results.jsonl`
+- `result-overrides.jsonl`
+- `report.json`
+- `README.md`
+- `manifest.json`
+- `SHA256SUMS`
+
+测试：`tests/test_package_hard_release.py`
+
+### 5.8 Hard-wave orchestration
+
+`run_hard_wave_generation.sh`：
+
+- Claude 使用已验证的 direct chat endpoint；
+- Claude 与 GPT 并行，Gemini 在共享 direct endpoint 上顺序执行；
+- 默认 `--resume` 保留成功和失败终态，不做 success-only resampling；
+- 只有审计确认的基础设施失败才通过
+  `REVIEWBENCH_RESTART_FAILED=1` 或显式 task ID fresh-retry；
+- endpoint 和 worker 数可以通过环境变量覆盖。
+
+`run_hard_wave_summary_when_ready.sh`：
+
+- 只接受与当前文件 hash 一致的 generation、correctness 和 judgment
+  completion marker；
+- 调用 `validate_hard_wave.py ready` 检查 task-model key 集和 artifact identity；
+- 支持轮询间隔和 timeout。
+
+`validate_hard_wave.py correctness`：
+
+- 从 `oracles.jsonl` 自动推导 task → lane；
+- 验证七条 lane 的精确 `(task_id, model)` 集；
+- 核对 correctness 的 `start_sha` 和 candidate patch hash；
+- 生成只含七个权威 JSONL 的 `correctness-canonical/`；
+- 把 generation hash 写入 correctness marker，防止 generation 重跑后误用旧结果。
+
+`validate_hard_wave.py legacy-attest/summary`：
+
+- generation 绑定 canonical task fingerprint 和 patch bytes；
+- judgment 绑定同一 task/generation fingerprint、rubric text、judge model 和
+  context window；
+- summary 重算 resolved gate conjunction、leaderboard 和 pairwise；
+- `summary.complete.json` 绑定全部上游 marker 与最终 results/report。
+
+历史 wave 使用显式 `legacy-attest`：它证明当前冻结 artifact 之间连续一致，但不
+宣称能事后证明原始 API 调用当时的 prompt/patch bytes。新 wave 由 runtime
+marker 在原始执行时写 fingerprint。
+
 ## 6. 测试
 
-当前完整测试为 74 项。
+当前完整测试为 **158 项，分布在 28 个测试文件**。
 
 | 测试文件 | 覆盖面 |
 |---|---|
@@ -469,6 +548,8 @@ Go 默认 harness。
 | `test_summarize_release_evaluation.py` | 异构 correctness schema 和排行榜 |
 | `test_attach_evaluation_results.py` | 评测结果与 review items 的严格连接 |
 | `test_package_agentic_evaluation.py` | patch/trace 可移植路径与发布复制 |
+| `test_package_hard_release.py` | hard task/Oracle/result 合并、路径替换、manifest 和 checksums |
+| `test_validate_hard_wave.py` | generation/correctness/judgment marker、精确 pair 集和 stale artifact 拒绝 |
 
 运行：
 
@@ -479,10 +560,13 @@ git diff --check
 
 ## 7. 数据放置规则
 
-`.gitignore` 默认忽略整个 `data/`，只放行：
+`.gitignore` 默认忽略整个 `data/`，只放行冻结发布：
 
 ```text
 data/releases/v1/**
+data/releases/reserves/20260721/**
+data/releases/reserves/20260728/**
+data/releases/hard/20260808/**
 ```
 
 项目中允许保留：
@@ -509,9 +593,13 @@ data/releases/v1/**
 
 ## 8. 当前限制
 
-1. 100 题中只有 11 道在两个质量模型中都判为 hard。
-2. 最终 correctness 环境高度异构，没有一个命令能在全新机器上无准备地重放全部 100 题。
-3. `oracles.jsonl` 保存命令、工具链和 recovery 元数据，但 session worktree 和日志不随发布提交。
-4. 模型 solver 当前只改锚点生产文件。需要多文件重构的题可能被低估。
-5. 维护性统一裁判是 Claude Opus 4.8，Claude 候选存在无法完全排除的自裁偏差。
-6. 持续 miner 仍在运行，v1 固定不随新候选自动变化。
+1. correctness 环境高度异构，compact release 不包含数百 GB 的 worktree、
+   container layer 和 dependency cache。
+2. `oracles.jsonl` 保存命令、工具链、行为断言和 recovery 元数据，但恢复历史
+   环境仍可能需要专用镜像或 sidecar。
+3. 模型 solver 当前只改锚点 production file，多文件 modularity/API 题可能
+   被系统性低估。
+4. 维护性统一裁判是 Claude Opus 4.8，Claude 候选存在无法完全排除的自裁偏差。
+5. 新 374 hard 与既有 40 hard 使用不同的历史 difficulty 合并规则；manifest
+   和进展文档显式保留该差异。
+6. hard release 是严格可执行子集，不是全部真实 review comment 的随机样本。

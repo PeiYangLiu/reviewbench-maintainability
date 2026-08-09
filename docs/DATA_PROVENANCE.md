@@ -1,10 +1,11 @@
-# ReviewBench-Maintainability v1 数据血缘
+# ReviewBench-Maintainability 数据血缘
 
-更新时间：2026-07-14
+更新时间：2026-08-08
 
-本文回答以下问题：
+本文以 v1 的逐字段血缘为基础，并延伸到两个 reserve、475 题 general
+release 和 414 题 hard release。它回答以下问题：
 
-1. 最终 100 道题从哪些候选池进入。
+1. v1 100 道、475 题累计集和 414 hard 分别从哪些候选池进入。
 2. 一道题的 comment、commit、before、golden、质量判断和 oracle 分别来自哪里。
 3. `data/releases/v1/` 每个文件怎样生成。
 4. 三模型评测的 generation、correctness、judgment 和结果怎样连接。
@@ -761,3 +762,247 @@ Cumulative v1 + 20260721 + 20260728:
 tasks, oracles, provenance, failures, duplicate exclusions, reports, README,
 and cumulative preview. No machine-specific absolute paths or credentials are
 included.
+
+## 13. 20260808 hard release 血缘
+
+### 13.1 发布关系
+
+`data/releases/hard/20260808/` 是 hard 专项发布，不替换 475 题 general
+release。
+
+```text
+475 strict general tasks
+├── 40 published hard ────────────────┐
+└── 435 medium                        │
+                                      ├── 414 hard release
+739 semantic-unique hard candidates   │
+└── 374 new strict hard ──────────────┘
+```
+
+374 道新 hard 在冻结前已经排除与既有发布相同的任务 ID 和同一局部 reference
+solution。当前唯一 strict universe 是 849 道：414 hard + 435 medium。
+
+### 13.2 新 hard 候选来源
+
+存量池处理：
+
+```text
+70,939 quality-eligible
+− 3,000 priority tranche
+= 67,939 backlog
+→ 56,508 complete evidence
+→ 5,892 GPT strict pass
+→ hard selection
+→ 797 candidates
+→ exclude 5 published IDs
+→ 792 novel IDs
+→ full same-file reference-fix semantic dedup
+→ 739 Oracle engineering tasks
+```
+
+新 hard selection 要求：
+
+- GPT `quality-improvement/v1` strict pass；
+- 至少一个独立 judge 给出 intrinsic `hard`；
+- 完整 before、local patch、full same-file patch；
+- 非 test/docs/generated anchor；
+- 维护性是 primary goal；
+- 非 partial、style-only 或 behavior-fix primary。
+
+固定 confidence threshold 没有继续作为跨模型 hard 门，因为 GPT 与 Claude 的
+self-reported confidence 分布未校准。
+
+### 13.3 Oracle 工程来源
+
+739 道任务按语言拆为：
+
+```text
+gopy / scripted / tsjs / csharp / jvm / rust / native
+```
+
+每条 lane 的成功记录写入独立 `results.jsonl`。发布收集器
+`collect_hard_oracle_passes.py` 统一识别不同 schema 的严格成功：
+
+- `oracle_result=PASS_TO_PASS`
+- 或 `status=strict_pass`
+- 或 `disposition=accept`
+
+且同时要求：
+
+- start 三次稳定；
+- source-only golden 三次稳定；
+- `golden_correctness_ok=true`；
+- `pass_to_pass > 0`；
+- `changed_lines_covered=true`。
+
+最后一次 lane snapshot 有 372 个当前 strict pass。发布 union 又恢复两个此前
+已经完整验证、但被后续 flaky 重跑覆盖的 strict-pass 记录，得到 374 个新 hard。
+因此 release merge 使用 strongest validated evidence，而不是 last-write-wins。
+
+374 道新 hard 的 lane 来源：
+
+| Lane | Tasks |
+|---|---:|
+| gopy | 73 |
+| native | 65 |
+| rust | 71 |
+| scripted | 53 |
+| jvm | 52 |
+| tsjs | 42 |
+| csharp | 18 |
+
+### 13.4 Wave 冻结
+
+新 hard 分三波完成评测：
+
+| Wave | Tasks | Task-model pairs |
+|---|---:|---:|
+| wave-001 | 159 | 477 |
+| wave-003 | 190 | 570 |
+| wave-004 | 25 | 75 |
+| **Total** | **374** | **1,122** |
+
+每个 wave 至少包含：
+
+- `tasks.jsonl`
+- `oracles.jsonl`
+- 三个模型的 generation results
+- 七条 correctness lane JSONL
+- calibrated rubric-v2 judgments
+- normalized `results.jsonl`
+- `report.json`
+- generation/correctness/judgment/summary completion markers
+
+`correctness-canonical/` 只放七个权威 lane 文件。工作目录中的重跑前备份、
+interruption checkpoint 或 evidence shard 不允许被汇总器读取。
+
+Marker 不是行数完成标志，而是 content attestation：
+
+- generation：task file、逐题 task fingerprint、result JSONL、patch bytes；
+- correctness：task、Oracle、generation hash、start revision、candidate patch hash；
+- judgment：task fingerprint、generation fingerprint、rubric text、judge
+  model、context window、judgment JSONL；
+- summary：全部 ready input、normalized results、report、重算 leaderboard/pairwise。
+
+三个 20260808 wave 在 fingerprint 代码加入前已经完成，因此 manifest 中标为
+`legacy-continuity`。该模式验证当前 task、patch、correctness、judgment 和
+summary 相互一致，并核对 judgment 引用的 patch bytes；它不把事后补写的 hash
+描述成原始调用时已经存在的证明。后续新 wave 必须使用 `runtime` marker。
+
+### 13.5 Published hard slice
+
+既有 40 道 hard 从以下两个文件按任务 ID 连接：
+
+- tasks：
+  `data/releases/reserves/20260728/cumulative_preview.jsonl`
+- calibrated results：
+  session 中冻结的 475-task rubric-v2 cumulative results
+
+任务过滤字段：
+
+```text
+release_validation.judged_difficulty == "hard"
+```
+
+Oracle 从 v1、20260721 reserve 和 20260728 reserve 的三个 `oracles.jsonl`
+按 ID 连接。不得依赖物理行号。
+
+### 13.6 四门评测连接
+
+所有 414 道使用相同归一化结果 schema：
+
+```text
+task.id + model
+→ generation_apply
+→ scope_ok
+→ correctness_ok
+→ maintainability_pass
+→ resolved
+```
+
+`resolved=true` 当且仅当四门全部通过。最终 1,242 条结果必须满足：
+
+- 414 个唯一 task ID；
+- 每题三个模型；
+- 1,242 个唯一 `(task_id, model)`；
+- task、Oracle、result 的 ID 集一致；
+- 无 judge error；
+- 无 infra-shaped success fallback。
+
+### 13.7 Claude generation 修正
+
+wave-003 首次通过 8787 aggregate proxy 生成 Claude candidate，产生
+95/190 failure。相同 95 道在 4141 direct endpoint 上 fresh-run 后：
+
+```text
+94 generated
+1 genuine max-round failure
+```
+
+修正流程：
+
+1. 保留原 95 个成功 generation；
+2. 提取 95 个失败 task ID；
+3. 不恢复 exhausted trace，从原始 source fresh-run；
+4. 用 94 个成功结果替换 canonical generation；
+5. 只重放这 95 个 Claude correctness pair；
+6. 保证其余 475 correctness record object-identical；
+7. 重新执行 rubric-v2 judgment 和 summary。
+
+普通 `--resume` 会恢复 32 轮已耗尽的 trace，因此不能产生新样本。正常 benchmark
+run 保留该 terminal failure，防止只重采样失败项造成 selection bias。只有像
+wave-003 aggregate-proxy 这样有独立基础设施证据的批次，才使用
+`--restart-failed` 或显式 task ID 做审计 recovery，并把 correction 写入发布血缘。
+
+### 13.8 可移植发布
+
+`scripts/package_hard_release.py` 接受：
+
+- published cumulative tasks/results/oracles；
+- 一个或多个已完成 hard wave；
+- machine root replacement。
+
+它输出：
+
+```text
+data/releases/hard/20260808/
+├── README.md
+├── tasks.jsonl
+├── oracles.jsonl
+├── published-hard-results.jsonl
+├── result-overrides.jsonl
+├── results.jsonl
+├── report.json
+├── manifest.json
+└── SHA256SUMS
+```
+
+路径替换：
+
+| Machine root | Release placeholder |
+|---|---|
+| session root | `${REVIEWBENCH_SESSION_FILES}` |
+| repository root | `${REVIEWBENCH_REPOSITORY}` |
+| home root | `${HOME}` |
+
+`result-overrides.jsonl` 保存发布时应用的 runner-derived correction，不把
+session-only correction 隐藏成不可追溯的 last-write。manifest 同时记录
+published source、三个 wave 和 correction overlay 的 content hash。
+
+路径替换递归应用到 nested command、coverage report、artifact path 和 failure log。
+打包器在写完后扫描所有发布文件；任何原始 machine root 残留都会使打包失败。
+
+### 13.9 不进入版本控制的内容
+
+以下仍是可重建或过大的 session artifact：
+
+- 287 GB 级 correctness worktree 和 build output；
+- Docker image/layer；
+- dependency cache；
+- raw API response；
+- transient lock、PID、interruption log；
+- per-attempt coverage binary；
+- repository clone cache。
+
+发布包保留复核所需的任务、命令、工具链、行为断言、coverage 摘要、四门结果和
+hash，但不假装能够在没有历史环境恢复的全新机器上一键重放所有仓库。
