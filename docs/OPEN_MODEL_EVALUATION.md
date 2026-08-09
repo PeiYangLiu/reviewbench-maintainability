@@ -269,3 +269,47 @@ Full 2,070-pair execution remains blocked until those 40 original per-task
 replay contracts are recovered into the seven-lane format. For development
 only, `prepare` and `run` accept `--allow-partial-modern`; such an artifact is
 explicitly marked partial and cannot produce a complete manifest.
+
+## 8. Local Copilot API evaluation
+
+Six current hosted models are evaluated through the verified local direct
+endpoint `http://127.0.0.1:4141/v1/chat/completions`:
+
+```text
+gpt-5.6-sol
+gpt-5.6-terra
+gpt-5.6-luna
+claude-opus-5
+claude-sonnet-5
+gemini-3.6-flash
+```
+
+All use the same 414-task `agentic-line-edit/v1` protocol, 32-round limit,
+exact-start repo cache, and complete raw-response trace format.
+
+Local artifact root:
+
+```text
+/home/v-peiyangliu/conversationhub/liupeiyang/code_quality/
+  reviewbench-hard414-copilot-20260809/
+```
+
+Each model directory contains:
+
+- full `generation_results.jsonl`;
+- every per-round raw response and parsed tool trace;
+- all candidate patches;
+- completion marker and generation summary;
+- run log.
+
+The `/home` volume currently has sufficient capacity, so these artifacts remain
+local while generation runs. If the directory grows beyond comfortable local
+capacity, it will be copied with AzCopy to:
+
+```text
+https://conversationhub.blob.core.windows.net/amulet/
+  reviewbench-openmodels/copilot-api-20260809/
+```
+
+Any upload will be followed by a blob listing, manifest hash, and documented
+per-model path. Local files are not removed until the blob copy is verified.
