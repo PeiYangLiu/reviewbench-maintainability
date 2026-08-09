@@ -17,6 +17,20 @@ trust_args=()
 if [ "${TRUST_REMOTE_CODE:-0}" = "1" ]; then
   trust_args+=(--trust-remote-code)
 fi
+vllm_args=(
+  --vllm-extra-arg=--enable-prefix-caching
+  --vllm-extra-arg=--max-num-seqs
+  --vllm-extra-arg="$MAX_NUM_SEQS"
+)
+if [ "${ENABLE_EXPERT_PARALLEL:-0}" = "1" ]; then
+  vllm_args+=(--vllm-extra-arg=--enable-expert-parallel)
+fi
+if [ "${LANGUAGE_MODEL_ONLY:-0}" = "1" ]; then
+  vllm_args+=(--vllm-extra-arg=--language-model-only)
+fi
+if [ "${DISABLE_CUSTOM_ALL_REDUCE:-0}" = "1" ]; then
+  vllm_args+=(--vllm-extra-arg=--disable-custom-all-reduce)
+fi
 
 persist() {
   status="$?"
@@ -44,13 +58,11 @@ python3 scripts/run_open_model_agentic.py \
   --out-dir "$generation_root" \
   --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
   --max-model-len "$MAX_MODEL_LEN" \
-  --gpu-memory-utilization 0.90 \
+  --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.90}" \
   --workers "$GENERATION_WORKERS" \
   --max-rounds 32 \
   --max-output-tokens 4096 \
   --server-timeout 7200 \
   --download-dir "/scratch/hf-cache/${AMLT_JOB_NAME:-job}" \
   "${trust_args[@]}" \
-  --vllm-extra-arg=--enable-prefix-caching \
-  --vllm-extra-arg=--max-num-seqs \
-  --vllm-extra-arg="$MAX_NUM_SEQS"
+  "${vllm_args[@]}"

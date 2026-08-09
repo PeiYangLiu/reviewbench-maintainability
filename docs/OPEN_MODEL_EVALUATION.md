@@ -13,12 +13,12 @@ artifact，再运行 correctness 和 maintainability；以后 rubric 改变时�
 | AMLT environment | local conda `amlt10` |
 | AMLT version | 10.14.0 |
 | Project | `reviewbench-maintainability` |
-| Active experiments | `reviewbench-qwen-latest-hard414-v1`, `reviewbench-open-latest-hard414-v1`, `reviewbench-kimi25-hard414-v1` |
+| Active experiments | `reviewbench-qwen-latest-hard414-v2`, `reviewbench-open-latest-hard414-v3`, `reviewbench-kimi25-hard414-v2` |
 | Service | Singularity |
 | Target | `msrresrchbasicvc` |
 | Workspace | `Workspace_NLC` |
 | Project storage | `conversationhub / amulet` |
-| Code snapshot | `projects/reviewbench-maintainability/amlt-code/9d4941f31edb2412b7dae2e08a13336f` |
+| Code snapshots | `projects/reviewbench-maintainability/amlt-code/76e74460508d4bad3bb97b3c34c2e9a5` (Qwen/Kimi), `projects/reviewbench-maintainability/amlt-code/b08633d7221abfee389e47eb69cdbe18` (cross-family) |
 | Task set | `data/releases/hard/20260808/tasks.jsonl` |
 | Tasks | 414 |
 | Protocol | `agentic-line-edit/v1`, maximum 32 rounds |
@@ -67,34 +67,47 @@ reviewbench-openmodels/repo-cache-minimal
 The cache contains 340 repositories and only the exact task commit, trees, and
 blobs needed by `git show`; parent history and build artifacts are excluded.
 
-Active latest-Qwen result roots:
+Active latest-Qwen retry result roots
+(`reviewbench-qwen-latest-hard414-v2`):
 
 | Job | Backend ID | Blob result path |
 |---|---|---|
-| `qwen3-coder-next-fp8` | `musing_office_r9d8x2ysj9` | `projects/reviewbench-maintainability/amlt-results/7213695212.05418-8ebe60a6-2ee5-4962-9542-4dc48b51e119` |
-| `qwen36-27b` | `happy_dog_g72rtj81j0` | `projects/reviewbench-maintainability/amlt-results/7213695212.05232-29f47ce7-942f-4b03-9d52-3d6a620047db` |
-| `qwen36-35b-a3b` | `calm_car_5cv9rn3t70` | `projects/reviewbench-maintainability/amlt-results/7213695212.05046-0d6240a5-1bcc-438b-965a-aa56c6768ce3` |
+| `qwen3-coder-next-fp8` | `lucid_calypso_p3g6g7bzq7` | `projects/reviewbench-maintainability/amlt-results/7213692609.19921-3d4ecb43-1694-46a3-9a17-7c81468f2148` |
+| `qwen36-27b` | `frosty_turnip_5fq0cl3s9x` | `projects/reviewbench-maintainability/amlt-results/7213692609.19729-c4908ce4-ce7b-4daf-8d63-8b91805d88c8` |
+| `qwen36-35b-a3b` | `crimson_chayote_s4t15t5bzw` | `projects/reviewbench-maintainability/amlt-results/7213692609.19554-34348a7b-dcf4-461a-8701-b840b36599b4` |
 
-Active cross-family result roots:
-
-| Job | Backend ID | Blob result path |
-|---|---|---|
-| `devstral2-123b-fp8` | `purple_carnival_j14g3dz3fh` | `projects/reviewbench-maintainability/amlt-results/7213695172.92394-6a9f6a88-7fac-4f66-8725-1c31641410ba` |
-| `gpt-oss-120b` | `keen_calypso_50g95dmwzh` | `projects/reviewbench-maintainability/amlt-results/7213695172.92205-52d66fb9-3ecb-4e45-ab44-f92bc959e3aa` |
-| `minimax-m21-fp8` | `sharp_bee_8mbf3h0vnb` | `projects/reviewbench-maintainability/amlt-results/7213695172.92021-32c2d3f0-8679-4bc8-bfcf-e18b76ad557c` |
-
-Kimi K2.5:
+Active cross-family retry result roots
+(`reviewbench-open-latest-hard414-v3`):
 
 | Job | Backend ID | Blob result path |
 |---|---|---|
-| `kimi-k25` | `olden_leg_0rd7vknd5k` | `projects/reviewbench-maintainability/amlt-results/7213695135.17390-91af252b-95c0-4b98-88a1-c016e03cae39` |
+| `devstral2-123b-fp8` | `happy_pumpkin_5fnmy5716z` | `projects/reviewbench-maintainability/amlt-results/7213692429.75640-6bb028b1-99ed-4e5b-88b0-c558f61ed1a2` |
+| `gpt-oss-120b` | `tender_dolphin_v5rn7h26vb` | `projects/reviewbench-maintainability/amlt-results/7213692429.75446-6a3b509f-289f-42dc-bd08-9d84150743a8` |
+| `minimax-m21-fp8` | `placid_animal_s26w47l71l` | `projects/reviewbench-maintainability/amlt-results/7213692429.75268-d7406a12-413b-414b-8b2b-c35c980690a0` |
 
-Retired Qwen-v1 paths remain in blob as failure evidence. Those jobs loaded
-vLLM but failed before inference because vLLM upgraded NumPy while the platform
-image retained an incompatible old SciPy. Qwen-v2 and the first cross-family
-submission were canceled before inference when the requested model set was
-replaced by newer family releases. Active configs pin `numpy==2.2.6` and
-`scipy==1.15.3`.
+Kimi K2.5 retry (`reviewbench-kimi25-hard414-v2`):
+
+| Job | Backend ID | Blob result path |
+|---|---|---|
+| `kimi-k25` | `quiet_muscle_rv6bqty0wr` | `projects/reviewbench-maintainability/amlt-results/7213692577.50703-02a66671-a198-437e-b76e-973c6dec125d` |
+
+Failed and canceled latest-model attempts remain immutable failure evidence:
+
+| Experiment / job | Terminal state | Blob result path |
+|---|---|---|
+| `reviewbench-qwen-latest-hard414-v1:qwen3-coder-next-fp8` | failed before inference | `projects/reviewbench-maintainability/amlt-results/7213695212.05418-8ebe60a6-2ee5-4962-9542-4dc48b51e119` |
+| `reviewbench-qwen-latest-hard414-v1:qwen36-27b` | failed before inference | `projects/reviewbench-maintainability/amlt-results/7213695212.05232-29f47ce7-942f-4b03-9d52-3d6a620047db` |
+| `reviewbench-qwen-latest-hard414-v1:qwen36-35b-a3b` | failed before inference | `projects/reviewbench-maintainability/amlt-results/7213695212.05046-0d6240a5-1bcc-438b-965a-aa56c6768ce3` |
+| `reviewbench-open-latest-hard414-v1:devstral2-123b-fp8` | failed before inference | `projects/reviewbench-maintainability/amlt-results/7213695172.92394-6a9f6a88-7fac-4f66-8725-1c31641410ba` |
+| `reviewbench-open-latest-hard414-v1:gpt-oss-120b` | canceled while queued | `projects/reviewbench-maintainability/amlt-results/7213695172.92205-52d66fb9-3ecb-4e45-ab44-f92bc959e3aa` |
+| `reviewbench-open-latest-hard414-v1:minimax-m21-fp8` | failed before inference | `projects/reviewbench-maintainability/amlt-results/7213695172.92021-32c2d3f0-8679-4bc8-bfcf-e18b76ad557c` |
+| `reviewbench-open-latest-hard414-v2:minimax-m21-fp8` | canceled while queued | `projects/reviewbench-maintainability/amlt-results/7213692649.93167-743e4cf8-fac8-414c-a2af-afa920554df6` |
+| `reviewbench-kimi25-hard414-v1:kimi-k25` | failed before inference | `projects/reviewbench-maintainability/amlt-results/7213695135.17390-91af252b-95c0-4b98-88a1-c016e03cae39` |
+
+Failed jobs that reached the wrapper contain the complete server log, manifest,
+and packaged diagnostic archive. Still earlier retired Qwen jobs preserve the
+original NumPy/SciPy incompatibility evidence. Active configs pin
+`numpy==2.2.6` and `scipy==1.15.3`.
 
 ## 4. Complete inference artifacts
 
@@ -154,15 +167,32 @@ patches/traces. GPU model inference is not repeated.
 
 ## 6. Submission status
 
-Seven latest-model jobs were accepted by `msrresrchbasicvc` on 2026-08-09:
+The first latest-model attempts failed before any benchmark inference. Their
+artifacts were preserved, diagnosed, and superseded without treating the jobs
+as model results:
+
+| Jobs | Root cause | Retry change |
+|---|---|---|
+| Qwen3-Coder-Next, Qwen3.6 27B/35B, Devstral-2 | vLLM custom all-reduce aborted with `custom_all_reduce.cuh:455 'invalid argument'` on the Singularity A100 topology | `--disable-custom-all-reduce`, falling back to NCCL |
+| MiniMax M2.1 | FP8 expert shard width 192 was not divisible by block width 128 under TP8 | official `--enable-expert-parallel`; NCCL fallback also enabled |
+| Kimi K2.5 | the 0.90 GPU budget left `-3.75 GiB` for KV cache after loading 71.19 GiB per H100 | text-only serving, `gpu_memory_utilization=0.98`, and `max_num_seqs=4` |
+
+The queued first-attempt GPT-OSS job and an intermediate MiniMax retry were
+canceled before model execution once the shared all-reduce failure was known.
+
+Seven corrected jobs were accepted by `msrresrchbasicvc` on 2026-08-09:
 
 - Qwen3-Coder-Next and Qwen3.6 27B/35B in
-  `reviewbench-qwen-latest-hard414-v1`;
+  `reviewbench-qwen-latest-hard414-v2`;
 - Devstral-2, GPT-OSS and MiniMax M2.1 in
-  `reviewbench-open-latest-hard414-v1`;
-- Kimi K2.5 in `reviewbench-kimi25-hard414-v1`.
+  `reviewbench-open-latest-hard414-v3`;
+- Kimi K2.5 in `reviewbench-kimi25-hard414-v2`.
 
-They entered `preparing` while the corrected vLLM environment was built.
+At `2026-08-09T13:36:08Z`, all seven retries were accepted and queued on the
+requested target; none had failed.
+
+All retry result roots are listed in section 3. No failed startup produced a
+benchmark sample, so retries do not overwrite or resample successful inference.
 
 GLM-5-FP8 and DeepSeek-V3.2-FP8 remain blocked on H200 image compatibility.
 The MSBJ04 fallback account currently has no configured/login-visible targets,
@@ -287,14 +317,15 @@ gemini-3.6-flash
 All use the same 414-task `agentic-line-edit/v1` protocol, 32-round limit,
 exact-start repo cache, and complete raw-response trace format.
 
-Local artifact root:
+Artifact root on the `conversationhub` BlobFuse2 mount:
 
 ```text
 /home/v-peiyangliu/conversationhub/liupeiyang/code_quality/
   reviewbench-hard414-copilot-20260809/
 ```
 
-Each model directory contains:
+Outputs are written directly to this blob-backed mount rather than staged on
+ephemeral local disk. Each model directory contains:
 
 - full `generation_results.jsonl`;
 - every per-round raw response and parsed tool trace;
@@ -302,14 +333,6 @@ Each model directory contains:
 - completion marker and generation summary;
 - run log.
 
-The `/home` volume currently has sufficient capacity, so these artifacts remain
-local while generation runs. If the directory grows beyond comfortable local
-capacity, it will be copied with AzCopy to:
-
-```text
-https://conversationhub.blob.core.windows.net/amulet/
-  reviewbench-openmodels/copilot-api-20260809/
-```
-
-Any upload will be followed by a blob listing, manifest hash, and documented
-per-model path. Local files are not removed until the blob copy is verified.
+After each model completes, its completion marker, manifest, and checksums are
+written beside the full JSONL, traces, and patches. No inference artifact is
+deleted after aggregation.
