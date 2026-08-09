@@ -68,8 +68,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--models",
         nargs="+",
-        choices=sorted(api.MODEL_SPECS),
         default=list(api.MODEL_SPECS),
+        help=(
+            "Model IDs. Unknown IDs are sent to the configured "
+            "OpenAI-compatible chat endpoint."
+        ),
     )
     parser.add_argument("--ids", nargs="+")
     parser.add_argument("--limit", type=int)

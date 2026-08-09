@@ -99,3 +99,32 @@ def test_force_chat_rejects_silent_solver_fallback(monkeypatch):
 
     with pytest.raises(RuntimeError, match="solver model mismatch"):
         MODULE.invoke_model("gpt-5.5", "system", "prompt", args)
+
+
+def test_custom_model_defaults_to_openai_compatible_chat(monkeypatch):
+    captured = {}
+
+    def fake_post_json(endpoint, payload, headers, **kwargs):
+        captured["payload"] = payload
+        return {
+            "model": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+            "choices": [{"message": {"content": "OK"}}],
+            "usage": {},
+        }
+
+    monkeypatch.setattr(MODULE, "post_json", fake_post_json)
+    args = Namespace(
+        chat_endpoint="http://127.0.0.1:8000/v1/chat/completions",
+        responses_endpoint="unused",
+        token_endpoint="unused",
+        max_output_tokens=128,
+        request_timeout=30,
+        request_retries=1,
+        force_chat=True,
+    )
+    model = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+    text, _ = MODULE.invoke_model(model, "system", "prompt", args)
+
+    assert text == "OK"
+    assert captured["payload"]["model"] == model
+    assert "reasoning_effort" not in captured["payload"]

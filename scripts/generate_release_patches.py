@@ -60,8 +60,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--models",
         nargs="+",
-        choices=sorted(MODEL_SPECS),
         default=list(MODEL_SPECS),
+        help=(
+            "Model IDs. Known Copilot models use their configured provider; "
+            "unknown IDs default to an OpenAI-compatible chat endpoint."
+        ),
     )
     parser.add_argument("--ids", nargs="+")
     parser.add_argument("--limit", type=int)
@@ -302,7 +305,10 @@ def invoke_model(
     prompt: str,
     args: argparse.Namespace,
 ) -> tuple[str, dict[str, Any]]:
-    spec = MODEL_SPECS[model]
+    spec = MODEL_SPECS.get(
+        model,
+        {"provider": "chat", "reasoning_effort": None},
+    )
     if spec["provider"] == "chat" or getattr(args, "force_chat", False):
         payload: dict[str, Any] = {
             "model": model,
@@ -388,7 +394,10 @@ def generate_one(
         "path": path,
         "start_sha": task.get("start_sha"),
         "model": model,
-        "provider": MODEL_SPECS[model]["provider"],
+        "provider": MODEL_SPECS.get(
+            model,
+            {"provider": "chat"},
+        )["provider"],
         "status": "failed",
         "apply_ok": False,
         "attempts": [],
