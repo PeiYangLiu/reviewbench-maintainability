@@ -13,7 +13,7 @@ artifact，再运行 correctness 和 maintainability；以后 rubric 改变时�
 | AMLT environment | local conda `amlt10` |
 | AMLT version | 10.14.0 |
 | Project | `reviewbench-maintainability` |
-| Active experiments | `reviewbench-qwen-hard414-v2`, `reviewbench-open-hard414-v1` |
+| Active experiments | `reviewbench-qwen-latest-hard414-v1`, `reviewbench-open-latest-hard414-v1`, `reviewbench-kimi25-hard414-v1` |
 | Service | Singularity |
 | Target | `msrresrchbasicvc` |
 | Workspace | `Workspace_NLC` |
@@ -31,15 +31,13 @@ All Hugging Face revisions are immutable commit SHAs.
 
 | Job | Model / revision | SKU | TP | SLA |
 |---|---|---|---:|---|
-| `qwen25-coder-7b` | `Qwen/Qwen2.5-Coder-7B-Instruct@c03e6d358207e414f1eca0bb1891e29f1db0e242` | `40G1-A100` | 1 | Standard |
-| `qwen25-coder-32b` | `Qwen/Qwen2.5-Coder-32B-Instruct@381fc969f78efac66bc87ff7ddeadb7e73c218a7` | `40G2-A100` | 2 | Standard |
-| `qwen3-coder-30b-a3b` | `Qwen/Qwen3-Coder-30B-A3B-Instruct@b2cff646eb4bb1d68355c01b18ae02e7cf42d120` | `40G2-A100` | 2 | Standard |
 | `qwen3-coder-next-fp8` | `Qwen/Qwen3-Coder-Next-FP8@da6e2ed27304dd39abadd9c82ef50e8de67bdd4c` | `40G4-A100` | 4 | Standard |
-| `qwen3-coder-480b-a35b-fp8` | `Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8@003f183a92fbe5b9a8325aaa8b2ae797c91dd90f` | `80G8-A100-IB-NvLink` | 8 | Basic |
-| `devstral-small-2507` | `mistralai/Devstral-Small-2507@bd165ab26cebbcc2eea2c4ecbfc07f3ac42b3c39` | `40G2-A100` | 2 | Standard |
+| `qwen36-27b` | `Qwen/Qwen3.6-27B@6a9e13bd6fc8f0983b9b99948120bc37f49c13e9` | `40G2-A100` | 2 | Standard |
+| `qwen36-35b-a3b` | `Qwen/Qwen3.6-35B-A3B@995ad96eacd98c81ed38be0c5b274b04031597b0` | `40G4-A100` | 4 | Standard |
+| `devstral2-123b-fp8` | `mistralai/Devstral-2-123B-Instruct-2512@1613bf01adb5e1c6fdc196b46e6b173eae75eb4a` | `40G8-A100-IB-NvLink` | 8 | Standard |
 | `gpt-oss-120b` | `openai/gpt-oss-120b@b5c939de8f754692c1647ca79fbf85e8c1e70f8a` | `40G4-A100` | 4 | Standard |
-| `glm45-air-fp8` | `zai-org/GLM-4.5-Air-FP8@f9a9c5acf5e543cd24d659a056c5dbcda78ffcfc` | `40G4-A100` | 4 | Standard |
-| `deepseek-coder-v2` | `deepseek-ai/DeepSeek-Coder-V2-Instruct@2453c79a2a0947968a054947b53daa598cb3be52` | `80G8-A100-IB-NvLink` | 8 | Basic |
+| `minimax-m21-fp8` | `MiniMaxAI/MiniMax-M2.1@cd97f59135f37b2a6bf09356e485d5e4aeb7dc9c` | `40G8-A100-IB-NvLink` | 8 | Standard |
+| `kimi-k25` | `moonshotai/Kimi-K2.5@4d01dfe0332d63057c186e0b262165819efb6611` | `80G8-H100-IB-NvLink` | 8 | Standard |
 
 GPU selection follows:
 
@@ -47,8 +45,10 @@ GPU selection follows:
 A100 40GB → A100 80GB → H100 → H200
 ```
 
-The 480B FP8 weights do not fit on eight A100-40GB GPUs, so that job uses the
-next preferred resource, eight A100-80GB GPUs.
+Kimi K2.5 uses H100 because its compressed checkpoint and kernels do not fit or
+run on the available A100 configuration. GLM-5-FP8 and DeepSeek-V3.2-FP8 are
+new enough to include, but their 754B/685B weight footprints require H200; H200
+is currently blocked by platform-image compatibility and remains pending.
 
 ## 3. Durable blob locations
 
@@ -67,29 +67,34 @@ reviewbench-openmodels/repo-cache-minimal
 The cache contains 340 repositories and only the exact task commit, trees, and
 blobs needed by `git show`; parent history and build artifacts are excluded.
 
-Active Qwen-v2 result roots:
+Active latest-Qwen result roots:
 
 | Job | Backend ID | Blob result path |
 |---|---|---|
-| `qwen25-coder-7b` | `silver_leaf_2c1hd3tmrt` | `projects/reviewbench-maintainability/amlt-results/7213696495.44500-15367c27-3de4-49b4-aa82-c879c72336c2` |
-| `qwen25-coder-32b` | `plum_deer_zm994w80ft` | `projects/reviewbench-maintainability/amlt-results/7213696495.44292-7a54261d-0eeb-4022-a063-11406dbd7b82` |
-| `qwen3-coder-30b-a3b` | `clever_bear_8xqyfrvxqn` | `projects/reviewbench-maintainability/amlt-results/7213696495.44087-40aaf5a8-0e22-405d-9c1f-eff27d31cde7` |
-| `qwen3-coder-next-fp8` | `mighty_station_tszrv9g7pl` | `projects/reviewbench-maintainability/amlt-results/7213696495.43885-2a8d5d64-236b-407d-8952-c2d9f264eb6a` |
-| `qwen3-coder-480b-a35b-fp8` | `honest_stamp_r3j2j1y8ks` | `projects/reviewbench-maintainability/amlt-results/7213696495.43686-4dd8015e-8c51-4fa0-9d60-66ad218da8b5` |
+| `qwen3-coder-next-fp8` | `musing_office_r9d8x2ysj9` | `projects/reviewbench-maintainability/amlt-results/7213695212.05418-8ebe60a6-2ee5-4962-9542-4dc48b51e119` |
+| `qwen36-27b` | `happy_dog_g72rtj81j0` | `projects/reviewbench-maintainability/amlt-results/7213695212.05232-29f47ce7-942f-4b03-9d52-3d6a620047db` |
+| `qwen36-35b-a3b` | `calm_car_5cv9rn3t70` | `projects/reviewbench-maintainability/amlt-results/7213695212.05046-0d6240a5-1bcc-438b-965a-aa56c6768ce3` |
 
 Active cross-family result roots:
 
 | Job | Backend ID | Blob result path |
 |---|---|---|
-| `devstral-small-2507` | `coral_gas_mvfgwqqyhh` | `projects/reviewbench-maintainability/amlt-results/7213696456.58415-cef7479d-ae54-4bf1-b5ee-b4325295278d` |
-| `gpt-oss-120b` | `maroon_feast_n2lq59qx7t` | `projects/reviewbench-maintainability/amlt-results/7213696456.58155-6cfed0ca-d801-4c1c-970b-fb878174b4dd` |
-| `glm45-air-fp8` | `zen_card_q30t40xkr6` | `projects/reviewbench-maintainability/amlt-results/7213696456.57903-f6c81e91-de79-4bee-af5f-e6cd4075caab` |
-| `deepseek-coder-v2` | `clever_kitten_j0fm2srkvq` | `projects/reviewbench-maintainability/amlt-results/7213696456.57642-c62d74dd-b96b-4663-b497-3906f9009791` |
+| `devstral2-123b-fp8` | `purple_carnival_j14g3dz3fh` | `projects/reviewbench-maintainability/amlt-results/7213695172.92394-6a9f6a88-7fac-4f66-8725-1c31641410ba` |
+| `gpt-oss-120b` | `keen_calypso_50g95dmwzh` | `projects/reviewbench-maintainability/amlt-results/7213695172.92205-52d66fb9-3ecb-4e45-ab44-f92bc959e3aa` |
+| `minimax-m21-fp8` | `sharp_bee_8mbf3h0vnb` | `projects/reviewbench-maintainability/amlt-results/7213695172.92021-32c2d3f0-8679-4bc8-bfcf-e18b76ad557c` |
 
-The retired `reviewbench-qwen-hard414-v1` paths remain in blob as failure
-evidence. Those jobs loaded vLLM but failed before inference because vLLM
-upgraded NumPy while the platform image retained an incompatible old SciPy.
-The active configs pin `numpy==2.2.6` and `scipy==1.15.3`.
+Kimi K2.5:
+
+| Job | Backend ID | Blob result path |
+|---|---|---|
+| `kimi-k25` | `olden_leg_0rd7vknd5k` | `projects/reviewbench-maintainability/amlt-results/7213695135.17390-91af252b-95c0-4b98-88a1-c016e03cae39` |
+
+Retired Qwen-v1 paths remain in blob as failure evidence. Those jobs loaded
+vLLM but failed before inference because vLLM upgraded NumPy while the platform
+image retained an incompatible old SciPy. Qwen-v2 and the first cross-family
+submission were canceled before inference when the requested model set was
+replaced by newer family releases. Active configs pin `numpy==2.2.6` and
+`scipy==1.15.3`.
 
 ## 4. Complete inference artifacts
 
@@ -149,18 +154,20 @@ patches/traces. GPU model inference is not repeated.
 
 ## 6. Submission status
 
-Nine jobs were accepted by `msrresrchbasicvc` on 2026-08-09:
+Seven latest-model jobs were accepted by `msrresrchbasicvc` on 2026-08-09:
 
-- five Qwen-family jobs in `reviewbench-qwen-hard414-v2`;
-- Devstral, GPT-OSS, GLM and DeepSeek-Coder in
-  `reviewbench-open-hard414-v1`.
+- Qwen3-Coder-Next and Qwen3.6 27B/35B in
+  `reviewbench-qwen-latest-hard414-v1`;
+- Devstral-2, GPT-OSS and MiniMax M2.1 in
+  `reviewbench-open-latest-hard414-v1`;
+- Kimi K2.5 in `reviewbench-kimi25-hard414-v1`.
 
 They entered `preparing` while the corrected vLLM environment was built.
 
-Kimi K2 is not submitted: its FP8 weights require H200 capacity, but the
-available `msrresrchbasicvc` platform image metadata rejects H200. The MSBJ04
-fallback account currently has no configured/login-visible targets, so the
-pipeline fails closed rather than silently moving Kimi to an unapproved target.
+GLM-5-FP8 and DeepSeek-V3.2-FP8 remain blocked on H200 image compatibility.
+The MSBJ04 fallback account currently has no configured/login-visible targets,
+so the pipeline fails closed rather than silently moving them to an unapproved
+target.
 
 ## 7. Correctness orchestration
 
@@ -176,15 +183,13 @@ python scripts/run_open_model_correctness.py preflight \
   --oracles data/releases/hard/20260808/oracles.jsonl \
   --repo-cache "$REVIEWBENCH_SESSION_FILES/repos" \
   --output "$REVIEWBENCH_HARD_ORACLE/open-model-correctness-preflight" \
-  --model-id Qwen/Qwen2.5-Coder-7B-Instruct \
-  --model-id Qwen/Qwen2.5-Coder-32B-Instruct \
-  --model-id Qwen/Qwen3-Coder-30B-A3B-Instruct \
   --model-id Qwen/Qwen3-Coder-Next-FP8 \
-  --model-id Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 \
-  --model-id mistralai/Devstral-Small-2507 \
+  --model-id Qwen/Qwen3.6-27B \
+  --model-id Qwen/Qwen3.6-35B-A3B \
+  --model-id mistralai/Devstral-2-123B-Instruct-2512 \
   --model-id openai/gpt-oss-120b \
-  --model-id zai-org/GLM-4.5-Air-FP8 \
-  --model-id deepseek-ai/DeepSeek-Coder-V2-Instruct
+  --model-id MiniMaxAI/MiniMax-M2.1 \
+  --model-id moonshotai/Kimi-K2.5
 ```
 
 After inference, stage one exact generation JSONL per model:
