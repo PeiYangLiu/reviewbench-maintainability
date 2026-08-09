@@ -13,12 +13,12 @@ artifact，再运行 correctness 和 maintainability；以后 rubric 改变时�
 | AMLT environment | local conda `amlt10` |
 | AMLT version | 10.14.0 |
 | Project | `reviewbench-maintainability` |
-| Experiment | `reviewbench-qwen-hard414-v1` |
+| Active experiments | `reviewbench-qwen-hard414-v2`, `reviewbench-open-hard414-v1` |
 | Service | Singularity |
 | Target | `msrresrchbasicvc` |
 | Workspace | `Workspace_NLC` |
 | Project storage | `conversationhub / amulet` |
-| Code snapshot | `projects/reviewbench-maintainability/amlt-code/3be69de32e413569861e2f2fd691e4e7` |
+| Code snapshot | `projects/reviewbench-maintainability/amlt-code/9d4941f31edb2412b7dae2e08a13336f` |
 | Task set | `data/releases/hard/20260808/tasks.jsonl` |
 | Tasks | 414 |
 | Protocol | `agentic-line-edit/v1`, maximum 32 rounds |
@@ -36,6 +36,10 @@ All Hugging Face revisions are immutable commit SHAs.
 | `qwen3-coder-30b-a3b` | `Qwen/Qwen3-Coder-30B-A3B-Instruct@b2cff646eb4bb1d68355c01b18ae02e7cf42d120` | `40G2-A100` | 2 | Standard |
 | `qwen3-coder-next-fp8` | `Qwen/Qwen3-Coder-Next-FP8@da6e2ed27304dd39abadd9c82ef50e8de67bdd4c` | `40G4-A100` | 4 | Standard |
 | `qwen3-coder-480b-a35b-fp8` | `Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8@003f183a92fbe5b9a8325aaa8b2ae797c91dd90f` | `80G8-A100-IB-NvLink` | 8 | Basic |
+| `devstral-small-2507` | `mistralai/Devstral-Small-2507@bd165ab26cebbcc2eea2c4ecbfc07f3ac42b3c39` | `40G2-A100` | 2 | Standard |
+| `gpt-oss-120b` | `openai/gpt-oss-120b@b5c939de8f754692c1647ca79fbf85e8c1e70f8a` | `40G4-A100` | 4 | Standard |
+| `glm45-air-fp8` | `zai-org/GLM-4.5-Air-FP8@f9a9c5acf5e543cd24d659a056c5dbcda78ffcfc` | `40G4-A100` | 4 | Standard |
+| `deepseek-coder-v2` | `deepseek-ai/DeepSeek-Coder-V2-Instruct@2453c79a2a0947968a054947b53daa598cb3be52` | `80G8-A100-IB-NvLink` | 8 | Basic |
 
 GPU selection follows:
 
@@ -63,15 +67,29 @@ reviewbench-openmodels/repo-cache-minimal
 The cache contains 340 repositories and only the exact task commit, trees, and
 blobs needed by `git show`; parent history and build artifacts are excluded.
 
-Per-job result roots:
+Active Qwen-v2 result roots:
 
 | Job | Backend ID | Blob result path |
 |---|---|---|
-| `qwen25-coder-7b` | `affable_island_mx0ddy7h8k` | `projects/reviewbench-maintainability/amlt-results/7213701554.02094-8117827f-dfdc-45b6-8279-2604b8c3b45c` |
-| `qwen25-coder-32b` | `teal_button_928dvnplm3` | `projects/reviewbench-maintainability/amlt-results/7213701554.01877-cea1ee78-505f-4d4f-bc85-4b9a81a3b7a9` |
-| `qwen3-coder-30b-a3b` | `kind_island_83kzg8060m` | `projects/reviewbench-maintainability/amlt-results/7213701554.01671-5265586f-27bc-4ce7-9f17-9b219fe047ce` |
-| `qwen3-coder-next-fp8` | `upbeat_thread_brps5lyvmh` | `projects/reviewbench-maintainability/amlt-results/7213701554.01472-b7b1ec57-af97-4b8b-9340-71ece19aee34` |
-| `qwen3-coder-480b-a35b-fp8` | `mighty_leg_n8hq5y9m20` | `projects/reviewbench-maintainability/amlt-results/7213701554.01273-c08e49e3-e595-4021-ba91-ef711079f6be` |
+| `qwen25-coder-7b` | `silver_leaf_2c1hd3tmrt` | `projects/reviewbench-maintainability/amlt-results/7213696495.44500-15367c27-3de4-49b4-aa82-c879c72336c2` |
+| `qwen25-coder-32b` | `plum_deer_zm994w80ft` | `projects/reviewbench-maintainability/amlt-results/7213696495.44292-7a54261d-0eeb-4022-a063-11406dbd7b82` |
+| `qwen3-coder-30b-a3b` | `clever_bear_8xqyfrvxqn` | `projects/reviewbench-maintainability/amlt-results/7213696495.44087-40aaf5a8-0e22-405d-9c1f-eff27d31cde7` |
+| `qwen3-coder-next-fp8` | `mighty_station_tszrv9g7pl` | `projects/reviewbench-maintainability/amlt-results/7213696495.43885-2a8d5d64-236b-407d-8952-c2d9f264eb6a` |
+| `qwen3-coder-480b-a35b-fp8` | `honest_stamp_r3j2j1y8ks` | `projects/reviewbench-maintainability/amlt-results/7213696495.43686-4dd8015e-8c51-4fa0-9d60-66ad218da8b5` |
+
+Active cross-family result roots:
+
+| Job | Backend ID | Blob result path |
+|---|---|---|
+| `devstral-small-2507` | `coral_gas_mvfgwqqyhh` | `projects/reviewbench-maintainability/amlt-results/7213696456.58415-cef7479d-ae54-4bf1-b5ee-b4325295278d` |
+| `gpt-oss-120b` | `maroon_feast_n2lq59qx7t` | `projects/reviewbench-maintainability/amlt-results/7213696456.58155-6cfed0ca-d801-4c1c-970b-fb878174b4dd` |
+| `glm45-air-fp8` | `zen_card_q30t40xkr6` | `projects/reviewbench-maintainability/amlt-results/7213696456.57903-f6c81e91-de79-4bee-af5f-e6cd4075caab` |
+| `deepseek-coder-v2` | `clever_kitten_j0fm2srkvq` | `projects/reviewbench-maintainability/amlt-results/7213696456.57642-c62d74dd-b96b-4663-b497-3906f9009791` |
+
+The retired `reviewbench-qwen-hard414-v1` paths remain in blob as failure
+evidence. Those jobs loaded vLLM but failed before inference because vLLM
+upgraded NumPy while the platform image retained an incompatible old SciPy.
+The active configs pin `numpy==2.2.6` and `scipy==1.15.3`.
 
 ## 4. Complete inference artifacts
 
@@ -131,9 +149,18 @@ patches/traces. GPU model inference is not repeated.
 
 ## 6. Submission status
 
-The five jobs were accepted by `msrresrchbasicvc` on 2026-08-09 and entered
-`preparing`. Status, failures, retries, and final artifact hashes will be
-appended here as the experiment progresses.
+Nine jobs were accepted by `msrresrchbasicvc` on 2026-08-09:
+
+- five Qwen-family jobs in `reviewbench-qwen-hard414-v2`;
+- Devstral, GPT-OSS, GLM and DeepSeek-Coder in
+  `reviewbench-open-hard414-v1`.
+
+They entered `preparing` while the corrected vLLM environment was built.
+
+Kimi K2 is not submitted: its FP8 weights require H200 capacity, but the
+available `msrresrchbasicvc` platform image metadata rejects H200. The MSBJ04
+fallback account currently has no configured/login-visible targets, so the
+pipeline fails closed rather than silently moving Kimi to an unapproved target.
 
 ## 7. Correctness orchestration
 
@@ -153,7 +180,11 @@ python scripts/run_open_model_correctness.py preflight \
   --model-id Qwen/Qwen2.5-Coder-32B-Instruct \
   --model-id Qwen/Qwen3-Coder-30B-A3B-Instruct \
   --model-id Qwen/Qwen3-Coder-Next-FP8 \
-  --model-id Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8
+  --model-id Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 \
+  --model-id mistralai/Devstral-Small-2507 \
+  --model-id openai/gpt-oss-120b \
+  --model-id zai-org/GLM-4.5-Air-FP8 \
+  --model-id deepseek-ai/DeepSeek-Coder-V2-Instruct
 ```
 
 After inference, stage one exact generation JSONL per model:
