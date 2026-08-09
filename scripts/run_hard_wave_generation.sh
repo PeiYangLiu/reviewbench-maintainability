@@ -7,31 +7,42 @@ WAVE="${1:?usage: run_hard_wave_generation.sh WAVE_DIR REPO_CACHE}"
 REPOS="${2:?usage: run_hard_wave_generation.sh WAVE_DIR REPO_CACHE}"
 mkdir -p "$WAVE/generation"
 
+DIRECT_ENDPOINT="${REVIEWBENCH_DIRECT_CHAT_ENDPOINT:-http://127.0.0.1:4141/v1/chat/completions}"
+GPT_ENDPOINT="${REVIEWBENCH_GPT_CHAT_ENDPOINT:-http://127.0.0.1:8787/v1/chat/completions}"
+WORKERS="${REVIEWBENCH_GENERATION_WORKERS:-8}"
+restart_args=()
+if [ "${REVIEWBENCH_RESTART_FAILED:-0}" = "1" ]; then
+  restart_args+=(--restart-failed)
+fi
+
 run_model() {
-  local model="$1" endpoint="$2" workers="$3"
+  local model="$1" endpoint="$2"
   python3 "$ROOT/scripts/generate_agentic_patches.py" \
     --tasks "$WAVE/tasks.jsonl" \
     --repo-cache "$REPOS" \
     --out-dir "$WAVE/generation/$model" \
     --models "$model" \
-    --workers "$workers" \
+    --workers "$WORKERS" \
     --max-rounds 32 \
     --max-output-tokens 32768 \
     --request-timeout 600 \
     --request-retries 6 \
     --chat-endpoint "$endpoint" \
     --force-chat \
-    --resume
+    --resume \
+    "${restart_args[@]}"
 }
 
-# Sequential model waves avoid concurrent git-worktree mutations in the shared
-# repository cache. Each model internally runs repo-balanced task workers.
-for spec in \
-  "claude-opus-4.8 http://127.0.0.1:8787/v1/chat/completions 6" \
-  "gemini-3.5-flash http://127.0.0.1:4141/v1/chat/completions 6" \
-  "gpt-5.5 http://127.0.0.1:8787/v1/chat/completions 6"; do
-  read -r model endpoint workers <<<"$spec"
-  if ! run_model "$model" "$endpoint" "$workers"; then
-    echo "$model completed with generation failures; continuing to next model" >&2
-  fi
-done
+# Generation reads the shared repository cache with `git show`; edits live in
+# isolated temporary directories. Claude and GPT can therefore run in parallel.
+# Gemini follows Claude because both use the same direct endpoint by default.
+failed=0
+run_model "claude-opus-4.8" "$DIRECT_ENDPOINT" &
+claude_pid="$!"
+run_model "gpt-5.5" "$GPT_ENDPOINT" &
+gpt_pid="$!"
+
+wait "$claude_pid" || failed=1
+wait "$gpt_pid" || failed=1
+run_model "gemini-3.5-flash" "$DIRECT_ENDPOINT" || failed=1
+exit "$failed"

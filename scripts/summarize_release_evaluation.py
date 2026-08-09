@@ -265,20 +265,22 @@ def pairwise(rows: list[dict[str, Any]], models: list[str]) -> dict[str, Any]:
     return result
 
 
-def main() -> int:
-    args = parse_args()
-    tasks = load_jsonl(args.tasks)
-    task_by_id = {task["id"]: task for task in tasks}
-    model_paths = parse_model_paths(args.generation)
+def build_evaluation(
+    tasks: list[dict[str, Any]],
+    model_paths: dict[str, Path],
+    correctness_dir: Path,
+    judgments_path: Path,
+    max_changed_lines: int = 400,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     generations = {
         (item["id"], model): item
         for model, path in model_paths.items()
         for item in load_jsonl(path)
     }
-    correctness = load_correctness(args.correctness_dir)
+    correctness = load_correctness(correctness_dir)
     judgments = {
         (item["id"], item["solver_model"]): item
-        for item in load_jsonl(args.judgments)
+        for item in load_jsonl(judgments_path)
     }
 
     rows = []
@@ -292,7 +294,7 @@ def main() -> int:
             scope_ok = (
                 generation_apply
                 and type(generation.get("changed_lines")) is int
-                and 0 < generation["changed_lines"] <= args.max_changed_lines
+                and 0 < generation["changed_lines"] <= max_changed_lines
                 and generation.get("path") == (task.get("locality") or {}).get("path")
             )
             correctness_ok = (
@@ -342,11 +344,6 @@ def main() -> int:
                 }
             )
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(
-        "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows),
-        encoding="utf-8",
-    )
     models = list(model_paths)
     expected = len(tasks) * len(models)
     generation_protocols = sorted(
@@ -375,6 +372,29 @@ def main() -> int:
         },
         "pairwise": pairwise(rows, models),
     }
+    return rows, report
+
+
+def main() -> int:
+    args = parse_args()
+    tasks = load_jsonl(args.tasks)
+    model_paths = parse_model_paths(args.generation)
+    rows, report = build_evaluation(
+        tasks,
+        model_paths,
+        args.correctness_dir,
+        args.judgments,
+        args.max_changed_lines,
+    )
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(
+        "".join(
+            json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+            for row in rows
+        ),
+        encoding="utf-8",
+    )
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(
         json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",

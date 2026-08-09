@@ -72,3 +72,37 @@ def test_strict_pass_accepts_tsjs_run_records():
     }
 
     assert MODULE.strict_pass(oracle)
+
+
+def test_strict_pass_accepts_native_ok_run_records():
+    runs = [
+        {"run": run, "ok": True, "passed": 1, "failed": 0}
+        for run in range(1, 4)
+    ]
+    oracle = {
+        "oracle_result": "PASS_TO_PASS",
+        "golden_correctness_ok": True,
+        "start_runs": runs,
+        "golden_runs": runs,
+        "stable_p2p": True,
+        "pass_to_pass": 1,
+        "changed_lines_covered": True,
+    }
+
+    assert MODULE.strict_pass(oracle)
+
+
+def test_strict_pass_rejects_nonzero_scalar_run_codes():
+    base = {
+        "oracle_result": "PASS_TO_PASS",
+        "golden_correctness_ok": True,
+        "stable_p2p": True,
+        "pass_to_pass": 1,
+        "changed_lines_covered": True,
+    }
+    assert MODULE.strict_pass(
+        {**base, "start_runs": [0, 0, 0], "golden_runs": [0, 0, 0]}
+    )
+    assert not MODULE.strict_pass(
+        {**base, "start_runs": [1, 1, 1], "golden_runs": [1, 1, 1]}
+    )

@@ -30,15 +30,30 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def strict_pass(oracle: dict[str, Any]) -> bool:
     def stable(value: Any) -> bool:
+        def run_succeeded(item: Any) -> bool:
+            if item is True:
+                return True
+            if type(item) is int:
+                return item == 0
+            if not isinstance(item, dict):
+                return False
+            if "exit_code" in item:
+                return item.get("exit_code") == 0
+            if "ok" in item:
+                return item.get("ok") is True
+            return (
+                type(item.get("failed")) is int
+                and item["failed"] == 0
+                and type(item.get("passed")) is int
+                and item["passed"] > 0
+            )
+
         if value is True:
             return True
         if type(value) is int:
             return value >= 3
         if isinstance(value, list):
-            return len(value) >= 3 and all(
-                not isinstance(item, dict) or item.get("exit_code") == 0
-                for item in value
-            )
+            return len(value) >= 3 and all(run_succeeded(item) for item in value)
         return False
 
     start_stable = (

@@ -144,6 +144,7 @@ def test_resume_ignores_rejected_cross_file_edit(tmp_path):
         "apply_ok": True,
         "protocol": "agentic-line-edit/v1",
         "patch_file": str(patch),
+        "patch_sha256": MODULE.hashlib.sha256(patch.read_bytes()).hexdigest(),
         "path": "src/a.py",
         "rounds": [
             {
@@ -166,6 +167,7 @@ def test_resume_accepts_valid_generated_result(tmp_path):
         "apply_ok": True,
         "protocol": "agentic-line-edit/v1",
         "patch_file": str(patch),
+        "patch_sha256": MODULE.hashlib.sha256(patch.read_bytes()).hexdigest(),
         "path": "src/a.py",
         "rounds": [
             {
@@ -178,6 +180,72 @@ def test_resume_accepts_valid_generated_result(tmp_path):
         ],
     }
     assert MODULE.reusable_result(result) is True
+
+
+def test_resume_rejects_changed_task_or_patch(tmp_path):
+    task = {
+        "id": "task",
+        "repo": "owner/repo",
+        "start_sha": "start",
+        "locality": {"path": "src/a.py"},
+    }
+    patch = tmp_path / "candidate.patch"
+    patch.write_text("first")
+    result = {
+        "apply_ok": True,
+        "protocol": "agentic-line-edit/v1",
+        "patch_file": str(patch),
+        "patch_sha256": MODULE.hashlib.sha256(patch.read_bytes()).hexdigest(),
+        "task_fingerprint": MODULE.task_fingerprint(task),
+        "path": "src/a.py",
+        "rounds": [],
+    }
+    assert MODULE.reusable_result(result, task) is True
+    changed_task = {**task, "task_instruction": "different"}
+    assert MODULE.reusable_result(result, changed_task) is False
+    patch.write_text("second")
+    assert MODULE.reusable_result(result, task) is False
+
+
+def test_restart_failed_discards_exhausted_trace():
+    failed = {
+        "status": "failed",
+        "apply_ok": False,
+        "rounds": [{"round": index} for index in range(1, 33)],
+    }
+    assert MODULE.previous_result_for_retry(failed, restart_failed=True) is None
+    assert MODULE.previous_result_for_retry(failed, restart_failed=False) is failed
+
+
+def test_restart_failed_preserves_nonterminal_checkpoint():
+    checkpoint = {
+        "status": "in_progress",
+        "apply_ok": False,
+        "rounds": [{"round": 1}],
+    }
+    assert (
+        MODULE.previous_result_for_retry(checkpoint, restart_failed=True)
+        is checkpoint
+    )
+
+
+def test_changed_task_does_not_resume_prior_trace():
+    task = {"id": "task", "task_instruction": "new"}
+    previous = {
+        "status": "in_progress",
+        "task_fingerprint": MODULE.task_fingerprint(
+            {"id": "task", "task_instruction": "old"}
+        ),
+        "rounds": [{"round": 1}],
+    }
+    assert (
+        MODULE.previous_result_for_retry(
+            previous,
+            restart_failed=False,
+            task=task,
+        )
+        is None
+    )
 
 
 def test_resume_restores_edits_and_transcript_without_resampling():

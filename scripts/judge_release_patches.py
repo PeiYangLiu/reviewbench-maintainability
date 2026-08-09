@@ -4,13 +4,17 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import datetime as dt
+import hashlib
 import json
 from pathlib import Path
 import re
 import threading
 from typing import Any
 
+import generate_agentic_patches as agentic
 import generate_release_patches as generator
 
 
@@ -71,6 +75,31 @@ Return exactly one JSON object:
   "reason": "one concise sentence"
 }"""
 RUBRICS = {"v1": JUDGE_INSTRUCTIONS, "v2": RUBRIC_V2_INSTRUCTIONS}
+JUDGE_PROMPT_VERSION = "reviewbench-maintainability-judge/v2"
+
+
+def judge_protocol_fingerprint(
+    rubric: str,
+    judge_model: str,
+    max_context_chars: int,
+    max_output_tokens: int | None,
+) -> str:
+    payload = {
+        "prompt_version": JUDGE_PROMPT_VERSION,
+        "rubric": rubric,
+        "rubric_instructions": RUBRICS[rubric],
+        "judge_model": judge_model,
+        "max_context_chars": max_context_chars,
+        "max_output_tokens": max_output_tokens,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
 INLINE_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
@@ -226,11 +255,22 @@ def judge_one(
     solver_model: str,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
+    fingerprint = generation_fingerprint(generation)
+    protocol_fingerprint = judge_protocol_fingerprint(
+        args.rubric,
+        args.judge_model,
+        args.max_context_chars,
+        args.max_output_tokens,
+    )
     base = {
         "id": task["id"],
         "repo": task.get("repo"),
         "solver_model": solver_model,
         "judge_model": args.judge_model,
+        "rubric": args.rubric,
+        "judge_protocol_fingerprint": protocol_fingerprint,
+        "task_fingerprint": agentic.task_fingerprint(task),
+        "generation_fingerprint": fingerprint,
     }
     if generation.get("apply_ok") is not True:
         return {
@@ -282,7 +322,6 @@ def judge_one(
                 "status": "judged",
                 "maintainability_pass": passed,
                 "attempt": attempt,
-                "rubric": args.rubric,
                 "patch_file": str(patch_path),
                 "raw_file": str(raw_path),
                 "usage": usage,
@@ -321,6 +360,117 @@ def write_results(
     temporary.replace(path)
 
 
+def generation_fingerprint(generation: dict[str, Any]) -> str:
+    record = json.dumps(
+        generation,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    patch = Path(str(generation.get("patch_file") or ""))
+    patch_bytes = patch.read_bytes() if patch.is_file() else b""
+    return hashlib.sha256(record + b"\0" + patch_bytes).hexdigest()
+
+
+def generation_set_digests(
+    generations: dict[str, dict[str, dict[str, Any]]],
+) -> dict[str, str]:
+    return {
+        model: hashlib.sha256(
+            "".join(
+                f"{task_id}\t{generation_fingerprint(record)}\n"
+                for task_id, record in sorted(records.items())
+            ).encode()
+        ).hexdigest()
+        for model, records in sorted(generations.items())
+    }
+
+
+def completion_marker(path: Path) -> Path:
+    return path.with_name(f"{path.stem}.complete.json")
+
+
+def write_completion_marker(
+    path: Path,
+    task_fingerprints: dict[str, str],
+    models: set[str],
+    results: dict[tuple[str, str], dict[str, Any]],
+    tasks_sha256: str,
+    generation_sha256: dict[str, str],
+    generation_fingerprints: dict[tuple[str, str], str],
+    protocol_fingerprint: str,
+    rubric: str,
+    judge_model: str,
+    max_context_chars: int,
+    max_output_tokens: int | None,
+    attestation_mode: str = "runtime",
+) -> None:
+    expected = {
+        (task_id, model)
+        for task_id in task_fingerprints
+        for model in models
+    }
+    if set(results) != expected:
+        completion_marker(path).unlink(missing_ok=True)
+        return
+    unresolved = [
+        key
+        for key, result in results.items()
+        if result.get("status")
+        in {"judge_error", "input_error", "missing_patch"}
+    ]
+    unresolved.extend(
+        key
+        for key, result in results.items()
+        if result.get("task_fingerprint")
+        != task_fingerprints.get(key[0])
+    )
+    unresolved.extend(
+        key
+        for key, result in results.items()
+        if result.get("judge_protocol_fingerprint")
+        != protocol_fingerprint
+    )
+    unresolved.extend(
+        key
+        for key, result in results.items()
+        if result.get("generation_fingerprint")
+        != generation_fingerprints.get(key)
+    )
+    if unresolved:
+        completion_marker(path).unlink(missing_ok=True)
+        return
+    marker = {
+        "schema_version": "reviewbench-judgments-complete/v1",
+        "attestation_mode": attestation_mode,
+        "tasks": len(task_fingerprints),
+        "models": sorted(models),
+        "task_model_pairs": len(results),
+        "tasks_sha256": tasks_sha256,
+        "generation_sha256": generation_sha256,
+        "judge_protocol_fingerprint": protocol_fingerprint,
+        "rubric": rubric,
+        "judge_model": judge_model,
+        "max_context_chars": max_context_chars,
+        "max_output_tokens": max_output_tokens,
+        "results_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "pair_ids_sha256": hashlib.sha256(
+            "".join(
+                f"{task_id}\t{model}\n"
+                for task_id, model in sorted(expected)
+            ).encode()
+        ).hexdigest(),
+        "statuses": dict(
+            Counter(result.get("status") for result in results.values())
+        ),
+        "completed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+    completion_marker(path).write_text(
+        json.dumps(marker, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def main() -> int:
     args = parse_args()
     tasks = load_jsonl(args.tasks)
@@ -350,13 +500,33 @@ def main() -> int:
         for model in generation_paths
         if (
             (task["id"], model) not in results
+            or results[(task["id"], model)].get("generation_fingerprint")
+            != generation_fingerprint(generations[model][task["id"]])
+            or results[(task["id"], model)].get("task_fingerprint")
+            != agentic.task_fingerprint(task)
+            or results[(task["id"], model)].get(
+                "judge_protocol_fingerprint"
+            )
+            != judge_protocol_fingerprint(
+                args.rubric,
+                args.judge_model,
+                args.max_context_chars,
+                args.max_output_tokens,
+            )
             or (
                 generations[model][task["id"]].get("apply_ok") is True
                 and results[(task["id"], model)].get("status")
-                in {"generation_failed", "missing_patch", "judge_error"}
+                in {
+                    "generation_failed",
+                    "missing_patch",
+                    "judge_error",
+                    "input_error",
+                }
             )
         )
     ]
+    if jobs:
+        completion_marker(args.out).unlink(missing_ok=True)
     task_order = {task["id"]: index for index, task in enumerate(tasks)}
     model_order = {model: index for index, model in enumerate(generation_paths)}
     lock = threading.Lock()
@@ -399,12 +569,39 @@ def main() -> int:
             ),
             "errors": sum(
                 item["solver_model"] == model
-                and item.get("status") == "judge_error"
+                and item.get("status")
+                in {"judge_error", "input_error", "missing_patch"}
                 for item in results.values()
             ),
         }
         for model in generation_paths
     }
+    write_completion_marker(
+        args.out,
+        {
+            task_id: agentic.task_fingerprint(task)
+            for task_id, task in tasks_by_id.items()
+        },
+        set(generation_paths),
+        results,
+        hashlib.sha256(args.tasks.read_bytes()).hexdigest(),
+        generation_set_digests(generations),
+        {
+            (task_id, model): generation_fingerprint(record)
+            for model, records in generations.items()
+            for task_id, record in records.items()
+        },
+        judge_protocol_fingerprint(
+            args.rubric,
+            args.judge_model,
+            args.max_context_chars,
+            args.max_output_tokens,
+        ),
+        args.rubric,
+        args.judge_model,
+        args.max_context_chars,
+        args.max_output_tokens,
+    )
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if all(item["errors"] == 0 for item in summary.values()) else 1
 

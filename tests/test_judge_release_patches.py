@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import sys
 
@@ -118,3 +119,107 @@ def test_invoke_judge_rejects_silent_model_fallback(monkeypatch):
             128,
             "v2",
         )
+
+
+def test_completion_marker_requires_resolved_judgments(tmp_path):
+    path = tmp_path / "judgments_v2.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "id": "task",
+                "solver_model": "gpt-5.5",
+                "status": "judge_error",
+                "task_fingerprint": "task-fingerprint",
+                "generation_fingerprint": "generation-fingerprint",
+                "judge_protocol_fingerprint": "protocol-fingerprint",
+            }
+        )
+        + "\n"
+    )
+    results = {
+        ("task", "gpt-5.5"): {
+            "id": "task",
+            "solver_model": "gpt-5.5",
+            "status": "judge_error",
+            "task_fingerprint": "task-fingerprint",
+            "generation_fingerprint": "generation-fingerprint",
+            "judge_protocol_fingerprint": "protocol-fingerprint",
+        }
+    }
+    MODULE.write_completion_marker(
+        path,
+        {"task": "task-fingerprint"},
+        {"gpt-5.5"},
+        results,
+        "tasks-sha",
+        {"gpt-5.5": "generation-sha"},
+        {("task", "gpt-5.5"): "generation-fingerprint"},
+        "protocol-fingerprint",
+        "v2",
+        "claude-opus-4.8",
+        30_000,
+        8192,
+    )
+    assert not MODULE.completion_marker(path).exists()
+
+    results[("task", "gpt-5.5")]["status"] = "judged"
+    path.write_text(
+        json.dumps(results[("task", "gpt-5.5")]) + "\n"
+    )
+    MODULE.write_completion_marker(
+        path,
+        {"task": "task-fingerprint"},
+        {"gpt-5.5"},
+        results,
+        "tasks-sha",
+        {"gpt-5.5": "generation-sha"},
+        {("task", "gpt-5.5"): "generation-fingerprint"},
+        "protocol-fingerprint",
+        "v2",
+        "claude-opus-4.8",
+        30_000,
+        8192,
+    )
+    marker = json.loads(MODULE.completion_marker(path).read_text())
+    assert marker["task_model_pairs"] == 1
+
+
+def test_generation_fingerprint_includes_patch_bytes(tmp_path):
+    patch = tmp_path / "candidate.patch"
+    patch.write_text("first")
+    generation = {
+        "id": "task",
+        "model": "gpt-5.5",
+        "patch_file": str(patch),
+        "apply_ok": True,
+    }
+    before = MODULE.generation_fingerprint(generation)
+    patch.write_text("second")
+    assert MODULE.generation_fingerprint(generation) != before
+
+
+def test_judge_protocol_fingerprint_changes_with_rubric_or_context():
+    baseline = MODULE.judge_protocol_fingerprint(
+        "v2",
+        "claude-opus-4.8",
+        30_000,
+        8192,
+    )
+    assert baseline != MODULE.judge_protocol_fingerprint(
+        "v1",
+        "claude-opus-4.8",
+        30_000,
+        8192,
+    )
+    assert baseline != MODULE.judge_protocol_fingerprint(
+        "v2",
+        "claude-opus-4.8",
+        10_000,
+        8192,
+    )
+    assert baseline != MODULE.judge_protocol_fingerprint(
+        "v2",
+        "claude-opus-4.8",
+        30_000,
+        2048,
+    )

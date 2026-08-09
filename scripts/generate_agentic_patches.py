@@ -11,6 +11,8 @@ from __future__ import annotations
 import argparse
 import ast
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import datetime as dt
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -46,6 +48,18 @@ change; use read again when needed.
 
 Do not return Markdown, prose, SEARCH/REPLACE blocks, or a unified diff."""
 
+
+def task_fingerprint(task: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            task,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tasks", type=Path, required=True)
@@ -79,6 +93,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--force-chat", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--restart-failed",
+        action="store_true",
+        help=(
+            "With --resume, restart terminal failed tasks from the original "
+            "source instead of restoring an exhausted action trace."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -458,6 +480,7 @@ def generate_one(
         "start_sha": task.get("start_sha"),
         "model": model,
         "protocol": "agentic-line-edit/v1",
+        "task_fingerprint": task_fingerprint(task),
         "status": "failed",
         "apply_ok": False,
         "rounds": [],
@@ -540,6 +563,9 @@ def generate_one(
                                 "status": "generated",
                                 "apply_ok": True,
                                 "patch_file": str(patch_path),
+                                "patch_sha256": hashlib.sha256(
+                                    patch.encode()
+                                ).hexdigest(),
                                 "changed_lines": api.changed_line_count(patch),
                                 "successful_round": round_number,
                             }
@@ -565,6 +591,9 @@ def generate_one(
                     "status": "generated",
                     "apply_ok": True,
                     "patch_file": str(patch_path),
+                    "patch_sha256": hashlib.sha256(
+                        patch.encode()
+                    ).hexdigest(),
                     "changed_lines": api.changed_line_count(patch),
                     "successful_round": len(result["rounds"]),
                     "finish_mode": "round_limit",
@@ -600,11 +629,25 @@ def load_results(path: Path) -> dict[str, dict[str, Any]]:
     }
 
 
-def reusable_result(item: dict[str, Any]) -> bool:
+def reusable_result(
+    item: dict[str, Any],
+    task: dict[str, Any] | None = None,
+) -> bool:
     if (
         item.get("apply_ok") is not True
         or item.get("protocol") != "agentic-line-edit/v1"
         or not Path(str(item.get("patch_file") or "")).is_file()
+    ):
+        return False
+    patch = Path(str(item["patch_file"]))
+    if (
+        item.get("patch_sha256")
+        != hashlib.sha256(patch.read_bytes()).hexdigest()
+    ):
+        return False
+    if (
+        task is not None
+        and item.get("task_fingerprint") != task_fingerprint(task)
     ):
         return False
     editable_path = str(item.get("path") or "")
@@ -617,6 +660,23 @@ def reusable_result(item: dict[str, Any]) -> bool:
         if not edit_action_is_valid(action, editable_path):
             return False
     return True
+
+
+def previous_result_for_retry(
+    item: dict[str, Any] | None,
+    restart_failed: bool,
+    task: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if not item:
+        return None
+    if (
+        task is not None
+        and item.get("task_fingerprint") != task_fingerprint(task)
+    ):
+        return None
+    if restart_failed and item.get("status") == "failed":
+        return None
+    return item
 
 
 def write_results(
@@ -634,11 +694,74 @@ def write_results(
     temporary.replace(path)
 
 
+def completion_marker(path: Path) -> Path:
+    return path.with_name("generation_complete.json")
+
+
+def patch_set_digest(records: dict[str, dict[str, Any]]) -> str:
+    digest_input = []
+    for task_id, record in sorted(records.items()):
+        patch = Path(str(record.get("patch_file") or ""))
+        patch_hash = (
+            hashlib.sha256(patch.read_bytes()).hexdigest()
+            if patch.is_file()
+            else ""
+        )
+        digest_input.append(f"{task_id}\t{patch_hash}\n")
+    return hashlib.sha256("".join(digest_input).encode()).hexdigest()
+
+
+def write_completion_marker(
+    path: Path,
+    model: str,
+    tasks: dict[str, dict[str, Any]],
+    records: dict[str, dict[str, Any]],
+    tasks_sha256: str,
+    attestation_mode: str = "runtime",
+) -> None:
+    task_ids = set(tasks)
+    if set(records) != task_ids:
+        completion_marker(path).unlink(missing_ok=True)
+        return
+    if any(
+        record.get("task_fingerprint") != task_fingerprint(tasks[task_id])
+        for task_id, record in records.items()
+    ):
+        completion_marker(path).unlink(missing_ok=True)
+        return
+    marker = {
+        "schema_version": "reviewbench-generation-complete/v1",
+        "attestation_mode": attestation_mode,
+        "model": model,
+        "tasks": len(task_ids),
+        "tasks_sha256": tasks_sha256,
+        "results_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "patches_sha256": patch_set_digest(records),
+        "task_ids_sha256": hashlib.sha256(
+            "".join(f"{task_id}\n" for task_id in sorted(task_ids)).encode()
+        ).hexdigest(),
+        "generated": sum(
+            record.get("apply_ok") is True
+            for record in records.values()
+        ),
+        "failed": sum(
+            record.get("apply_ok") is not True
+            for record in records.values()
+        ),
+        "completed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+    completion_marker(path).write_text(
+        json.dumps(marker, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def main() -> int:
     args = parse_args()
     all_tasks = api.load_tasks(args.tasks, None, None)
     tasks = api.load_tasks(args.tasks, set(args.ids) if args.ids else None, args.limit)
     order = {task["id"]: index for index, task in enumerate(all_tasks)}
+    tasks_by_id = {task["id"]: task for task in all_tasks}
     paths = {
         model: args.out_dir / api.safe_component(model) / "generation_results.jsonl"
         for model in args.models
@@ -651,8 +774,14 @@ def main() -> int:
         (task, model)
         for model in args.models
         for task in tasks
-        if not reusable_result(results[model].get(task["id"], {}))
+        if not reusable_result(
+            results[model].get(task["id"], {}),
+            task,
+        )
     ]
+    models_with_jobs = {model for _, model in jobs}
+    for model in models_with_jobs:
+        completion_marker(paths[model]).unlink(missing_ok=True)
     lock = threading.Lock()
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
@@ -662,7 +791,11 @@ def main() -> int:
                 task,
                 model,
                 args,
-                results[model].get(task["id"]),
+                previous_result_for_retry(
+                    results[model].get(task["id"]),
+                    args.restart_failed,
+                    task,
+                ),
             ): (task, model)
             for task, model in jobs
         }
@@ -676,6 +809,7 @@ def main() -> int:
                     "repo": task.get("repo"),
                     "model": model,
                     "protocol": "agentic-line-edit/v1",
+                    "task_fingerprint": task_fingerprint(task),
                     "status": "failed",
                     "apply_ok": False,
                     "error": str(exc)[:500],
@@ -702,6 +836,15 @@ def main() -> int:
         json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    tasks_sha256 = hashlib.sha256(args.tasks.read_bytes()).hexdigest()
+    for model, items in results.items():
+        write_completion_marker(
+            paths[model],
+            model,
+            tasks_by_id,
+            items,
+            tasks_sha256,
+        )
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if all(item["failed"] == 0 for item in summary.values()) else 1
 
