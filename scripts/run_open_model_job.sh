@@ -73,6 +73,12 @@ fi
 if [ "${ENFORCE_EAGER:-0}" = "1" ]; then
   vllm_args+=(--vllm-extra-arg=--enforce-eager)
 fi
+if [ -n "${KV_CACHE_MEMORY_BYTES:-}" ]; then
+  vllm_args+=(
+    --vllm-extra-arg=--kv-cache-memory-bytes
+    --vllm-extra-arg="$KV_CACHE_MEMORY_BYTES"
+  )
+fi
 
 persist() {
   status="$?"
