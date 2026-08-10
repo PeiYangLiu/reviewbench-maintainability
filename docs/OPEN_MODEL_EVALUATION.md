@@ -13,12 +13,12 @@ artifact，再运行 correctness 和 maintainability；以后 rubric 改变时�
 | AMLT environment | local conda `amlt10` |
 | AMLT version | 10.14.0 |
 | Project | `reviewbench-maintainability` |
-| Active experiments | `reviewbench-qwen-latest-hard414-v2`, `reviewbench-open-latest-hard414-v3`, `reviewbench-kimi25-hard414-v2` |
+| Active experiments | `reviewbench-qwen-latest-hard414-v3`, `reviewbench-open-latest-hard414-v4`, `reviewbench-kimi25-hard414-v3` |
 | Service | Singularity |
 | Target | `msrresrchbasicvc` |
 | Workspace | `Workspace_NLC` |
 | Project storage | `conversationhub / amulet` |
-| Code snapshots | `projects/reviewbench-maintainability/amlt-code/76e74460508d4bad3bb97b3c34c2e9a5` (Qwen/Kimi), `projects/reviewbench-maintainability/amlt-code/b08633d7221abfee389e47eb69cdbe18` (cross-family) |
+| Code snapshot | `projects/reviewbench-maintainability/amlt-code/c3685d7d0dc81fe856fa303133e4fcb1` |
 | Task set | `data/releases/hard/20260808/tasks.jsonl` |
 | Tasks | 414 |
 | Protocol | `agentic-line-edit/v1`, maximum 32 rounds |
@@ -68,28 +68,28 @@ The cache contains 340 repositories and only the exact task commit, trees, and
 blobs needed by `git show`; parent history and build artifacts are excluded.
 
 Active latest-Qwen retry result roots
-(`reviewbench-qwen-latest-hard414-v2`):
+(`reviewbench-qwen-latest-hard414-v3`):
 
 | Job | Backend ID | Blob result path |
 |---|---|---|
-| `qwen3-coder-next-fp8` | `lucid_calypso_p3g6g7bzq7` | `projects/reviewbench-maintainability/amlt-results/7213692609.19921-3d4ecb43-1694-46a3-9a17-7c81468f2148` |
-| `qwen36-27b` | `frosty_turnip_5fq0cl3s9x` | `projects/reviewbench-maintainability/amlt-results/7213692609.19729-c4908ce4-ce7b-4daf-8d63-8b91805d88c8` |
-| `qwen36-35b-a3b` | `crimson_chayote_s4t15t5bzw` | `projects/reviewbench-maintainability/amlt-results/7213692609.19554-34348a7b-dcf4-461a-8701-b840b36599b4` |
+| `qwen3-coder-next-fp8` | `cyan_queen_gyl2dcqppz` | `projects/reviewbench-maintainability/amlt-results/7213646004.43791-c6690589-573b-4880-9ac5-0cac7405c04a` |
+| `qwen36-27b` | `sleepy_lettuce_sk0zvk371z` | `projects/reviewbench-maintainability/amlt-results/7213646004.43595-e7266fea-8a70-49de-bf32-fcd2ca412285` |
+| `qwen36-35b-a3b` | `gifted_key_9czmsb6fb9` | `projects/reviewbench-maintainability/amlt-results/7213646004.43413-fa6ecfc8-ab1d-4a0a-bc50-1cff4fd81bbc` |
 
 Active cross-family retry result roots
-(`reviewbench-open-latest-hard414-v3`):
+(`reviewbench-open-latest-hard414-v4`):
 
 | Job | Backend ID | Blob result path |
 |---|---|---|
-| `devstral2-123b-fp8` | `happy_pumpkin_5fnmy5716z` | `projects/reviewbench-maintainability/amlt-results/7213692429.75640-6bb028b1-99ed-4e5b-88b0-c558f61ed1a2` |
-| `gpt-oss-120b` | `tender_dolphin_v5rn7h26vb` | `projects/reviewbench-maintainability/amlt-results/7213692429.75446-6a3b509f-289f-42dc-bd08-9d84150743a8` |
-| `minimax-m21-fp8` | `placid_animal_s26w47l71l` | `projects/reviewbench-maintainability/amlt-results/7213692429.75268-d7406a12-413b-414b-8b2b-c35c980690a0` |
+| `devstral2-123b-fp8` | `silver_hand_mhw5cm29kz` | `projects/reviewbench-maintainability/amlt-results/7213645968.60049-9982a3d0-57fc-46b0-8027-a1ce108a8128` |
+| `gpt-oss-120b` | `silly_cord_nzvkl4h3kp` | `projects/reviewbench-maintainability/amlt-results/7213645968.59853-ae63b09a-4130-406c-ade5-ec95116f3b86` |
+| `minimax-m21-fp8` | `lucid_band_z625t3qp4q` | `projects/reviewbench-maintainability/amlt-results/7213645968.59675-7e76c2e7-9896-4bfa-87c9-4f4cfc39db2d` |
 
-Kimi K2.5 retry (`reviewbench-kimi25-hard414-v2`):
+Kimi K2.5 retry (`reviewbench-kimi25-hard414-v3`):
 
 | Job | Backend ID | Blob result path |
 |---|---|---|
-| `kimi-k25` | `quiet_muscle_rv6bqty0wr` | `projects/reviewbench-maintainability/amlt-results/7213692577.50703-02a66671-a198-437e-b76e-973c6dec125d` |
+| `kimi-k25` | `patient_rice_02wxtg0x0m` | `projects/reviewbench-maintainability/amlt-results/7213645931.71015-6f9dedd5-14f8-4f19-8148-f1f07f86619a` |
 
 Failed and canceled latest-model attempts remain immutable failure evidence:
 
@@ -103,6 +103,13 @@ Failed and canceled latest-model attempts remain immutable failure evidence:
 | `reviewbench-open-latest-hard414-v1:minimax-m21-fp8` | failed before inference | `projects/reviewbench-maintainability/amlt-results/7213695172.92021-32c2d3f0-8679-4bc8-bfcf-e18b76ad557c` |
 | `reviewbench-open-latest-hard414-v2:minimax-m21-fp8` | canceled while queued | `projects/reviewbench-maintainability/amlt-results/7213692649.93167-743e4cf8-fac8-414c-a2af-afa920554df6` |
 | `reviewbench-kimi25-hard414-v1:kimi-k25` | failed before inference | `projects/reviewbench-maintainability/amlt-results/7213695135.17390-91af252b-95c0-4b98-88a1-c016e03cae39` |
+| `reviewbench-qwen-latest-hard414-v2:qwen3-coder-next-fp8` | 414 source reads failed before inference | `projects/reviewbench-maintainability/amlt-results/7213692609.19921-3d4ecb43-1694-46a3-9a17-7c81468f2148` |
+| `reviewbench-qwen-latest-hard414-v2:qwen36-27b` | 414 source reads failed before inference | `projects/reviewbench-maintainability/amlt-results/7213692609.19729-c4908ce4-ce7b-4daf-8d63-8b91805d88c8` |
+| `reviewbench-qwen-latest-hard414-v2:qwen36-35b-a3b` | 414 source reads failed before inference | `projects/reviewbench-maintainability/amlt-results/7213692609.19554-34348a7b-dcf4-461a-8701-b840b36599b4` |
+| `reviewbench-open-latest-hard414-v3:devstral2-123b-fp8` | 414 source reads failed before inference | `projects/reviewbench-maintainability/amlt-results/7213692429.75640-6bb028b1-99ed-4e5b-88b0-c558f61ed1a2` |
+| `reviewbench-open-latest-hard414-v3:gpt-oss-120b` | 414 source reads failed before inference | `projects/reviewbench-maintainability/amlt-results/7213692429.75446-6a3b509f-289f-42dc-bd08-9d84150743a8` |
+| `reviewbench-open-latest-hard414-v3:minimax-m21-fp8` | 414 source reads failed before inference | `projects/reviewbench-maintainability/amlt-results/7213692429.75268-d7406a12-413b-414b-8b2b-c35c980690a0` |
+| `reviewbench-kimi25-hard414-v2:kimi-k25` | failed before server startup | `projects/reviewbench-maintainability/amlt-results/7213692577.50703-02a66671-a198-437e-b76e-973c6dec125d` |
 
 Failed jobs that reached the wrapper contain the complete server log, manifest,
 and packaged diagnostic archive. Still earlier retired Qwen jobs preserve the
@@ -175,21 +182,31 @@ as model results:
 |---|---|---|
 | Qwen3-Coder-Next, Qwen3.6 27B/35B, Devstral-2 | vLLM custom all-reduce aborted with `custom_all_reduce.cuh:455 'invalid argument'` on the Singularity A100 topology | `--disable-custom-all-reduce`, falling back to NCCL |
 | MiniMax M2.1 | FP8 expert shard width 192 was not divisible by block width 128 under TP8 | official `--enable-expert-parallel`; NCCL fallback also enabled |
-| Kimi K2.5 | the 0.90 GPU budget left `-3.75 GiB` for KV cache after loading 71.19 GiB per H100 | text-only serving, `gpu_memory_utilization=0.98`, and `max_num_seqs=4` |
+| Kimi K2.5 | the 0.90 GPU budget left `-3.75 GiB` for KV cache after loading 71.19 GiB per H100 | text-only serving and `max_num_seqs=4` |
 
 The queued first-attempt GPT-OSS job and an intermediate MiniMax retry were
 canceled before model execution once the shared all-reduce failure was known.
 
-Seven corrected jobs were accepted by `msrresrchbasicvc` on 2026-08-09:
+The next six non-Kimi jobs successfully started their model servers, but all
+414 tasks failed while reading exact-start source from the BlobFuse-mounted Git
+cache, before the first model request. Kimi's 0.98 memory threshold was 0.48 GiB
+above one H100's startup-free memory. These are infrastructure records, not
+model results.
+
+The current jobs explicitly trust the read-only mounted Git repositories,
+include a cache-object preflight before model startup, preserve the underlying
+Git stderr on failure, and use `gpu_memory_utilization=0.96` for Kimi.
+
+Seven updated jobs were accepted by `msrresrchbasicvc` on 2026-08-09:
 
 - Qwen3-Coder-Next and Qwen3.6 27B/35B in
-  `reviewbench-qwen-latest-hard414-v2`;
+  `reviewbench-qwen-latest-hard414-v3`;
 - Devstral-2, GPT-OSS and MiniMax M2.1 in
-  `reviewbench-open-latest-hard414-v3`;
-- Kimi K2.5 in `reviewbench-kimi25-hard414-v2`.
+  `reviewbench-open-latest-hard414-v4`;
+- Kimi K2.5 in `reviewbench-kimi25-hard414-v3`.
 
-At `2026-08-09T13:36:08Z`, all seven retries were accepted and queued on the
-requested target; none had failed.
+At `2026-08-10T02:31:53Z`, all seven current jobs were accepted and queued on
+the requested target; none had failed.
 
 All retry result roots are listed in section 3. No failed startup produced a
 benchmark sample, so retries do not overwrite or resample successful inference.
@@ -302,8 +319,11 @@ explicitly marked partial and cannot produce a complete manifest.
 
 ## 8. Local Copilot API evaluation
 
-Six current hosted models are evaluated through the verified local direct
-endpoint `http://127.0.0.1:4141/v1/chat/completions`:
+Six current hosted models are evaluated through the verified local Copilot
+gateway. Claude and Gemini use
+`http://127.0.0.1:4141/v1/chat/completions`; GPT-5.6 uses the Copilot Responses
+API with credentials issued by the local `http://127.0.0.1:4141/token`
+endpoint:
 
 ```text
 gpt-5.6-sol
@@ -316,6 +336,23 @@ gemini-3.6-flash
 
 All use the same 414-task `agentic-line-edit/v1` protocol, 32-round limit,
 exact-start repo cache, and complete raw-response trace format.
+
+The first GPT-5.6 attempt was rejected before inference because the three
+models were incorrectly forced through Chat Completions. The corrected
+Responses route passed a live tool-use smoke test, and only failed records are
+being replaced. Gemini's empty-content failures are likewise retried at one
+worker after the original six-process run overloaded the shared gateway.
+
+Status at `2026-08-10T02:31:53Z`:
+
+| Model | Generated | Remaining failed | State |
+|---|---:|---:|---|
+| `claude-sonnet-5` | 414 | 0 | complete |
+| `claude-opus-5` | 411 | 3 | complete; three Metasploit tasks exhausted 32 rounds twice |
+| `gemini-3.6-flash` | 88 | 326 | low-concurrency failed-only retry running |
+| `gpt-5.6-luna` | 18 | 396 | Responses retry running |
+| `gpt-5.6-sol` | 19 | 395 | Responses retry running |
+| `gpt-5.6-terra` | 23 | 391 | Responses retry running |
 
 Artifact root on the `conversationhub` BlobFuse2 mount:
 

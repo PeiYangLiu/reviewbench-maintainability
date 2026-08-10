@@ -226,15 +226,26 @@ def read_at_start(
     path: str,
 ) -> str:
     path = validate_repo_path(path)
+    repository = api.repo_dir(repo_cache, str(task["repo"])).resolve()
     completed = subprocess.run(
-        ["git", "show", f"{task['start_sha']}:{path}"],
-        cwd=api.repo_dir(repo_cache, str(task["repo"])),
+        [
+            "git",
+            "-c",
+            f"safe.directory={repository}",
+            "show",
+            f"{task['start_sha']}:{path}",
+        ],
+        cwd=repository,
         capture_output=True,
         text=True,
         timeout=60,
     )
     if completed.returncode != 0:
-        raise ValueError(f"file unavailable at start_sha: {path}")
+        detail = completed.stderr.strip()[-300:]
+        raise ValueError(
+            f"file unavailable at start_sha: {path}"
+            + (f": {detail}" if detail else "")
+        )
     return completed.stdout
 
 

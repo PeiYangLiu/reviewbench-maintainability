@@ -27,6 +27,9 @@ MODEL_SPECS = {
     "claude-opus-4.8": {"provider": "chat", "reasoning_effort": None},
     "gemini-3.5-flash": {"provider": "chat", "reasoning_effort": "medium"},
     "gpt-5.5": {"provider": "responses", "reasoning_effort": "medium"},
+    "gpt-5.6-luna": {"provider": "responses", "reasoning_effort": "medium"},
+    "gpt-5.6-sol": {"provider": "responses", "reasoning_effort": "medium"},
+    "gpt-5.6-terra": {"provider": "responses", "reasoning_effort": "medium"},
 }
 SOLVER_INSTRUCTIONS = """You are an expert software engineer addressing one code review request.
 
@@ -114,9 +117,16 @@ def repo_dir(repo_cache: Path, repo: str) -> Path:
 def source_at_start(task: dict[str, Any], repo_cache: Path) -> str:
     path = str((task.get("locality") or {}).get("path") or "")
     start_sha = str(task.get("start_sha") or "")
+    repository = repo_dir(repo_cache, str(task.get("repo") or "")).resolve()
     completed = subprocess.run(
-        ["git", "show", f"{start_sha}:{path}"],
-        cwd=repo_dir(repo_cache, str(task.get("repo") or "")),
+        [
+            "git",
+            "-c",
+            f"safe.directory={repository}",
+            "show",
+            f"{start_sha}:{path}",
+        ],
+        cwd=repository,
         capture_output=True,
         text=True,
         timeout=60,

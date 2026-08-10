@@ -1,6 +1,7 @@
 import importlib.util
 from argparse import Namespace
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -47,6 +48,27 @@ def test_unified_patch_uses_git_paths():
     assert patch.startswith("--- a/src/example.py\n+++ b/src/example.py\n")
     assert "-value = 1" in patch
     assert "+value = 2" in patch
+
+
+def test_source_at_start_trusts_exact_mounted_repo(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["cwd"] = kwargs["cwd"]
+        return subprocess.CompletedProcess(command, 0, stdout="source", stderr="")
+
+    monkeypatch.setattr(MODULE.subprocess, "run", fake_run)
+    task = {
+        "repo": "owner/repo",
+        "start_sha": "abc123",
+        "locality": {"path": "src/file.py"},
+    }
+
+    assert MODULE.source_at_start(task, tmp_path) == "source"
+    repository = (tmp_path / "owner__repo").resolve()
+    assert captured["cwd"] == repository
+    assert f"safe.directory={repository}" in captured["command"]
 
 
 def test_force_chat_routes_responses_model_and_checks_identity(monkeypatch):
@@ -99,6 +121,41 @@ def test_force_chat_rejects_silent_solver_fallback(monkeypatch):
 
     with pytest.raises(RuntimeError, match="solver model mismatch"):
         MODULE.invoke_model("gpt-5.5", "system", "prompt", args)
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"],
+)
+def test_current_gpt_models_use_responses_api(monkeypatch, model):
+    captured = {}
+
+    def fake_post_json(endpoint, payload, headers, **kwargs):
+        captured["endpoint"] = endpoint
+        captured["payload"] = payload
+        return {"output_text": "OK", "usage": {}}
+
+    monkeypatch.setattr(MODULE, "post_json", fake_post_json)
+    monkeypatch.setattr(
+        MODULE,
+        "copilot_token",
+        lambda endpoint, refresh=False: "token",
+    )
+    args = Namespace(
+        chat_endpoint="unused",
+        responses_endpoint="https://example.invalid/responses",
+        token_endpoint="http://127.0.0.1:4141/token",
+        max_output_tokens=128,
+        request_timeout=30,
+        request_retries=1,
+        force_chat=False,
+    )
+
+    text, _ = MODULE.invoke_model(model, "system", "prompt", args)
+
+    assert text == "OK"
+    assert captured["endpoint"] == args.responses_endpoint
+    assert captured["payload"]["model"] == model
 
 
 def test_custom_model_defaults_to_openai_compatible_chat(monkeypatch):

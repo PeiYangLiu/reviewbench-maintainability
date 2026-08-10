@@ -13,6 +13,45 @@ set -euo pipefail
 work="${AMLT_DIRSYNC_DIR:-/scratch/reviewbench-openmodels/${AMLT_JOB_NAME:-job}}"
 generation_root="$work/run"
 mkdir -p "$generation_root" "$AMLT_OUTPUT_DIR"
+# The exact-start cache is a trusted, read-only BlobFuse mount whose ownership
+# differs from the container user.
+git config --global --add safe.directory '*'
+python3 - "$AMLT_DATA_DIR" <<'PY'
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+root = Path(sys.argv[1]).resolve()
+with Path("data/releases/hard/20260808/tasks.jsonl").open(
+    encoding="utf-8"
+) as stream:
+    task = json.loads(next(stream))
+repository = root / str(task["repo"]).replace("/", "__")
+path = str((task.get("locality") or {}).get("path") or "")
+completed = subprocess.run(
+    [
+        "git",
+        "-c",
+        f"safe.directory={repository}",
+        "-C",
+        str(repository),
+        "cat-file",
+        "-e",
+        f"{task['start_sha']}:{path}",
+    ],
+    text=True,
+    capture_output=True,
+    check=False,
+)
+if completed.returncode:
+    raise SystemExit(
+        "repo-cache preflight failed for "
+        f"{task['repo']}@{task['start_sha']}:{path}: "
+        f"{completed.stderr.strip()[-1000:]}"
+    )
+print(f"repo-cache preflight passed: {task['repo']}@{task['start_sha']}:{path}")
+PY
 trust_args=()
 if [ "${TRUST_REMOTE_CODE:-0}" = "1" ]; then
   trust_args+=(--trust-remote-code)
