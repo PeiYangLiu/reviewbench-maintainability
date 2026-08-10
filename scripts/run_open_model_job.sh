@@ -79,6 +79,9 @@ if [ -n "${KV_CACHE_MEMORY_BYTES:-}" ]; then
     --vllm-extra-arg="$KV_CACHE_MEMORY_BYTES"
   )
 fi
+if [ "${DISABLE_FLASHINFER_AUTOTUNE:-0}" = "1" ]; then
+  vllm_args+=(--vllm-extra-arg=--no-enable-flashinfer-autotune)
+fi
 
 persist() {
   status="$?"

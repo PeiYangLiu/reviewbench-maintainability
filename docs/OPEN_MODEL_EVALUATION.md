@@ -13,12 +13,12 @@ artifact，再运行 correctness 和 maintainability；以后 rubric 改变时�
 | AMLT environment | local conda `amlt10` |
 | AMLT version | 10.14.0 |
 | Project | `reviewbench-maintainability` |
-| Active experiments | `reviewbench-qwen-latest-hard414-v4`, `reviewbench-open-latest-hard414-v5`, `reviewbench-kimi25-hard414-v6` |
+| Active experiments | `reviewbench-qwen-latest-hard414-v4`, `reviewbench-open-latest-hard414-v5`, `reviewbench-kimi25-hard414-v7` |
 | Service | Singularity |
 | Target | `msrresrchbasicvc` |
 | Workspace | `Workspace_NLC` |
 | Project storage | `conversationhub / amulet` |
-| Code snapshots | `projects/reviewbench-maintainability/amlt-code/85ab05f9c45c04ffd8afd982ff3ab522` (Qwen/cross-family), `projects/reviewbench-maintainability/amlt-code/e29046924ae717e67a981da2650d018c` (Kimi) |
+| Code snapshots | `projects/reviewbench-maintainability/amlt-code/85ab05f9c45c04ffd8afd982ff3ab522` (Qwen/cross-family), `projects/reviewbench-maintainability/amlt-code/33bd4b03fb7c4464d9e9d01655ad26cc` (Kimi) |
 | Task set | `data/releases/hard/20260808/tasks.jsonl` |
 | Tasks | 414 |
 | Protocol | `agentic-line-edit/v1`, maximum 32 rounds |
@@ -85,11 +85,11 @@ Active cross-family retry result roots
 | `gpt-oss-120b` | `jolly_lime_stp99xkpy5` | `projects/reviewbench-maintainability/amlt-results/7213619390.70144-0660aa2d-7741-4009-8436-e52c5eaf8d03` |
 | `minimax-m21-fp8` | `cyan_bulb_wgqbmkp94x` | `projects/reviewbench-maintainability/amlt-results/7213619390.69963-21c60d6b-3514-4c44-be9b-426529b1b719` |
 
-Kimi K2.5 retry (`reviewbench-kimi25-hard414-v6`):
+Kimi K2.5 retry (`reviewbench-kimi25-hard414-v7`):
 
 | Job | Backend ID | Blob result path |
 |---|---|---|
-| `kimi-k25` | `lucid_sheep_0tng2sy0f6` | `projects/reviewbench-maintainability/amlt-results/7213606929.36377-f080ff1d-bc1d-492a-ada4-7ef16f69b7ca` |
+| `kimi-k25` | `musing_plow_lk7mjb18f0` | `projects/reviewbench-maintainability/amlt-results/7213601570.50237-cc8dc298-9c65-4d0c-b55c-197520cd42e2` |
 
 Failed and canceled latest-model attempts remain immutable failure evidence:
 
@@ -119,6 +119,7 @@ Failed and canceled latest-model attempts remain immutable failure evidence:
 | `reviewbench-kimi25-hard414-v3:kimi-k25` | failed cache preflight before inference | `projects/reviewbench-maintainability/amlt-results/7213645931.71015-6f9dedd5-14f8-4f19-8148-f1f07f86619a` |
 | `reviewbench-kimi25-hard414-v4:kimi-k25` | insufficient KV cache before inference | `projects/reviewbench-maintainability/amlt-results/7213619360.83046-b51d699f-4fae-4841-8d19-17e10dd73d61` |
 | `reviewbench-kimi25-hard414-v5:kimi-k25` | KV allocation fragmentation before inference | `projects/reviewbench-maintainability/amlt-results/7213614687.03225-df8080c1-869a-4aef-b3d0-8e256d4f7a1b` |
+| `reviewbench-kimi25-hard414-v6:kimi-k25` | FlashInfer warmup OOM before inference | `projects/reviewbench-maintainability/amlt-results/7213606929.36377-f080ff1d-bc1d-492a-ada4-7ef16f69b7ca` |
 
 Failed jobs that reached the wrapper contain the complete server log, manifest,
 and packaged diagnostic archive. Still earlier retired Qwen jobs preserve the
@@ -218,11 +219,11 @@ Seven updated jobs were accepted by `msrresrchbasicvc` on 2026-08-10:
   `reviewbench-open-latest-hard414-v5`;
 - Kimi K2.5 in `reviewbench-kimi25-hard414-v4`.
 
-At `2026-08-10T13:18:37Z`, Qwen3.6 27B and 35B-A3B were generating patches;
-Qwen3-Coder-Next and all three cross-family A100 jobs were queued. Kimi v5
-proved that 2.93 GiB was available but vLLM exhausted it through automatic KV
-allocation and failed on a final 50 MiB block. Kimi v6 explicitly caps KV cache
-at 2300 MiB, above the 32K minimum while leaving about 650 MiB headroom.
+At `2026-08-10T14:47:52Z`, Qwen3.6 27B and 35B-A3B had produced 78 and 157
+task records; Qwen3-Coder-Next and all three cross-family A100 jobs were queued.
+Kimi v6 allocated enough KV for 32K but FlashInfer autotune required another
+256 MiB temporary buffer. Kimi v7 uses a 2200 MiB KV cap and disables that
+autotune warmup while retaining the 32K context.
 
 All retry result roots are listed in section 3. No failed startup produced a
 benchmark sample, so retries do not overwrite or resample successful inference.
@@ -359,13 +360,13 @@ Responses route passed a live tool-use smoke test, and only failed records are
 being replaced. Gemini's empty-content failures are likewise retried at one
 worker after the original six-process run overloaded the shared gateway.
 
-Status at `2026-08-10T13:18:37Z`:
+Status at `2026-08-10T14:47:52Z`:
 
 | Model | Generated | Remaining failed | State |
 |---|---:|---:|---|
 | `claude-sonnet-5` | 414 | 0 | complete |
 | `claude-opus-5` | 411 | 3 | complete; three Metasploit tasks exhausted 32 rounds twice |
-| `gemini-3.6-flash` | 114 | 300 | low-concurrency failed-only retry running |
+| `gemini-3.6-flash` | 116 | 298 | low-concurrency failed-only retry running |
 | `gpt-5.6-luna` | 414 | 0 | complete |
 | `gpt-5.6-sol` | 412 | 2 | complete; two Speckle duplication tasks exhausted 32 rounds |
 | `gpt-5.6-terra` | 414 | 0 | complete |
