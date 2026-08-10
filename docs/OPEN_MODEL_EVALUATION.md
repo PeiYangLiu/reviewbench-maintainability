@@ -360,13 +360,13 @@ Responses route passed a live tool-use smoke test, and only failed records are
 being replaced. Gemini's empty-content failures are likewise retried at one
 worker after the original six-process run overloaded the shared gateway.
 
-Status at `2026-08-10T14:47:52Z`:
+Hosted-model status at `2026-08-10T20:10:41Z`:
 
 | Model | Generated | Remaining failed | State |
 |---|---:|---:|---|
 | `claude-sonnet-5` | 414 | 0 | complete |
 | `claude-opus-5` | 411 | 3 | complete; three Metasploit tasks exhausted 32 rounds twice |
-| `gemini-3.6-flash` | 116 | 298 | low-concurrency failed-only retry running |
+| `gemini-3.6-flash` | 131 | 283 | complete; 275 invalid actions and 8 no-patch terminal failures |
 | `gpt-5.6-luna` | 414 | 0 | complete |
 | `gpt-5.6-sol` | 412 | 2 | complete; two Speckle duplication tasks exhausted 32 rounds |
 | `gpt-5.6-terra` | 414 | 0 | complete |
