@@ -60,3 +60,6 @@ def test_builds_exact_tree_without_parent_history(tmp_path):
     )
     assert missing_parent.returncode != 0
     assert json.loads((bare / MODULE.MARKER).read_text())["start_commits"] == 1
+    assert (
+        bare / ".git" / MODULE.CACHE_REF
+    ).read_text(encoding="ascii") == f"{start}\n"

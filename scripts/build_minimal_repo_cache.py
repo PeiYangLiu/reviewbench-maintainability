@@ -15,6 +15,7 @@ from typing import Any
 
 
 MARKER = ".reviewbench-minimal-cache.json"
+CACHE_REF = "refs/heads/reviewbench-cache"
 
 
 def parse_args() -> argparse.Namespace:
@@ -164,6 +165,13 @@ def validate_cache(
             )
 
 
+def ensure_cache_ref(destination: Path, starts: set[str]) -> None:
+    """Keep the repository recognizable after empty directories reach Blob."""
+    reference = destination / ".git" / CACHE_REF
+    reference.parent.mkdir(parents=True, exist_ok=True)
+    reference.write_text(f"{min(starts)}\n", encoding="ascii")
+
+
 def build_repo(
     repo: str,
     tasks: list[dict[str, Any]],
@@ -177,6 +185,10 @@ def build_repo(
     if marker.is_file():
         existing = json.loads(marker.read_text(encoding="utf-8"))
         if existing.get("task_fingerprint") == fingerprint:
+            ensure_cache_ref(
+                destination,
+                {str(task["start_sha"]) for task in tasks},
+            )
             validate_cache(destination, tasks)
             return {**existing, "status": "reused"}
 
@@ -190,6 +202,7 @@ def build_repo(
     starts = {str(task["start_sha"]) for task in tasks}
     ids = object_ids(source, starts)
     write_exact_pack(source, temporary / ".git", ids)
+    ensure_cache_ref(temporary, starts)
     validate_cache(temporary, tasks)
     record = {
         "repo": repo,

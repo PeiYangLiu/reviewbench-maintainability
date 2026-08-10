@@ -13,12 +13,12 @@ artifact，再运行 correctness 和 maintainability；以后 rubric 改变时�
 | AMLT environment | local conda `amlt10` |
 | AMLT version | 10.14.0 |
 | Project | `reviewbench-maintainability` |
-| Active experiments | `reviewbench-qwen-latest-hard414-v3`, `reviewbench-open-latest-hard414-v4`, `reviewbench-kimi25-hard414-v3` |
+| Active experiments | `reviewbench-qwen-latest-hard414-v4`, `reviewbench-open-latest-hard414-v5`, `reviewbench-kimi25-hard414-v4` |
 | Service | Singularity |
 | Target | `msrresrchbasicvc` |
 | Workspace | `Workspace_NLC` |
 | Project storage | `conversationhub / amulet` |
-| Code snapshot | `projects/reviewbench-maintainability/amlt-code/c3685d7d0dc81fe856fa303133e4fcb1` |
+| Code snapshot | `projects/reviewbench-maintainability/amlt-code/85ab05f9c45c04ffd8afd982ff3ab522` |
 | Task set | `data/releases/hard/20260808/tasks.jsonl` |
 | Tasks | 414 |
 | Protocol | `agentic-line-edit/v1`, maximum 32 rounds |
@@ -68,28 +68,28 @@ The cache contains 340 repositories and only the exact task commit, trees, and
 blobs needed by `git show`; parent history and build artifacts are excluded.
 
 Active latest-Qwen retry result roots
-(`reviewbench-qwen-latest-hard414-v3`):
+(`reviewbench-qwen-latest-hard414-v4`):
 
 | Job | Backend ID | Blob result path |
 |---|---|---|
-| `qwen3-coder-next-fp8` | `cyan_queen_gyl2dcqppz` | `projects/reviewbench-maintainability/amlt-results/7213646004.43791-c6690589-573b-4880-9ac5-0cac7405c04a` |
-| `qwen36-27b` | `sleepy_lettuce_sk0zvk371z` | `projects/reviewbench-maintainability/amlt-results/7213646004.43595-e7266fea-8a70-49de-bf32-fcd2ca412285` |
-| `qwen36-35b-a3b` | `gifted_key_9czmsb6fb9` | `projects/reviewbench-maintainability/amlt-results/7213646004.43413-fa6ecfc8-ab1d-4a0a-bc50-1cff4fd81bbc` |
+| `qwen3-coder-next-fp8` | `frosty_celery_1b2rj4p0z2` | `projects/reviewbench-maintainability/amlt-results/7213619421.74239-d211805e-733e-42e0-9347-064abf4142e5` |
+| `qwen36-27b` | `loving_garage_zq18vlnm50` | `projects/reviewbench-maintainability/amlt-results/7213619421.74031-104fbb46-9099-4d20-8311-859291c62a66` |
+| `qwen36-35b-a3b` | `kind_cat_lc94xdsyxf` | `projects/reviewbench-maintainability/amlt-results/7213619421.73854-a54ab682-f811-46dd-a598-20a20791d77a` |
 
 Active cross-family retry result roots
-(`reviewbench-open-latest-hard414-v4`):
+(`reviewbench-open-latest-hard414-v5`):
 
 | Job | Backend ID | Blob result path |
 |---|---|---|
-| `devstral2-123b-fp8` | `silver_hand_mhw5cm29kz` | `projects/reviewbench-maintainability/amlt-results/7213645968.60049-9982a3d0-57fc-46b0-8027-a1ce108a8128` |
-| `gpt-oss-120b` | `silly_cord_nzvkl4h3kp` | `projects/reviewbench-maintainability/amlt-results/7213645968.59853-ae63b09a-4130-406c-ade5-ec95116f3b86` |
-| `minimax-m21-fp8` | `lucid_band_z625t3qp4q` | `projects/reviewbench-maintainability/amlt-results/7213645968.59675-7e76c2e7-9896-4bfa-87c9-4f4cfc39db2d` |
+| `devstral2-123b-fp8` | `loving_tooth_y4h1qrkjpk` | `projects/reviewbench-maintainability/amlt-results/7213619390.70356-6fdc8105-67e7-4b85-92bb-49a97b377cf9` |
+| `gpt-oss-120b` | `jolly_lime_stp99xkpy5` | `projects/reviewbench-maintainability/amlt-results/7213619390.70144-0660aa2d-7741-4009-8436-e52c5eaf8d03` |
+| `minimax-m21-fp8` | `cyan_bulb_wgqbmkp94x` | `projects/reviewbench-maintainability/amlt-results/7213619390.69963-21c60d6b-3514-4c44-be9b-426529b1b719` |
 
-Kimi K2.5 retry (`reviewbench-kimi25-hard414-v3`):
+Kimi K2.5 retry (`reviewbench-kimi25-hard414-v4`):
 
 | Job | Backend ID | Blob result path |
 |---|---|---|
-| `kimi-k25` | `patient_rice_02wxtg0x0m` | `projects/reviewbench-maintainability/amlt-results/7213645931.71015-6f9dedd5-14f8-4f19-8148-f1f07f86619a` |
+| `kimi-k25` | `elated_hook_8rjb5sbrlf` | `projects/reviewbench-maintainability/amlt-results/7213619360.83046-b51d699f-4fae-4841-8d19-17e10dd73d61` |
 
 Failed and canceled latest-model attempts remain immutable failure evidence:
 
@@ -110,6 +110,13 @@ Failed and canceled latest-model attempts remain immutable failure evidence:
 | `reviewbench-open-latest-hard414-v3:gpt-oss-120b` | 414 source reads failed before inference | `projects/reviewbench-maintainability/amlt-results/7213692429.75446-6a3b509f-289f-42dc-bd08-9d84150743a8` |
 | `reviewbench-open-latest-hard414-v3:minimax-m21-fp8` | 414 source reads failed before inference | `projects/reviewbench-maintainability/amlt-results/7213692429.75268-d7406a12-413b-414b-8b2b-c35c980690a0` |
 | `reviewbench-kimi25-hard414-v2:kimi-k25` | failed before server startup | `projects/reviewbench-maintainability/amlt-results/7213692577.50703-02a66671-a198-437e-b76e-973c6dec125d` |
+| `reviewbench-qwen-latest-hard414-v3:qwen3-coder-next-fp8` | failed cache preflight before inference | `projects/reviewbench-maintainability/amlt-results/7213646004.43791-c6690589-573b-4880-9ac5-0cac7405c04a` |
+| `reviewbench-qwen-latest-hard414-v3:qwen36-27b` | failed cache preflight before inference | `projects/reviewbench-maintainability/amlt-results/7213646004.43595-e7266fea-8a70-49de-bf32-fcd2ca412285` |
+| `reviewbench-qwen-latest-hard414-v3:qwen36-35b-a3b` | failed cache preflight before inference | `projects/reviewbench-maintainability/amlt-results/7213646004.43413-fa6ecfc8-ab1d-4a0a-bc50-1cff4fd81bbc` |
+| `reviewbench-open-latest-hard414-v4:devstral2-123b-fp8` | failed cache preflight before inference | `projects/reviewbench-maintainability/amlt-results/7213645968.60049-9982a3d0-57fc-46b0-8027-a1ce108a8128` |
+| `reviewbench-open-latest-hard414-v4:gpt-oss-120b` | failed cache preflight before inference | `projects/reviewbench-maintainability/amlt-results/7213645968.59853-ae63b09a-4130-406c-ade5-ec95116f3b86` |
+| `reviewbench-open-latest-hard414-v4:minimax-m21-fp8` | failed cache preflight before inference | `projects/reviewbench-maintainability/amlt-results/7213645968.59675-7e76c2e7-9896-4bfa-87c9-4f4cfc39db2d` |
+| `reviewbench-kimi25-hard414-v3:kimi-k25` | failed cache preflight before inference | `projects/reviewbench-maintainability/amlt-results/7213645931.71015-6f9dedd5-14f8-4f19-8148-f1f07f86619a` |
 
 Failed jobs that reached the wrapper contain the complete server log, manifest,
 and packaged diagnostic archive. Still earlier retired Qwen jobs preserve the
@@ -193,20 +200,24 @@ cache, before the first model request. Kimi's 0.98 memory threshold was 0.48 GiB
 above one H100's startup-free memory. These are infrastructure records, not
 model results.
 
-The current jobs explicitly trust the read-only mounted Git repositories,
-include a cache-object preflight before model startup, preserve the underlying
-Git stderr on failure, and use `gpu_memory_utilization=0.96` for Kimi.
+The cache preflight then exposed the underlying portability defect: the local
+minimal repositories relied on empty `.git/refs/` directories, which Blob
+storage does not preserve. The builder now writes one real
+`refs/heads/reviewbench-cache` per repository. All 340 refs were generated,
+the 414 exact-start objects were revalidated, and the 340 41-byte files were
+incrementally uploaded and counted in Blob. The current jobs retain the
+preflight and use `gpu_memory_utilization=0.96` for Kimi.
 
-Seven updated jobs were accepted by `msrresrchbasicvc` on 2026-08-09:
+Seven updated jobs were accepted by `msrresrchbasicvc` on 2026-08-10:
 
 - Qwen3-Coder-Next and Qwen3.6 27B/35B in
-  `reviewbench-qwen-latest-hard414-v3`;
+  `reviewbench-qwen-latest-hard414-v4`;
 - Devstral-2, GPT-OSS and MiniMax M2.1 in
-  `reviewbench-open-latest-hard414-v4`;
-- Kimi K2.5 in `reviewbench-kimi25-hard414-v3`.
+  `reviewbench-open-latest-hard414-v5`;
+- Kimi K2.5 in `reviewbench-kimi25-hard414-v4`.
 
-At `2026-08-10T02:31:53Z`, all seven current jobs were accepted and queued on
-the requested target; none had failed.
+At `2026-08-10T09:53:30Z`, all seven current jobs were accepted and queued on
+the requested target.
 
 All retry result roots are listed in section 3. No failed startup produced a
 benchmark sample, so retries do not overwrite or resample successful inference.
@@ -343,16 +354,16 @@ Responses route passed a live tool-use smoke test, and only failed records are
 being replaced. Gemini's empty-content failures are likewise retried at one
 worker after the original six-process run overloaded the shared gateway.
 
-Status at `2026-08-10T02:31:53Z`:
+Status at `2026-08-10T09:51:09Z`:
 
 | Model | Generated | Remaining failed | State |
 |---|---:|---:|---|
 | `claude-sonnet-5` | 414 | 0 | complete |
 | `claude-opus-5` | 411 | 3 | complete; three Metasploit tasks exhausted 32 rounds twice |
-| `gemini-3.6-flash` | 88 | 326 | low-concurrency failed-only retry running |
-| `gpt-5.6-luna` | 18 | 396 | Responses retry running |
-| `gpt-5.6-sol` | 19 | 395 | Responses retry running |
-| `gpt-5.6-terra` | 23 | 391 | Responses retry running |
+| `gemini-3.6-flash` | 103 | 311 | low-concurrency failed-only retry running |
+| `gpt-5.6-luna` | 414 | 0 | complete |
+| `gpt-5.6-sol` | 412 | 2 | complete; two Speckle duplication tasks exhausted 32 rounds |
+| `gpt-5.6-terra` | 414 | 0 | complete |
 
 Artifact root on the `conversationhub` BlobFuse2 mount:
 
