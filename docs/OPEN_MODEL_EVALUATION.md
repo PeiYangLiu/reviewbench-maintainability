@@ -13,12 +13,12 @@ artifact，再运行 correctness 和 maintainability；以后 rubric 改变时�
 | AMLT environment | local conda `amlt10` |
 | AMLT version | 10.14.0 |
 | Project | `reviewbench-maintainability` |
-| Active experiments | `reviewbench-qwen-latest-hard414-v4`, `reviewbench-open-latest-hard414-v5`, `reviewbench-kimi25-hard414-v4` |
+| Active experiments | `reviewbench-qwen-latest-hard414-v4`, `reviewbench-open-latest-hard414-v5`, `reviewbench-kimi25-hard414-v5` |
 | Service | Singularity |
 | Target | `msrresrchbasicvc` |
 | Workspace | `Workspace_NLC` |
 | Project storage | `conversationhub / amulet` |
-| Code snapshot | `projects/reviewbench-maintainability/amlt-code/85ab05f9c45c04ffd8afd982ff3ab522` |
+| Code snapshots | `projects/reviewbench-maintainability/amlt-code/85ab05f9c45c04ffd8afd982ff3ab522` (Qwen/cross-family), `projects/reviewbench-maintainability/amlt-code/40d90d3f025d0a67b3234b66d27fa1f4` (Kimi) |
 | Task set | `data/releases/hard/20260808/tasks.jsonl` |
 | Tasks | 414 |
 | Protocol | `agentic-line-edit/v1`, maximum 32 rounds |
@@ -85,11 +85,11 @@ Active cross-family retry result roots
 | `gpt-oss-120b` | `jolly_lime_stp99xkpy5` | `projects/reviewbench-maintainability/amlt-results/7213619390.70144-0660aa2d-7741-4009-8436-e52c5eaf8d03` |
 | `minimax-m21-fp8` | `cyan_bulb_wgqbmkp94x` | `projects/reviewbench-maintainability/amlt-results/7213619390.69963-21c60d6b-3514-4c44-be9b-426529b1b719` |
 
-Kimi K2.5 retry (`reviewbench-kimi25-hard414-v4`):
+Kimi K2.5 retry (`reviewbench-kimi25-hard414-v5`):
 
 | Job | Backend ID | Blob result path |
 |---|---|---|
-| `kimi-k25` | `elated_hook_8rjb5sbrlf` | `projects/reviewbench-maintainability/amlt-results/7213619360.83046-b51d699f-4fae-4841-8d19-17e10dd73d61` |
+| `kimi-k25` | `sweet_carrot_1tbwvgcqd1` | `projects/reviewbench-maintainability/amlt-results/7213614687.03225-df8080c1-869a-4aef-b3d0-8e256d4f7a1b` |
 
 Failed and canceled latest-model attempts remain immutable failure evidence:
 
@@ -117,6 +117,7 @@ Failed and canceled latest-model attempts remain immutable failure evidence:
 | `reviewbench-open-latest-hard414-v4:gpt-oss-120b` | failed cache preflight before inference | `projects/reviewbench-maintainability/amlt-results/7213645968.59853-ae63b09a-4130-406c-ade5-ec95116f3b86` |
 | `reviewbench-open-latest-hard414-v4:minimax-m21-fp8` | failed cache preflight before inference | `projects/reviewbench-maintainability/amlt-results/7213645968.59675-7e76c2e7-9896-4bfa-87c9-4f4cfc39db2d` |
 | `reviewbench-kimi25-hard414-v3:kimi-k25` | failed cache preflight before inference | `projects/reviewbench-maintainability/amlt-results/7213645931.71015-6f9dedd5-14f8-4f19-8148-f1f07f86619a` |
+| `reviewbench-kimi25-hard414-v4:kimi-k25` | insufficient KV cache before inference | `projects/reviewbench-maintainability/amlt-results/7213619360.83046-b51d699f-4fae-4841-8d19-17e10dd73d61` |
 
 Failed jobs that reached the wrapper contain the complete server log, manifest,
 and packaged diagnostic archive. Still earlier retired Qwen jobs preserve the
@@ -216,8 +217,10 @@ Seven updated jobs were accepted by `msrresrchbasicvc` on 2026-08-10:
   `reviewbench-open-latest-hard414-v5`;
 - Kimi K2.5 in `reviewbench-kimi25-hard414-v4`.
 
-At `2026-08-10T09:53:30Z`, all seven current jobs were accepted and queued on
-the requested target.
+At `2026-08-10T11:09:10Z`, Qwen3.6-35B-A3B was generating patches, the other
+five A100 jobs were queued, and Kimi v5 was accepted with a 0.97 memory budget
+and eager execution. Kimi retains the 32K context while freeing CUDA graph
+memory for the required 2.14 GiB KV cache.
 
 All retry result roots are listed in section 3. No failed startup produced a
 benchmark sample, so retries do not overwrite or resample successful inference.
@@ -354,13 +357,13 @@ Responses route passed a live tool-use smoke test, and only failed records are
 being replaced. Gemini's empty-content failures are likewise retried at one
 worker after the original six-process run overloaded the shared gateway.
 
-Status at `2026-08-10T09:51:09Z`:
+Status at `2026-08-10T11:09:10Z`:
 
 | Model | Generated | Remaining failed | State |
 |---|---:|---:|---|
 | `claude-sonnet-5` | 414 | 0 | complete |
 | `claude-opus-5` | 411 | 3 | complete; three Metasploit tasks exhausted 32 rounds twice |
-| `gemini-3.6-flash` | 103 | 311 | low-concurrency failed-only retry running |
+| `gemini-3.6-flash` | 109 | 305 | low-concurrency failed-only retry running |
 | `gpt-5.6-luna` | 414 | 0 | complete |
 | `gpt-5.6-sol` | 412 | 2 | complete; two Speckle duplication tasks exhausted 32 rounds |
 | `gpt-5.6-terra` | 414 | 0 | complete |

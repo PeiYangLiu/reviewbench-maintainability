@@ -70,6 +70,9 @@ fi
 if [ "${DISABLE_CUSTOM_ALL_REDUCE:-0}" = "1" ]; then
   vllm_args+=(--vllm-extra-arg=--disable-custom-all-reduce)
 fi
+if [ "${ENFORCE_EAGER:-0}" = "1" ]; then
+  vllm_args+=(--vllm-extra-arg=--enforce-eager)
+fi
 
 persist() {
   status="$?"
