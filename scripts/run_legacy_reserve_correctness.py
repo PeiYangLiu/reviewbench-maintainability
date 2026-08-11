@@ -1436,7 +1436,7 @@ def replay_native(
 
     workspace_source = task_dir if manifest["workspace"] == "." else task_dir / manifest["workspace"]
     workspace_scratch = scratch / "workspace"
-    shutil.copytree(workspace_source, workspace_scratch)
+    shutil.copytree(workspace_source, workspace_scratch, symlinks=True)
     patch_target = workspace_scratch if manifest["workspace"] == "." else workspace_scratch
 
     patch_path = Path(generation["patch_file"])
@@ -1532,7 +1532,7 @@ def replay_rust(
         task, oracle, task_id, "rust", generation, legacy_root, []
     )
     workspace_scratch = scratch / "workspace"
-    shutil.copytree(task_dir / "start", workspace_scratch)
+    shutil.copytree(task_dir / "start", workspace_scratch, symlinks=True)
 
     patch_path = Path(generation["patch_file"])
     ok, detail = apply_patch(workspace_scratch, patch_path)
@@ -1726,7 +1726,7 @@ def replay_tsjs(
         if session_dir.is_dir():
             destination = workspace_scratch / "session"
             shutil.rmtree(destination, ignore_errors=True)
-            shutil.copytree(session_dir, destination)
+            shutil.copytree(session_dir, destination, symlinks=True)
 
         patch_path = Path(generation["patch_file"])
         ok, detail = apply_patch(workspace_scratch, patch_path)

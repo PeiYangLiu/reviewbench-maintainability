@@ -715,6 +715,7 @@ def test_replay_native_applies_patch_and_records_pass(tmp_path, monkeypatch):
     task_dir = legacy_root / "strict_screen_20260726" / manifest["task_dir"]
     (task_dir / "start").mkdir(parents=True)
     (task_dir / "start" / "file.txt").write_text("a\nb\nc\n", encoding="utf-8")
+    (task_dir / "start" / "broken-link").symlink_to("missing-target")
     (task_dir / "query.sql").write_text("SELECT 1", encoding="utf-8")
 
     patch_path = tmp_path / "candidate.patch"
@@ -754,6 +755,10 @@ def test_replay_native_applies_patch_and_records_pass(tmp_path, monkeypatch):
         seen_workspace["file.txt"] = (
             (scratch / "workspace" / "file.txt").read_text(encoding="utf-8")
         )
+        seen_workspace["broken-link"] = (
+            (scratch / "workspace" / "broken-link").is_symlink(),
+            (scratch / "workspace" / "broken-link").readlink(),
+        )
         return real_persist_evidence(output_arg, lane, model, task_id_arg, scratch)
 
     monkeypatch.setattr(MODULE, "run_subprocess", fake_run_subprocess)
@@ -771,6 +776,7 @@ def test_replay_native_applies_patch_and_records_pass(tmp_path, monkeypatch):
     # the patched workspace copy must contain the candidate's change, and
     # the original retained task_dir must be left untouched.
     assert seen_workspace["file.txt"] == "a\nB\nc\n"
+    assert seen_workspace["broken-link"] == (True, Path("missing-target"))
     assert (task_dir / "start" / "file.txt").read_text(encoding="utf-8") == "a\nb\nc\n"
     # the disposable scratch workspace must not linger under output --
     # only the small evidence log does.
