@@ -56,6 +56,10 @@ trust_args=()
 if [ "${TRUST_REMOTE_CODE:-0}" = "1" ]; then
   trust_args+=(--trust-remote-code)
 fi
+ids_args=()
+if [ -n "${GENERATION_IDS_FILE:-}" ]; then
+  ids_args+=(--ids-file "$GENERATION_IDS_FILE")
+fi
 vllm_args=(
   --vllm-extra-arg=--enable-prefix-caching
   --vllm-extra-arg=--max-num-seqs
@@ -118,8 +122,9 @@ python3 scripts/run_open_model_agentic.py \
   --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.90}" \
   --workers "$GENERATION_WORKERS" \
   --max-rounds 32 \
-  --max-output-tokens 4096 \
+  --max-output-tokens "${MAX_OUTPUT_TOKENS:-4096}" \
   --server-timeout 7200 \
   --download-dir "/scratch/hf-cache/${AMLT_JOB_NAME:-job}" \
   "${trust_args[@]}" \
+  "${ids_args[@]}" \
   "${vllm_args[@]}"

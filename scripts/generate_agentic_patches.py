@@ -49,6 +49,7 @@ change; use read again when needed.
 Do not return Markdown, prose, SEARCH/REPLACE blocks, or a unified diff."""
 
 NATIVE_TOOL_MODELS = {"gemini-3.6-flash"}
+NATIVE_EDIT_DEADLINE = 24
 NATIVE_TOOL_INSTRUCTIONS = """You are an expert software engineer working in a real Git worktree.
 
 Address the reviewer concern with the smallest complete, behavior-preserving
@@ -263,7 +264,12 @@ def parse_action(
         if not direct.get("action") and isinstance(nested, dict):
             direct = nested
         if str(direct.get("action") or "") in {"read", "find", "edit", "finish"}:
-            return direct
+            try:
+                json.dumps(direct)
+            except (TypeError, ValueError):
+                direct = None
+            else:
+                return direct
 
     candidates = object_candidates(text)
     errors = []
@@ -285,6 +291,11 @@ def parse_action(
         nested = value.get("assistant_action")
         if not value.get("action") and isinstance(nested, dict):
             value = nested
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError) as exc:
+            errors.append(str(exc))
+            continue
         action = str(value.get("action") or "")
         if action in {"read", "find", "edit", "finish"}:
             selected = value
@@ -342,7 +353,7 @@ def read_at_start(
         cwd=repository,
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=300,
     )
     if completed.returncode != 0:
         detail = completed.stderr.strip()[-300:]
@@ -562,16 +573,19 @@ def invoke(
     model: str,
     prompt: str,
     args: argparse.Namespace,
+    native_messages: list[dict[str, Any]] | None = None,
+    native_tool_choice: dict[str, Any] | str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
     if model in NATIVE_TOOL_MODELS:
         payload = {
             "model": model,
-            "messages": [
+            "messages": native_messages
+            or [
                 {"role": "system", "content": NATIVE_TOOL_INSTRUCTIONS},
                 {"role": "user", "content": prompt},
             ],
             "tools": NATIVE_TOOLS,
-            "tool_choice": "auto",
+            "tool_choice": native_tool_choice or "auto",
             "parallel_tool_calls": False,
             "max_tokens": args.max_output_tokens,
             "reasoning_effort": "medium",
@@ -609,6 +623,68 @@ def invoke(
         invoke_args,
     )
     return text, usage, None
+
+
+def native_assistant_message(data: dict[str, Any]) -> dict[str, Any] | None:
+    choices = data.get("choices") or []
+    if not choices:
+        return None
+    message = choices[0].get("message") or {}
+    if not message:
+        return None
+    return {
+        key: message[key]
+        for key in (
+            "role",
+            "content",
+            "tool_calls",
+            "reasoning_opaque",
+        )
+        if key in message
+    }
+
+
+def append_native_turn(
+    history: list[dict[str, Any]],
+    data: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    message = native_assistant_message(data)
+    if message is None:
+        history.append(
+            {
+                "role": "user",
+                "content": (
+                    "The response was empty. Invoke exactly one provided "
+                    "function."
+                ),
+            }
+        )
+        return
+    history.append(message)
+    tool_calls = message.get("tool_calls") or []
+    if len(tool_calls) == 1 and tool_calls[0].get("id"):
+        history.append(
+            {
+                "role": "tool",
+                "tool_call_id": tool_calls[0]["id"],
+                "content": json.dumps(
+                    result,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            }
+        )
+    else:
+        history.append(
+            {
+                "role": "user",
+                "content": (
+                    "The prior response was rejected. Invoke exactly one "
+                    "provided function."
+                ),
+            }
+        )
 
 
 def native_tool_text(data: dict[str, Any]) -> str:
@@ -700,22 +776,89 @@ def generate_one(
         result["resumed_from_round"] = len(prior_rounds)
         first_round = len(prior_rounds) + 1
 
+    native_history = None
+    if model in NATIVE_TOOL_MODELS:
+        initial_prompt = build_initial_prompt(
+            task,
+            before,
+            args.initial_context_chars,
+        ).replace(
+            "Choose the next JSON tool action.",
+            "Invoke the next provided function.",
+        )
+        native_history = [
+            {"role": "system", "content": NATIVE_TOOL_INSTRUCTIONS},
+            {"role": "user", "content": initial_prompt},
+        ]
+        for prior_round in result["rounds"]:
+            response = prior_round.get("raw_api_response")
+            if not isinstance(response, dict):
+                continue
+            prior_result = prior_round.get("tool_result")
+            if not isinstance(prior_result, dict):
+                prior_result = {
+                    "ok": False,
+                    "error": prior_round.get("error") or "tool call rejected",
+                }
+            append_native_turn(native_history, response, prior_result)
+
     for round_number in range(first_round, args.max_rounds + 1):
-        prompt = build_initial_prompt(task, before, args.initial_context_chars)
-        if transcript:
-            prompt += "\n\nTOOL TRANSCRIPT:\n" + "\n".join(
-                json.dumps(event, ensure_ascii=False, sort_keys=True)
-                for event in transcript
+        if native_history is None:
+            prompt = build_initial_prompt(
+                task,
+                before,
+                args.initial_context_chars,
             )
-        prompt += "\n\nReturn the next JSON action only."
+            if transcript:
+                prompt += "\n\nTOOL TRANSCRIPT:\n" + "\n".join(
+                    json.dumps(event, ensure_ascii=False, sort_keys=True)
+                    for event in transcript
+                )
+            prompt += "\n\nReturn the next JSON action only."
+            prompt_payload = prompt
+        else:
+            prompt = ""
+            force_edit = not edited and round_number >= NATIVE_EDIT_DEADLINE
+            native_tool_choice = (
+                {
+                    "type": "function",
+                    "function": {"name": "edit"},
+                }
+                if force_edit
+                else "auto"
+            )
+            prompt_payload = json.dumps(
+                {
+                    "messages": native_history,
+                    "tools": NATIVE_TOOLS,
+                    "tool_choice": native_tool_choice,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         round_result: dict[str, Any] = {
             "round": round_number,
-            "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+            "prompt_sha256": hashlib.sha256(
+                prompt_payload.encode()
+            ).hexdigest(),
         }
+        if native_history is not None and force_edit:
+            round_result["forced_tool"] = "edit"
         text = ""
         api_response = None
         try:
-            text, usage, api_response = invoke(model, prompt, args)
+            text, usage, api_response = invoke(
+                model,
+                prompt,
+                args,
+                native_messages=native_history,
+                native_tool_choice=(
+                    native_tool_choice
+                    if native_history is not None
+                    else None
+                ),
+            )
             action = parse_action(text, prefer_edit=not edited)
             round_result.update(
                 {
@@ -779,6 +922,8 @@ def generate_one(
                         break
             round_result["tool_result"] = tool_result
             transcript.append({"assistant_action": action, "tool_result": tool_result})
+            if native_history is not None and api_response is not None:
+                append_native_turn(native_history, api_response, tool_result)
         except Exception as exc:
             round_result["error"] = str(exc)[:500]
             if api_response is not None:
@@ -786,6 +931,12 @@ def generate_one(
             if text:
                 round_result["raw_response"] = text[:20_000]
             transcript.append({"tool_error": round_result["error"]})
+            if native_history is not None and api_response is not None:
+                append_native_turn(
+                    native_history,
+                    api_response,
+                    {"ok": False, "error": round_result["error"]},
+                )
         result["rounds"].append(round_result)
 
     if not result["apply_ok"] and edited and current != before:

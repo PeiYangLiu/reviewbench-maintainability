@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-output-tokens", type=int, default=4096)
     parser.add_argument("--server-timeout", type=int, default=3600)
     parser.add_argument("--generator-script", type=Path)
+    parser.add_argument("--ids-file", type=Path)
     parser.add_argument("--download-dir", type=Path)
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--vllm-extra-arg", action="append", default=[])
@@ -185,6 +186,19 @@ def main() -> int:
                 "--force-chat",
                 "--resume",
             ]
+            if args.ids_file:
+                ids = [
+                    line.strip()
+                    for line in args.ids_file.read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                    if line.strip()
+                ]
+                if not ids:
+                    raise ValueError(
+                        f"ids file is empty: {args.ids_file}"
+                    )
+                generation_command.extend(["--ids", *ids])
             completed = subprocess.run(
                 generation_command,
                 text=True,

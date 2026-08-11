@@ -63,6 +63,44 @@ def test_native_tool_text_rejects_multiple_calls():
         MODULE.parse_action(MODULE.native_tool_text(response))
 
 
+def test_append_native_turn_preserves_tool_history():
+    history = []
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_opaque": "opaque",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "read",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+
+    MODULE.append_native_turn(history, response, {"ok": True})
+
+    assert history[0]["reasoning_opaque"] == "opaque"
+    assert history[1] == {
+        "role": "tool",
+        "tool_call_id": "call-1",
+        "content": '{"ok": true}',
+    }
+
+
+def test_native_edit_deadline_leaves_final_rounds_for_completion():
+    assert 1 < MODULE.NATIVE_EDIT_DEADLINE < 32
+
+
 def test_parse_action_uses_last_valid_object_without_greedy_join():
     action = MODULE.parse_action(
         'I will inspect it.\n{"note":"first"}\n'
@@ -78,6 +116,14 @@ def test_parse_action_preserves_unescaped_regex_backslashes():
         '"content":"return r\'\\Z\'"}]}'
     )
     assert action["edits"][0]["content"] == "return r'\\Z'"
+
+
+def test_parse_action_rejects_non_json_ellipsis_values():
+    with pytest.raises(ValueError, match="not JSON serializable"):
+        MODULE.parse_action(
+            "{'action':'edit','edits':[{'start_line':1,"
+            "'end_line':1,'content':...}]}"
+        )
 
 
 def test_parse_action_accepts_transcript_wrapper_but_ignores_tool_result():

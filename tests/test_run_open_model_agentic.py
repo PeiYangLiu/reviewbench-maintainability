@@ -31,3 +31,25 @@ def test_terminate_stops_only_supplied_process():
     )
     MODULE.terminate(process)
     assert process.poll() is not None
+
+
+def test_ids_file_is_exposed_by_cli(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--model",
+            "model",
+            "--tasks",
+            str(tmp_path / "tasks.jsonl"),
+            "--repo-cache",
+            str(tmp_path / "repos"),
+            "--out-dir",
+            str(tmp_path / "out"),
+            "--ids-file",
+            str(tmp_path / "ids.txt"),
+        ],
+    )
+
+    assert MODULE.parse_args().ids_file == tmp_path / "ids.txt"

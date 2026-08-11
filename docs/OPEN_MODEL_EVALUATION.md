@@ -254,6 +254,46 @@ H200 submissions were rejected before job creation by amlt10's base-image
 accelerator metadata. Kimi v11 therefore retains 32K on H100 using a 1200 MiB
 FP8 KV cache and concurrency two.
 
+### 6.1 Completed-model failure audit
+
+The authoritative report is stored in Blob at:
+
+```text
+reviewbench-openmodels/analysis/20260811/failure-analysis-v2.json
+```
+
+It is derived from the verified final archives, not potentially incomplete
+live-synced JSONL files:
+
+| Model | Failed | Retryable infra/harness | Terminal model behavior |
+|---|---:|---:|---:|
+| Qwen3.6-35B-A3B | 100 | 36 | 64 |
+| Qwen3-Coder-Next-FP8 | 109 | 26 | 83 |
+| Devstral-2-123B | 34 | 7 | 27 |
+| MiniMax-M2.1 | 40 | 6 | 34 |
+| GPT-OSS-120B | 1 | 0 | 1 |
+| **Total** | **284** | **75** | **209** |
+
+The 75 retryable records consist of 47 BlobFuse `git show` timeouts, 25 Qwen35
+ellipsis serialization failures, and 3 Coder-Next context-boundary failures.
+The 209 terminal records consist mainly of 135 no-patch 32-round exhaustions
+and 64 invalid actions; the remaining 10 are malformed fields, invalid edit
+ranges/paths, or requests for absent files.
+
+Only the 75 retryable task IDs are resubmitted in
+`reviewbench-open-infra-retries-20260811-v1`:
+
+| Job | Tasks | Backend ID | Blob result path |
+|---|---:|---|---|
+| `qwen36-35b-a3b-infra-retry` | 36 | `neat_floor_sfbgyddm3t` | `projects/reviewbench-maintainability/amlt-results/7213533615.38996-1d590363-133c-45f3-9d89-28814db7427e` |
+| `qwen3-coder-next-fp8-infra-retry` | 26 | `purple_lamp_9w53plyfkp` | `projects/reviewbench-maintainability/amlt-results/7213533615.38588-188a0adf-efcb-47ac-9fc2-83fe328611e8` |
+| `devstral2-123b-fp8-infra-retry` | 7 | `honest_apricot_f52mr9bkh4` | `projects/reviewbench-maintainability/amlt-results/7213533615.38400-562f403e-842a-40cb-9f14-066d504baaa8` |
+| `minimax-m21-fp8-infra-retry` | 6 | `serene_floor_kmyhz1z2nx` | `projects/reviewbench-maintainability/amlt-results/7213533615.38206-d44a9ee0-75f2-4994-b06c-83485bd9365c` |
+
+The generator now rejects non-JSON ellipsis values before transcript
+serialization, allows five minutes for lazy Blob-backed source reads, and
+supports exact ID manifests and per-job output-token limits.
+
 All retry result roots are listed in section 3. No failed startup produced a
 benchmark sample, so retries do not overwrite or resample successful inference.
 
@@ -416,16 +456,22 @@ non-empty call. Controlled probes showed:
 
 The native-tools adapter preserves the same logical read/find/edit/finish
 protocol, converts exactly one function call per turn into the canonical action,
-and saves the complete raw API response envelope. A full 414-task fresh run is
-active at:
+and saves the complete raw API response envelope. A first native run showed that
+text-serialized tool history caused repeated read/find loops: all 27 failures
+made 32 valid function calls but zero edits. The corrected adapter uses standard
+assistant/tool messages and reserves the final eight calls for an edit if the
+model has only inspected files.
+
+A full 414-task fresh run is active at:
 
 ```text
 /home/v-peiyangliu/conversationhub/liupeiyang/code_quality/
   reviewbench-hard414-copilot-20260811/
-  gemini-3.6-flash-native-tools/
+  gemini-3.6-flash-native-tools-v2/
 ```
 
 Raw diagnostic envelopes and hashes are stored in its `diagnostics/` directory.
+At `2026-08-11T09:40:26Z`, it had generated 8 patches from 9 completed tasks.
 
 Hosted-model status at `2026-08-10T20:10:41Z`:
 
