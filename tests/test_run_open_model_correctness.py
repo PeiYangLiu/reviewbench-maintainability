@@ -426,6 +426,70 @@ def test_finalize_requires_exact_unique_pairs_and_writes_manifest(tmp_path):
     assert (output / "SHA256SUMS").is_file()
 
 
+def test_finalize_sorts_missing_pairs_across_lanes(tmp_path):
+    output, tasks_path, oracles_path = prepare_finalize_fixture(tmp_path)
+    model = "Qwen/Qwen"
+    extra_tasks = [task("z-task", "Java"), task("a-task", "Rust")]
+    write_jsonl(tasks_path, [task(), *extra_tasks])
+    write_jsonl(
+        oracles_path,
+        [
+            strict_oracle("task"),
+            strict_oracle("z-task", "/session/jvm/results.jsonl"),
+            strict_oracle("a-task", "/session/rust/results.jsonl"),
+        ],
+    )
+    MODULE.atomic_jsonl(
+        output / "task-plan.jsonl",
+        [
+            {"id": "task", "lane": "gopy", "source_kind": "modern"},
+            {"id": "z-task", "lane": "jvm", "source_kind": "modern"},
+            {"id": "a-task", "lane": "rust", "source_kind": "modern"},
+        ],
+    )
+    manifest_path = output / "input-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest.update(
+        {
+            "tasks_sha256": MODULE.sha256(tasks_path),
+            "oracles_sha256": MODULE.sha256(oracles_path),
+            "task_plan_sha256": MODULE.sha256(output / "task-plan.jsonl"),
+        }
+    )
+    MODULE.atomic_json(manifest_path, manifest)
+    generation_path = (
+        output
+        / "inputs/models"
+        / MODULE.safe_component(model)
+        / "generation_results.normalized.jsonl"
+    )
+    generations = MODULE.read_jsonl(generation_path)
+    generations.extend(
+        {
+            "id": task_id,
+            "model": model,
+            "start_sha": "start",
+            "status": "failed",
+            "apply_ok": False,
+            "patch_sha256": None,
+        }
+        for task_id in ("z-task", "a-task")
+    )
+    MODULE.atomic_jsonl(generation_path, generations)
+
+    result = MODULE.finalize(
+        tasks_path=tasks_path,
+        oracles_path=oracles_path,
+        output=output,
+        allow_incomplete=True,
+    )
+
+    assert result["missing_pairs"] == [
+        {"id": "a-task", "model": model},
+        {"id": "z-task", "model": model},
+    ]
+
+
 def test_refinalize_keeps_checksums_current(tmp_path):
     output, tasks_path, oracles_path = prepare_finalize_fixture(tmp_path)
     MODULE.finalize(

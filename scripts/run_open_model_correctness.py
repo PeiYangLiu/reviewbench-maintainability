@@ -2406,6 +2406,7 @@ def finalize(
         (task["id"], model) for task in tasks for model in models
     }
     actual_global = set(all_pairs)
+    missing_pairs.sort()
     if missing_pairs != sorted(expected_global - actual_global):
         raise ValueError("lane/global missing pair calculations disagree")
     complete = (
