@@ -290,6 +290,16 @@ Only the 75 retryable task IDs are resubmitted in
 | `devstral2-123b-fp8-infra-retry` | 7 | `honest_apricot_f52mr9bkh4` | `projects/reviewbench-maintainability/amlt-results/7213533615.38400-562f403e-842a-40cb-9f14-066d504baaa8` |
 | `minimax-m21-fp8-infra-retry` | 6 | `serene_floor_kmyhz1z2nx` | `projects/reviewbench-maintainability/amlt-results/7213533615.38206-d44a9ee0-75f2-4994-b06c-83485bd9365c` |
 
+The first Coder-Next delta recovered 21 of 26 tasks. Three remaining tasks
+exhausted 32 rounds without a patch. Two still hit the exact 65K context
+boundary and are isolated in `reviewbench-coder-context-retry-20260811-v2`
+with a 1024-token action budget:
+
+```text
+projects/reviewbench-maintainability/amlt-results/
+  7213524369.94635-0be2487b-8149-43d0-adb9-d2f97bfdec08
+```
+
 The generator now rejects non-JSON ellipsis values before transcript
 serialization, allows five minutes for lazy Blob-backed source reads, and
 supports exact ID manifests and per-job output-token limits.
@@ -471,7 +481,8 @@ A full 414-task fresh run is active at:
 ```
 
 Raw diagnostic envelopes and hashes are stored in its `diagnostics/` directory.
-At `2026-08-11T09:40:26Z`, it had generated 8 patches from 9 completed tasks.
+At `2026-08-11T12:14:25Z`, it had generated 171 patches from 188 completed
+tasks; 17 tasks had reached a terminal failure.
 
 Hosted-model status at `2026-08-10T20:10:41Z`:
 
