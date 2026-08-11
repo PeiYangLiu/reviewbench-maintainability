@@ -13,12 +13,12 @@ artifact，再运行 correctness 和 maintainability；以后 rubric 改变时�
 | AMLT environment | local conda `amlt10` |
 | AMLT version | 10.14.0 |
 | Project | `reviewbench-maintainability` |
-| Active experiments | `reviewbench-qwen-latest-hard414-v4`, `reviewbench-open-latest-hard414-v5`, `reviewbench-kimi25-hard414-v11` |
+| Active experiments | `reviewbench-qwen-latest-hard414-v4`, `reviewbench-open-infra-retries-20260811-v1`, `reviewbench-coder-context-retry-20260811-v3`, `reviewbench-kimi25-hard414-v12` |
 | Service | Singularity |
 | Target | `msrresrchbasicvc` |
 | Workspace | `Workspace_NLC` |
 | Project storage | `conversationhub / amulet` |
-| Code snapshots | `projects/reviewbench-maintainability/amlt-code/85ab05f9c45c04ffd8afd982ff3ab522` (Qwen/cross-family), `projects/reviewbench-maintainability/amlt-code/aa888bf99cf2949552db56be66798752` (Kimi) |
+| Code snapshots | `projects/reviewbench-maintainability/amlt-code/85ab05f9c45c04ffd8afd982ff3ab522` (original Qwen/cross-family), `projects/reviewbench-maintainability/amlt-code/69e75bceda6918fcd787b1aa5df0c56c` (bounded Coder retry), `projects/reviewbench-maintainability/amlt-code/12a6350df2840e14ee678e219a2d726f` (bounded Kimi remainder) |
 | Task set | `data/releases/hard/20260808/tasks.jsonl` |
 | Tasks | 414 |
 | Protocol | `agentic-line-edit/v1`, maximum 32 rounds |
@@ -232,20 +232,23 @@ Seven updated jobs were accepted by `msrresrchbasicvc` on 2026-08-10:
 - Kimi K2.5 in `reviewbench-kimi25-hard414-v4`.
 
 After exhausting H100 BF16-KV configurations and rejecting unsupported H200
-image metadata, the current Kimi FP8-KV run was accepted on 2026-08-11 as
-`reviewbench-kimi25-hard414-v11`.
+image metadata, Kimi FP8-KV v11 was accepted on 2026-08-11. It produced eight
+valid samples before two requests exposed an unbounded-transcript context
+failure. Those eight samples are frozen; v11 was stopped without resampling
+them, and v12 targets only the remaining 406 IDs with a 60,000-character
+transcript bound.
 
-Generation checkpoint at `2026-08-11T03:34:33Z`:
+Generation checkpoint at `2026-08-11T17:05Z`:
 
 | Model | Generated | Failed | State |
 |---|---:|---:|---|
-| Qwen3.6-27B | 194 records | — | running |
-| Qwen3.6-35B-A3B | 314 | 100 | complete |
-| Qwen3-Coder-Next-FP8 | 305 | 109 | complete |
-| Devstral-2-123B | 380 | 34 | complete |
+| Qwen3.6-27B | 146 | 50 | running; 196/414 records |
+| Qwen3.6-35B-A3B | 345 | 69 | canonical after targeted retry |
+| Qwen3-Coder-Next-FP8 | 327 | 87 | canonical after two targeted retry layers |
+| Devstral-2-123B | 387 | 27 | canonical after targeted retry |
 | GPT-OSS-120B | 413 | 1 | complete |
 | MiniMax-M2.1 | 374 | 40 | complete |
-| Kimi-K2.5 | 0 | 414 infrastructure | superseded |
+| Kimi-K2.5 | 8 preserved | 406 pending | v12 running |
 
 The completed non-Kimi models include 47 BlobFuse source-read timeouts that
 will be retried without resampling successful or protocol-terminal tasks. Kimi
@@ -291,9 +294,9 @@ Only the 75 retryable task IDs are resubmitted in
 | `minimax-m21-fp8-infra-retry` | 6 | `serene_floor_kmyhz1z2nx` | `projects/reviewbench-maintainability/amlt-results/7213533615.38206-d44a9ee0-75f2-4994-b06c-83485bd9365c` |
 
 The first Coder-Next delta recovered 21 of 26 tasks. Three remaining tasks
-exhausted 32 rounds without a patch. Two still hit the exact 65K context
-boundary and are isolated in `reviewbench-coder-context-retry-20260811-v2`
-with a 1024-token action budget:
+exhausted 32 rounds without a patch. A 1024-token retry did not fix the other
+two because the accumulated read transcript still requested exactly 65,537
+tokens:
 
 ```text
 projects/reviewbench-maintainability/amlt-results/
@@ -301,8 +304,12 @@ projects/reviewbench-maintainability/amlt-results/
 ```
 
 The generator now rejects non-JSON ellipsis values before transcript
-serialization, allows five minutes for lazy Blob-backed source reads, and
-supports exact ID manifests and per-job output-token limits.
+serialization, allows five minutes for lazy Blob-backed source reads, supports
+exact ID manifests and per-job output-token limits, and retains only the newest
+complete tool events inside a configured transcript budget. The bounded v3
+retry recovered BSMPT; the Clarity-Wasm task then completed 32 valid calls
+without editing and is a terminal model failure. Final Coder generation is
+327/414.
 
 All retry result roots are listed in section 3. No failed startup produced a
 benchmark sample, so retries do not overwrite or resample successful inference.
@@ -431,9 +438,23 @@ Qwen3.6-27B and Kimi will be added after valid generation completes.
 
 The initial Rust pass stopped after 40 records because per-attempt Cargo build
 state filled `/data`. Completed lane caches and interrupted worker scratch were
-removed without deleting JSONL, logs, patches, or evidence artifacts. The Rust
-adapter now deletes each `pair_state` after evidence preservation and resumes
-from the existing checkpoint.
+removed without deleting JSONL, logs, patches, or evidence artifacts. A first
+cleanup used `shutil.rmtree`, which silently left root-owned Docker files.
+The current adapter keeps Cargo state inside each attempt and verifies deletion
+through a cleanup container. Rust resumed at one worker without accumulating
+completed build trees.
+
+The replay also found two evaluation-infrastructure defects rather than model
+failures:
+
+- six Go/Python Oracles lost their pinned Go/Python runtime through path
+  remapping, shared `PYTHONPATH`, or an overlong AF_UNIX temporary path;
+- four CRLF source files were read through universal-newline conversion, so
+  otherwise valid patches were emitted against LF-normalized blobs.
+
+Both are fixed and isolated task subsets are being replayed across all completed
+models. Canonical generation overlays reconstruct CRLF patches from the saved
+tool traces; they never call the model again.
 
 ### 7.3 Parallel rubric-v2 judgment
 
@@ -457,6 +478,22 @@ The hosted group contains Claude Opus/Sonnet 5 and GPT-5.6 Luna/Sol/Terra.
 The open group contains Qwen35B, Coder-Next, Devstral-2, GPT-OSS, and MiniMax.
 Every raw judge response is retained. Completion markers, checksums, normalized
 four-gate results, and Blob paths are produced after each group finishes.
+
+Both base groups are complete: open-five has 2,070 records with 298
+maintainability passes, and hosted-five has 2,070 records with 1,029 passes.
+Schema-invalid judge replies were retried with explicit field feedback; no
+`judge_error` remains. The base judgment bundle, including 4,229 raw responses,
+is stored at:
+
+```text
+/home/v-peiyangliu/conversationhub/liupeiyang/code_quality/
+  reviewbench-hard414-evaluation-20260811/judging/
+  rubric-v2-judgments-20260811.tar.gz
+SHA-256 d1c032a1566678701f308779676a5e53247120f3660360b30fc8e8605bd0f123
+```
+
+Recovered-generation and line-ending deltas are judged separately and overlay
+only the affected task-model pairs.
 
 ## 8. Local Copilot API evaluation
 
@@ -501,7 +538,7 @@ made 32 valid function calls but zero edits. The corrected adapter uses standard
 assistant/tool messages and reserves the final eight calls for an edit if the
 model has only inspected files.
 
-A full 414-task fresh run is active at:
+A full 414-task fresh run completed at:
 
 ```text
 /home/v-peiyangliu/conversationhub/liupeiyang/code_quality/
@@ -509,9 +546,11 @@ A full 414-task fresh run is active at:
   gemini-3.6-flash-native-tools-v2/
 ```
 
-Raw diagnostic envelopes and hashes are stored in its `diagnostics/` directory.
-At `2026-08-11T12:14:25Z`, it had generated 171 patches from 188 completed
-tasks; 17 tasks had reached a terminal failure.
+The valid native-tools result is **375 generated / 39 failed**. Of the failures,
+37 explored through round 23 and then repeatedly returned an empty `edits`
+array when required to make a concrete edit; two edited but ended with no
+effective patch. There are no empty gateway responses in this run. Its
+rubric-v2 judgment is complete at 223/414 before correctness and delta overlay.
 
 Hosted-model status at `2026-08-10T20:10:41Z`:
 
@@ -519,7 +558,7 @@ Hosted-model status at `2026-08-10T20:10:41Z`:
 |---|---:|---:|---|
 | `claude-sonnet-5` | 414 | 0 | complete |
 | `claude-opus-5` | 411 | 3 | complete; three Metasploit tasks exhausted 32 rounds twice |
-| `gemini-3.6-flash` | 131 | 283 | invalidated text-schema run; native-tools fresh run active |
+| `gemini-3.6-flash` | 375 | 39 | native-tools v2 complete; old 131/414 run excluded |
 | `gpt-5.6-luna` | 414 | 0 | complete |
 | `gpt-5.6-sol` | 412 | 2 | complete; two Speckle duplication tasks exhausted 32 rounds |
 | `gpt-5.6-terra` | 414 | 0 | complete |
