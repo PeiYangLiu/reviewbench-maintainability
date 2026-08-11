@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--max-rounds", type=int, default=32)
     parser.add_argument("--max-output-tokens", type=int, default=4096)
+    parser.add_argument("--max-transcript-chars", type=int, default=120_000)
     parser.add_argument("--server-timeout", type=int, default=3600)
     parser.add_argument("--generator-script", type=Path)
     parser.add_argument("--ids-file", type=Path)
@@ -177,6 +178,8 @@ def main() -> int:
                 str(args.max_rounds),
                 "--max-output-tokens",
                 str(args.max_output_tokens),
+                "--max-transcript-chars",
+                str(args.max_transcript_chars),
                 "--request-timeout",
                 "600",
                 "--request-retries",

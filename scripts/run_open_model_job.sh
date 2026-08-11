@@ -123,6 +123,7 @@ python3 scripts/run_open_model_agentic.py \
   --workers "$GENERATION_WORKERS" \
   --max-rounds 32 \
   --max-output-tokens "${MAX_OUTPUT_TOKENS:-4096}" \
+  --max-transcript-chars "${MAX_TRANSCRIPT_CHARS:-120000}" \
   --server-timeout 7200 \
   --download-dir "/scratch/hf-cache/${AMLT_JOB_NAME:-job}" \
   "${trust_args[@]}" \

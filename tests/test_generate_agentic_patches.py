@@ -101,6 +101,20 @@ def test_native_edit_deadline_leaves_final_rounds_for_completion():
     assert 1 < MODULE.NATIVE_EDIT_DEADLINE < 32
 
 
+def test_tool_transcript_keeps_recent_events_within_budget():
+    events = [
+        {"assistant_action": {"action": "find", "query": str(index)}}
+        for index in range(20)
+    ]
+
+    rendered = MODULE.render_tool_transcript(events, 500)
+
+    assert len(rendered) <= 500
+    assert "Older tool events were omitted" in rendered
+    assert '"query": "19"' in rendered
+    assert '"query": "0"' not in rendered
+
+
 def test_parse_action_uses_last_valid_object_without_greedy_join():
     action = MODULE.parse_action(
         'I will inspect it.\n{"note":"first"}\n'

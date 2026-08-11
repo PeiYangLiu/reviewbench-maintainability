@@ -187,6 +187,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--request-timeout", type=int, default=300)
     parser.add_argument("--request-retries", type=int, default=6)
     parser.add_argument("--initial-context-chars", type=int, default=30_000)
+    parser.add_argument("--max-transcript-chars", type=int, default=120_000)
     parser.add_argument(
         "--chat-endpoint",
         default="http://127.0.0.1:4399/v1/chat/completions",
@@ -235,6 +236,52 @@ def object_candidates(text: str) -> list[str]:
             start = starts.pop()
             candidates.append((start, text[start : index + 1]))
     return [candidate for _, candidate in sorted(candidates)]
+
+
+def render_tool_transcript(
+    events: list[dict[str, Any]],
+    maximum_chars: int,
+) -> str:
+    rows = [
+        json.dumps(event, ensure_ascii=False, sort_keys=True)
+        for event in events
+    ]
+    rendered = "\n".join(rows)
+    if maximum_chars <= 0 or len(rendered) <= maximum_chars:
+        return rendered
+
+    notice = json.dumps(
+        {
+            "tool_transcript_notice": (
+                "Older tool events were omitted to preserve context for "
+                "a concrete edit."
+            )
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    budget = maximum_chars - len(notice) - 1
+    if budget <= 0:
+        return notice[:maximum_chars]
+
+    selected: list[str] = []
+    used = 0
+    for row in reversed(rows):
+        required = len(row) + (1 if selected else 0)
+        if used + required > budget:
+            break
+        selected.append(row)
+        used += required
+    if not selected:
+        marker = "...<latest tool event truncated>..."
+        available = max(0, budget - len(marker))
+        left = available // 2
+        latest = rows[-1]
+        selected = [
+            latest[:left] + marker + latest[-(available - left) :]
+        ]
+    selected.reverse()
+    return notice + "\n" + "\n".join(selected)
 
 
 def decode_object(text: str) -> Any:
@@ -810,9 +857,9 @@ def generate_one(
                 args.initial_context_chars,
             )
             if transcript:
-                prompt += "\n\nTOOL TRANSCRIPT:\n" + "\n".join(
-                    json.dumps(event, ensure_ascii=False, sort_keys=True)
-                    for event in transcript
+                prompt += "\n\nTOOL TRANSCRIPT:\n" + render_tool_transcript(
+                    transcript,
+                    args.max_transcript_chars,
                 )
             prompt += "\n\nReturn the next JSON action only."
             prompt_payload = prompt
