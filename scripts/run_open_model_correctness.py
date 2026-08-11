@@ -946,12 +946,26 @@ def adapt_runner_source(
             ),
             label="rust container prefix",
         )
+        text = replace_required(
+            text,
+            (
+                "        finally:\n"
+                "            clean_variant(repo, work)"
+            ),
+            (
+                "        finally:\n"
+                "            clean_variant(repo, work)\n"
+                "            shutil.rmtree(pair_state, ignore_errors=True)"
+            ),
+            label="rust attempt-state cleanup",
+        )
         changes.extend(
             [
                 "configure lane/repo roots",
                 "make task/model cardinality dynamic",
                 "record the actual execution host",
                 "use an open-model-specific container prefix",
+                "remove per-attempt build state after preserving evidence",
             ]
         )
     else:

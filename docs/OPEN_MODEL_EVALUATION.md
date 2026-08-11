@@ -429,6 +429,12 @@ generations, and has preflight SHA-256
 `f0b6513a053182557d74cc147433f176aa202fa278ccf551c37b08a4cb593a0e`.
 Qwen3.6-27B and Kimi will be added after valid generation completes.
 
+The initial Rust pass stopped after 40 records because per-attempt Cargo build
+state filled `/data`. Completed lane caches and interrupted worker scratch were
+removed without deleting JSONL, logs, patches, or evidence artifacts. The Rust
+adapter now deletes each `pair_state` after evidence preservation and resumes
+from the existing checkpoint.
+
 ### 7.3 Parallel rubric-v2 judgment
 
 Completed models are judged without waiting for the remaining inference jobs.
