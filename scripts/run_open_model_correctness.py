@@ -972,6 +972,19 @@ def adapt_runner_source(
             ),
             label="native release placeholder restoration",
         )
+        text = replace_required(
+            text,
+            (
+                "        expected = list("
+                "strict.get(\"pass_to_pass_tests\") or [])"
+            ),
+            (
+                "        strict = {**strict, \"commands\": commands}\n"
+                "        expected = list("
+                "strict.get(\"pass_to_pass_tests\") or [])"
+            ),
+            label="native restored command execution",
+        )
         changes.extend(
             [
                 "configure lane/repo roots",
