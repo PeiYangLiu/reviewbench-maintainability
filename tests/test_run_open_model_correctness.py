@@ -291,6 +291,8 @@ def test_native_runner_restores_release_placeholders():
     assert '"${REVIEWBENCH_SESSION_FILES}"' in adapted
     assert '_OPEN_CONFIG["session_root"]' in adapted
     assert 'strict = {**strict, "commands": commands}' in adapted
+    assert "conan profile detect --force" in adapted
+    assert '"submodule", "deinit", "--all", "--force"' in adapted
 
 
 def test_modern_generation_artifacts_stay_inside_wave(tmp_path):

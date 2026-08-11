@@ -985,6 +985,42 @@ def adapt_runner_source(
             ),
             label="native restored command execution",
         )
+        text = replace_required(
+            text,
+            '        strict = {**strict, "commands": commands}',
+            (
+                '        if task["repo"] == "BSMPT/BSMPT" and '
+                'commands.get("configure_command"):\n'
+                '            commands["configure_command"] = (\n'
+                '                "conan profile detect --force >/dev/null && "\n'
+                '                + commands["configure_command"]\n'
+                "            )\n"
+                '        strict = {**strict, "commands": commands}'
+            ),
+            label="native Conan profile recovery",
+        )
+        text = replace_required(
+            text,
+            (
+                "def restore_exact_start(\n"
+                "    repo: Path, worktree: Path, case: dict[str, Any]\n"
+                ") -> None:\n"
+                "    git(\n"
+            ),
+            (
+                "def restore_exact_start(\n"
+                "    repo: Path, worktree: Path, case: dict[str, Any]\n"
+                ") -> None:\n"
+                "    git(\n"
+                "        worktree,\n"
+                '        "submodule", "deinit", "--all", "--force",\n'
+                "        timeout=600,\n"
+                "        check=False,\n"
+                "    )\n"
+                "    git(\n"
+            ),
+            label="native submodule diagnostic reset",
+        )
         changes.extend(
             [
                 "configure lane/repo roots",
