@@ -420,6 +420,97 @@ replay contracts are recovered into the seven-lane format. For development
 only, `prepare` and `run` accept `--allow-partial-modern`; such an artifact is
 explicitly marked partial and cannot produce a complete manifest.
 
+#### 7.1.1 Reserve-20260728 replay adapter (14 of the 40)
+
+`scripts/run_legacy_reserve_correctness.py` closes part of this gap for the
+14 (of the 40) published-hard tasks whose Oracle was recovered under
+`data/releases/reserves/20260728/` and that still have a genuine, previously
+proven (or at least fully self-contained) legacy harness on the retained
+session root: native 6 (ClickHouse, Desbordante, IntelPython/dpnp,
+SciCompMod/memilio, XRPLF/rippled, lanl/singularity-eos), JVM 5
+(Consensys/web3signer, SkriptLang/Skript, apache/solr, hibernate-orm,
+reposense/RepoSense), Rust 1 (FuelLabs/fuel-tx), TS/JS 2
+(discourse/discourse, opossum-tool/OpossumUI).
+
+It reuses the existing `run_open_model_correctness.py` extension point
+(`source_kind == "published_legacy"`, lane inferred by `legacy_lane()`) and
+writes only `output/legacy/correctness/<lane>.jsonl` raw rows -- the exact
+file `finalize()` already merges with `output/modern/correctness/<lane>.jsonl`
+and normalizes through the same `normalized_record()` used for the 374 modern
+tasks. It does not reimplement patch validation/staging: it consumes the
+already-staged, checksum-verified `generation_results.normalized.jsonl`
+produced by `prepare --allow-partial-modern`.
+
+Design:
+- Native + Rust replay a fresh, disposable copy of the historical
+  `.../start` checkout per (task, model), applying the staged candidate
+  patch there and re-running the exact (for 5 of 6 native tasks: previously
+  *proven*, recorded in the historical `native.jsonl`) Docker command; the
+  retained checkout itself is never mutated.
+- JVM + TS/JS replay a fresh `git worktree` of the retained
+  `repos/<org>__<repo>` clone at the Oracle's exact `start_sha`, apply the
+  staged patch there, and run the Oracle's own self-contained
+  `command`/`test_command` fields with the historical toolchain (pinned
+  Docker image or Node runtime).
+- Any task whose required Docker image, retained repo checkout, Gradle/cargo
+  cache, or Node runtime is missing is reported as a **preflight blocker**
+  and is left out of the raw output entirely -- it is never scored as a
+  pass/fail. `finalize --allow-incomplete` will show it under
+  `missing_pairs` until the asset is recovered.
+
+Commands:
+
+```bash
+# 1) Stage patches for an arbitrary model across the full 414-task release
+#    (allow the 40 published-legacy tasks, including our 14, to stay
+#    unresolved for now):
+python3 scripts/run_open_model_correctness.py prepare \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --repo-cache <repo-cache> --output <output> \
+  --model '<model>=<generation_results.jsonl>' \
+  --allow-partial-modern
+
+# 2) Fail-closed preflight of the 14 reserve tasks (no execution):
+python3 scripts/run_legacy_reserve_correctness.py preflight \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --legacy-root <retained-session-root> \
+  --output <output> --allow-blocked
+
+# 3) Replay only what preflight reports ready, for the staged model:
+python3 scripts/run_legacy_reserve_correctness.py replay \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --legacy-root <retained-session-root> \
+  --output <output> --model '<model>'
+
+# 4) Finalize as usual (missing/blocked pairs remain visible, not fabricated):
+python3 scripts/run_open_model_correctness.py finalize \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --output <output> --allow-incomplete
+```
+
+As of this writing, a read-only `preflight` pass against the retained
+session root reports 7 of the 14 tasks ready (ClickHouse, dpnp, memilio,
+rippled, singularity-eos, discourse, opossum-tool/OpossumUI) and 7 blocked:
+Desbordante (harness recipe was never proven historically -- every
+historical candidate patch failed to apply through it), the 4 remaining JVM
+tasks plus web3signer's `-javaagent`/`-I` flags (missing recorded Gradle
+cache home and `/oracle-cache` assets under
+`oracle_recovery/java/cache/`), and FuelLabs/fuel-tx (missing recorded
+cargo cache under `oracle_recovery/rust/cache/cargo`). These are reported,
+not invented; recovering the missing cache directories (or the Desbordante
+proof) would move those tasks to "ready" without any code change.
+
+`tests/test_run_legacy_reserve_correctness.py` covers this adapter with
+tiny synthetic fixtures only (no real builds/containers): patch
+apply/failure handling, git worktree materialization, blocker detection per
+lane, drift detection against the 14-task manifest, resume/skip behavior,
+and candidate-missing rows that normalize cleanly through the real
+`normalized_record()`.
+
 ### 7.2 Current five-model correctness replay
 
 At `2026-08-11T03:40:36Z`, five completed model archives passed generation
