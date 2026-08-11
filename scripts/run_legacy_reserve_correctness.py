@@ -290,6 +290,10 @@ NATIVE_MANIFEST: dict[str, dict[str, Any]] = {
     },
 }
 
+TSJS_NODE_OVERRIDES = {
+    "github__opossum-tool__OpossumUI__pull_987__comment_972768731__duplication": "18.20.8",
+}
+
 INFRA_RETRY = "infra_retry"
 CANDIDATE_MISSING = "candidate_missing"
 
@@ -301,7 +305,7 @@ CANDIDATE_MISSING = "candidate_missing"
 # silently treating them as fresh (code-review finding: "resume must
 # validate current task/oracle/replay-contract fingerprints and rerun
 # stale rows").
-ADAPTER_CONTRACT_VERSION = "v2-2026-08-11-concurrency-and-provenance-hardening"
+ADAPTER_CONTRACT_VERSION = "v3-2026-08-11-runtime-and-symlink-recovery"
 
 
 def replay_contract_fingerprint(
@@ -711,6 +715,23 @@ def commit_present(repo_dir: Path, sha: str) -> bool:
     return result.returncode == 0
 
 
+def tsjs_node_version(task_id: str, oracle: dict[str, Any]) -> str:
+    return str(
+        TSJS_NODE_OVERRIDES.get(task_id)
+        or oracle.get("historical_node")
+        or ""
+    )
+
+
+def resolve_node_command(command: str, cwd: Path) -> list[str]:
+    parts = shlex.split(command)
+    if parts and "/" not in parts[0]:
+        local = cwd / "node_modules/.bin" / parts[0]
+        if local.is_file():
+            parts[0] = str(local)
+    return parts
+
+
 def remove_worktree(repo_source: Path, dest: Path) -> None:
     subprocess.run(
         ["git", "-C", str(repo_source), "worktree", "remove", "--force", str(dest)],
@@ -1043,7 +1064,7 @@ def tsjs_blockers(
             f"exact task start_sha {start_sha} as a commit (cannot "
             "materialize the correct starting revision)"
         )
-    node = oracle.get("historical_node")
+    node = tsjs_node_version(task_id, oracle)
     if not node:
         blockers.append("Oracle is missing historical_node")
     else:
@@ -1162,7 +1183,7 @@ def asset_state(
             ),
         }
     if lane == "tsjs":
-        node = oracle.get("historical_node")
+        node = tsjs_node_version(task_id, oracle)
         runtime = (
             oracle_recovery_root(legacy_root) / "tsjs/_runtimes"
             / f"node-v{node}-linux-x64/bin/node"
@@ -1753,7 +1774,7 @@ def replay_tsjs(
             changed = patch_changed_paths(patch_text)
             scope_ok = scope_is_safe(changed)
 
-            node = oracle["historical_node"]
+            node = tsjs_node_version(task_id, oracle)
             runtime_bin = (
                 oracle_recovery_root(legacy_root)
                 / "tsjs/_runtimes"
@@ -1797,7 +1818,7 @@ def replay_tsjs(
             else:
                 run_log = scratch / "run.log"
                 exit_code, duration, error = run_subprocess(
-                    shlex.split(oracle["test_command"]),
+                    resolve_node_command(oracle["test_command"], cwd),
                     cwd=cwd,
                     log_path=run_log,
                     env=env,

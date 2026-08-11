@@ -365,6 +365,24 @@ def test_tsjs_blockers_flags_missing_runtime(tmp_path, monkeypatch):
     assert not any("start_sha" in b for b in blockers)
 
 
+def test_tsjs_runtime_override_and_local_binary_resolution(tmp_path):
+    task_id = (
+        "github__opossum-tool__OpossumUI__pull_987__"
+        "comment_972768731__duplication"
+    )
+    assert MODULE.tsjs_node_version(
+        task_id, {"historical_node": "16.20.2"}
+    ) == "18.20.8"
+
+    binary = tmp_path / "node_modules/.bin/vitest"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    assert MODULE.resolve_node_command(
+        "vitest run --coverage",
+        tmp_path,
+    ) == [str(binary), "run", "--coverage"]
+
+
 def test_tsjs_blockers_flags_missing_start_sha_when_oracle_omits_it(tmp_path):
     # Real Discourse/Opossum oracles genuinely omit start_sha (it lives on
     # the task/task-plan record instead). tsjs_blockers must fail closed
