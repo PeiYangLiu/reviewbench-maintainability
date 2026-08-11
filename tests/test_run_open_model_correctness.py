@@ -292,6 +292,7 @@ def test_native_runner_restores_release_placeholders():
     assert '_OPEN_CONFIG["session_root"]' in adapted
     assert 'strict = {**strict, "commands": commands}' in adapted
     assert "conan profile detect --force" in adapted
+    assert "IREE_ERROR_ON_MISSING_SUBMODULES=OFF" in adapted
     assert "preserve_submodules" in adapted
     assert '(plan.get("env") or {}).items()' in adapted
 

@@ -1001,6 +1001,26 @@ def adapt_runner_source(
         )
         text = replace_required(
             text,
+            '        strict = {**strict, "commands": commands}',
+            (
+                '        if task["repo"] == "iree-org/iree" and '
+                'commands.get("configure_command"):\n'
+                '            commands["configure_command"] = (\n'
+                '                "mkdir -p \'{artifact}/cmake-wrapper\'; "\n'
+                '                "printf \'%s\\\\n\' \'#!/bin/sh\' "\n'
+                '                "\'exec /usr/bin/cmake \\\"$@\\\" '
+                '-DIREE_ERROR_ON_MISSING_SUBMODULES=OFF\' "\n'
+                '                "> \'{artifact}/cmake-wrapper/cmake\'; "\n'
+                '                "chmod +x \'{artifact}/cmake-wrapper/cmake\'; "\n'
+                '                "PATH=\'{artifact}/cmake-wrapper\':$PATH "\n'
+                '                + commands["configure_command"]\n'
+                "            )\n"
+                '        strict = {**strict, "commands": commands}'
+            ),
+            label="native IREE submodule-check recovery",
+        )
+        text = replace_required(
+            text,
             (
                 "def restore_exact_start(\n"
                 "    repo: Path, worktree: Path, case: dict[str, Any]\n"
