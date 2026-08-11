@@ -382,6 +382,16 @@ def test_tsjs_runtime_override_and_local_binary_resolution(tmp_path):
         tmp_path,
     ) == [str(binary), "run", "--coverage"]
 
+    binary.unlink()
+    fallback = tmp_path / "shared/.bin/vitest"
+    fallback.parent.mkdir(parents=True)
+    fallback.write_text("#!/bin/sh\n")
+    assert MODULE.resolve_node_command(
+        "vitest run --coverage",
+        tmp_path,
+        fallback.parent,
+    ) == [str(fallback), "run", "--coverage"]
+
 
 def test_tsjs_blockers_flags_missing_start_sha_when_oracle_omits_it(tmp_path):
     # Real Discourse/Opossum oracles genuinely omit start_sha (it lives on

@@ -305,7 +305,7 @@ CANDIDATE_MISSING = "candidate_missing"
 # silently treating them as fresh (code-review finding: "resume must
 # validate current task/oracle/replay-contract fingerprints and rerun
 # stale rows").
-ADAPTER_CONTRACT_VERSION = "v3-2026-08-11-runtime-and-symlink-recovery"
+ADAPTER_CONTRACT_VERSION = "v4-2026-08-11-retained-node-tools"
 
 
 def replay_contract_fingerprint(
@@ -723,12 +723,20 @@ def tsjs_node_version(task_id: str, oracle: dict[str, Any]) -> str:
     )
 
 
-def resolve_node_command(command: str, cwd: Path) -> list[str]:
+def resolve_node_command(
+    command: str,
+    cwd: Path,
+    fallback_bin: Path | None = None,
+) -> list[str]:
     parts = shlex.split(command)
     if parts and "/" not in parts[0]:
         local = cwd / "node_modules/.bin" / parts[0]
         if local.is_file():
             parts[0] = str(local)
+        elif fallback_bin is not None:
+            fallback = fallback_bin / parts[0]
+            if fallback.is_file():
+                parts[0] = str(fallback)
     return parts
 
 
@@ -1044,6 +1052,15 @@ def tsjs_blockers(
     blockers = []
     if not oracle.get("test_command"):
         blockers.append("Oracle is missing test_command")
+    else:
+        test_parts = shlex.split(str(oracle["test_command"]))
+        if test_parts and test_parts[0] == "vitest":
+            vitest = (
+                oracle_recovery_root(legacy_root)
+                / "tsjs/_node_tools/node_modules/.bin/vitest"
+            )
+            if not vitest.is_file():
+                blockers.append(f"missing retained Vitest binary: {vitest}")
     repo = oracle.get("repo") or ""
     checkout = repo_checkout_dir(legacy_root, repo)
     if not checkout.is_dir():
@@ -1199,6 +1216,10 @@ def asset_state(
             session_tree = None
         return {
             "node_runtime": safe_file_digest(runtime) if runtime else None,
+            "shared_node_tools": directory_identity(
+                oracle_recovery_root(legacy_root)
+                / "tsjs/_node_tools/node_modules"
+            ),
             # the exact repo checkout replay_tsjs worktree-checks-out from
             "repo_checkout": directory_identity(checkout) if checkout else None,
             # the exact recovered session/ tree copied into the worktree
@@ -1818,7 +1839,12 @@ def replay_tsjs(
             else:
                 run_log = scratch / "run.log"
                 exit_code, duration, error = run_subprocess(
-                    resolve_node_command(oracle["test_command"], cwd),
+                    resolve_node_command(
+                        oracle["test_command"],
+                        cwd,
+                        oracle_recovery_root(legacy_root)
+                        / "tsjs/_node_tools/node_modules/.bin",
+                    ),
                     cwd=cwd,
                     log_path=run_log,
                     env=env,
