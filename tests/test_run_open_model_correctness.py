@@ -247,7 +247,9 @@ def test_rust_runner_adaptation_replaces_completion_count():
     )
     assert 'len(rows) == EXPECTED_RECORDS' in adapted
     assert 'len(rows) == 42' not in adapted
-    assert "shutil.rmtree(pair_state, ignore_errors=True)" in adapted
+    assert "remove_pair_state(pair_state)" in adapted
+    assert 'cargo_home = pair_state / "cargo-home"' in adapted
+    assert "root-owned state cleanup failed" in adapted
 
 
 def test_modern_generation_artifacts_stay_inside_wave(tmp_path):

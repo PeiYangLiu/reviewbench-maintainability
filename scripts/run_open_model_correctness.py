@@ -949,13 +949,70 @@ def adapt_runner_source(
         text = replace_required(
             text,
             (
+                "def clean_variant(repo: Path, work: Path) -> None:\n"
+            ),
+            (
+                "def remove_pair_state(path: Path) -> None:\n"
+                "    if STATE.resolve() not in path.resolve().parents:\n"
+                "        raise RuntimeError("
+                'f"refusing to remove non-state path: {path}")\n'
+                "    shutil.rmtree(path, ignore_errors=True)\n"
+                "    if not path.exists():\n"
+                "        return\n"
+                '    cleanup_name = "rb-open-rust-state-" + '
+                "hashlib.sha256(str(path).encode()).hexdigest()[:16]\n"
+                "    subprocess.run(\n"
+                '        ["docker", "rm", "-f", cleanup_name],\n'
+                "        stdout=subprocess.DEVNULL,\n"
+                "        stderr=subprocess.DEVNULL,\n"
+                "        check=False,\n"
+                "    )\n"
+                "    removed = subprocess.run(\n"
+                "        [\n"
+                '            "docker", "run", "--rm", "--name", '
+                "cleanup_name,\n"
+                '            "-v", "/data:/data", lane.DEFAULT_IMAGE,\n'
+                '            "sh", "-c", \'rm -rf -- "$1"\', "sh", '
+                "str(path),\n"
+                "        ],\n"
+                "        stdout=subprocess.PIPE,\n"
+                "        stderr=subprocess.STDOUT,\n"
+                "        text=True,\n"
+                "        check=False,\n"
+                "        timeout=300,\n"
+                "    )\n"
+                "    if removed.returncode != 0 or path.exists():\n"
+                "        raise RuntimeError(\n"
+                '            "root-owned state cleanup failed: "\n'
+                "            + removed.stdout[-1000:]\n"
+                "        )\n"
+                "\n\n"
+                "def clean_variant(repo: Path, work: Path) -> None:\n"
+            ),
+            label="rust root-owned state cleanup helper",
+        )
+        text = replace_required(
+            text,
+            '    cargo_home = pair_state.parents[1] / "cargo-home"',
+            '    cargo_home = pair_state / "cargo-home"',
+            label="rust attempt-local cargo home",
+        )
+        text = replace_required(
+            text,
+            "            shutil.rmtree(pair_state, ignore_errors=True)",
+            "            remove_pair_state(pair_state)",
+            label="rust stale attempt-state cleanup",
+        )
+        text = replace_required(
+            text,
+            (
                 "        finally:\n"
                 "            clean_variant(repo, work)"
             ),
             (
                 "        finally:\n"
                 "            clean_variant(repo, work)\n"
-                "            shutil.rmtree(pair_state, ignore_errors=True)"
+                "            remove_pair_state(pair_state)"
             ),
             label="rust attempt-state cleanup",
         )
@@ -965,7 +1022,7 @@ def adapt_runner_source(
                 "make task/model cardinality dynamic",
                 "record the actual execution host",
                 "use an open-model-specific container prefix",
-                "remove per-attempt build state after preserving evidence",
+                "remove root-owned per-attempt build state after evidence",
             ]
         )
     else:
