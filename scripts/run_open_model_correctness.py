@@ -1006,20 +1006,60 @@ def adapt_runner_source(
                 "    repo: Path, worktree: Path, case: dict[str, Any]\n"
                 ") -> None:\n"
                 "    git(\n"
+                "        worktree,\n"
+                '        "reset",\n'
+                '        "--hard",\n'
+                "        case[\"task\"][\"start_sha\"],\n"
+                "        timeout=600,\n"
+                "        check=True,\n"
+                "    )\n"
+                '    git(worktree, "clean", "-ffdx", '
+                "timeout=1800, check=True)\n"
+                "    verify_exact_start(repo, worktree, case)"
             ),
             (
                 "def restore_exact_start(\n"
                 "    repo: Path, worktree: Path, case: dict[str, Any]\n"
                 ") -> None:\n"
+                '    preserve_submodules = case["task"]["repo"] == '
+                '"iree-org/iree"\n'
+                "    if preserve_submodules:\n"
+                "        git(\n"
+                "            worktree,\n"
+                '            "submodule", "foreach", "--recursive",\n'
+                '            "git reset --hard && git clean -ffdx",\n'
+                "            timeout=1800,\n"
+                "            check=False,\n"
+                "        )\n"
                 "    git(\n"
                 "        worktree,\n"
-                '        "submodule", "deinit", "--all", "--force",\n'
+                '        "reset",\n'
+                '        "--hard",\n'
+                "        case[\"task\"][\"start_sha\"],\n"
                 "        timeout=600,\n"
-                "        check=False,\n"
+                "        check=True,\n"
                 "    )\n"
-                "    git(\n"
+                "    if preserve_submodules:\n"
+                '        git(worktree, "clean", "-ffdx", "-e", '
+                '"third_party/", timeout=1800, check=True)\n'
+                "    else:\n"
+                '        git(worktree, "clean", "-ffdx", '
+                "timeout=1800, check=True)\n"
+                "    verify_exact_start(repo, worktree, case)"
             ),
-            label="native submodule diagnostic reset",
+            label="native submodule-preserving diagnostic reset",
+        )
+        text = replace_required(
+            text,
+            "    attempts: list[dict[str, Any]] = []",
+            (
+                "    env.update(\n"
+                "        {str(key): str(value) for key, value in "
+                '(plan.get("env") or {}).items()}\n'
+                "    )\n"
+                "    attempts: list[dict[str, Any]] = []"
+            ),
+            label="native plan environment",
         )
         changes.extend(
             [
