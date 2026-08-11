@@ -242,12 +242,12 @@ Generation checkpoint at `2026-08-11T17:05Z`:
 
 | Model | Generated | Failed | State |
 |---|---:|---:|---|
-| Qwen3.6-27B | 146 | 50 | running; 196/414 records |
+| Qwen3.6-27B | 179 preserved | 235 pending | fixed-harness v5 running |
 | Qwen3.6-35B-A3B | 345 | 69 | canonical after targeted retry |
 | Qwen3-Coder-Next-FP8 | 327 | 87 | canonical after two targeted retry layers |
 | Devstral-2-123B | 387 | 27 | canonical after targeted retry |
 | GPT-OSS-120B | 413 | 1 | complete |
-| MiniMax-M2.1 | 374 | 40 | complete |
+| MiniMax-M2.1 | 378 | 36 | canonical after targeted retry |
 | Kimi-K2.5 | 8 preserved | 406 pending | v12 running |
 
 The completed non-Kimi models include 47 BlobFuse source-read timeouts that
@@ -503,6 +503,13 @@ cache home and `/oracle-cache` assets under
 cargo cache under `oracle_recovery/rust/cache/cargo`). These are reported,
 not invented; recovering the missing cache directories (or the Desbordante
 proof) would move those tasks to "ready" without any code change.
+
+The real preflight was written on 2026-08-11 with all 14 exact IDs and the
+same 7-ready/7-blocked split. Replay is active for the 11 completed models.
+Rows are written concurrently under per-lane locks, bind the current task,
+Oracle, model patch, Docker image and retained source-tree fingerprints, and
+store only output-bundled evidence. Candidate-missing rows remain explicit;
+blocked tasks produce no correctness verdict.
 
 `tests/test_run_legacy_reserve_correctness.py` covers this adapter with
 tiny synthetic fixtures only (no real builds/containers): patch
