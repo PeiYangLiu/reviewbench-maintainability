@@ -831,11 +831,16 @@ def main() -> int:
                 result = {
                     "id": task["id"],
                     "repo": task.get("repo"),
+                    "path": str(
+                        (task.get("locality") or {}).get("path") or ""
+                    ),
+                    "start_sha": task.get("start_sha"),
                     "model": model,
                     "protocol": "agentic-line-edit/v1",
                     "task_fingerprint": task_fingerprint(task),
                     "status": "failed",
                     "apply_ok": False,
+                    "rounds": [],
                     "error": str(exc)[:500],
                 }
             with lock:

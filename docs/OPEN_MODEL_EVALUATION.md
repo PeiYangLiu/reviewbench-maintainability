@@ -1,6 +1,6 @@
 # Open-weight model evaluation
 
-更新时间：2026-08-09
+更新时间：2026-08-11
 
 本文记录 414-hard benchmark 的开源模型完整评测。评测先冻结 inference
 artifact，再运行 correctness 和 maintainability；以后 rubric 改变时直接重判，
@@ -13,12 +13,12 @@ artifact，再运行 correctness 和 maintainability；以后 rubric 改变时�
 | AMLT environment | local conda `amlt10` |
 | AMLT version | 10.14.0 |
 | Project | `reviewbench-maintainability` |
-| Active experiments | `reviewbench-qwen-latest-hard414-v4`, `reviewbench-open-latest-hard414-v5`, `reviewbench-kimi25-hard414-v7` |
+| Active experiments | `reviewbench-qwen-latest-hard414-v4`, `reviewbench-open-latest-hard414-v5`, `reviewbench-kimi25-hard414-v11` |
 | Service | Singularity |
 | Target | `msrresrchbasicvc` |
 | Workspace | `Workspace_NLC` |
 | Project storage | `conversationhub / amulet` |
-| Code snapshots | `projects/reviewbench-maintainability/amlt-code/85ab05f9c45c04ffd8afd982ff3ab522` (Qwen/cross-family), `projects/reviewbench-maintainability/amlt-code/33bd4b03fb7c4464d9e9d01655ad26cc` (Kimi) |
+| Code snapshots | `projects/reviewbench-maintainability/amlt-code/85ab05f9c45c04ffd8afd982ff3ab522` (Qwen/cross-family), `projects/reviewbench-maintainability/amlt-code/aa888bf99cf2949552db56be66798752` (Kimi) |
 | Task set | `data/releases/hard/20260808/tasks.jsonl` |
 | Tasks | 414 |
 | Protocol | `agentic-line-edit/v1`, maximum 32 rounds |
@@ -85,11 +85,11 @@ Active cross-family retry result roots
 | `gpt-oss-120b` | `jolly_lime_stp99xkpy5` | `projects/reviewbench-maintainability/amlt-results/7213619390.70144-0660aa2d-7741-4009-8436-e52c5eaf8d03` |
 | `minimax-m21-fp8` | `cyan_bulb_wgqbmkp94x` | `projects/reviewbench-maintainability/amlt-results/7213619390.69963-21c60d6b-3514-4c44-be9b-426529b1b719` |
 
-Kimi K2.5 retry (`reviewbench-kimi25-hard414-v7`):
+Kimi K2.5 retry (`reviewbench-kimi25-hard414-v11`):
 
 | Job | Backend ID | Blob result path |
 |---|---|---|
-| `kimi-k25` | `musing_plow_lk7mjb18f0` | `projects/reviewbench-maintainability/amlt-results/7213601570.50237-cc8dc298-9c65-4d0c-b55c-197520cd42e2` |
+| `kimi-k25` | `jolly_stamp_1t6v7bgz36` | `projects/reviewbench-maintainability/amlt-results/7213555570.21499-72941eed-97c2-4128-b1bb-c446f64b0a0b` |
 
 Failed and canceled latest-model attempts remain immutable failure evidence:
 
@@ -120,6 +120,7 @@ Failed and canceled latest-model attempts remain immutable failure evidence:
 | `reviewbench-kimi25-hard414-v4:kimi-k25` | insufficient KV cache before inference | `projects/reviewbench-maintainability/amlt-results/7213619360.83046-b51d699f-4fae-4841-8d19-17e10dd73d61` |
 | `reviewbench-kimi25-hard414-v5:kimi-k25` | KV allocation fragmentation before inference | `projects/reviewbench-maintainability/amlt-results/7213614687.03225-df8080c1-869a-4aef-b3d0-8e256d4f7a1b` |
 | `reviewbench-kimi25-hard414-v6:kimi-k25` | FlashInfer warmup OOM before inference | `projects/reviewbench-maintainability/amlt-results/7213606929.36377-f080ff1d-bc1d-492a-ada4-7ef16f69b7ca` |
+| `reviewbench-kimi25-hard414-v7:kimi-k25` | first-request runtime OOM before valid inference | `projects/reviewbench-maintainability/amlt-results/7213601570.50237-cc8dc298-9c65-4d0c-b55c-197520cd42e2` |
 
 Failed jobs that reached the wrapper contain the complete server log, manifest,
 and packaged diagnostic archive. Still earlier retired Qwen jobs preserve the
@@ -167,6 +168,17 @@ Each task trace stores all rounds, including:
 This is the authoritative inference layer. Aggregate scores are derived
 artifacts and can be regenerated under a changed rubric.
 
+Five completed open-model archives were downloaded and verified locally under
+`/data/v-peiyangliu/reviewbench-openmodels/completed-20260811/`:
+
+| Model | Records | Generated | Failed | Archive SHA-256 |
+|---|---:|---:|---:|---|
+| Qwen3.6-35B-A3B | 414 | 314 | 100 | `8bbfd0b5349c5cd87a85e236f761268183a135ec9c32e8315b537320964fcacc` |
+| Qwen3-Coder-Next-FP8 | 414 | 305 | 109 | `508881cbf65724eeee8a9b22a4534ed91cc7ca89b32ef19ccbfdad5e451ee5a7` |
+| Devstral-2-123B | 414 | 380 | 34 | `9b154b175b71c12d7ccf4fe55f1bbca9786d547f925a4761e761ae6c9837da1f` |
+| GPT-OSS-120B | 414 | 413 | 1 | `6f1a278830806ad8cbb3f29c0303276d9fea6a680f097b2fc5a8599217fd9472` |
+| MiniMax-M2.1 | 414 | 374 | 40 | `76b7f6a01bdf212a6ae0cf8a5d49dd1ac74da11fb7f367ff9007ee3c6b873e12` |
+
 ## 5. Evaluation stages after inference
 
 For every model:
@@ -209,7 +221,7 @@ storage does not preserve. The builder now writes one real
 `refs/heads/reviewbench-cache` per repository. All 340 refs were generated,
 the 414 exact-start objects were revalidated, and the 340 41-byte files were
 incrementally uploaded and counted in Blob. The current jobs retain the
-preflight and use `gpu_memory_utilization=0.96` for Kimi.
+cache-object preflight.
 
 Seven updated jobs were accepted by `msrresrchbasicvc` on 2026-08-10:
 
@@ -219,11 +231,28 @@ Seven updated jobs were accepted by `msrresrchbasicvc` on 2026-08-10:
   `reviewbench-open-latest-hard414-v5`;
 - Kimi K2.5 in `reviewbench-kimi25-hard414-v4`.
 
-At `2026-08-10T14:47:52Z`, Qwen3.6 27B and 35B-A3B had produced 78 and 157
-task records; Qwen3-Coder-Next and all three cross-family A100 jobs were queued.
-Kimi v6 allocated enough KV for 32K but FlashInfer autotune required another
-256 MiB temporary buffer. Kimi v7 uses a 2200 MiB KV cap and disables that
-autotune warmup while retaining the 32K context.
+After exhausting H100 BF16-KV configurations and rejecting unsupported H200
+image metadata, the current Kimi FP8-KV run was accepted on 2026-08-11 as
+`reviewbench-kimi25-hard414-v11`.
+
+Generation checkpoint at `2026-08-11T03:34:33Z`:
+
+| Model | Generated | Failed | State |
+|---|---:|---:|---|
+| Qwen3.6-27B | 194 records | — | running |
+| Qwen3.6-35B-A3B | 314 | 100 | complete |
+| Qwen3-Coder-Next-FP8 | 305 | 109 | complete |
+| Devstral-2-123B | 380 | 34 | complete |
+| GPT-OSS-120B | 413 | 1 | complete |
+| MiniMax-M2.1 | 374 | 40 | complete |
+| Kimi-K2.5 | 0 | 414 infrastructure | superseded |
+
+The completed non-Kimi models include 47 BlobFuse source-read timeouts that
+will be retried without resampling successful or protocol-terminal tasks. Kimi
+v7 started successfully but its first request exhausted H100 runtime workspace.
+H200 submissions were rejected before job creation by amlt10's base-image
+accelerator metadata. Kimi v11 therefore retains 32K on H100 using a 1200 MiB
+FP8 KV cache and concurrency two.
 
 All retry result roots are listed in section 3. No failed startup produced a
 benchmark sample, so retries do not overwrite or resample successful inference.
@@ -333,6 +362,22 @@ Full 2,070-pair execution remains blocked until those 40 original per-task
 replay contracts are recovered into the seven-lane format. For development
 only, `prepare` and `run` accept `--allow-partial-modern`; such an artifact is
 explicitly marked partial and cannot produce a complete manifest.
+
+### 7.2 Current five-model correctness replay
+
+At `2026-08-11T03:40:36Z`, five completed model archives passed generation
+marker, task fingerprint, pair-set, patch, and checksum validation. The
+374-task modern replay is running at:
+
+```text
+/data/v-peiyangliu/reviewbench-openmodels/
+  correctness-20260811-five-v2/
+```
+
+It contains 2,070 task-model inputs, explicitly marks candidate-missing
+generations, and has preflight SHA-256
+`f0b6513a053182557d74cc147433f176aa202fa278ccf551c37b08a4cb593a0e`.
+Qwen3.6-27B and Kimi will be added after valid generation completes.
 
 ## 8. Local Copilot API evaluation
 

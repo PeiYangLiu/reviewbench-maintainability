@@ -1252,12 +1252,25 @@ def validate_and_stage_model(
     for task in tasks:
         task_id = task["id"]
         source = dict(by_pair[(task_id, model)])
-        if source.get("start_sha") != task.get("start_sha"):
-            raise ValueError(f"{task_id} {model} generation start SHA mismatch")
         if source.get("task_fingerprint") != task_fingerprint(task):
             raise ValueError(
                 f"{task_id} {model} generation task fingerprint mismatch"
             )
+        if source.get("start_sha") != task.get("start_sha"):
+            if (
+                source.get("apply_ok") is not True
+                and source.get("start_sha") is None
+            ):
+                source["source_start_sha"] = None
+                source["start_sha"] = task.get("start_sha")
+                source["path"] = str(
+                    (task.get("locality") or {}).get("path") or ""
+                )
+                source["metadata_recovered_from_task_fingerprint"] = True
+            else:
+                raise ValueError(
+                    f"{task_id} {model} generation start SHA mismatch"
+                )
         source["source_generation_results"] = str(results_path)
         source["source_patch_file"] = source.get("patch_file")
         source["source_trace_file"] = source.get("trace_file")

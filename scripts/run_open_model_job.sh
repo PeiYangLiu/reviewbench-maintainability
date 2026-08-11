@@ -82,6 +82,12 @@ fi
 if [ "${DISABLE_FLASHINFER_AUTOTUNE:-0}" = "1" ]; then
   vllm_args+=(--vllm-extra-arg=--no-enable-flashinfer-autotune)
 fi
+if [ -n "${KV_CACHE_DTYPE:-}" ]; then
+  vllm_args+=(
+    --vllm-extra-arg=--kv-cache-dtype
+    --vllm-extra-arg="$KV_CACHE_DTYPE"
+  )
+fi
 
 persist() {
   status="$?"

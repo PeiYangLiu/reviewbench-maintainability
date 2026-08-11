@@ -164,6 +164,41 @@ def test_generation_staging_validates_exact_pairs_and_hashes(tmp_path):
         )
 
 
+def test_staging_recovers_failed_record_metadata_from_fingerprint(tmp_path):
+    model = "model"
+    item = task()
+    tasks_path = tmp_path / "tasks.jsonl"
+    write_jsonl(tasks_path, [item])
+    results = tmp_path / "source/generation_results.jsonl"
+    write_jsonl(
+        results,
+        [
+            {
+                "id": item["id"],
+                "model": model,
+                "start_sha": None,
+                "task_fingerprint": MODULE.task_fingerprint(item),
+                "status": "failed",
+                "apply_ok": False,
+                "error": "serialization failed",
+            }
+        ],
+    )
+
+    staged, _ = MODULE.validate_and_stage_model(
+        model=model,
+        results_path=results,
+        tasks=[item],
+        tasks_path=tasks_path,
+        destination=tmp_path / "staged",
+        require_marker=False,
+    )
+
+    assert staged["task"]["start_sha"] == "start"
+    assert staged["task"]["path"] == "source.py"
+    assert staged["task"]["metadata_recovered_from_task_fingerprint"] is True
+
+
 def test_scripted_runner_adaptation_uses_dynamic_models_and_task_count():
     source = """\
 import json
