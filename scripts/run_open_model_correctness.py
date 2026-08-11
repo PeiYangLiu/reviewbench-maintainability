@@ -954,12 +954,31 @@ def adapt_runner_source(
             'return f"rb-open-native-{digest}"',
             label="native container prefix",
         )
+        text = replace_required(
+            text,
+            "        commands = strict.get(\"commands\") or {}",
+            (
+                "        commands = {\n"
+                "            name: (\n"
+                "                value.replace(\n"
+                '                    "${REVIEWBENCH_SESSION_FILES}",\n'
+                '                    _OPEN_CONFIG["session_root"],\n'
+                "                )\n"
+                "                if isinstance(value, str) else value\n"
+                "            )\n"
+                "            for name, value in "
+                "(strict.get(\"commands\") or {}).items()\n"
+                "        }"
+            ),
+            label="native release placeholder restoration",
+        )
         changes.extend(
             [
                 "configure lane/repo roots",
                 "configure task count",
                 "derive safe arbitrary-model worktree names",
                 "use an open-model-specific container prefix",
+                "restore sanitized session paths before plan validation",
             ]
         )
     elif lane == "rust":
@@ -1164,6 +1183,7 @@ def runner_config(
         "schema_version": "reviewbench-open-correctness-runner-config/v1",
         "models": models,
         "repo_cache": str(repo_cache),
+        "session_root": str(oracle_root.parent),
         "lane_roots": {
             lane: str(oracle_root / lane) for lane in LANES
         },

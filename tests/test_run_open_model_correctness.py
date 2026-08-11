@@ -274,6 +274,24 @@ def test_gopy_runner_adaptation_preserves_oracle_runtimes():
     assert "oracle-remapped.sh" in adapted
 
 
+def test_native_runner_restores_release_placeholders():
+    source_path = Path(
+        "/data/v-peiyangliu/reviewbench-session-"
+        "9a9f50f0-cb30-462e-942e-1e9def267f6d/"
+        "hard_oracle_20260804/wave-001/correctness/native_runner.py"
+    )
+    if not source_path.is_file():
+        pytest.skip("proven native runner is not available")
+
+    adapted, _ = MODULE.adapt_runner_source(
+        "native",
+        source_path.read_text(encoding="utf-8"),
+    )
+
+    assert '"${REVIEWBENCH_SESSION_FILES}"' in adapted
+    assert '_OPEN_CONFIG["session_root"]' in adapted
+
+
 def test_modern_generation_artifacts_stay_inside_wave(tmp_path):
     model = "Qwen/Qwen"
     source = tmp_path / "source"
