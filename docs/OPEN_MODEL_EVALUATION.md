@@ -429,6 +429,29 @@ generations, and has preflight SHA-256
 `f0b6513a053182557d74cc147433f176aa202fa278ccf551c37b08a4cb593a0e`.
 Qwen3.6-27B and Kimi will be added after valid generation completes.
 
+### 7.3 Parallel rubric-v2 judgment
+
+Completed models are judged without waiting for the remaining inference jobs.
+Two rubric-v2 blind-judge runs use `claude-opus-4.8` through the verified 4141
+direct endpoint:
+
+```text
+/data/v-peiyangliu/reviewbench-openmodels/judging-20260811/
+  hosted-five/
+    judgments.jsonl
+    raw/
+    run.log
+  open-five/
+    judgments.jsonl
+    raw/
+    run.log
+```
+
+The hosted group contains Claude Opus/Sonnet 5 and GPT-5.6 Luna/Sol/Terra.
+The open group contains Qwen35B, Coder-Next, Devstral-2, GPT-OSS, and MiniMax.
+Every raw judge response is retained. Completion markers, checksums, normalized
+four-gate results, and Blob paths are produced after each group finishes.
+
 ## 8. Local Copilot API evaluation
 
 Six current hosted models are evaluated through the verified local Copilot
