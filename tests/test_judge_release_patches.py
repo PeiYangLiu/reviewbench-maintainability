@@ -121,6 +121,20 @@ def test_invoke_judge_rejects_silent_model_fallback(monkeypatch):
         )
 
 
+def test_repair_prompt_requires_every_v2_field():
+    prompt = MODULE.build_repair_prompt(
+        "original prompt",
+        '{"addressed":"partial"}',
+        "introduces_new_debt must be a boolean",
+        "v2",
+    )
+
+    assert "original prompt" in prompt
+    assert "introduces_new_debt" in prompt
+    assert '{"addressed":"partial"}' in prompt
+    assert "corrected JSON object only" in prompt
+
+
 def test_completion_marker_requires_resolved_judgments(tmp_path):
     path = tmp_path / "judgments_v2.jsonl"
     path.write_text(

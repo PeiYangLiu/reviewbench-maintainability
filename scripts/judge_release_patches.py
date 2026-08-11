@@ -249,6 +249,29 @@ def invoke_judge(
     return generator.chat_text(data), data.get("usage") or {}
 
 
+def build_repair_prompt(
+    prompt: str,
+    invalid_response: str,
+    error: str,
+    rubric: str,
+) -> str:
+    required = (
+        "addressed, quality_1_to_5, introduces_new_debt, reason"
+        if rubric == "v2"
+        else (
+            "addressed, quality_1_to_5, behavior_preserved, focused, "
+            "reason"
+        )
+    )
+    return (
+        f"{prompt}\n\n"
+        "SCHEMA REPAIR: Your previous response was invalid. Return the "
+        f"corrected JSON object only, with every required field: {required}.\n"
+        f"VALIDATION ERROR: {error}\n"
+        f"INVALID RESPONSE:\n{invalid_response[:2_000]}"
+    )
+
+
 def judge_one(
     task: dict[str, Any],
     generation: dict[str, Any],
@@ -305,16 +328,21 @@ def judge_one(
     )
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     last_error = ""
+    attempt_prompt = prompt
     for attempt in range(1, 4):
+        text = ""
         try:
             text, usage = invoke_judge(
                 args.judge_model,
-                prompt,
+                attempt_prompt,
                 args.chat_endpoint,
                 args.max_output_tokens,
                 args.rubric,
             )
             raw_path.write_text(text, encoding="utf-8")
+            raw_path.with_name(
+                f"{raw_path.stem}.attempt-{attempt}{raw_path.suffix}"
+            ).write_text(text, encoding="utf-8")
             verdict = parse_verdict(text, args.rubric)
             passed = verdict_passes(verdict, args.rubric)
             return {
@@ -329,6 +357,13 @@ def judge_one(
             }
         except Exception as exc:
             last_error = str(exc)[:500]
+            if text:
+                attempt_prompt = build_repair_prompt(
+                    prompt,
+                    text,
+                    last_error,
+                    args.rubric,
+                )
     return {
         **base,
         "status": "judge_error",
