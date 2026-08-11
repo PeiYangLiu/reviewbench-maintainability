@@ -399,16 +399,15 @@ def read_at_start(
         ],
         cwd=repository,
         capture_output=True,
-        text=True,
         timeout=300,
     )
     if completed.returncode != 0:
-        detail = completed.stderr.strip()[-300:]
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()[-300:]
         raise ValueError(
             f"file unavailable at start_sha: {path}"
             + (f": {detail}" if detail else "")
         )
-    return completed.stdout
+    return completed.stdout.decode("utf-8")
 
 
 def read_lines(
@@ -448,6 +447,8 @@ def find_text(text: str, query: str, limit: int = 20) -> dict[str, Any]:
 def apply_line_edits(text: str, edits: Any) -> tuple[str, list[dict[str, Any]]]:
     if not isinstance(edits, list) or not edits:
         raise ValueError("edit action requires a non-empty edits list")
+    crlf_count = text.count("\r\n")
+    newline = "\r\n" if crlf_count > text.count("\n") - crlf_count else "\n"
     lines = text.splitlines()
     had_final_newline = text.endswith("\n")
     parsed = []
@@ -488,9 +489,9 @@ def apply_line_edits(text: str, edits: Any) -> tuple[str, list[dict[str, Any]]]:
                 "replacement_lines": len(replacement),
             }
         )
-    output = "\n".join(lines)
+    output = newline.join(lines)
     if had_final_newline and lines:
-        output += "\n"
+        output += newline
     return output, list(reversed(applied))
 
 
@@ -590,10 +591,9 @@ def git_diff(path: str, before: str, after: str) -> str:
             ["git", "diff", "--binary", "--", path],
             cwd=root,
             capture_output=True,
-            text=True,
             check=True,
         )
-        return completed.stdout
+        return completed.stdout.decode("utf-8")
 
 
 def build_initial_prompt(

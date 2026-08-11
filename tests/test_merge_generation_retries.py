@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -79,6 +80,7 @@ def test_merge_retries_only_replaces_failed_records(tmp_path):
         base_path=base_path,
         retry_paths=[retry_path],
         output=tmp_path / "out",
+        repo_cache=None,
     )
 
     rows = MODULE.load_jsonl(tmp_path / "out/generation_results.jsonl")
@@ -88,6 +90,9 @@ def test_merge_retries_only_replaces_failed_records(tmp_path):
     assert rows[1]["canonical_provenance"]["source_kind"] == "retry"
     assert Path(rows[1]["patch_file"]).is_file()
     assert len(MODULE.load_jsonl(tmp_path / "out/recovered/tasks.jsonl")) == 1
+    assert len(
+        MODULE.load_jsonl(tmp_path / "out/evaluation_delta/tasks.jsonl")
+    ) == 1
     assert (tmp_path / "out/generation_complete.json").is_file()
     assert (tmp_path / "out/recovered/generation_complete.json").is_file()
 
@@ -116,4 +121,74 @@ def test_merge_rejects_retry_of_success(tmp_path):
             base_path=base_path,
             retry_paths=[retry_path],
             output=tmp_path / "out",
+            repo_cache=None,
         )
+
+
+def test_merge_repairs_line_endings_without_resampling(tmp_path):
+    repo_cache = tmp_path / "repos"
+    repo = repo_cache / "owner__repo"
+    target = repo / "src/a.py"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"one\r\ntwo\r\nthree\r\n")
+    subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "start"], cwd=repo, check=True)
+    start_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        text=True,
+    ).strip()
+    task_row = {**task("one"), "start_sha": start_sha}
+    tasks_path = tmp_path / "tasks.jsonl"
+    oracles_path = tmp_path / "oracles.jsonl"
+    write_jsonl(tasks_path, [task_row])
+    write_jsonl(oracles_path, [{"id": "one"}])
+    base_path = tmp_path / "base/generation_results.jsonl"
+    row = generation(task_row, "model", "generated", base_path.parent)
+    wrong_patch = AGENTIC.git_diff(
+        "src/a.py",
+        "one\ntwo\nthree\n",
+        "one\nTWO\nthree\n",
+    )
+    Path(row["patch_file"]).write_text(wrong_patch)
+    row["rounds"] = [
+        {
+            "action": {
+                "action": "edit",
+                "edits": [
+                    {
+                        "start_line": 2,
+                        "end_line": 2,
+                        "content": "TWO",
+                    }
+                ],
+            },
+            "tool_result": {"ok": True},
+        }
+    ]
+    write_jsonl(base_path, [row])
+
+    MODULE.merge_retries(
+        tasks_path=tasks_path,
+        oracles_path=oracles_path,
+        base_path=base_path,
+        retry_paths=[],
+        output=tmp_path / "out",
+        repo_cache=repo_cache,
+    )
+
+    merged = MODULE.load_jsonl(tmp_path / "out/generation_results.jsonl")[0]
+    assert merged["canonical_provenance"]["patch_repaired"] == (
+        "preserved-source-line-endings"
+    )
+    assert MODULE.patch_applies(
+        task_row,
+        Path(merged["patch_file"]),
+        repo_cache,
+    )
+    assert len(
+        MODULE.load_jsonl(tmp_path / "out/evaluation_delta/tasks.jsonl")
+    ) == 1

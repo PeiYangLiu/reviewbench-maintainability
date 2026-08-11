@@ -192,6 +192,37 @@ def test_apply_line_edits_replaces_and_inserts_without_search():
     assert len(applied) == 2
 
 
+def test_apply_line_edits_preserves_crlf():
+    after, _ = MODULE.apply_line_edits(
+        "one\r\ntwo\r\nthree\r\n",
+        [{"start_line": 2, "end_line": 2, "content": "TWO"}],
+    )
+
+    assert after == "one\r\nTWO\r\nthree\r\n"
+
+
+def test_git_diff_applies_to_crlf_source(tmp_path):
+    before = "one\r\ntwo\r\nthree\r\n"
+    after, _ = MODULE.apply_line_edits(
+        before,
+        [{"start_line": 2, "end_line": 2, "content": "TWO"}],
+    )
+    patch = MODULE.git_diff("src/a.txt", before, after)
+    repo = tmp_path / "repo"
+    target = repo / "src/a.txt"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(before.encode())
+    subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "start"], cwd=repo, check=True)
+    patch_path = tmp_path / "candidate.patch"
+    patch_path.write_text(patch)
+
+    subprocess.run(["git", "apply", "--check", str(patch_path)], cwd=repo, check=True)
+
+
 def test_apply_line_edits_rejects_overlap():
     with pytest.raises(ValueError, match="overlap"):
         MODULE.apply_line_edits(
