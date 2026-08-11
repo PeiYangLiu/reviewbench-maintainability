@@ -19,6 +19,50 @@ def test_parse_action_extracts_json():
     assert action == {"action": "finish"}
 
 
+def test_native_tool_text_converts_one_function_call():
+    response = {
+        "choices": [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "find",
+                                "arguments": '{"path":"src/a.py","query":"x"}',
+                            }
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+
+    assert MODULE.parse_action(MODULE.native_tool_text(response)) == {
+        "action": "find",
+        "path": "src/a.py",
+        "query": "x",
+    }
+
+
+def test_native_tool_text_rejects_multiple_calls():
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {"function": {"name": "read", "arguments": "{}"}},
+                        {"function": {"name": "finish", "arguments": "{}"}},
+                    ]
+                }
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="unsupported action"):
+        MODULE.parse_action(MODULE.native_tool_text(response))
+
+
 def test_parse_action_uses_last_valid_object_without_greedy_join():
     action = MODULE.parse_action(
         'I will inspect it.\n{"note":"first"}\n'

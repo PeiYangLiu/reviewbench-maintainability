@@ -26,6 +26,7 @@ import urllib.request
 MODEL_SPECS = {
     "claude-opus-4.8": {"provider": "chat", "reasoning_effort": None},
     "gemini-3.5-flash": {"provider": "chat", "reasoning_effort": "medium"},
+    "gemini-3.6-flash": {"provider": "chat", "reasoning_effort": "medium"},
     "gpt-5.5": {"provider": "responses", "reasoning_effort": "medium"},
     "gpt-5.6-luna": {"provider": "responses", "reasoning_effort": "medium"},
     "gpt-5.6-sol": {"provider": "responses", "reasoning_effort": "medium"},

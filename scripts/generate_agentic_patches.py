@@ -48,6 +48,110 @@ change; use read again when needed.
 
 Do not return Markdown, prose, SEARCH/REPLACE blocks, or a unified diff."""
 
+NATIVE_TOOL_MODELS = {"gemini-3.6-flash"}
+NATIVE_TOOL_INSTRUCTIONS = """You are an expert software engineer working in a real Git worktree.
+
+Address the reviewer concern with the smallest complete, behavior-preserving
+maintainability change. You may inspect repository files, but may change only
+the anchored production file. Do not add tests or modify unrelated code.
+
+Use exactly one provided function per turn. Call finish only after completing
+the change. Start with the editable file named in the task and complete within
+32 calls. The read and find functions accept exact file paths only, never
+directories. Prefer a focused edit over broad repository exploration."""
+NATIVE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read",
+            "description": "Read numbered lines from a repository file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Exact repository file path, never a directory."
+                        ),
+                    },
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                },
+                "required": ["path", "start_line", "end_line"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find",
+            "description": "Find literal text in a repository file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Exact repository file path, never a directory."
+                        ),
+                    },
+                    "query": {"type": "string"},
+                },
+                "required": ["path", "query"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit",
+            "description": (
+                "Apply non-overlapping line changes to the anchored file. "
+                "Line numbers are 1-based and end_line is inclusive. To insert "
+                "before a line, use end_line=start_line-1."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "edits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "start_line": {"type": "integer"},
+                                "end_line": {"type": "integer"},
+                                "content": {"type": "string"},
+                            },
+                            "required": [
+                                "start_line",
+                                "end_line",
+                                "content",
+                            ],
+                            "additionalProperties": False,
+                        },
+                    }
+                },
+                "required": ["edits"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "finish",
+            "description": "Finish after making a complete change.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
 
 def task_fingerprint(task: dict[str, Any]) -> str:
     return hashlib.sha256(
@@ -458,7 +562,37 @@ def invoke(
     model: str,
     prompt: str,
     args: argparse.Namespace,
-) -> tuple[str, dict[str, Any]]:
+) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
+    if model in NATIVE_TOOL_MODELS:
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": NATIVE_TOOL_INSTRUCTIONS},
+                {"role": "user", "content": prompt},
+            ],
+            "tools": NATIVE_TOOLS,
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "max_tokens": args.max_output_tokens,
+            "reasoning_effort": "medium",
+            "stream": False,
+        }
+        data = api.post_json(
+            args.chat_endpoint,
+            payload,
+            {},
+            timeout=args.request_timeout,
+            retries=args.request_retries,
+        )
+        actual_model = str(data.get("model") or "")
+        if actual_model and actual_model != model:
+            raise RuntimeError(
+                f"solver model mismatch: requested {model}, gateway returned "
+                f"{actual_model}; refusing a silent fallback"
+            )
+        text = native_tool_text(data)
+        return text, data.get("usage") or {}, data
+
     invoke_args = argparse.Namespace(
         chat_endpoint=args.chat_endpoint,
         responses_endpoint=args.responses_endpoint,
@@ -468,7 +602,50 @@ def invoke(
         request_retries=args.request_retries,
         force_chat=args.force_chat,
     )
-    return api.invoke_model(model, AGENT_INSTRUCTIONS, prompt, invoke_args)
+    text, usage = api.invoke_model(
+        model,
+        AGENT_INSTRUCTIONS,
+        prompt,
+        invoke_args,
+    )
+    return text, usage, None
+
+
+def native_tool_text(data: dict[str, Any]) -> str:
+    choices = data.get("choices") or []
+    message = (choices[0].get("message") or {}) if choices else {}
+    tool_calls = message.get("tool_calls") or []
+    if len(tool_calls) != 1:
+        if not tool_calls:
+            return api.chat_text(data)
+        return json.dumps(
+            {
+                "action": "__multiple_tool_calls__",
+                "tool_calls": tool_calls,
+            },
+            ensure_ascii=False,
+        )
+    function = tool_calls[0].get("function") or {}
+    name = str(function.get("name") or "")
+    arguments = function.get("arguments") or "{}"
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            return json.dumps(
+                {
+                    "action": "__invalid_tool_arguments__",
+                    "tool": name,
+                    "arguments": arguments,
+                },
+                ensure_ascii=False,
+            )
+    if not isinstance(arguments, dict):
+        arguments = {"arguments": arguments}
+    return json.dumps(
+        {**arguments, "action": name},
+        ensure_ascii=False,
+    )
 
 
 def generate_one(
@@ -536,8 +713,9 @@ def generate_one(
             "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
         }
         text = ""
+        api_response = None
         try:
-            text, usage = invoke(model, prompt, args)
+            text, usage, api_response = invoke(model, prompt, args)
             action = parse_action(text, prefer_edit=not edited)
             round_result.update(
                 {
@@ -547,6 +725,8 @@ def generate_one(
                     "raw_response": text,
                 }
             )
+            if api_response is not None:
+                round_result["raw_api_response"] = api_response
             object_count = len(object_candidates(text))
             round_result["response_object_count"] = object_count
             if object_count > 1:
@@ -601,6 +781,8 @@ def generate_one(
             transcript.append({"assistant_action": action, "tool_result": tool_result})
         except Exception as exc:
             round_result["error"] = str(exc)[:500]
+            if api_response is not None:
+                round_result["raw_api_response"] = api_response
             if text:
                 round_result["raw_response"] = text[:20_000]
             transcript.append({"tool_error": round_result["error"]})

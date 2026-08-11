@@ -401,9 +401,31 @@ exact-start repo cache, and complete raw-response trace format.
 
 The first GPT-5.6 attempt was rejected before inference because the three
 models were incorrectly forced through Chat Completions. The corrected
-Responses route passed a live tool-use smoke test, and only failed records are
-being replaced. Gemini's empty-content failures are likewise retried at one
-worker after the original six-process run overloaded the shared gateway.
+Responses route passed a live tool-use smoke test, and only failed records were
+replaced.
+
+The first Gemini 3.6 run is retained but excluded from scoring. Of its 283
+terminal failures, 149 had empty content on all 32 calls and 77 had only one
+non-empty call. Controlled probes showed:
+
+- `default`, `medium`, and `low` reasoning all returned
+  `finish_reason="error"` with empty content;
+- changing source-window and output-token budgets did not fix the error;
+- the same real task returned a valid `find` call when the four actions were
+  provided through the OpenAI `tools` field instead of text-embedded JSON.
+
+The native-tools adapter preserves the same logical read/find/edit/finish
+protocol, converts exactly one function call per turn into the canonical action,
+and saves the complete raw API response envelope. A full 414-task fresh run is
+active at:
+
+```text
+/home/v-peiyangliu/conversationhub/liupeiyang/code_quality/
+  reviewbench-hard414-copilot-20260811/
+  gemini-3.6-flash-native-tools/
+```
+
+Raw diagnostic envelopes and hashes are stored in its `diagnostics/` directory.
 
 Hosted-model status at `2026-08-10T20:10:41Z`:
 
@@ -411,7 +433,7 @@ Hosted-model status at `2026-08-10T20:10:41Z`:
 |---|---:|---:|---|
 | `claude-sonnet-5` | 414 | 0 | complete |
 | `claude-opus-5` | 411 | 3 | complete; three Metasploit tasks exhausted 32 rounds twice |
-| `gemini-3.6-flash` | 131 | 283 | complete; 275 invalid actions and 8 no-patch terminal failures |
+| `gemini-3.6-flash` | 131 | 283 | invalidated text-schema run; native-tools fresh run active |
 | `gpt-5.6-luna` | 414 | 0 | complete |
 | `gpt-5.6-sol` | 412 | 2 | complete; two Speckle duplication tasks exhausted 32 rounds |
 | `gpt-5.6-terra` | 414 | 0 | complete |
