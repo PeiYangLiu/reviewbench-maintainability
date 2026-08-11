@@ -511,6 +511,21 @@ Oracle, model patch, Docker image and retained source-tree fingerprints, and
 store only output-bundled evidence. Candidate-missing rows remain explicit;
 blocked tasks produce no correctness verdict.
 
+The 11-model replay is now complete for all seven ready tasks. It produced
+79 normalized rows: 33 pass, 38 fail, and 8 candidate-missing. The count is
+two above 7 x 11 because two models also had candidate-missing rows on blocked
+JVM tasks; no blocked task received a correctness verdict. The partial manifest
+still lists the other 4,475 task-model pairs as missing because this artifact
+intentionally contains only the recovered legacy slice. The complete raw
+evidence bundle is stored at:
+
+```text
+/home/v-peiyangliu/conversationhub/liupeiyang/code_quality/
+  reviewbench-hard414-evaluation-20260811/correctness/
+  correctness-20260811-legacy-20260728-eleven-v1.tar.gz
+SHA-256 8cfa350847d4a86a612b4be4f278ac7c6b4fe64a5f453439a81f4f059598acfd
+```
+
 `tests/test_run_legacy_reserve_correctness.py` covers this adapter with
 tiny synthetic fixtures only (no real builds/containers): patch
 apply/failure handling, git worktree materialization, blocker detection per
