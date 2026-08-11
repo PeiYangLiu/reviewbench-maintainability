@@ -252,6 +252,28 @@ def test_rust_runner_adaptation_replaces_completion_count():
     assert "root-owned state cleanup failed" in adapted
 
 
+def test_gopy_runner_adaptation_preserves_oracle_runtimes():
+    source_path = Path(
+        "/data/v-peiyangliu/reviewbench-session-"
+        "9a9f50f0-cb30-462e-942e-1e9def267f6d/"
+        "hard_oracle_20260804/wave-001/correctness/"
+        "gopy_candidate_replay.py"
+    )
+    if not source_path.is_file():
+        pytest.skip("proven Go/Python runner is not available")
+
+    adapted, _ = MODULE.adapt_runner_source(
+        "gopy",
+        source_path.read_text(encoding="utf-8"),
+    )
+
+    assert "GO_1230 = LANE / 'toolchains/go1.23.0/bin/go'" in adapted
+    assert "'go 1.24.2' in description" in adapted
+    assert "if 'venv/bin/python' not in command[0]" in adapted
+    assert "Path('/tmp/reviewbench-gopy')" in adapted
+    assert "oracle-remapped.sh" in adapted
+
+
 def test_modern_generation_artifacts_stay_inside_wave(tmp_path):
     model = "Qwen/Qwen"
     source = tmp_path / "source"

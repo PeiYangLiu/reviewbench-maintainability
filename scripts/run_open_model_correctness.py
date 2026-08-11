@@ -644,7 +644,126 @@ def adapt_runner_source(
                 ),
                 label="gopy Python runtime",
             )
-        changes.extend(["configure lane/repo roots", "configure task count"])
+        text = replace_required(
+            text,
+            "GO = Path(shutil.which('go') or '/usr/bin/go')",
+            (
+                "GO = Path(shutil.which('go') or '/usr/bin/go')\n"
+                "GO_1230 = LANE / 'toolchains/go1.23.0/bin/go'\n"
+                "GO_12410 = next(\n"
+                "    iter(sorted(LANE.glob(\n"
+                "        'recovery/*/home/go/pkg/mod/'\n"
+                "        'golang.org/toolchain@v0.0.1-"
+                "go1.24.10.linux-amd64/bin/go'\n"
+                "    ))),\n"
+                "    LANE / 'missing-go1.24.10',\n"
+                ")"
+            ),
+            label="gopy retained Go toolchains",
+        )
+        text = replace_required(
+            text,
+            (
+                "    if 'go 1.23.6' in description:\n"
+                "        return GO_1236\n"
+                "    if 'go 1.25.0' in description:\n"
+                "        return GO_125\n"
+            ),
+            (
+                "    if 'go 1.23.0' in description:\n"
+                "        return GO_1230\n"
+                "    if 'go 1.23.6' in description:\n"
+                "        return GO_1236\n"
+                "    if 'go 1.24.2' in description or "
+                "'go 1.24.10' in description:\n"
+                "        return GO_12410\n"
+                "    if 'go 1.25.0' in description:\n"
+                "        return GO_125\n"
+            ),
+            label="gopy Oracle Go selection",
+        )
+        text = replace_required(
+            text,
+            (
+                "    temp = CORRECTNESS / 'gopy-worker-temp' / "
+                "hashlib.sha256(\n"
+                "        str(artifact).encode()\n"
+                "    ).hexdigest()[:12]"
+            ),
+            (
+                "    temp = Path('/tmp/reviewbench-gopy') / "
+                "hashlib.sha256(\n"
+                "        str(artifact).encode()\n"
+                "    ).hexdigest()[:12]"
+            ),
+            label="gopy short worker temp",
+        )
+        text = replace_required(
+            text,
+            (
+                "    env.update({\n"
+                "        'REVIEWED_PATH': task['locality']['path'],\n"
+                "        'COVERAGE_OUT': context['coverage_out'],\n"
+                "        'PYTHONPATH': os.pathsep.join([\n"
+                "            str(LANE), str(worktree), "
+                "str(worktree / 'src'),\n"
+                "            interpolate(str(spec.get('pythonpath') "
+                "or ''), context),\n"
+                "            str(PYTHON_SITE),\n"
+                "            os.environ.get('PYTHONPATH', ''),\n"
+                "        ]),\n"
+                "    })"
+            ),
+            (
+                "    python_paths = [\n"
+                "        str(LANE), str(worktree), str(worktree / 'src'),\n"
+                "        interpolate(str(spec.get('pythonpath') "
+                "or ''), context),\n"
+                "    ]\n"
+                "    if 'venv/bin/python' not in command[0]:\n"
+                "        python_paths.extend([\n"
+                "            str(PYTHON_SITE),\n"
+                "            os.environ.get('PYTHONPATH', ''),\n"
+                "        ])\n"
+                "    env.update({\n"
+                "        'REVIEWED_PATH': task['locality']['path'],\n"
+                "        'COVERAGE_OUT': context['coverage_out'],\n"
+                "        'PYTHONPATH': os.pathsep.join(python_paths),\n"
+                "    })"
+            ),
+            label="gopy pinned virtualenv isolation",
+        )
+        text = replace_required(
+            text,
+            "    executed = run(command, cwd=cwd, env=env, timeout=timeout)",
+            (
+                "    if len(command) > 1 and Path(command[0]).name "
+                "in {'bash', 'sh'}:\n"
+                "        script = Path(command[1])\n"
+                "        if script.is_file():\n"
+                "            script_text = script.read_text(encoding='utf-8')\n"
+                "            remapped = re.sub(\n"
+                r"""                r'go_bin="[^"]+/bin/go"',"""
+                "\n"
+                "                f'go_bin=\"{go_binary}\"',\n"
+                "                script_text,\n"
+                "            )\n"
+                "            if remapped != script_text:\n"
+                "                script = artifact / 'oracle-remapped.sh'\n"
+                "                script.write_text(remapped, encoding='utf-8')\n"
+                "                command[1] = str(script)\n"
+                "    executed = run(command, cwd=cwd, env=env, timeout=timeout)"
+            ),
+            label="gopy shell Oracle Go remap",
+        )
+        changes.extend(
+            [
+                "configure lane/repo roots",
+                "configure task count",
+                "preserve pinned Python and Go runtime contracts",
+                "use short multiprocessing temp paths",
+            ]
+        )
     elif lane == "jvm":
         text = replace_required(
             text,
