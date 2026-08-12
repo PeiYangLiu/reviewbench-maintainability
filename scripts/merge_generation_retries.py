@@ -263,8 +263,14 @@ def merge_retries(
         raise ValueError("task and Oracle ID sets differ")
 
     base = index_unique(load_jsonl(base_path), label="base generation")
-    if set(base) != set(tasks_by_id):
-        raise ValueError("base generation does not match the task ID set")
+    unexpected_base = set(base) - set(tasks_by_id)
+    if unexpected_base:
+        raise ValueError(
+            "base generation contains unknown IDs: "
+            f"{sorted(unexpected_base)[:5]}"
+        )
+    if not base:
+        raise ValueError("base generation is empty")
     model_values = {str(record.get("model") or "") for record in base.values()}
     if len(model_values) != 1 or not next(iter(model_values)):
         raise ValueError(f"base generation has inconsistent models: {model_values}")
@@ -281,7 +287,7 @@ def merge_retries(
             load_jsonl(retry_path),
             label=f"retry generation {index}",
         )
-        unexpected = set(retry) - set(base)
+        unexpected = set(retry) - set(tasks_by_id)
         if unexpected:
             raise ValueError(
                 f"retry {index} contains unknown IDs: {sorted(unexpected)[:5]}"
@@ -296,8 +302,8 @@ def merge_retries(
                 f"retry {index} model mismatch: {sorted(wrong_models)}"
             )
         for task_id, record in retry.items():
-            current = selected[task_id][0]
-            if current.get("apply_ok") is True:
+            current = selected.get(task_id)
+            if current is not None and current[0].get("apply_ok") is True:
                 raise ValueError(
                     f"retry {index} attempts to replace successful ID {task_id}"
                 )
@@ -315,6 +321,13 @@ def merge_retries(
                     row.get("apply_ok") is not True for row in retry.values()
                 ),
             }
+        )
+
+    missing = set(tasks_by_id) - set(selected)
+    if missing:
+        raise ValueError(
+            "base and retry generations do not cover the task ID set: "
+            f"{sorted(missing)[:5]}"
         )
 
     canonical = {
@@ -351,7 +364,7 @@ def merge_retries(
         task["id"]
         for task in tasks
         if task["id"] in touched
-        and base[task["id"]].get("apply_ok") is not True
+        and base.get(task["id"], {}).get("apply_ok") is not True
         and canonical[task["id"]].get("apply_ok") is True
     ]
     recovered_root = output / "recovered"
@@ -415,6 +428,7 @@ def merge_retries(
         "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "model": model,
         "tasks": len(tasks),
+        "base_records": len(base),
         "base_results_sha256": file_sha256(base_path),
         "retry_overlays": overlay_manifest,
         "touched": len(touched),

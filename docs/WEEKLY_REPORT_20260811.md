@@ -120,6 +120,7 @@ AND maintainability_pass
 | Gemini 3.6 Flash | **375** | 39 | complete, native-tools v2 |
 | Qwen3.6-35B-A3B | **345** | 69 | canonical after retry |
 | Qwen3-Coder-Next-FP8 | **327** | 87 | canonical after two retry layers |
+| Qwen3.6-27B | **363** | 51 | canonical after bounded remainder |
 | Devstral-2-123B | **387** | 27 | canonical after retry |
 | GPT-OSS-120B | **413** | 1 | complete |
 | MiniMax-M2.1 | **378** | 36 | canonical after retry |
@@ -128,24 +129,27 @@ AND maintainability_pass
 
 | Model | 当前有效 generated | 剩余 | 状态 |
 |---|---:|---:|---|
-| Qwen3.6-27B | **224 unique** | 19 failed + 171 unprocessed | running |
-| Kimi K2.5 | **9 unique** | 405 | running，吞吐最慢 |
+| Kimi K2.5 | **16 unique** | 1 failed + 397 unprocessed | running，吞吐最慢 |
 
-Qwen27 的 224 个有效成功样本来自：
+Qwen27 已于 `2026-08-12T11:25:39Z` 完成 bounded remainder：
 
-- v4 已冻结成功：179；
-- v5 早期持久快照新增成功：44；
-- v5 最近重启快照新增成功：1。
+- v4 partial：234 条，其中 179 generated、55 failed；
+- v5 remainder：235 条，其中 184 generated、51 failed；
+- 两者只在 v4 的 55 个失败 ID 上重叠，并集严格等于 414；
+- canonical：**363 generated / 51 failed**。
 
-Qwen v5 在 pause/requeue 后，远端 live JSONL 曾从 64 条缩短为 5 条。此前 64 条
-快照已经本地持久化并保存 SHA-256，最终合并必须按 task ID 去重，不能把远端
-当前文件当作完整 checkpoint。v5 当前去重状态为 64 个已处理 ID：
-45 generated、19 failed；其余 171 个 fixed-harness ID 尚未处理。与 v4 保留的
-179 个成功样本合并后，正好是 224 generated + 19 failed + 171 unprocessed =
-414。AMLT 当前状态已恢复为 `running`。
+最终使用 terminal tar，而不是曾在 pause/requeue 后缩短的 live JSONL。v5
+archive SHA-256 为
+`39405ecdb694b3653a7ed549ebafc65d6a0592f79f3e2dc153f806724b4d8f7e`；
+canonical results SHA-256 为
+`cc6658363311fbccbfb649d19210cd6d815f4c55a5635c3fdfabb0e43de49c68`。
+Qwen27 的 rubric-v2 已完成：414/414 records、无 judge error，
+Maintainability **174/414**。五条轻量 correctness lane 已独立启动，不等待
+Kimi。
 
-Kimi v11 的 8 个成功样本已冻结；v12 只运行剩余 406 个 ID，目前新增 1 个成功
-样本。Kimi 仍是总工期的决定性瓶颈。
+Kimi v11 的 8 个成功样本已冻结；v12 只运行剩余 406 个 ID，当前已有
+8 generated / 1 failed。Kimi 仍是完整 13 模型总工期的决定性瓶颈，但不阻塞
+其他模型发布 partial Final Resolved。
 
 ---
 
@@ -198,6 +202,7 @@ pass = addressed=yes AND quality>=4 AND introduces_new_debt=false
 | GPT-5.6 Terra | **225** |
 | Claude Opus 5 | **224** |
 | Gemini 3.6 Flash | **224** |
+| Qwen3.6-27B | **174** |
 | Claude Sonnet 5 | **165** |
 | GPT-5.6 Luna | **165** |
 | Qwen3.6-35B-A3B | **99** |
@@ -209,7 +214,7 @@ pass = addressed=yes AND quality>=4 AND introduces_new_debt=false
 注意：
 
 - 这是 maintainability 单门，不是 Final Resolved；
-- Qwen27 和 Kimi 尚未完成，因此未进入该表；
+- Kimi 尚未完成，因此暂未进入该表；
 - correctness 未通过的 patch 即使 maintainability 通过，也不会进入最终分数。
 
 base 盲裁共 4,554 个 task-model pair；schema-invalid 响应通过显式 repair prompt
@@ -220,6 +225,15 @@ base 盲裁共 4,554 个 task-model pair；schema-invalid 响应通过显式 rep
   reviewbench-hard414-evaluation-20260811/judging/
   rubric-v2-judgments-20260811.tar.gz
 SHA-256 d1c032a1566678701f308779676a5e53247120f3660360b30fc8e8605bd0f123
+```
+
+Qwen27 增量 judge bundle：
+
+```text
+/home/v-peiyangliu/conversationhub/liupeiyang/code_quality/
+  reviewbench-hard414-evaluation-20260812/judging/
+  qwen27-rubric-v2.tar.gz
+SHA-256 c9979833098d6d73748571fbc065e63d5064726a6955b98bd068d1547db199ed
 ```
 
 ---
@@ -249,7 +263,7 @@ SHA-256 d1c032a1566678701f308779676a5e53247120f3660360b30fc8e8605bd0f123
 | C# | 90/90 |
 | JVM | 260/260 |
 | Rust | **355/355**（104 pass，19 infra 待恢复） |
-| Native | 0/325（主跑尚未开始） |
+| Native | **171/325**（running；51 pass） |
 
 Open Rust 最初因 Docker root-owned Cargo state 占满 `/data`。当前 runner 将
 Cargo state 放入 attempt 内，并使用 cleanup container 验证删除，已从 40 条恢复到
@@ -264,9 +278,9 @@ metadata 和 exact-start baseline 环境；这些行不会提前当作模型 fai
 | Scripted | 265/265 | 180 |
 | TS/JS | 210/210 | 189 |
 | C# | **90/90** | 61 pass，6 infra 待恢复 |
-| JVM | 0/260 | pending |
-| Rust | 0/355 | pending |
-| Native | 0/325 | pending |
+| JVM | **260/260** | 175 pass，35 infra 待恢复 |
+| Rust | **355/355** | 253 pass，14 infra 待恢复 |
+| Native | **127/325** | running；90 pass |
 
 ### 7.3 Gemini 3.6
 
@@ -278,13 +292,26 @@ metadata 和 exact-start baseline 环境；这些行不会提前当作模型 fai
 | C# | 18/18 | 8 |
 | JVM | 52/52 | 34（7 个 infra pair 待 overlay/recovery） |
 | Native | 65/65 | 44；IREE infra 已 overlay 为真实 fail |
-| Rust | 0/71 | pending |
+| Rust | **71/71** | 38 pass，3 infra 待恢复 |
 
 Gemini Native 唯一的 IREE infra pair 已通过完整 Git/submodule cache 重跑：
 candidate fail 且 exact-start baseline pass，因此最终归类为真实 correctness fail，
 不再存在该 pair 的 infra 状态。
 
-### 7.4 Correctness 基础设施恢复
+### 7.4 Qwen3.6-27B
+
+Qwen27 的 414-task canonical 已在独立输出中完成 prepare：
+
+```text
+/data/v-peiyangliu/reviewbench-openmodels/
+  correctness-20260812-qwen27-v1/
+```
+
+Go/Python、Scripted、TS/JS、C#、JVM 已并行启动；Rust 在 hosted Rust 355/355
+落盘后以单 worker 接续。Native 将在现有两条 Native 主跑释放容量后启动，避免
+在 `/data` 高水位时同时保留第三套重型构建状态。
+
+### 7.5 Correctness 基础设施恢复
 
 本周额外完成：
 
@@ -355,7 +382,9 @@ SHA-256 8cfa350847d4a86a612b4be4f278ac7c6b4fe64a5f453439a81f4f059598acfd
 - 非 JSON ellipsis 在 transcript 序列化前 fail-fast；
 - Git BlobFuse read timeout 从 60 秒提高到 300 秒；
 - tool transcript 设置字符上限；
-- targeted retry 支持精确 IDs 和 per-job output budget。
+- targeted retry 支持精确 IDs 和 per-job output budget；
+- canonical merger 支持 partial base 与 remainder 的完整并集，同时继续禁止
+  retry 覆盖成功样本，并 fail-closed 校验最终 414-task coverage。
 
 ### 9.2 Open-model 服务
 
@@ -409,6 +438,14 @@ Canonical generation：
 /data/v-peiyangliu/reviewbench-openmodels/canonical-20260811/
 ```
 
+Qwen27 final inference archive：
+
+```text
+/data/v-peiyangliu/reviewbench-openmodels/completed-20260812/
+  qwen27-v5-final/
+SHA-256 39405ecdb694b3653a7ed549ebafc65d6a0592f79f3e2dc153f806724b4d8f7e
+```
+
 本周新增/重点代码：
 
 - `scripts/generate_agentic_patches.py`
@@ -428,7 +465,8 @@ Canonical generation：
 ### 可以对外陈述
 
 1. 414-hard benchmark 已冻结且已有三模型正式基线。
-2. 最新 11 模型已完成 generation、maintainability 或进入 correctness 主体阶段。
+2. 最新 12 模型已完成 generation，并已完成或进入 maintainability/correctness；
+   Kimi 仍在独立 generation。
 3. Gemini 3.6 的异常已定位为 API/schema 适配问题，修复后有效 generation 为
    375/414。
 4. Open-model retry 只覆盖确认的基础设施/harness 失败，没有重采样成功样本。
@@ -438,8 +476,9 @@ Canonical generation：
 
 1. 不能发布最新模型 Final Resolved `/414` 排名；
 2. 不能把缺 replay contract 的 33 道题当作 correctness fail；
-3. 不能把 Qwen live JSONL 当作完整 checkpoint；
-4. 不能把 Kimi 当前 9 条结果外推为模型最终水平；
+3. Qwen 必须以已冻结 terminal tar 和 canonical manifest 为准，不能回退到
+   历史 live JSONL；
+4. 不能把 Kimi 当前 17 条已处理结果外推为模型最终水平；
 5. 不能把 maintainability 单门排名称为 benchmark 总榜。
 
 ### 主要风险
@@ -447,7 +486,7 @@ Canonical generation：
 | 风险 | 影响 | 当前处理 |
 |---|---|---|
 | Kimi inference 极慢 | 决定最终交付日期 | 保留成功样本，固定剩余 ID，持续运行 |
-| Qwen pause/requeue checkpoint 缩短 | 远端 live 文件不完整 | 本地保存历史快照，最终按 task ID 去重合并 |
+| Qwen pause/requeue checkpoint 缩短 | 远端 live 文件不完整 | terminal tar 已冻结，v4/v5 并集和 canonical 414 已校验 |
 | 33 道 legacy contract 缺失 | 阻塞完整 `/414` correctness | fail-closed，逐来源恢复 |
 | Native/Rust 重型构建 | 时间和磁盘压力 | 低并发、attempt cleanup、增量 overlay |
 
@@ -455,11 +494,12 @@ Canonical generation：
 
 ## 十二、下一阶段计划
 
-1. 完成 Qwen27 剩余 171 个 fixed-harness ID。
-2. 持续运行 Kimi 剩余 405 个 ID；Kimi 是当前关键路径。
-3. 恢复 open-five Rust 的 19 条 infra 记录，并启动 325-pair Native lane。
-4. 恢复 hosted C# 的 6 条 infra，并完成 JVM、Rust、Native。
-5. 运行 Gemini Rust lane，并合并已完成的 IREE overlay。
+1. 完成 Qwen27 rubric-v2 和七条 correctness lane；重型 Rust/Native 在现有
+   heavy lane 释放容量后立即启动。
+2. 持续运行 Kimi 剩余 397 个 ID；Kimi 是完整 13 模型的关键路径。
+3. 恢复 open-five Rust 的 19 条 infra，并完成正在运行的 Native lane。
+4. 恢复 hosted C# 的 6 条、JVM 的 35 条 infra，并完成 Rust、Native。
+5. 恢复 Gemini Rust 的 3 条 infra，并合并已完成的 IREE overlay。
 6. 合并所有 canonical generation、correctness recovery、legacy 和 judge delta。
 7. 恢复 33 道剩余 published legacy contract；在此之前只发布 partial。
 8. 生成每模型四门表：

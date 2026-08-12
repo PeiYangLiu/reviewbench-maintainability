@@ -1,6 +1,6 @@
 # Open-weight model evaluation
 
-更新时间：2026-08-11
+更新时间：2026-08-12
 
 本文记录 414-hard benchmark 的开源模型完整评测。评测先冻结 inference
 artifact，再运行 correctness 和 maintainability；以后 rubric 改变时直接重判，
@@ -13,7 +13,7 @@ artifact，再运行 correctness 和 maintainability；以后 rubric 改变时�
 | AMLT environment | local conda `amlt10` |
 | AMLT version | 10.14.0 |
 | Project | `reviewbench-maintainability` |
-| Active experiments | `reviewbench-qwen-latest-hard414-v4`, `reviewbench-open-infra-retries-20260811-v1`, `reviewbench-coder-context-retry-20260811-v3`, `reviewbench-kimi25-hard414-v12` |
+| Active experiments | `reviewbench-kimi25-hard414-v12` |
 | Service | Singularity |
 | Target | `msrresrchbasicvc` |
 | Workspace | `Workspace_NLC` |
@@ -238,24 +238,41 @@ failure. Those eight samples are frozen; v11 was stopped without resampling
 them, and v12 targets only the remaining 406 IDs with a 60,000-character
 transcript bound.
 
-Generation checkpoint at `2026-08-11T17:05Z`:
+Generation checkpoint at `2026-08-12T12:05Z`:
 
 | Model | Generated | Failed | State |
 |---|---:|---:|---|
-| Qwen3.6-27B | 179 preserved | 235 pending | fixed-harness v5 running |
+| Qwen3.6-27B | 363 | 51 | canonical; rubric-v2 complete, correctness running |
 | Qwen3.6-35B-A3B | 345 | 69 | canonical after targeted retry |
 | Qwen3-Coder-Next-FP8 | 327 | 87 | canonical after two targeted retry layers |
 | Devstral-2-123B | 387 | 27 | canonical after targeted retry |
 | GPT-OSS-120B | 413 | 1 | complete |
 | MiniMax-M2.1 | 378 | 36 | canonical after targeted retry |
-| Kimi-K2.5 | 8 preserved | 406 pending | v12 running |
+| Kimi-K2.5 | 16 | 1 failed + 397 pending | v12 running |
 
-The completed non-Kimi models include 47 BlobFuse source-read timeouts that
-will be retried without resampling successful or protocol-terminal tasks. Kimi
-v7 started successfully but its first request exhausted H100 runtime workspace.
-H200 submissions were rejected before job creation by amlt10's base-image
-accelerator metadata. Kimi v11 therefore retains 32K on H100 using a 1200 MiB
-FP8 KV cache and concurrency two.
+Qwen3.6-27B v5 completed all 235 bounded-remainder IDs with 184 generated and
+51 failed records. Its partial v4 input has 179 generated and 55 failed records;
+the two inputs overlap only on those 55 failures and their union is exactly 414
+IDs. The canonical merger preserves all 179 v4 successes, overlays the complete
+v5 remainder, and produces 363 generated / 51 failed. The final v5 archive is:
+
+```text
+projects/reviewbench-maintainability/amlt-results/
+  7213506183.41486-94bd2fd8-e8fb-4836-9fe4-0c53a4bda124/
+  open-model-generation.tar.gz
+SHA-256 39405ecdb694b3653a7ed549ebafc65d6a0592f79f3e2dc153f806724b4d8f7e
+
+/data/v-peiyangliu/reviewbench-openmodels/
+  canonical-20260811/Qwen-Qwen3.6-27B/generation_results.jsonl
+SHA-256 cc6658363311fbccbfb649d19210cd6d815f4c55a5635c3fdfabb0e43de49c68
+```
+
+Kimi v7 started successfully but its first request exhausted H100 runtime
+workspace. H200 submissions were rejected before job creation by amlt10's
+base-image accelerator metadata. Kimi v11 therefore retains 32K on H100 using
+a 1200 MiB FP8 KV cache and concurrency two. Its eight preserved v11 successes
+plus the current v12 checkpoint give 16 generated, one failed, and 397
+unprocessed IDs.
 
 ### 6.1 Completed-model failure audit
 
@@ -547,7 +564,17 @@ marker, task fingerprint, pair-set, patch, and checksum validation. The
 It contains 2,070 task-model inputs, explicitly marks candidate-missing
 generations, and has preflight SHA-256
 `f0b6513a053182557d74cc147433f176aa202fa278ccf551c37b08a4cb593a0e`.
-Qwen3.6-27B and Kimi will be added after valid generation completes.
+Qwen3.6-27B now runs independently at:
+
+```text
+/data/v-peiyangliu/reviewbench-openmodels/
+  correctness-20260812-qwen27-v1/
+```
+
+Its Go/Python, Scripted, TS/JS, C#, and JVM lanes started immediately after
+canonicalization; Rust and Native use the same staged input and start as the
+already-running heavy lanes release capacity. Kimi will be added after valid
+generation completes.
 
 The initial Rust pass stopped after 40 records because per-attempt Cargo build
 state filled `/data`. Completed lane caches and interrupted worker scratch were
@@ -607,6 +634,20 @@ SHA-256 d1c032a1566678701f308779676a5e53247120f3660360b30fc8e8605bd0f123
 
 Recovered-generation and line-ending deltas are judged separately and overlay
 only the affected task-model pairs.
+
+Qwen3.6-27B rubric-v2 judgment completed independently with 414 records, 363
+judged candidates, 51 generation failures, no judge errors, and 174
+maintainability passes:
+
+```text
+/data/v-peiyangliu/reviewbench-openmodels/
+  judging-20260812/qwen27/
+
+/home/v-peiyangliu/conversationhub/liupeiyang/code_quality/
+  reviewbench-hard414-evaluation-20260812/judging/
+  qwen27-rubric-v2.tar.gz
+SHA-256 c9979833098d6d73748571fbc065e63d5064726a6955b98bd068d1547db199ed
+```
 
 ## 8. Local Copilot API evaluation
 

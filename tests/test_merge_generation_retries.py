@@ -125,6 +125,73 @@ def test_merge_rejects_retry_of_success(tmp_path):
         )
 
 
+def test_merge_accepts_partial_base_when_retries_complete_task_set(tmp_path):
+    tasks = [task("one"), task("two"), task("three")]
+    tasks_path = tmp_path / "tasks.jsonl"
+    oracles_path = tmp_path / "oracles.jsonl"
+    write_jsonl(tasks_path, tasks)
+    write_jsonl(oracles_path, [{"id": row["id"]} for row in tasks])
+    base_path = tmp_path / "base/generation_results.jsonl"
+    retry_path = tmp_path / "retry/generation_results.jsonl"
+    write_jsonl(
+        base_path,
+        [
+            generation(tasks[0], "model", "generated", base_path.parent),
+            generation(tasks[1], "model", "failed", base_path.parent),
+        ],
+    )
+    write_jsonl(
+        retry_path,
+        [
+            generation(tasks[1], "model", "generated", retry_path.parent),
+            generation(tasks[2], "model", "failed", retry_path.parent),
+        ],
+    )
+
+    manifest = MODULE.merge_retries(
+        tasks_path=tasks_path,
+        oracles_path=oracles_path,
+        base_path=base_path,
+        retry_paths=[retry_path],
+        output=tmp_path / "out",
+        repo_cache=None,
+    )
+
+    rows = MODULE.load_jsonl(tmp_path / "out/generation_results.jsonl")
+    assert manifest["base_records"] == 2
+    assert manifest["tasks"] == 3
+    assert manifest["generated"] == 2
+    assert manifest["failed"] == 1
+    assert manifest["recovered"] == 1
+    assert len(rows) == 3
+    assert rows[0]["canonical_provenance"]["source_kind"] == "base"
+    assert rows[1]["canonical_provenance"]["source_kind"] == "retry"
+    assert rows[2]["canonical_provenance"]["source_kind"] == "retry"
+
+
+def test_merge_rejects_incomplete_partial_base_and_retries(tmp_path):
+    tasks = [task("one"), task("two")]
+    tasks_path = tmp_path / "tasks.jsonl"
+    oracles_path = tmp_path / "oracles.jsonl"
+    write_jsonl(tasks_path, tasks)
+    write_jsonl(oracles_path, [{"id": row["id"]} for row in tasks])
+    base_path = tmp_path / "base/generation_results.jsonl"
+    write_jsonl(
+        base_path,
+        [generation(tasks[0], "model", "generated", base_path.parent)],
+    )
+
+    with pytest.raises(ValueError, match="do not cover"):
+        MODULE.merge_retries(
+            tasks_path=tasks_path,
+            oracles_path=oracles_path,
+            base_path=base_path,
+            retry_paths=[],
+            output=tmp_path / "out",
+            repo_cache=None,
+        )
+
+
 def test_merge_repairs_line_endings_without_resampling(tmp_path):
     repo_cache = tmp_path / "repos"
     repo = repo_cache / "owner__repo"
