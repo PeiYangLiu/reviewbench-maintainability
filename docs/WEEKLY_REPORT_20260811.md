@@ -277,11 +277,12 @@ metadata 和 exact-start baseline 环境；这些行不会提前当作模型 fai
 | TS/JS | 42/42 | 33 |
 | C# | 18/18 | 8 |
 | JVM | 52/52 | 34（7 个 infra pair 待 overlay/recovery） |
-| Native | 65/65 | 44 |
+| Native | 65/65 | 44；IREE infra 已 overlay 为真实 fail |
 | Rust | 0/71 | pending |
 
-Gemini Native 唯一剩余的 IREE infra pair 正通过完整 Git/submodule cache 重跑；
-不把该行提前计为模型 fail。
+Gemini Native 唯一的 IREE infra pair 已通过完整 Git/submodule cache 重跑：
+candidate fail 且 exact-start baseline pass，因此最终归类为真实 correctness fail，
+不再存在该 pair 的 infra 状态。
 
 ### 7.4 Correctness 基础设施恢复
 
@@ -458,7 +459,7 @@ Canonical generation：
 2. 持续运行 Kimi 剩余 405 个 ID；Kimi 是当前关键路径。
 3. 恢复 open-five Rust 的 19 条 infra 记录，并启动 325-pair Native lane。
 4. 恢复 hosted C# 的 6 条 infra，并完成 JVM、Rust、Native。
-5. 完成 Gemini IREE overlay 和 Rust lane。
+5. 运行 Gemini Rust lane，并合并已完成的 IREE overlay。
 6. 合并所有 canonical generation、correctness recovery、legacy 和 judge delta。
 7. 恢复 33 道剩余 published legacy contract；在此之前只发布 partial。
 8. 生成每模型四门表：
