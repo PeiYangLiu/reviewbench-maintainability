@@ -665,6 +665,55 @@ def test_cmd_replay_propagates_lookup_errors_instead_of_infra_retry(
         assert all(row["status"] != MODULE.INFRA_RETRY for row in rows)
 
 
+def test_cmd_replay_infra_row_retains_generation_patch_hash(
+    tmp_path, monkeypatch
+):
+    tasks_path, oracles_path = build_full_release(tmp_path / "release")
+    tasks_by_id, _, _ = MODULE.load_release_and_plan(
+        tasks_path, oracles_path
+    )
+    tsjs_task_id = next(
+        task_id for task_id, lane in MODULE.EXPECTED_LANE.items() if lane == "tsjs"
+    )
+    output = tmp_path / "output"
+    stage_generation(
+        output, "my-model", tasks_by_id, apply_ok_ids={tsjs_task_id}
+    )
+    monkeypatch.setattr(MODULE, "task_blockers", lambda *args, **kwargs: [])
+
+    def raise_infra_error(*args, **kwargs):
+        raise FileNotFoundError("runtime disappeared")
+
+    monkeypatch.setitem(MODULE.REPLAY_FUNCTIONS, "tsjs", raise_infra_error)
+    args_ns = MODULE.parse_args(
+        [
+            "replay",
+            "--tasks", str(tasks_path),
+            "--oracles", str(oracles_path),
+            "--legacy-root", str(tmp_path / "legacy"),
+            "--output", str(output),
+            "--model", "my-model",
+            "--task-id", tsjs_task_id,
+        ]
+    )
+
+    assert MODULE.cmd_replay(args_ns) == 0
+    row = BASE.read_jsonl(
+        output / "legacy/correctness/tsjs.jsonl"
+    )[0]
+    generation = next(
+        item
+        for item in BASE.read_jsonl(
+            output
+            / "inputs/models/my-model/generation_results.normalized.jsonl"
+        )
+        if item["id"] == tsjs_task_id
+    )
+    assert row["status"] == MODULE.INFRA_RETRY
+    assert row["candidate_result"] == MODULE.INFRA_RETRY
+    assert row["patch_sha256"] == generation["patch_sha256"]
+
+
 def test_replay_rejects_missing_staged_generation(tmp_path):
     tasks_path, oracles_path = build_full_release(tmp_path / "release")
     output = tmp_path / "output"

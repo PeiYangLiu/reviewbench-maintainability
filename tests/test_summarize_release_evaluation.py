@@ -122,6 +122,38 @@ def test_load_correctness_normalizes_flat_schema(tmp_path):
     assert result["correctness_ok"] is True
 
 
+def test_load_correctness_accepts_normalized_open_schema(tmp_path):
+    path = tmp_path / "normalized.jsonl"
+    path.write_text(
+        '{"schema_version":"reviewbench-open-correctness-normalized/v1",'
+        '"id":"task","model":"m","status":"pass","patch_apply":true,'
+        '"correctness_ok":true,"pass_to_pass_total":2,'
+        '"pass_to_pass_passed":2}\n',
+        encoding="utf-8",
+    )
+
+    result = MODULE.load_correctness(tmp_path)[("task", "m")]
+
+    assert result["oracle_replayed"] is True
+    assert result["patch_apply"] is True
+    assert result["correctness_ok"] is True
+
+
+def test_load_correctness_normalized_infra_is_not_replayed(tmp_path):
+    path = tmp_path / "normalized-infra.jsonl"
+    path.write_text(
+        '{"schema_version":"reviewbench-open-correctness-normalized/v1",'
+        '"id":"task","model":"m","status":"infra_retry","patch_apply":true,'
+        '"correctness_ok":null}\n',
+        encoding="utf-8",
+    )
+
+    result = MODULE.load_correctness(tmp_path)[("task", "m")]
+
+    assert result["oracle_replayed"] is False
+    assert result["correctness_ok"] is False
+
+
 def test_load_correctness_accepts_start_reset_policy(tmp_path):
     path = tmp_path / "start-reset.jsonl"
     path.write_text(

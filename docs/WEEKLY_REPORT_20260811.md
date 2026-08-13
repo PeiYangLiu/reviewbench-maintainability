@@ -310,9 +310,28 @@ Qwen27 的 414-task canonical 已在独立输出中完成 prepare：
   correctness-20260812-qwen27-v1/
 ```
 
-Go/Python、Scripted、TS/JS、C#、JVM、Rust 均已完整落盘。Native 将在现有两条
-Native 主跑释放容量后自动启动，避免在 `/data` 高水位时同时保留第三套重型
-构建状态。
+七条 modern correctness lane 均已完整落盘。当前可运行的 4 条 published
+legacy 也已独立重放；36 条 legacy 仍因历史资产缺失而 blocked。
+
+Qwen27 当前 378-task partial：
+
+| Gate | Pass |
+|---|---:|
+| Generation/apply | 332/378 |
+| Scope | 327/378 |
+| Correctness | 179/378 |
+| Maintainability | 160/378 |
+| **Final Resolved** | **93/378** |
+
+其中 19 个 correctness pair 仍为 infra/unresolved，因此 93 同时也是当前证据集
+上的 fail-closed lower bound。Portable release：
+
+```text
+/home/v-peiyangliu/conversationhub/liupeiyang/code_quality/
+  reviewbench-hard414-evaluation-20260813/qwen27/
+  qwen27-partial378-v1.tar.gz
+SHA-256 e5b58bd948ced81803f8e40667f30446fc7ce0e6891896c54d7bcb911e727eb1
+```
 
 ### 7.5 管理员重启恢复
 
@@ -325,9 +344,11 @@ Native 主跑释放容量后自动启动，避免在 `/data` 高水位时同时�
 - Qwen Native：尚未开始。
 
 清理已完成 Qwen lane 的可重建 cache 后释放约 61 GiB，未删除 patch、raw log
-或 evidence。Open/Hosted Native 已按“跳过终态、重试 infra、补齐 missing”
-模式恢复；Qwen Native supervisor 已重新挂起等待接力。4141 judge 服务随重启
-停止，但当前没有未完成 judge 请求；Kimi generation 完成前会重新启动。
+或 evidence。随后磁盘可用空间增长到 600+ GiB，Open、Hosted、Qwen 三条
+Native 均从 1 worker 提升到 3 workers，且移除了 correctness 对 Kimi monitor
+的依赖。Qwen Native 已完成；本段更新时 Open/Hosted Native 分别为 311/325
+和 287/325。4141 judge 服务随重启停止，但当前没有未完成 judge 请求；Kimi
+generation 完成前会重新启动。
 
 ### 7.6 Correctness 基础设施恢复
 
@@ -494,7 +515,8 @@ SHA-256 39405ecdb694b3653a7ed549ebafc65d6a0592f79f3e2dc153f806724b4d8f7e
 
 ### 暂时不能对外陈述
 
-1. 不能发布最新模型 Final Resolved `/414` 排名；
+1. 不能发布最新模型 Final Resolved `/414` 排名；Qwen27 仅可发布明确标注的
+   partial **93/378**；
 2. 不能把缺 replay contract 的 33 道题当作 correctness fail；
 3. Qwen 必须以已冻结 terminal tar 和 canonical manifest 为准，不能回退到
    历史 live JSONL；
@@ -507,16 +529,16 @@ SHA-256 39405ecdb694b3653a7ed549ebafc65d6a0592f79f3e2dc153f806724b4d8f7e
 |---|---|---|
 | Kimi inference 极慢 | 决定最终交付日期 | 保留成功样本，固定剩余 ID，持续运行 |
 | Qwen pause/requeue checkpoint 缩短 | 远端 live 文件不完整 | terminal tar 已冻结，v4/v5 并集和 canonical 414 已校验 |
-| 33 道 legacy contract 缺失 | 阻塞完整 `/414` correctness | fail-closed，逐来源恢复 |
-| Native/Rust 重型构建 | 时间和磁盘压力 | 低并发、attempt cleanup、增量 overlay |
+| 36 道当前不可运行 legacy contract | 阻塞 Qwen 完整 `/414` correctness | fail-closed，逐来源恢复 |
+| Native/Rust 重型构建 | 时间和磁盘压力 | 3-worker 独立流水线、attempt cleanup、增量 overlay |
 
 ---
 
 ## 十二、下一阶段计划
 
-1. 完成 Qwen27 rubric-v2 和七条 correctness lane；重型 Rust/Native 在现有
-   heavy lane 释放容量后立即启动。
-2. 持续运行 Kimi 剩余 397 个 ID；Kimi 是完整 13 模型的关键路径。
+1. 恢复 Qwen27 的 19 条 correctness infra 和 36 条 blocked legacy；partial
+   结果不等待这些恢复。
+2. Kimi 剩余 397 个 ID 独立运行，不作为其他模型评分或发布的依赖。
 3. 恢复 open-five Rust 的 19 条 infra，并完成正在运行的 Native lane。
 4. 恢复 hosted C# 的 6 条、JVM 的 35 条 infra，并完成 Rust、Native。
 5. 恢复 Gemini Rust 的 3 条 infra，并合并已完成的 IREE overlay。

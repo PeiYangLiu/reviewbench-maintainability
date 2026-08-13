@@ -679,6 +679,31 @@ maintainability passes:
 SHA-256 c9979833098d6d73748571fbc065e63d5064726a6955b98bd068d1547db199ed
 ```
 
+Qwen3.6-27B has also completed all seven modern correctness lanes. Four
+currently runnable published-legacy tasks were replayed independently; 36
+legacy tasks remain blocked by missing historical assets. Its current
+378-task partial four-gate result is:
+
+| Gate | Pass |
+|---|---:|
+| Generation/apply | 332/378 |
+| Scope | 327/378 |
+| Correctness | 179/378 |
+| Maintainability | 160/378 |
+| **Final Resolved** | **93/378** |
+
+This is a partial score, not a replacement for the frozen `/414` leaderboard.
+Nineteen correctness pairs remain explicitly unresolved infrastructure, so
+93 is also a fail-closed lower bound over the current 378-task evidence set.
+The portable release is stored at:
+
+```text
+/home/v-peiyangliu/conversationhub/liupeiyang/code_quality/
+  reviewbench-hard414-evaluation-20260813/qwen27/
+  qwen27-partial378-v1.tar.gz
+SHA-256 e5b58bd948ced81803f8e40667f30446fc7ce0e6891896c54d7bcb911e727eb1
+```
+
 ## 8. Local Copilot API evaluation
 
 Six current hosted models are evaluated through the verified local Copilot

@@ -129,6 +129,11 @@ def load_correctness(directory: Path) -> dict[tuple[str, str], dict[str, Any]]:
                     "command": model_result.get("command") or tests.get("command"),
                     "oracle_replayed": (
                         record.get("oracle_replayed") is True
+                        or (
+                            record.get("schema_version")
+                            == "reviewbench-open-correctness-normalized/v1"
+                            and model_result.get("status") in {"pass", "fail"}
+                        )
                         or model_result.get("correctness_result")
                         in {"pass", "fail"}
                         or model_result.get("status")
