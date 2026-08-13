@@ -355,7 +355,21 @@ Open-five 的七条 modern lane 已全部落盘，并分别与冻结的 7-task l
 
 每个 tar 均有同名 `.sha256`；详细 SHA 记录在 `docs/OPEN_MODEL_EVALUATION.md`。
 
-### 7.6 管理员重启恢复
+### 7.6 Hosted-five 与 Gemini partial
+
+| Model | Generation | Scope | Correctness | Maintainability | Final Resolved |
+|---|---:|---:|---:|---:|---:|
+| GPT-5.6 Sol | 379 | 370 | 299 | 227 | **170/381** |
+| Claude Opus 5 | 378 | 369 | 310 | 206 | **161/381** |
+| GPT-5.6 Terra | 381 | 374 | 284 | 206 | **151/381** |
+| Gemini 3.6 Flash | 342 | 323 | 249 | 203 | **146/381** |
+| GPT-5.6 Luna | 381 | 379 | 228 | 151 | **108/381** |
+| Claude Sonnet 5 | 381 | 374 | 287 | 154 | **104/381** |
+
+12 模型统一榜单与全部 archive SHA：
+`docs/LATEST_MODEL_PARTIAL_LEADERBOARD_20260813.md`。
+
+### 7.7 管理员重启恢复
 
 本地评测机于 `2026-08-12T17:14Z` 重启。重启前 checkpoint 均为原子 JSONL，
 没有丢记录：
@@ -372,7 +386,7 @@ Native 均从 1 worker 提升到 3 workers，且移除了 correctness 对 Kimi m
 和 287/325。4141 judge 服务随重启停止，但当前没有未完成 judge 请求；Kimi
 generation 完成前会重新启动。
 
-### 7.7 Correctness 基础设施恢复
+### 7.8 Correctness 基础设施恢复
 
 本周额外完成：
 

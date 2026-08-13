@@ -10,6 +10,7 @@ The benchmark idea is to mine merged PRs where reviewers asked for maintainabili
 - [`docs/DATA_PROVENANCE.md`](docs/DATA_PROVENANCE.md): complete data lineage from mining through release and model evaluation
 - [`docs/PROGRESS_20260808.md`](docs/PROGRESS_20260808.md): current authoritative status, 414-task hard release, corrected three-model evaluation, and final artifact map
 - [`docs/OPEN_MODEL_EVALUATION.md`](docs/OPEN_MODEL_EVALUATION.md): Qwen/open-weight AMLT jobs, pinned model revisions, GPU assignments, complete artifact schema, and blob result paths
+- [`docs/LATEST_MODEL_PARTIAL_LEADERBOARD_20260813.md`](docs/LATEST_MODEL_PARTIAL_LEADERBOARD_20260813.md): current 12-model partial Final Resolved leaderboard and portable release checksums
 - [`docs/WEEKLY_REPORT_20260811.md`](docs/WEEKLY_REPORT_20260811.md): current 414-hard latest-model evaluation report, live gate progress, risks, and delivery plan
 - [`docs/WEEKLY_REPORT_20260805.md`](docs/WEEKLY_REPORT_20260805.md): historical ICLR 2027-oriented weekly report before the hard-task Oracle campaign completed
 - [`docs/PROGRESS_20260728.md`](docs/PROGRESS_20260728.md): historical 475-task cumulative release snapshot

@@ -733,6 +733,21 @@ openai-gpt-oss-120b           9d8982b2b26641a347b07545e3b3facdb1c1e2258f7d1230e4
 MiniMaxAI-MiniMax-M2.1        fa1497a8629403bc40b0023ac0c8a516403312e377dbbca4356187e131aa9686
 ```
 
+Hosted-five and Gemini have now completed the same independent 381-task
+partial flow:
+
+| Model | Generation | Scope | Correctness | Maintainability | Final Resolved |
+|---|---:|---:|---:|---:|---:|
+| GPT-5.6 Sol | 379 | 370 | 299 | 227 | **170/381** |
+| Claude Opus 5 | 378 | 369 | 310 | 206 | **161/381** |
+| GPT-5.6 Terra | 381 | 374 | 284 | 206 | **151/381** |
+| Gemini 3.6 Flash | 342 | 323 | 249 | 203 | **146/381** |
+| GPT-5.6 Luna | 381 | 379 | 228 | 151 | **108/381** |
+| Claude Sonnet 5 | 381 | 374 | 287 | 154 | **104/381** |
+
+The combined 12-model table and every portable archive checksum are recorded
+in [`LATEST_MODEL_PARTIAL_LEADERBOARD_20260813.md`](LATEST_MODEL_PARTIAL_LEADERBOARD_20260813.md).
+
 ## 8. Local Copilot API evaluation
 
 Six current hosted models are evaluated through the verified local Copilot
