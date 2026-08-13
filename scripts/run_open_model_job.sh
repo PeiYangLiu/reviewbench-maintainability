@@ -117,6 +117,7 @@ python3 scripts/run_open_model_agentic.py \
   --tasks data/releases/hard/20260808/tasks.jsonl \
   --repo-cache "$AMLT_DATA_DIR" \
   --out-dir "$generation_root" \
+  --resume-from "$AMLT_OUTPUT_DIR/run" \
   --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
   --max-model-len "$MAX_MODEL_LEN" \
   --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.90}" \

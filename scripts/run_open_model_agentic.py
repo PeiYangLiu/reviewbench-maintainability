@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -23,6 +24,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tasks", type=Path, required=True)
     parser.add_argument("--repo-cache", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
+    parser.add_argument(
+        "--resume-from",
+        type=Path,
+        help="Restore a prior run's generation directory before resuming.",
+    )
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--max-model-len", type=int, default=32768)
@@ -105,10 +111,39 @@ def terminate(process: subprocess.Popen) -> None:
         process.wait(timeout=30)
 
 
+def restore_generation_checkpoint(
+    source_root: Path | None,
+    destination_root: Path,
+) -> int:
+    if source_root is None:
+        return 0
+    source = source_root / "generation"
+    destination = destination_root / "generation"
+    if not source.is_dir():
+        return 0
+    if source.resolve() == destination.resolve():
+        return 0
+    if destination.is_dir() and any(destination.iterdir()):
+        return 0
+    destination.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, destination, dirs_exist_ok=True)
+    return sum(path.is_file() for path in source.rglob("*"))
+
+
 def main() -> int:
     args = parse_args()
     served_model_name = args.served_model_name or args.model
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    restored_files = restore_generation_checkpoint(
+        args.resume_from,
+        args.out_dir,
+    )
+    if restored_files:
+        print(
+            f"restored {restored_files} generation checkpoint files from "
+            f"{args.resume_from}",
+            flush=True,
+        )
     server_log_path = args.out_dir / "vllm-server.log"
     endpoint = f"http://127.0.0.1:{args.port}/v1"
     generator_script = args.generator_script or (
@@ -225,6 +260,7 @@ def main() -> int:
         "workers": args.workers,
         "max_rounds": args.max_rounds,
         "max_output_tokens": args.max_output_tokens,
+        "restored_checkpoint_files": restored_files,
         "server_command": server_command,
         "models_response": models_payload,
         "packages": package_versions(),
