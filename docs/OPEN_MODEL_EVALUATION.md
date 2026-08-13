@@ -248,7 +248,7 @@ Generation checkpoint at `2026-08-13T04:27Z`:
 | Devstral-2-123B | 387 | 27 | canonical after targeted retry |
 | GPT-OSS-120B | 413 | 1 | complete |
 | MiniMax-M2.1 | 378 | 36 | canonical after targeted retry |
-| Kimi-K2.5 | 16 | 1 failed + 397 pending | v13 accepted; queued |
+| Kimi-K2.5 | 18 | 1 failed + 395 pending | v13 running |
 
 Qwen3.6-27B v5 completed all 235 bounded-remainder IDs with 184 generated and
 51 failed records. Its partial v4 input has 179 generated and 55 failed records;
@@ -272,7 +272,9 @@ workspace. H200 submissions were rejected before job creation by amlt10's
 base-image accelerator metadata. Kimi v11 therefore retains 32K on H100 using
 a 1200 MiB FP8 KV cache and concurrency two. Its eight preserved v11 successes
 plus the preserved v12 checkpoints give 16 generated, one failed, and 397
-unprocessed IDs.
+unprocessed IDs. The restart-resilient v13 job has since added two new unique
+generated records, bringing the current union to 18 generated, one failed, and
+395 unprocessed IDs.
 
 The Kimi v12 Singularity container restarted and re-executed the command at
 `2026-08-13T03:39Z`. Its local `$AMLT_DIRSYNC_DIR` was empty, so the live JSONL
@@ -702,6 +704,33 @@ The portable release is stored at:
   reviewbench-hard414-evaluation-20260813/qwen27/
   qwen27-partial378-v1.tar.gz
 SHA-256 e5b58bd948ced81803f8e40667f30446fc7ce0e6891896c54d7bcb911e727eb1
+```
+
+The original five open models have now completed all seven modern correctness
+lanes as well. Their independent 381-task partial releases use the 374 modern
+tasks plus the seven previously frozen runnable legacy tasks:
+
+| Model | Generation | Scope | Correctness | Maintainability | Final Resolved |
+|---|---:|---:|---:|---:|---:|
+| Qwen3.6-35B-A3B | 319 | 317 | 156 | 93 | **56/381** |
+| MiniMax-M2.1 | 346 | 337 | 84 | 68 | **37/381** |
+| GPT-OSS-120B | 380 | 374 | 182 | 47 | **34/381** |
+| Devstral-2-123B | 355 | 346 | 135 | 45 | **25/381** |
+| Qwen3-Coder-Next-FP8 | 300 | 294 | 69 | 30 | **15/381** |
+
+These remain fail-closed partial scores: unresolved infrastructure is not
+converted into model failure provenance, and 33 published-legacy tasks remain
+outside the denominator. Portable releases and checksums are stored under:
+
+```text
+/home/v-peiyangliu/conversationhub/liupeiyang/code_quality/
+  reviewbench-hard414-evaluation-20260813/open-five/
+
+Qwen-Qwen3.6-35B-A3B          f6c2fd93f9e6669bc6f219cab1b70b866376e89ea97c2417cb77c74bcdecf3e4
+Qwen-Qwen3-Coder-Next-FP8     53bdfbb7b1a7fc3fc6bfca4cc8324e2d5d5fe581adf81fc459ea31954e9f570a
+mistralai-Devstral-2-123B     c83441f04672656a1ccd170ae6812a77125f7bba45d15fb021a24902d77386da
+openai-gpt-oss-120b           9d8982b2b26641a347b07545e3b3facdb1c1e2258f7d1230e4c946ea02e6fdca
+MiniMaxAI-MiniMax-M2.1        fa1497a8629403bc40b0023ac0c8a516403312e377dbbca4356187e131aa9686
 ```
 
 ## 8. Local Copilot API evaluation

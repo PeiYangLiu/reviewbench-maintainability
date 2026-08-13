@@ -129,7 +129,7 @@ AND maintainability_pass
 
 | Model | 当前有效 generated | 剩余 | 状态 |
 |---|---:|---:|---|
-| Kimi K2.5 | **16 unique** | 1 failed + 397 unprocessed | v13 accepted，queued |
+| Kimi K2.5 | **18 unique** | 1 failed + 395 unprocessed | v13 running |
 
 Qwen27 已于 `2026-08-12T11:25:39Z` 完成 bounded remainder：
 
@@ -151,8 +151,8 @@ Kimi v11 和 v12 的去重 checkpoint 已冻结为 16 generated / 1 failed。v12
 容器重启后 live JSONL 从 9 条回退到 5 条并重复旧 ID，因此已终止。v13 使用
 精确 397-ID remainder，并在启动时从 Blob `$AMLT_OUTPUT_DIR` 恢复
 generation/patch/trace，再进入现有 `--resume`，避免下次容器重启重采样成功项。
-Kimi 仍是完整 13 模型总工期的决定性瓶颈，但不阻塞其他模型发布 partial
-Final Resolved。
+v13 已新增 2 条 unique generated，当前并集为 18 generated / 1 failed /
+395 unprocessed。Kimi 不阻塞其他模型发布 partial Final Resolved。
 
 ---
 
@@ -333,7 +333,29 @@ Qwen27 当前 378-task partial：
 SHA-256 e5b58bd948ced81803f8e40667f30446fc7ce0e6891896c54d7bcb911e727eb1
 ```
 
-### 7.5 管理员重启恢复
+### 7.5 Open-five partial Final Resolved
+
+Open-five 的七条 modern lane 已全部落盘，并分别与冻结的 7-task legacy slice 和
+各自 judgment overlay 合并：
+
+| Model | Generation | Scope | Correctness | Maintainability | Final Resolved |
+|---|---:|---:|---:|---:|---:|
+| Qwen3.6-35B-A3B | 319 | 317 | 156 | 93 | **56/381** |
+| MiniMax-M2.1 | 346 | 337 | 84 | 68 | **37/381** |
+| GPT-OSS-120B | 380 | 374 | 182 | 47 | **34/381** |
+| Devstral-2-123B | 355 | 346 | 135 | 45 | **25/381** |
+| Qwen3-Coder-Next-FP8 | 300 | 294 | 69 | 30 | **15/381** |
+
+五个 portable release 已上传：
+
+```text
+/home/v-peiyangliu/conversationhub/liupeiyang/code_quality/
+  reviewbench-hard414-evaluation-20260813/open-five/
+```
+
+每个 tar 均有同名 `.sha256`；详细 SHA 记录在 `docs/OPEN_MODEL_EVALUATION.md`。
+
+### 7.6 管理员重启恢复
 
 本地评测机于 `2026-08-12T17:14Z` 重启。重启前 checkpoint 均为原子 JSONL，
 没有丢记录：
@@ -350,7 +372,7 @@ Native 均从 1 worker 提升到 3 workers，且移除了 correctness 对 Kimi m
 和 287/325。4141 judge 服务随重启停止，但当前没有未完成 judge 请求；Kimi
 generation 完成前会重新启动。
 
-### 7.6 Correctness 基础设施恢复
+### 7.7 Correctness 基础设施恢复
 
 本周额外完成：
 
@@ -538,7 +560,7 @@ SHA-256 39405ecdb694b3653a7ed549ebafc65d6a0592f79f3e2dc153f806724b4d8f7e
 
 1. 恢复 Qwen27 的 19 条 correctness infra 和 36 条 blocked legacy；partial
    结果不等待这些恢复。
-2. Kimi 剩余 397 个 ID 独立运行，不作为其他模型评分或发布的依赖。
+2. Kimi 剩余 395 个 ID 独立运行，不作为其他模型评分或发布的依赖。
 3. 恢复 open-five Rust 的 19 条 infra，并完成正在运行的 Native lane。
 4. 恢复 hosted C# 的 6 条、JVM 的 35 条 infra，并完成 Rust、Native。
 5. 恢复 Gemini Rust 的 3 条 infra，并合并已完成的 IREE overlay。
