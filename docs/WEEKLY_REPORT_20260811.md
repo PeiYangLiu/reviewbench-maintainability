@@ -129,7 +129,7 @@ AND maintainability_pass
 
 | Model | 当前有效 generated | 剩余 | 状态 |
 |---|---:|---:|---|
-| Kimi K2.5 | **16 unique** | 1 failed + 397 unprocessed | running，吞吐最慢 |
+| Kimi K2.5 | **16 unique** | 1 failed + 397 unprocessed | v13 accepted，queued |
 
 Qwen27 已于 `2026-08-12T11:25:39Z` 完成 bounded remainder：
 
@@ -144,12 +144,15 @@ archive SHA-256 为
 canonical results SHA-256 为
 `cc6658363311fbccbfb649d19210cd6d815f4c55a5635c3fdfabb0e43de49c68`。
 Qwen27 的 rubric-v2 已完成：414/414 records、无 judge error，
-Maintainability **174/414**。五条轻量 correctness lane 已独立启动，不等待
-Kimi。
+Maintainability **174/414**。除 Native 外六条 correctness lane 已完整落盘，
+不等待 Kimi。
 
-Kimi v11 的 8 个成功样本已冻结；v12 只运行剩余 406 个 ID，当前已有
-8 generated / 1 failed。Kimi 仍是完整 13 模型总工期的决定性瓶颈，但不阻塞
-其他模型发布 partial Final Resolved。
+Kimi v11 和 v12 的去重 checkpoint 已冻结为 16 generated / 1 failed。v12
+容器重启后 live JSONL 从 9 条回退到 5 条并重复旧 ID，因此已终止。v13 使用
+精确 397-ID remainder，并在启动时从 Blob `$AMLT_OUTPUT_DIR` 恢复
+generation/patch/trace，再进入现有 `--resume`，避免下次容器重启重采样成功项。
+Kimi 仍是完整 13 模型总工期的决定性瓶颈，但不阻塞其他模型发布 partial
+Final Resolved。
 
 ---
 
@@ -263,7 +266,7 @@ SHA-256 c9979833098d6d73748571fbc065e63d5064726a6955b98bd068d1547db199ed
 | C# | 90/90 |
 | JVM | 260/260 |
 | Rust | **355/355**（104 pass，19 infra 待恢复） |
-| Native | **171/325**（running；51 pass） |
+| Native | **233/325**（restarted；66 pass） |
 
 Open Rust 最初因 Docker root-owned Cargo state 占满 `/data`。当前 runner 将
 Cargo state 放入 attempt 内，并使用 cleanup container 验证删除，已从 40 条恢复到
@@ -280,7 +283,7 @@ metadata 和 exact-start baseline 环境；这些行不会提前当作模型 fai
 | C# | **90/90** | 61 pass，6 infra 待恢复 |
 | JVM | **260/260** | 175 pass，35 infra 待恢复 |
 | Rust | **355/355** | 253 pass，14 infra 待恢复 |
-| Native | **127/325** | running；90 pass |
+| Native | **207/325** | restarted；151 pass |
 
 ### 7.3 Gemini 3.6
 
@@ -307,11 +310,26 @@ Qwen27 的 414-task canonical 已在独立输出中完成 prepare：
   correctness-20260812-qwen27-v1/
 ```
 
-Go/Python、Scripted、TS/JS、C#、JVM 已并行启动；Rust 在 hosted Rust 355/355
-落盘后以单 worker 接续。Native 将在现有两条 Native 主跑释放容量后启动，避免
-在 `/data` 高水位时同时保留第三套重型构建状态。
+Go/Python、Scripted、TS/JS、C#、JVM、Rust 均已完整落盘。Native 将在现有两条
+Native 主跑释放容量后自动启动，避免在 `/data` 高水位时同时保留第三套重型
+构建状态。
 
-### 7.5 Correctness 基础设施恢复
+### 7.5 管理员重启恢复
+
+本地评测机于 `2026-08-12T17:14Z` 重启。重启前 checkpoint 均为原子 JSONL，
+没有丢记录：
+
+- Open Native：233/325；
+- Hosted Native：207/325；
+- Qwen 其余六 lane：309/309；
+- Qwen Native：尚未开始。
+
+清理已完成 Qwen lane 的可重建 cache 后释放约 61 GiB，未删除 patch、raw log
+或 evidence。Open/Hosted Native 已按“跳过终态、重试 infra、补齐 missing”
+模式恢复；Qwen Native supervisor 已重新挂起等待接力。4141 judge 服务随重启
+停止，但当前没有未完成 judge 请求；Kimi generation 完成前会重新启动。
+
+### 7.6 Correctness 基础设施恢复
 
 本周额外完成：
 
@@ -384,7 +402,9 @@ SHA-256 8cfa350847d4a86a612b4be4f278ac7c6b4fe64a5f453439a81f4f059598acfd
 - tool transcript 设置字符上限；
 - targeted retry 支持精确 IDs 和 per-job output budget；
 - canonical merger 支持 partial base 与 remainder 的完整并集，同时继续禁止
-  retry 覆盖成功样本，并 fail-closed 校验最终 414-task coverage。
+  retry 覆盖成功样本，并 fail-closed 校验最终 414-task coverage；
+- AMLT generation 启动时从持久 Blob output 恢复 checkpoint，避免
+  `$AMLT_DIRSYNC_DIR` 随容器重启丢失。
 
 ### 9.2 Open-model 服务
 

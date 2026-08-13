@@ -1,6 +1,6 @@
 # Open-weight model evaluation
 
-更新时间：2026-08-12
+更新时间：2026-08-13
 
 本文记录 414-hard benchmark 的开源模型完整评测。评测先冻结 inference
 artifact，再运行 correctness 和 maintainability；以后 rubric 改变时直接重判，
@@ -13,12 +13,12 @@ artifact，再运行 correctness 和 maintainability；以后 rubric 改变时�
 | AMLT environment | local conda `amlt10` |
 | AMLT version | 10.14.0 |
 | Project | `reviewbench-maintainability` |
-| Active experiments | `reviewbench-kimi25-hard414-v12` |
+| Active experiments | `reviewbench-kimi25-hard414-v13` |
 | Service | Singularity |
 | Target | `msrresrchbasicvc` |
 | Workspace | `Workspace_NLC` |
 | Project storage | `conversationhub / amulet` |
-| Code snapshots | `projects/reviewbench-maintainability/amlt-code/85ab05f9c45c04ffd8afd982ff3ab522` (original Qwen/cross-family), `projects/reviewbench-maintainability/amlt-code/69e75bceda6918fcd787b1aa5df0c56c` (bounded Coder retry), `projects/reviewbench-maintainability/amlt-code/12a6350df2840e14ee678e219a2d726f` (bounded Kimi remainder) |
+| Code snapshots | `projects/reviewbench-maintainability/amlt-code/85ab05f9c45c04ffd8afd982ff3ab522` (original Qwen/cross-family), `projects/reviewbench-maintainability/amlt-code/69e75bceda6918fcd787b1aa5df0c56c` (bounded Coder retry), `projects/reviewbench-maintainability/amlt-code/12a6350df2840e14ee678e219a2d726f` (bounded Kimi remainder), `projects/reviewbench-maintainability/amlt-code/b5d63f4abb99530320a2cfe95b5e735e` (restart-resilient Kimi remainder) |
 | Task set | `data/releases/hard/20260808/tasks.jsonl` |
 | Tasks | 414 |
 | Protocol | `agentic-line-edit/v1`, maximum 32 rounds |
@@ -238,7 +238,7 @@ failure. Those eight samples are frozen; v11 was stopped without resampling
 them, and v12 targets only the remaining 406 IDs with a 60,000-character
 transcript bound.
 
-Generation checkpoint at `2026-08-12T12:05Z`:
+Generation checkpoint at `2026-08-13T04:27Z`:
 
 | Model | Generated | Failed | State |
 |---|---:|---:|---|
@@ -248,7 +248,7 @@ Generation checkpoint at `2026-08-12T12:05Z`:
 | Devstral-2-123B | 387 | 27 | canonical after targeted retry |
 | GPT-OSS-120B | 413 | 1 | complete |
 | MiniMax-M2.1 | 378 | 36 | canonical after targeted retry |
-| Kimi-K2.5 | 16 | 1 failed + 397 pending | v12 running |
+| Kimi-K2.5 | 16 | 1 failed + 397 pending | v13 accepted; queued |
 
 Qwen3.6-27B v5 completed all 235 bounded-remainder IDs with 184 generated and
 51 failed records. Its partial v4 input has 179 generated and 55 failed records;
@@ -271,8 +271,32 @@ Kimi v7 started successfully but its first request exhausted H100 runtime
 workspace. H200 submissions were rejected before job creation by amlt10's
 base-image accelerator metadata. Kimi v11 therefore retains 32K on H100 using
 a 1200 MiB FP8 KV cache and concurrency two. Its eight preserved v11 successes
-plus the current v12 checkpoint give 16 generated, one failed, and 397
+plus the preserved v12 checkpoints give 16 generated, one failed, and 397
 unprocessed IDs.
+
+The Kimi v12 Singularity container restarted and re-executed the command at
+`2026-08-13T03:39Z`. Its local `$AMLT_DIRSYNC_DIR` was empty, so the live JSONL
+regressed from nine records to five and began repeating already-processed IDs.
+Both versions were frozen before terminating v12:
+
+```text
+/data/v-peiyangliu/reviewbench-openmodels/
+  restart-snapshots/20260813T0414Z/
+```
+
+The v13 job targets the exact 397-ID complement and restores
+`$AMLT_OUTPUT_DIR/run/generation` from persistent Blob storage before invoking
+the existing `--resume` path. Successful patches and traces therefore survive
+future container restarts instead of being resampled. The accepted job is:
+
+```text
+experiment: reviewbench-kimi25-hard414-v13
+job:        kimi-k25-resumable-remainder
+job id:     brave_panda_fjqqgfly8v
+results:    projects/reviewbench-maintainability/amlt-results/
+            7213379617.71709-d7c6bb44-2a39-4e1c-9371-c41034ce2500
+IDs SHA-256 53d6a1fb9271c4e7912d334dce942144c3ccdc19ca62853165d784739e8ffdd1
+```
 
 ### 6.1 Completed-model failure audit
 
@@ -571,10 +595,16 @@ Qwen3.6-27B now runs independently at:
   correctness-20260812-qwen27-v1/
 ```
 
-Its Go/Python, Scripted, TS/JS, C#, and JVM lanes started immediately after
-canonicalization; Rust and Native use the same staged input and start as the
-already-running heavy lanes release capacity. Kimi will be added after valid
-generation completes.
+Its Go/Python, Scripted, TS/JS, C#, JVM, and Rust lanes are complete. Native is
+queued behind the two existing heavy Native runs. Kimi will be added after
+valid generation completes.
+
+The local evaluation host rebooted at `2026-08-12T17:14Z`. Atomic JSONL
+checkpoints remained intact at 233/325 open-model Native pairs and 207/325
+hosted-model Native pairs. Completed Qwen lane caches were removed, releasing
+about 61 GiB without deleting evidence, and both Native runners resumed in
+skip-terminal/retry-infra/fill-missing mode. The Qwen Native supervisor was
+recreated to start after either existing Native run terminates.
 
 The initial Rust pass stopped after 40 records because per-attempt Cargo build
 state filled `/data`. Completed lane caches and interrupted worker scratch were
