@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -1788,6 +1789,9 @@ def build_recovered_assets(tmp_path, task_id=TSFILE_ID, **overrides):
     harness.parent.mkdir(parents=True, exist_ok=True)
     harness.write_text("// behavioral oracle\n", encoding="utf-8")
     harness_sha = MODULE.hashlib.sha256(harness.read_bytes()).hexdigest()
+    cache = assets / "caches/demo"
+    (cache / "bin").mkdir(parents=True, exist_ok=True)
+    (cache / "bin/cargo").write_text("#!/bin/sh\n", encoding="utf-8")
     entry = {
         "id": task_id,
         "status": "ready",
@@ -1797,6 +1801,11 @@ def build_recovered_assets(tmp_path, task_id=TSFILE_ID, **overrides):
         "case": "case",
         "start_sha": head,
         "workspace": "workspaces/case",
+        "workspace_state": MODULE.workspace_git_state(start),
+        "mounted_cache_digests": {
+            "caches/demo": MODULE.cache_tree_digest(cache),
+        },
+        "cache_mounts": {"caches/demo": "/cache"},
         "patch_subdir": "start",
         "docker_image": "image:tag",
         "docker_image_id": "sha256:deadbeef",
@@ -1806,7 +1815,6 @@ def build_recovered_assets(tmp_path, task_id=TSFILE_ID, **overrides):
         "env": {},
         "mount": {"start": "/work"},
         "readonly_mounts": [],
-        "cache_mounts": {},
         "cargo_cache": None,
         "harness_mounts": [{"host": "harness/case", "container": "/harness"}],
         "harness_copies": [],
@@ -1816,6 +1824,7 @@ def build_recovered_assets(tmp_path, task_id=TSFILE_ID, **overrides):
         "pass_to_pass_tests": [],
         "hashed_files": [{"path": "harness/case/oracle_test.cc", "sha256": harness_sha}],
         "proof_runs": [{"variant": "start", "run": 1, "exit_code": 0}],
+        "golden_command": None,
         "blockers": [],
     }
     entry.update(overrides)
@@ -2045,3 +2054,225 @@ def test_recovered_contract_changes_the_replay_fingerprint(tmp_path, monkeypatch
         TSFILE_ID, "native", oracle, tmp_path, []
     )
     assert before != after
+
+
+# ---------------------------------------------------------------------------
+# Recovered assets: removal / tampering / drift must block or go infra,
+# never produce a candidate verdict
+# ---------------------------------------------------------------------------
+
+
+def _ready_entry(assets, **overrides):
+    manifest_path = assets / MODULE.RECOVERY_MANIFEST_NAME
+    payload = json.loads(manifest_path.read_text())
+    payload["tasks"][0].update(overrides)
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    MODULE.load_recovery_assets(assets)
+
+
+def test_removed_mounted_cache_blocks(tmp_path, monkeypatch):
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+    assert MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha") == []
+    MODULE._CACHE_TREE_DIGESTS.clear()
+    shutil.rmtree(assets / "caches/demo")
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("missing mounted cache" in b for b in blockers)
+
+
+def test_tampered_mounted_cache_blocks(tmp_path, monkeypatch):
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+    MODULE._CACHE_TREE_DIGESTS.clear()
+    # a single extra file inside the mounted cache must be detected: the
+    # historical bounded sampler would have missed it
+    (assets / "caches/demo/bin/injected.so").write_text("evil\n", encoding="utf-8")
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("has drifted" in b for b in blockers)
+
+
+def test_truncated_mounted_cache_file_blocks(tmp_path, monkeypatch):
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+    MODULE._CACHE_TREE_DIGESTS.clear()
+    (assets / "caches/demo/bin/cargo").write_text("", encoding="utf-8")
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("has drifted" in b for b in blockers)
+
+
+def test_unbound_mounted_cache_blocks(tmp_path, monkeypatch):
+    """A cache the replay mounts but the manifest never bound must block."""
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    _ready_entry(assets, mounted_cache_digests={})
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("not bound to the recovery manifest" in b for b in blockers)
+    _ready_entry(assets, mounted_cache_digests=None)
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("does not record mounted_cache_digests" in b for b in blockers)
+
+
+def test_incomplete_cargo_home_blocks(tmp_path, monkeypatch):
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE._CACHE_TREE_DIGESTS.clear()
+    cargo = assets / "caches/cargo-home"
+    (cargo / "registry").mkdir(parents=True)
+    (cargo / "registry/index").write_text("x\n", encoding="utf-8")
+    digest = MODULE.cache_tree_digest(cargo)
+    _ready_entry(assets, cargo_cache="caches/cargo-home",
+                 mounted_cache_digests={
+                     "caches/demo": MODULE.cache_tree_digest(assets / "caches/demo"),
+                     "caches/cargo-home": digest,
+                 })
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("incomplete reconstructed CARGO_HOME" in b for b in blockers)
+
+
+def test_dirty_workspace_blocks(tmp_path, monkeypatch):
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+    start = assets / "workspaces/case/start"
+
+    # 1) tracked drift
+    (start / "src.txt").write_text("tampered\n", encoding="utf-8")
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("has drifted" in b and "tracked" in b for b in blockers)
+    (start / "src.txt").write_text("line1\nline2\nline3\n", encoding="utf-8")
+    assert MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha") == []
+
+    # 2) untracked drift (e.g. a stray leftover build/patch artifact)
+    (start / "leftover.txt").write_text("stray\n", encoding="utf-8")
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("has drifted" in b and "untracked" in b for b in blockers)
+    (start / "leftover.txt").unlink()
+    assert MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha") == []
+
+
+def test_manifest_without_workspace_state_cannot_be_verified(tmp_path, monkeypatch):
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    _ready_entry(assets, workspace_state={"head": None})
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("does not record workspace_state" in b for b in blockers)
+
+
+def test_recovered_contract_requires_a_golden_proof_when_golden_declared(
+    tmp_path, monkeypatch
+):
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    # start-only proof + a declared golden patch is insufficient
+    _ready_entry(
+        assets,
+        golden_patch="harness/case/golden.patch",
+        hashed_files=[],
+        proof_runs=[{"variant": "start", "run": 1, "exit_code": 0}],
+    )
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("no successful golden proof run" in b for b in blockers)
+    # a failing golden run is still insufficient
+    _ready_entry(
+        assets,
+        proof_runs=[
+            {"variant": "start", "run": 1, "exit_code": 0},
+            {"variant": "golden", "run": 1, "exit_code": 1, "stage": "apply"},
+        ],
+    )
+    assert any(
+        "no successful golden proof run" in b
+        for b in MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    )
+    # start + golden clears it
+    _ready_entry(
+        assets,
+        proof_runs=[
+            {"variant": "start", "run": 1, "exit_code": 0},
+            {"variant": "golden", "run": 1, "exit_code": 0},
+        ],
+    )
+    assert MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha") == []
+
+
+def test_replay_recovered_returns_infra_not_fail_when_assets_drift(
+    tmp_path, monkeypatch
+):
+    """Drift discovered after preflight must never become a candidate fail."""
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+    patch_path = tmp_path / "candidate.patch"
+    patch_path.write_text(
+        "diff --git a/src.txt b/src.txt\n--- a/src.txt\n+++ b/src.txt\n"
+        "@@ -1,3 +1,3 @@\n line1\n-line2\n+patched\n line3\n",
+        encoding="utf-8",
+    )
+
+    def explode(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("Oracle must not execute against drifted assets")
+
+    monkeypatch.setattr(MODULE, "run_subprocess", explode)
+    monkeypatch.setattr(MODULE, "purge_scratch", lambda scratch: None)
+    MODULE._CACHE_TREE_DIGESTS.clear()
+    shutil.rmtree(assets / "caches/demo")
+
+    row = MODULE.replay_recovered(
+        TSFILE_ID, "my-model", strict_task(TSFILE_ID), strict_oracle(TSFILE_ID),
+        {"patch_file": str(patch_path), "patch_sha256": "abc", "apply_ok": True},
+        tmp_path / "legacy", tmp_path / "work", tmp_path / "output", 900, "native",
+    )
+    assert row["status"] == MODULE.INFRA_RETRY
+    assert row["correctness_ok"] is None
+    assert row["patch_apply"] is None
+    assert any("missing mounted cache" in b for b in row["asset_blockers"])
+
+
+def test_asset_state_fingerprints_every_mounted_input(tmp_path, monkeypatch):
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+    entry = MODULE.recovered_entry(TSFILE_ID)
+    state = MODULE.recovered_asset_state(entry)
+    assert set(state["mounted_caches"]) == {"caches/demo"}
+    assert state["workspace_state"]["head"] == entry["start_sha"]
+    assert state["harness_mounts"] == entry["harness_mounts"]
+
+    # mutating a mounted cache changes the fingerprint -> stale rows rerun
+    before = MODULE.replay_contract_fingerprint(
+        TSFILE_ID, "native", strict_oracle(TSFILE_ID), tmp_path, []
+    )
+    MODULE._CACHE_TREE_DIGESTS.clear()
+    (assets / "caches/demo/bin/extra").write_text("x\n", encoding="utf-8")
+    after = MODULE.replay_contract_fingerprint(
+        TSFILE_ID, "native", strict_oracle(TSFILE_ID), tmp_path, []
+    )
+    assert before != after
+
+
+def test_workspace_drift_invalidates_previously_recorded_rows(tmp_path, monkeypatch):
+    """A recorded row must be treated as stale once its workspace drifts."""
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+    task = strict_task(TSFILE_ID)
+    oracle = strict_oracle(TSFILE_ID)
+    generation = {"patch_sha256": "abc", "apply_ok": True}
+    row = {"patch_sha256": "abc"}
+    row.update(
+        MODULE.row_provenance_fields(
+            task, oracle, TSFILE_ID, "native", generation, tmp_path, []
+        )
+    )
+    assert not MODULE.row_is_stale(
+        row, task, oracle, TSFILE_ID, "native", generation, tmp_path, []
+    )
+    (assets / "workspaces/case/start/leftover.txt").write_text("x\n", encoding="utf-8")
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert blockers
+    assert MODULE.row_is_stale(
+        row, task, oracle, TSFILE_ID, "native", generation, tmp_path, blockers
+    )

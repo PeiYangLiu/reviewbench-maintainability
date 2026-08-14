@@ -629,15 +629,39 @@ recovery applied identically to start and golden.
 
 `run_legacy_reserve_correctness.py` gained one flag, `--assets-root`
 (or `REVIEWBENCH_LEGACY_ASSETS`). A recovered contract supersedes the
-historical one for the tasks it covers, and is re-verified against live state
-on **every** preflight and replay: the workspace must still be at the exact
-`start_sha`, every authored harness file must still hash to its manifest
-digest, the Docker image must still be loaded with the recorded image id, any
-reconstructed CARGO_HOME must still exist, and the manifest must carry a
-successful start-tree proof run. Anything else is a blocker, so nothing is
-ever scored off an unverified asset. The contract is also folded into each raw
-row's `replay_contract_fingerprint`, so changing a recovered command, mount,
-harness digest or image invalidates previously-recorded rows on resume.
+historical one for the tasks it covers, and **every input the replay actually
+mounts** is re-verified against live state on each preflight *and* again
+immediately before the Oracle runs:
+
+- the exact-start workspace must still be at the task `start_sha` **and**
+  match the manifest's recorded `workspace_state` -- same modified tracked
+  paths (dpnp legitimately carries the retained dpctl-0.19 compatibility
+  patch), same untracked entries, same `git submodule status` lines -- so a
+  stray edit, a half-deleted build tree or a moved/dirty submodule blocks
+  instead of silently changing what gets compiled;
+- every authored harness file, golden patch and harness-copy source must
+  still hash to its recorded SHA-256;
+- every mounted cache -- both `cache_mounts` (rippled's Conan cache) and the
+  rebuilt CARGO_HOMEs -- must be present *and* match its recorded tree digest
+  (a complete, unsampled walk over every file's path, size, mode and symlink
+  target), and a CARGO_HOME missing `bin/cargo` is reported as incomplete;
+- the Docker image must still be loaded with the recorded image id;
+- the manifest must carry a successful start-tree proof run **and**, for any
+  contract that declares a source-only golden patch, a successful golden
+  proof run.
+
+A manifest that predates these fields cannot be verified and is therefore
+itself a blocker. All of it is folded into `recovered_asset_state()` and hence
+into each raw row's `replay_contract_fingerprint`, so a drifted workspace,
+mutated cache, retagged image or edited command invalidates previously
+recorded rows on resume -- and `cmd_replay` retracts any row whose task has
+become blocked. If drift is only discovered at replay time, `replay_recovered`
+returns an `infra_retry` row carrying the exact `asset_blockers` **before**
+touching the workspace, so a broken asset can never be recorded as a candidate
+failure. Live verification against the real bundle: injecting one stray file
+into a workspace, or one extra file into the mounted CARGO_HOME, flips the
+affected task to blocked (`recorded 8356 files ... live 8357 files`) and
+retracts its previously recorded row; removing the file restores ready.
 
 Two lane-level bugs were fixed while proving this end to end, both of which
 would silently mis-score a *passing* replay:
@@ -655,17 +679,33 @@ Recovery status (proven by re-running each contract here, not assumed):
 
 | Task | Contract | Proof |
 | --- | --- | --- |
-| ClickHouse/ClickHouse #74193 | recovered | full 13,413-target clang-19 build; oracle query output byte-identical to the historical `start-runs.txt` |
-| Desbordante/desbordante-core #154 | recovered | `Desbordante_lib` + oracle link/run; stdout SHA-256 `50d9c3cd...` byte-identical to the historical proven start run (this task was previously blocked as "never proven end-to-end") |
-| IntelPython/dpnp #2201 | recovered | `dpnp.choose public behavior: 5 cases passed` |
-| SciCompMod/memilio #690 | recovered | oracle binary builds and exits 0 |
-| XRPLF/rippled #5143 | recovered | `2175 tests total, 0 failures` (matches the recorded 2175) |
-| lanl/singularity-eos #75 | recovered | oracle binary builds and exits 0 |
-| apache/tsfile #823 | recovered (re-authored harness) | `OracleAlignedBatch.DoubleValuesPreserveRowsAndValues` passes on start (repeatably) and on the derived source-only golden |
-| python/cpython #143314 | recovered (selected P2P tests) | 2 unchanged `test_os` tests that drive `parse_envlist()` pass on start (x2) and golden |
-| FuelLabs/fuel-tx #197 | recovered (rebuilt CARGO_HOME) | 77 passed, offline (`--network=none`) after deleting `target/`, matching the recorded `pass_to_pass: 77` |
-| otter-sec/anchor #2488 | recovered (re-authored harness) | both recorded tests pass on start and golden, offline |
+| ClickHouse/ClickHouse #74193 | recovered | start: full 13,413-target clang-19 build, oracle query output byte-identical to the historical `start-runs.txt`; golden: retained `source-only.patch` rebuilds and passes (295 s) |
+| Desbordante/desbordante-core #154 | recovered | start: stdout SHA-256 `50d9c3cd...` byte-identical to the historical proven start run (previously blocked as "never proven end-to-end"); golden: the recorded object-archive recipe (`golden_command`) passes with identical behavioural output |
+| IntelPython/dpnp #2201 | recovered | start + golden: `dpnp.choose public behavior: 5 cases passed` |
+| SciCompMod/memilio #690 | recovered | start + golden: oracle binary builds and exits 0 |
+| XRPLF/rippled #5143 | recovered | start + golden: `2175 tests total, 0 failures` (matches the recorded 2175) |
+| lanl/singularity-eos #75 | recovered | start + golden: oracle binary builds and exits 0 (shared `-include typeinfo`, see below) |
+| apache/tsfile #823 | recovered (re-authored harness) | start (repeatably) + golden: `OracleAlignedBatch.DoubleValuesPreserveRowsAndValues` passes |
+| python/cpython #143314 | recovered (selected P2P tests) | start (x2) + golden: 2 unchanged `test_os` tests that drive `parse_envlist()` pass |
+| FuelLabs/fuel-tx #197 | recovered (rebuilt CARGO_HOME) | start + golden: 77 passed, offline (`--network=none`) after deleting `target/`, matching the recorded `pass_to_pass: 77` |
+| otter-sec/anchor #2488 | recovered (re-authored harness) | start + golden: both recorded tests pass, offline |
 | grpc/grpc #32970 | **blocked** | no retained replay contract at all (Oracle carries only counters/coverage from `legacy159_oracle_native_normalized.jsonl`), the retained `repos/grpc__grpc` checkout does not contain the task `start_sha`, and no pinned Bazel toolchain/output-base cache for the 2023 tree was retained |
+
+Every recovered contract declares the source-only golden it must satisfy (the
+retained per-case patch, or one derived strictly from the Oracle's own
+`golden_scope`/`scope_expansion` paths), and **a contract cannot be ready
+without a successful golden proof**: `cmd_manifest` requires a passing start
+*and* golden run, and `cmd_smoke` records a golden patch that fails to apply
+as an explicit `stage: "apply"` failure run (with its log) instead of skipping
+the variant, which keeps the contract out of the ready set. Two goldens needed
+recorded, documented recipes rather than the start-side command:
+Desbordante's golden removes the `Desbordante_lib` target and references
+unrelated-branch headers, so its `golden_command` reproduces the historical
+"build the real production objects, archive, link with -std=c++20" recipe;
+singularity-eos' reference golden introduces `typeid(CRTP)` without including
+`<typeinfo>` (upstream's target commit does not include it either), so
+`-include typeinfo` is added to the *shared* command -- applying it only to
+the golden would unfairly fail any candidate that mirrors the reference fix.
 
 Re-authored harnesses are real behavioral tests, never source-shape checks:
 the tsfile oracle writes six aligned fixed-width `DOUBLE` rows through the
@@ -705,9 +745,9 @@ python3 scripts/run_legacy_reserve_correctness.py replay \
 The bundle produced on 2026-08-14 lives at
 `/data/v-peiyangliu/reviewbench-openmodels/legacy-recovery-assets/native-rust`
 (`recovery-manifest.json` SHA-256
-`ff5a87f9a0a8d6cee166343d78de6d470db39e55a6328b06c19e3aa18085900b`,
+`7a650c7c4a286a1ee70de1fff70806a93ee7df580cb3328ce265cc0eb77b5161`,
 `SHA256SUMS` SHA-256
-`63ac4252b115ff77cd66d13d58bb07226ef2ef9d84998240b994de72595a3621`).
+`e4b677abfa802fee217cd415f5174c47c69307d7364b417f561995251f61db21`).
 
 A real preflight over the full release with the bundle reports 10 of the 11
 native/rust published-legacy tasks ready (grpc alone blocked), and a real

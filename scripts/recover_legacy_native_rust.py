@@ -71,6 +71,12 @@ def _native(**kwargs: Any) -> dict[str, Any]:
         "harness_copies": [],
         "harness_mounts": [],
         "golden_patch": None,
+        # Some historical recoveries proved the golden tree with a *different*
+        # build recipe than the start tree (the golden's own source-only
+        # changes restructure the build). ``golden_command`` records that
+        # recorded recipe; it is used only by the golden proof, never by a
+        # candidate replay, which always runs ``command``.
+        "golden_command": None,
         "expected_stdout_sha256": None,
     }
     entry.update(kwargs)
@@ -96,6 +102,7 @@ def _rust(**kwargs: Any) -> dict[str, Any]:
         "harness_copies": [],
         "harness_mounts": [],
         "golden_patch": None,
+        "golden_command": None,
         "expected_stdout_sha256": None,
     }
     entry.update(kwargs)
@@ -121,6 +128,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         repo="ClickHouse/ClickHouse",
         start_sha="9ba917834bc6042bd9d46903b054e62a110713f9",
         workspace="workspaces/05-clickhouse",
+        golden_patch="workspaces/05-clickhouse/source-only.patch",
         patch_subdir="start",
         docker_image="oracle-clickhouse:real",
         mount={"start": "/src", "query.sql": "/work/query.sql"},
@@ -149,6 +157,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         repo="Desbordante/desbordante-core",
         start_sha="e963ad8cdf492859a4632e729a4bcfddefe959a6",
         workspace="workspaces/11-desbordante",
+        golden_patch="workspaces/11-desbordante/source-only.patch",
         patch_subdir="start",
         docker_image="reviewbench-native-real-desbordante",
         mount={".": "/work"},
@@ -171,6 +180,45 @@ RECIPES: dict[str, dict[str, Any]] = {
         # (11-desbordante/start-runs.log).
         expected_stdout_sha256=(
             "50d9c3cd931938b97b3fa05670b63cd2131873fc572286fa7f5443d9b058ca59"
+        ),
+        # The golden's own source-only CMakeLists change removes the
+        # ``Desbordante_lib`` target, so the historical recovery proved the
+        # golden tree by building the individual production objects and
+        # archiving them (build-commands.txt: "GOLDEN PRODUCTION"/"GOLDEN
+        # ORACLE LINK"). That recorded recipe is reproduced verbatim here and
+        # is used only for the golden proof.
+        golden_command=(
+            # The golden's source-only CMakeLists change removes the
+            # ``Desbordante_lib`` target, and its algorithms.h references
+            # unrelated-branch headers that do not exist at this commit, so
+            # the whole library cannot link. The historical recovery
+            # (build-commands.txt "GOLDEN PRODUCTION"/"GOLDEN ORACLE LINK")
+            # therefore built the real CMake production objects the oracle
+            # needs, archived them, and linked against that archive with
+            # -std=c++20. Reproduced verbatim here, plus balancer.cpp.o which
+            # the golden's GfdValidation now calls. Used only by the golden
+            # proof; candidate replays always run ``command``.
+            "cmake -S /work/start -B /work/start/build-real -G Ninja "
+            "-DCOMPILE_TESTS=OFF -DUNPACK_DATASETS=OFF -DASAN=OFF "
+            "-DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS=--coverage "
+            "-DCMAKE_EXE_LINKER_FLAGS=--coverage && "
+            "OBJS=\"src/core/CMakeFiles/Desbordante.dir/algorithms/gfd/gfd_validation.cpp.o "
+            "src/core/CMakeFiles/Desbordante.dir/algorithms/gfd/gfd_handler.cpp.o "
+            "src/core/CMakeFiles/Desbordante.dir/algorithms/gfd/balancer.cpp.o "
+            "src/core/CMakeFiles/Desbordante.dir/parser/graph_parser/graph_parser.cpp.o "
+            "src/core/CMakeFiles/Desbordante.dir/algorithms/algorithm.cpp.o "
+            "src/core/CMakeFiles/Desbordante.dir/util/progress.cpp.o "
+            "src/core/CMakeFiles/Desbordante.dir/config/thread_number/option.cpp.o\" && "
+            "ninja -C build-real $OBJS && "
+            "rm -f libDesbordante-minimal.a && "
+            "ar rcs libDesbordante-minimal.a "
+            "$(for o in $OBJS; do echo build-real/$o; done) && "
+            "g++ -std=c++20 --coverage -O0 -g /work/oracle.cpp -Isrc/core -Isrc "
+            "-Ibuild-real/src/core -Ilib/easyloggingpp/src -Ilib/better-enums "
+            "libDesbordante-minimal.a build-real/lib/easyloggingpp/libeasyloggingpp.a "
+            "-lboost_container -lboost_program_options -lboost_thread "
+            "-lboost_graph -lboost_regex -pthread -o oracle-real && "
+            "./oracle-real /work/start"
         ),
         provenance={
             "kind": "git-clone-shared",
@@ -198,6 +246,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         repo="IntelPython/dpnp",
         start_sha="efa7e1c208f33287edc54ba870214d093a43d643",
         workspace="workspaces/14-dpnp",
+        golden_patch="workspaces/14-dpnp/source-only.patch",
         patch_subdir="start",
         docker_image="oracle-dpnp:real",
         mount={"start": "/src", "behavior_test.py": "/oracle/behavior_test.py"},
@@ -229,6 +278,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         repo="SciCompMod/memilio",
         start_sha="ce15427d0294e5cd2c862704515df707323d25f6",
         workspace="workspaces/19-memilio-history",
+        golden_patch="workspaces/19-memilio-history/source-only-golden.patch",
         patch_subdir="start",
         docker_image="reviewbench-native-real-eventuals",
         mount={".": "/work"},
@@ -250,6 +300,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         repo="XRPLF/rippled",
         start_sha="ea887bfc93b22f6a1225f2843a11131e04f0dfd2",
         workspace="workspaces/22-rippled",
+        golden_patch="workspaces/22-rippled/source-only.patch",
         patch_subdir="start",
         docker_image="oracle-rippled:real",
         mount={"start": "/src"},
@@ -300,13 +351,22 @@ RECIPES: dict[str, dict[str, Any]] = {
         repo="lanl/singularity-eos",
         start_sha="af8d8b4e9fad603f4f6aae99945823cfbc5c7f9a",
         workspace="workspaces/28-singularity-eos",
+        golden_patch="workspaces/28-singularity-eos/source-only-golden.patch",
         patch_subdir="start",
         docker_image="reviewbench-native-real-eventuals",
         mount={".": "/work"},
         workdir="/work/start",
+        # ``-include typeinfo`` is added to the *shared* command (start and
+        # golden alike): the reference source-only golden introduces a
+        # ``typeid(CRTP)`` helper in eos_base.hpp without including
+        # <typeinfo> (upstream's target commit does not include it either),
+        # so the historical environment must have provided it transitively.
+        # Adding it to only the golden proof would unfairly fail any candidate
+        # that mirrors the reference fix, which is exactly the kind of
+        # infrastructure artefact that must never be scored as a model error.
         command=(
-            "g++-11 -std=c++17 -O0 -g -I. -Iutils /work/oracle.cpp -o "
-            "correctness-oracle && ./correctness-oracle"
+            "g++-11 -std=c++17 -O0 -g -include typeinfo -I. -Iutils "
+            "/work/oracle.cpp -o correctness-oracle && ./correctness-oracle"
         ),
         provenance={
             "kind": "git-clone-shared",
@@ -417,6 +477,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         repo="FuelLabs/fuel-tx",
         start_sha="30d88423ac0e00f2d0a54c314b4dc59ef38238c1",
         workspace="workspaces/fuel-tx-197",
+        golden_patch="harness/fuel-tx-197/source-only-golden.patch",
         patch_subdir="start",
         docker_image="reviewbench-strict-rust:20260726",
         # The workspace's test-helpers manifest resolves the crate under test
@@ -546,29 +607,148 @@ def docker_image_id(image: str) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def workspace_provenance(start: Path) -> dict[str, Any]:
-    """Cheap, non-content provenance for a possibly huge workspace tree."""
+def workspace_state(start: Path) -> dict[str, Any]:
+    """Exact, replay-relevant state of a recovered exact-start workspace.
+
+    A recovered workspace is only trustworthy if it is *still* the tree the
+    contract was proven against, so this captures everything that can drift
+    underneath a replay:
+
+    * ``head`` -- the checked-out commit;
+    * ``tracked`` -- every modified/deleted tracked path (dpnp legitimately
+      carries the retained dpctl-0.19 compatibility patch; anything else is
+      drift);
+    * ``untracked`` -- untracked entries, with directories collapsed by git
+      (``--untracked-files=normal``), which is what makes this cheap even for
+      a 52 GB tree with a full build directory in it;
+    * ``submodules`` -- ``git submodule status`` lines, so an initialized
+      submodule that moves or goes dirty (ClickHouse ships 123 of them) is
+      caught instead of silently changing what gets compiled.
+
+    The manifest records this verbatim, and both preflight and replay compare
+    the live value against it: any difference is a blocker, never a candidate
+    failure.
+    """
     if not start.is_dir():
         return {"exists": False}
     tracked = run(
         ["git", "-C", str(start), "status", "--porcelain", "--untracked-files=no"]
     )
+    untracked = run(
+        [
+            "git", "-C", str(start), "status", "--porcelain",
+            "--untracked-files=normal",
+        ]
+    )
+    submodules = run(["git", "-C", str(start), "submodule", "status"])
     return {
         "exists": True,
         "head": git_head(start),
-        "dirty_tracked_paths": [
-            line[3:] for line in tracked.stdout.splitlines() if line
-        ][:20],
-        "bytes": None,
+        "tracked": sorted(
+            line[3:] for line in tracked.stdout.splitlines() if line.strip()
+        ),
+        "untracked": sorted(
+            line[3:] for line in untracked.stdout.splitlines()
+            if line.startswith("?? ")
+        ),
+        "submodules": sorted(
+            line.strip() for line in submodules.stdout.splitlines() if line.strip()
+        ),
     }
+
+
+# Backwards-compatible alias: the manifest field is now ``workspace_state``.
+workspace_provenance = workspace_state
+
+
+_TREE_DIGEST_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def tree_digest(path: Path, *, use_cache: bool = True) -> dict[str, Any] | None:
+    """Complete, order-independent structural digest of a mounted directory.
+
+    Every file under ``path`` contributes its repository-relative path, size,
+    mode and symlink target -- with **no sampling and no truncation**, unlike
+    the adapter's historical bounded ``directory_identity``. That is what lets
+    a reconstructed cache (a 7.8 GB Conan tree, a CARGO_HOME registry) be
+    bound to the manifest as a whole: adding, removing, truncating, growing or
+    re-permissioning any file inside it changes the digest, so a tampered or
+    partially-restored cache blocks instead of silently changing what a replay
+    compiles against.
+
+    File *contents* are deliberately not read: the caches are multi-gigabyte
+    and are mounted read-write by design (cargo/conan write lock files), so a
+    full content hash would be both prohibitively slow and unstable. Small
+    authored inputs (harness sources, golden patches, recipes) are covered by
+    real SHA-256 content hashes in ``SHA256SUMS`` instead.
+    """
+    key = str(path)
+    if use_cache and key in _TREE_DIGEST_CACHE:
+        return _TREE_DIGEST_CACHE[key]
+    if not path.is_dir():
+        return None
+    entries: list[tuple[str, int, int, str]] = []
+    for root, dirnames, filenames in os.walk(path):
+        dirnames.sort()
+        for name in sorted(filenames):
+            item = Path(root) / name
+            relative = str(item.relative_to(path))
+            try:
+                stat = item.lstat()
+            except OSError:
+                entries.append((relative, -1, -1, "unreadable"))
+                continue
+            target = ""
+            if os.path.islink(item):
+                try:
+                    target = os.readlink(item)
+                except OSError:
+                    target = "unreadable"
+            entries.append((relative, stat.st_size, stat.st_mode, target))
+    digest = hashlib.sha256(
+        json.dumps(sorted(entries), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    value = {"file_count": len(entries), "digest": digest}
+    if use_cache:
+        _TREE_DIGEST_CACHE[key] = value
+    return value
+
+
+def mounted_cache_digests(
+    recipe: dict[str, Any], assets_root: Path
+) -> dict[str, Any]:
+    """``tree_digest`` for every cache directory a replay actually mounts.
+
+    Covers both ``cache_mounts`` (rippled's reconstructed Conan cache) and
+    ``cargo_cache`` (the rebuilt CARGO_HOMEs), so no mounted build input is
+    left unbound.
+    """
+    digests: dict[str, Any] = {}
+    for host in sorted(recipe.get("cache_mounts", {})):
+        digests[host] = tree_digest(assets_root / host)
+    if recipe.get("cargo_cache"):
+        digests[recipe["cargo_cache"]] = tree_digest(
+            assets_root / recipe["cargo_cache"]
+        )
+    return digests
 
 
 def contract_blockers(
     task_id: str,
     recipe: dict[str, Any],
     assets_root: Path,
+    *,
+    expected_state: dict[str, Any] | None = None,
 ) -> list[str]:
-    """Fail-closed asset check for one recovered contract."""
+    """Fail-closed asset check for one recovered contract.
+
+    When ``expected_state`` (the manifest's recorded ``workspace_state``) is
+    supplied, the live workspace must match it exactly -- same HEAD, same
+    modified tracked paths, same untracked entries, same submodule states --
+    so a workspace that has drifted (a stray edit, a half-deleted build tree,
+    a submodule moved or gone dirty) blocks instead of quietly changing what a
+    replay compiles.
+    """
     blockers: list[str] = []
     workspace = assets_root / recipe["workspace"]
     start = workspace / recipe["patch_subdir"]
@@ -583,6 +763,20 @@ def contract_blockers(
                 f"exact-start subtree {start} is at {head}, not the task "
                 f"start_sha {recipe['start_sha']}"
             )
+        if expected_state is not None:
+            live = workspace_state(start)
+            for field in ("tracked", "untracked", "submodules"):
+                if live.get(field) != expected_state.get(field):
+                    added = sorted(
+                        set(live.get(field) or []) - set(expected_state.get(field) or [])
+                    )[:5]
+                    removed = sorted(
+                        set(expected_state.get(field) or []) - set(live.get(field) or [])
+                    )[:5]
+                    blockers.append(
+                        f"recovered workspace {start} has drifted: {field} "
+                        f"unexpected={added} missing={removed}"
+                    )
     for relative in recipe.get("harness_files", []):
         if not (assets_root / relative).is_file():
             blockers.append(f"missing recovered harness file: {assets_root / relative}")
@@ -590,12 +784,22 @@ def contract_blockers(
         blockers.append(
             f"missing recovered golden patch: {assets_root / recipe['golden_patch']}"
         )
-    for host in list(recipe.get("mount", {})) + list(recipe.get("cache_mounts", {})):
+    for host in recipe.get("mount", {}):
         if host == ".":
             continue
-        candidate = workspace / host
-        if not candidate.exists() and not (assets_root / host).exists():
-            blockers.append(f"missing mount source: {candidate}")
+        if not (workspace / host).exists():
+            blockers.append(f"missing mount source: {workspace / host}")
+    for host in recipe.get("cache_mounts", {}):
+        if not (assets_root / host).is_dir():
+            blockers.append(f"missing mounted cache: {assets_root / host}")
+    for mount in recipe.get("harness_mounts", []):
+        if not (assets_root / mount["host"]).exists():
+            blockers.append(
+                f"missing mounted harness directory: {assets_root / mount['host']}"
+            )
+    for copy in recipe.get("harness_copies", []):
+        if not (assets_root / copy["host"]).is_file():
+            blockers.append(f"missing harness copy source: {assets_root / copy['host']}")
     if recipe.get("cargo_cache"):
         cache = assets_root / recipe["cargo_cache"]
         if not (cache / "bin" / "cargo").exists():
@@ -675,20 +879,21 @@ def cmd_manifest(args: argparse.Namespace) -> int:
         workspace = assets_root / recipe["workspace"]
         blockers = contract_blockers(task_id, recipe, assets_root)
         proof = proofs.get(task_id, {})
-        proven_runs = [
-            run_row for run_row in proof.get("runs", [])
-            if run_row.get("exit_code") == 0
-        ]
-        if not any(row.get("variant") == "start" for row in proven_runs):
-            blockers.append(
-                "no recorded successful start-tree proof run "
-                "(run `recover_legacy_native_rust.py smoke` first)"
-            )
+        proof_runs = proof.get("runs", [])
+        blockers.extend(
+            f"{text} (run `recover_legacy_native_rust.py smoke"
+            f"{' --golden' if recipe.get('golden_patch') else ''}` first)"
+            for text in proof_blockers(recipe, proof_runs)
+        )
         hashed: list[dict[str, str]] = []
-        for relative in (
-            list(recipe.get("harness_files", []))
-            + ([recipe["golden_patch"]] if recipe.get("golden_patch") else [])
-        ):
+        extra_hashed = list(recipe.get("harness_files", []))
+        if recipe.get("golden_patch"):
+            extra_hashed.append(recipe["golden_patch"])
+        for copy in recipe.get("harness_copies", []):
+            extra_hashed.append(copy["host"])
+        if recipe.get("provenance", {}).get("image_recipe"):
+            extra_hashed.append(recipe["provenance"]["image_recipe"])
+        for relative in dict.fromkeys(extra_hashed):
             path = assets_root / relative
             if path.is_file():
                 digest = sha256_file(path)
@@ -703,9 +908,8 @@ def cmd_manifest(args: argparse.Namespace) -> int:
             "case": recipe["case"],
             "start_sha": recipe["start_sha"],
             "workspace": recipe["workspace"],
-            "workspace_provenance": workspace_provenance(
-                workspace / recipe["patch_subdir"]
-            ),
+            "workspace_state": workspace_state(workspace / recipe["patch_subdir"]),
+            "mounted_cache_digests": mounted_cache_digests(recipe, assets_root),
             "patch_subdir": recipe["patch_subdir"],
             "docker_image": recipe["docker_image"],
             "docker_image_id": docker_image_id(recipe["docker_image"]),
@@ -722,6 +926,7 @@ def cmd_manifest(args: argparse.Namespace) -> int:
             "workdir": recipe["workdir"],
             "command": recipe["command"],
             "golden_patch": recipe.get("golden_patch"),
+            "golden_command": recipe.get("golden_command"),
             "expected_stdout_sha256": recipe.get("expected_stdout_sha256"),
             "pass_to_pass_tests": recipe.get("pass_to_pass_tests", []),
             "provenance": recipe["provenance"],
@@ -788,6 +993,52 @@ def cmd_manifest(args: argparse.Namespace) -> int:
         indent=2,
     ))
     return 0
+
+
+def purge_directory(path: Path) -> None:
+    """Delete a disposable tree that may contain root-owned container state."""
+    if not path.exists():
+        return
+    subprocess.run(
+        ["docker", "run", "--rm", "-v", f"{path}:/w", "alpine",
+         "sh", "-c", "rm -rf /w/* /w/.[!.]* 2>/dev/null; true"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def proof_blockers(recipe: dict[str, Any], runs: list[dict[str, Any]]) -> list[str]:
+    """Why a contract's recorded proof runs are insufficient.
+
+    A start-tree proof alone is never enough for a contract that declares a
+    source-only golden: the Oracle is PASS_TO_PASS, so the golden must be
+    shown to apply *and* to pass. Any recorded failing run (apply or execute)
+    also keeps the contract out of the ready set.
+    """
+    blockers: list[str] = []
+    if not any(
+        row.get("variant") == "start" and row.get("exit_code") == 0 for row in runs
+    ):
+        blockers.append("no successful start-tree proof run")
+    if recipe.get("golden_patch"):
+        golden = [row for row in runs if row.get("variant") == "golden"]
+        if not any(row.get("exit_code") == 0 for row in golden):
+            failed = [row for row in golden if row.get("exit_code") != 0]
+            detail = (
+                f" (last failure: {failed[-1].get('stage')} -> "
+                f"{failed[-1].get('error')})" if failed else ""
+            )
+            blockers.append(
+                "contract declares a source-only golden patch but has no "
+                f"successful golden proof run{detail}"
+            )
+    return blockers
+
+
+def proof_status(recipe: dict[str, Any], runs: list[dict[str, Any]]) -> str:
+    if proof_blockers(recipe, runs):
+        return "failed" if runs else "blocked"
+    return "ready"
 
 
 def _apply_patch(tree: Path, patch: Path) -> tuple[bool, str]:
@@ -860,16 +1111,42 @@ def cmd_smoke(args: argparse.Namespace) -> int:
                     assets_root / recipe["golden_patch"],
                 )
                 if not ok:
+                    # A golden patch that will not apply is a *recorded
+                    # failure*, not a silently skipped variant: without it the
+                    # contract can never satisfy the "golden must pass" rule,
+                    # so the proof file must show why.
+                    log_path = log_dir / f"{recipe['case']}-smoke-golden-apply.log"
+                    log_path.write_text(detail, encoding="utf-8")
+                    runs.append(
+                        {
+                            "variant": "golden",
+                            "run": 1 + sum(
+                                1 for r in runs if r.get("variant") == "golden"
+                            ),
+                            "exit_code": 1,
+                            "stage": "apply",
+                            "error": "golden patch failed to apply",
+                            "duration_seconds": 0.0,
+                            "log": str(log_path),
+                            "command": f"apply {recipe['golden_patch']}",
+                        }
+                    )
                     print(f"{recipe['case']}: golden patch failed to apply:\n{detail}")
                     overall = 1
-                    shutil.rmtree(target, ignore_errors=True)
+                    purge_directory(target)
                     continue
                 cleanup = target
             for copy in recipe.get("harness_copies", []):
                 destination = target / recipe["patch_subdir"] / copy["workspace_path"]
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(assets_root / copy["host"], destination)
-            argv = docker_argv(task_id, recipe, assets_root, target)
+            argv = docker_argv(
+                task_id, recipe, assets_root, target,
+                command=(
+                    recipe.get("golden_command")
+                    if variant == "golden" else None
+                ),
+            )
             log_path = log_dir / f"{recipe['case']}-smoke-{variant}.log"
             started = time.time()
             with log_path.open("w") as stream:
@@ -881,26 +1158,24 @@ def cmd_smoke(args: argparse.Namespace) -> int:
                 "variant": variant,
                 "run": 1 + sum(1 for r in runs if r.get("variant") == variant),
                 "exit_code": completed.returncode,
+                "stage": "execute",
                 "duration_seconds": round(time.time() - started, 1),
                 "log": str(log_path),
                 "command": " ".join(argv),
             }
+            if completed.returncode != 0:
+                row["error"] = f"{variant} proof run exited {completed.returncode}"
             runs.append(row)
             if completed.returncode != 0:
                 overall = 1
             if cleanup is not None:
-                subprocess.run(
-                    ["docker", "run", "--rm", "-v", f"{cleanup}:/w", "alpine",
-                     "sh", "-c", "rm -rf /w/* /w/.[!.]* 2>/dev/null; true"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-                shutil.rmtree(cleanup, ignore_errors=True)
+                purge_directory(cleanup)
             print(json.dumps({"case": recipe["case"], **row}))
         payload = {
             "id": task_id,
             "case": recipe["case"],
-            "status": "ready" if all(r["exit_code"] == 0 for r in runs) else "failed",
-            "blockers": [],
+            "status": proof_status(recipe, runs),
+            "blockers": proof_blockers(recipe, runs),
             "runs": runs,
         }
         proof_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")

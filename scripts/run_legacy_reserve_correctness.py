@@ -361,6 +361,91 @@ def recovered_entry(task_id: str) -> dict[str, Any] | None:
     return RECOVERY_STATE["tasks"].get(task_id)
 
 
+def workspace_git_state(start: Path) -> dict[str, Any]:
+    """Live HEAD plus tracked/untracked/submodule state of a workspace.
+
+    Mirrors ``recover_legacy_native_rust.workspace_state`` field for field, so
+    preflight/replay compare exactly what the manifest recorded. Untracked
+    entries are collapsed by git at directory granularity, which keeps this
+    cheap even for a 52 GB workspace containing a full build tree.
+    """
+    def _git(*args: str) -> str:
+        result = subprocess.run(
+            ["git", "-C", str(start), *args],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        return result.stdout if result.returncode == 0 else ""
+
+    return {
+        "head": _git("rev-parse", "HEAD").strip() or None,
+        "tracked": sorted(
+            line[3:]
+            for line in _git(
+                "status", "--porcelain", "--untracked-files=no"
+            ).splitlines()
+            if line.strip()
+        ),
+        "untracked": sorted(
+            line[3:]
+            for line in _git(
+                "status", "--porcelain", "--untracked-files=normal"
+            ).splitlines()
+            if line.startswith("?? ")
+        ),
+        "submodules": sorted(
+            line.strip()
+            for line in _git("submodule", "status").splitlines()
+            if line.strip()
+        ),
+    }
+
+
+_CACHE_TREE_DIGESTS: dict[str, dict[str, Any] | None] = {}
+
+
+def cache_tree_digest(path: Path) -> dict[str, Any] | None:
+    """Complete structural digest of a mounted cache directory.
+
+    Identical algorithm to ``recover_legacy_native_rust.tree_digest``: every
+    file's path, size, mode and symlink target, with no sampling and no
+    truncation, so a swapped/truncated/partially-restored cache cannot slip
+    through the bounded sampling the historical ``directory_identity`` used.
+    Memoized per process because the same cache is checked for several tasks.
+    """
+    key = str(path)
+    if key in _CACHE_TREE_DIGESTS:
+        return _CACHE_TREE_DIGESTS[key]
+    if not path.is_dir():
+        _CACHE_TREE_DIGESTS[key] = None
+        return None
+    entries: list[tuple[str, int, int, str]] = []
+    for root, dirnames, filenames in os.walk(path):
+        dirnames.sort()
+        for name in sorted(filenames):
+            item = Path(root) / name
+            relative = str(item.relative_to(path))
+            try:
+                stat = item.lstat()
+            except OSError:
+                entries.append((relative, -1, -1, "unreadable"))
+                continue
+            target = ""
+            if os.path.islink(item):
+                try:
+                    target = os.readlink(item)
+                except OSError:
+                    target = "unreadable"
+            entries.append((relative, stat.st_size, stat.st_mode, target))
+    value = {
+        "file_count": len(entries),
+        "digest": hashlib.sha256(
+            json.dumps(sorted(entries), sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+    }
+    _CACHE_TREE_DIGESTS[key] = value
+    return value
+
+
 def recovered_blockers(task_id: str, entry: dict[str, Any]) -> list[str]:
     """Re-verify a recovered contract against live disk/Docker state.
 
@@ -381,16 +466,37 @@ def recovered_blockers(task_id: str, entry: dict[str, Any]) -> list[str]:
     if not start.is_dir():
         blockers.append(f"missing recovered exact-start subtree: {start}")
     else:
-        head = subprocess.run(
-            ["git", "-C", str(start), "rev-parse", "HEAD"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-        )
-        current = head.stdout.strip() if head.returncode == 0 else None
-        if current != entry["start_sha"]:
+        live_state = workspace_git_state(start)
+        if live_state.get("head") != entry["start_sha"]:
             blockers.append(
-                f"recovered workspace {start} is at {current}, not the task "
-                f"start_sha {entry['start_sha']}"
+                f"recovered workspace {start} is at {live_state.get('head')}, "
+                f"not the task start_sha {entry['start_sha']}"
             )
+        recorded_state = entry.get("workspace_state") or {}
+        for field in ("tracked", "untracked", "submodules"):
+            if field not in recorded_state:
+                # An older manifest without recorded workspace state cannot be
+                # verified, and an unverifiable workspace must not run.
+                blockers.append(
+                    "recovered contract manifest does not record "
+                    f"workspace_state.{field}; regenerate it with "
+                    "scripts/recover_legacy_native_rust.py manifest"
+                )
+                continue
+            if live_state.get(field) != recorded_state.get(field):
+                unexpected = sorted(
+                    set(live_state.get(field) or [])
+                    - set(recorded_state.get(field) or [])
+                )[:5]
+                missing = sorted(
+                    set(recorded_state.get(field) or [])
+                    - set(live_state.get(field) or [])
+                )[:5]
+                blockers.append(
+                    f"recovered workspace {start} has drifted since the "
+                    f"manifest was written: {field} unexpected={unexpected} "
+                    f"missing={missing}"
+                )
     for hashed in entry.get("hashed_files", []):
         path = root / hashed["path"]
         if not path.is_file():
@@ -411,17 +517,73 @@ def recovered_blockers(task_id: str, entry: dict[str, Any]) -> list[str]:
             f"Docker image {image} is now {live_image_id}, not the recovered "
             f"{entry['docker_image_id']}"
         )
+    # Every directory a replay actually mounts must be present *and* bound to
+    # the manifest, not merely exist: a mounted cache silently swapped,
+    # truncated or partially restored changes what the Oracle compiles.
+    recorded_caches = entry.get("mounted_cache_digests")
+    if recorded_caches is None:
+        blockers.append(
+            "recovered contract manifest does not record "
+            "mounted_cache_digests; regenerate it with "
+            "scripts/recover_legacy_native_rust.py manifest"
+        )
+        recorded_caches = {}
+    mounted_caches = list((entry.get("cache_mounts") or {}))
+    if entry.get("cargo_cache"):
+        mounted_caches.append(entry["cargo_cache"])
+    for relative in mounted_caches:
+        cache_dir = root / relative
+        if not cache_dir.is_dir():
+            blockers.append(f"missing mounted cache: {cache_dir}")
+            continue
+        recorded = recorded_caches.get(relative)
+        if recorded is None:
+            blockers.append(
+                f"mounted cache {cache_dir} is not bound to the recovery "
+                "manifest (no recorded tree digest)"
+            )
+            continue
+        live = cache_tree_digest(cache_dir)
+        if live != recorded:
+            blockers.append(
+                f"mounted cache {cache_dir} has drifted: recorded "
+                f"{recorded.get('file_count')} files / "
+                f"{str(recorded.get('digest'))[:12]}, live "
+                f"{live.get('file_count') if live else None} files / "
+                f"{str((live or {}).get('digest'))[:12]}"
+            )
     if entry.get("cargo_cache") and not (root / entry["cargo_cache"] / "bin" / "cargo").exists():
         blockers.append(
-            f"missing reconstructed CARGO_HOME: {root / entry['cargo_cache']}"
+            f"incomplete reconstructed CARGO_HOME (no bin/cargo): "
+            f"{root / entry['cargo_cache']}"
         )
+    for mount in entry.get("harness_mounts") or []:
+        if not (root / mount["host"]).exists():
+            blockers.append(
+                f"missing mounted harness directory: {root / mount['host']}"
+            )
+    for copy in entry.get("harness_copies") or []:
+        if not (root / copy["host"]).is_file():
+            blockers.append(f"missing harness copy source: {root / copy['host']}")
+    proof_runs = entry.get("proof_runs", [])
     if not any(
         run_row.get("variant") == "start" and run_row.get("exit_code") == 0
-        for run_row in entry.get("proof_runs", [])
+        for run_row in proof_runs
     ):
         blockers.append(
             "recovered contract has no successful start-tree proof run "
             "recorded in recovery-manifest.json"
+        )
+    if entry.get("golden_patch") and not any(
+        run_row.get("variant") == "golden" and run_row.get("exit_code") == 0
+        for run_row in proof_runs
+    ):
+        # PASS_TO_PASS: a contract that declares a source-only golden is only
+        # trustworthy once that golden has been shown to apply and pass.
+        blockers.append(
+            "recovered contract declares a source-only golden patch but has "
+            "no successful golden proof run recorded in "
+            "recovery-manifest.json"
         )
     return blockers
 
@@ -431,25 +593,26 @@ def recovered_asset_state(entry: dict[str, Any]) -> dict[str, Any]:
     if root is None:  # pragma: no cover - defensive
         return {}
     workspace = root / entry["workspace"]
+    mounted_caches = list(entry.get("cache_mounts") or {})
+    if entry.get("cargo_cache"):
+        mounted_caches.append(entry["cargo_cache"])
     return {
         "assets_root": str(root),
-        "workspace_head": (
-            subprocess.run(
-                ["git", "-C", str(workspace / entry["patch_subdir"]),
-                 "rev-parse", "HEAD"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-            ).stdout.strip()
-            or None
-        ),
+        # the exact tree replay copies and patches, including any drift
+        "workspace_state": workspace_git_state(workspace / entry["patch_subdir"]),
         "docker_image_id": docker_image_id(entry.get("docker_image") or ""),
+        # content hashes of every authored harness/patch input
         "hashed_files": entry.get("hashed_files", []),
         "command": entry.get("command"),
         "shell": entry.get("shell"),
         "mount": entry.get("mount"),
-        "cargo_cache": (
-            directory_identity(root / entry["cargo_cache"])
-            if entry.get("cargo_cache") else None
-        ),
+        "harness_mounts": entry.get("harness_mounts"),
+        "harness_copies": entry.get("harness_copies"),
+        # every cache directory the replay mounts, digested in full
+        "mounted_caches": {
+            relative: cache_tree_digest(root / relative)
+            for relative in sorted(mounted_caches)
+        },
     }
 
 # Bump whenever the *behavior* of a replay_* function, NATIVE_MANIFEST entry,
@@ -1756,16 +1919,65 @@ def replay_recovered(
     entry = recovered_entry(task_id)
     assert entry is not None
     assets_root: Path = RECOVERY_STATE["assets_root"]
-    scratch = work_root / lane / model_component(model) / task_id
-    shutil.rmtree(scratch, ignore_errors=True)
-    scratch.mkdir(parents=True, exist_ok=True)
     provenance = row_provenance_fields(
         task, oracle, task_id, lane, generation, legacy_root, []
     )
+
+    # Re-verify every mounted input immediately before doing any work, not
+    # just at preflight: a workspace or cache that went missing, drifted or
+    # was tampered with between preflight and here must surface as
+    # infrastructure, never as a candidate failure.
+    live_blockers = recovered_blockers(task_id, entry)
+    if live_blockers:
+        row = {
+            "id": task_id,
+            "model": model,
+            "lane": lane,
+            "source_kind": "published_legacy",
+            "start_sha": entry["start_sha"],
+            "patch_sha256": generation.get("patch_sha256"),
+            "status": INFRA_RETRY,
+            "candidate_result": INFRA_RETRY,
+            "correctness_ok": None,
+            "patch_apply": None,
+            "scope_ok": None,
+            "replay_contract": "recovered",
+            "error": "recovered asset verification failed before execution: "
+                     + "; ".join(live_blockers),
+            "asset_blockers": live_blockers,
+        }
+        row.update(provenance)
+        return row
+
+    scratch = work_root / lane / model_component(model) / task_id
+    shutil.rmtree(scratch, ignore_errors=True)
+    scratch.mkdir(parents=True, exist_ok=True)
     workspace_scratch = scratch / "workspace"
-    shutil.copytree(
-        assets_root / entry["workspace"], workspace_scratch, symlinks=True
-    )
+    try:
+        shutil.copytree(
+            assets_root / entry["workspace"], workspace_scratch, symlinks=True
+        )
+    except (OSError, shutil.Error) as error:
+        # An unreadable/root-owned leftover in the recovered workspace is an
+        # infrastructure fault, not a model failure.
+        purge_scratch(scratch)
+        row = {
+            "id": task_id,
+            "model": model,
+            "lane": lane,
+            "source_kind": "published_legacy",
+            "start_sha": entry["start_sha"],
+            "patch_sha256": generation.get("patch_sha256"),
+            "status": INFRA_RETRY,
+            "candidate_result": INFRA_RETRY,
+            "correctness_ok": None,
+            "patch_apply": None,
+            "scope_ok": None,
+            "replay_contract": "recovered",
+            "error": f"could not materialize recovered workspace: {error!r}"[:4000],
+        }
+        row.update(provenance)
+        return row
     patch_workdir = workspace_scratch / entry["patch_subdir"]
 
     patch_path = Path(generation["patch_file"])
