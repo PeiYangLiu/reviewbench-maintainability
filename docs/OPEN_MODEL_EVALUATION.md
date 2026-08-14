@@ -634,11 +634,16 @@ mounts** is re-verified against live state on each preflight *and* again
 immediately before the Oracle runs:
 
 - the exact-start workspace must still be at the task `start_sha` **and**
-  match the manifest's recorded `workspace_state` -- same modified tracked
-  paths (dpnp legitimately carries the retained dpctl-0.19 compatibility
-  patch), same untracked entries, same `git submodule status` lines -- so a
-  stray edit, a half-deleted build tree or a moved/dirty submodule blocks
-  instead of silently changing what gets compiled;
+  match the manifest's recorded `workspace_state`: same modified tracked paths
+  (dpnp legitimately carries the retained dpctl-0.19 compatibility patch),
+  same untracked entries, same `git submodule status` lines, **and the same
+  full lstat+content digest of the entire copied tree with only `.git`
+  excluded**. That last field is what catches build residue git deliberately
+  hides -- a `.gitignore`d `build/`, `target/` or `*.o` left in the workspace
+  is invisible to `git status` yet is copied into every replay scratch -- so
+  ignored residuals, symlinks and empty directories all block. It is not
+  free: ClickHouse's 52 GB workspace digests 586,242 entries in ~2 min, which
+  is the deliberate price of a fail-closed provenance check;
 - every authored harness file, golden patch and harness-copy source must
   still hash to its recorded SHA-256;
 - every mounted cache -- both `cache_mounts` (rippled's Conan cache) and the
@@ -682,6 +687,24 @@ proof runs stamped with the current fingerprint, and the adapter rejects a
 manifest entry whose recorded proof runs carry a different one, so editing a
 command, rebuilding an image or touching a harness byte turns previously
 recorded proofs into *stale evidence* rather than silently reusable ones.
+
+All lanes share that one implementation. The bounded `directory_identity`
+(500-file traversal cap, 64 KiB read cap per file) and `safe_file_digest`
+helpers that used to fingerprint the *historical* native/rust/JVM/TS-JS trees
+and caches are gone: a JVM Gradle cache home, a `/oracle-cache` jar, a TS/JS
+`node_modules` tree, a pinned Node runtime, a retained repo checkout and a
+recovered cache are now all bound by full lstat+content digests, so a change
+to the 900th file, a change past a file's first 64 KiB, a retargeted symlink
+or an added/removed empty directory can no longer slip through any lane's
+replay-contract fingerprint.
+
+Concurrency is fail-safe as well: `cmd_replay` holds a cross-process
+`execution_lock(lane, model, task)` from scratch creation through evidence
+persistence and cleanup, each invocation gets a unique scratch directory
+(`invocation_scratch`, PID + UUID suffixed), and evidence logs are published
+by copy-to-`.new`-then-`os.replace`. Two processes replaying the same pair
+therefore cannot delete each other's workspace mid-build, interleave a log, or
+leave a half-written artifact behind.
 
 Proofs never run against the canonical workspace: `cmd_smoke` materializes a
 disposable copy per variant (start and golden alike), applies the golden patch
@@ -792,9 +815,9 @@ python3 scripts/run_legacy_reserve_correctness.py replay \
 The bundle produced on 2026-08-14 lives at
 `/data/v-peiyangliu/reviewbench-openmodels/legacy-recovery-assets/native-rust`
 (`recovery-manifest.json` SHA-256
-`953cde9cc577076005465f67355e5f4b4eafead24f11c55a0f7840d34a11a447`,
+`95deeeef08b1aa5e67e37da8f1943283182f4b626978c3142232b07009e8d1e6`,
 `SHA256SUMS` SHA-256
-`acf3f5f056d6c512b4622381878f1d5ded46cd7d338cc93f24f6913bca9d8b32`). The
+`7698777c71fbf62ac21cbc2d3de83eadfe91fea7a36cad8991cef525cbebf477`). The
 Conan cache alone now binds 142,680 entries -- 128,802 files, 13,853
 directories and 25 symlinks -- where the previous file-only traversal bound
 128,802.
@@ -803,7 +826,13 @@ Live checks against that bundle: a same-size byte swap in ClickHouse's mounted
 CARGO_HOME; retargeting the `grpc/1.50.1/.../spm-core-include/grpc` *directory
 symlink* in the Conan cache; and adding a single empty directory to it -- each
 blocks the affected task ("has drifted from its recorded content digest"),
-and restoring the original state returns each to ready.
+and restoring the original state returns each to ready. A `.gitignore`d
+`build/residual.o` dropped into the memilio workspace -- which `git status`
+reports as nothing at all, because that repo's 278-line `.gitignore` hides it
+-- also blocks (10/11 -> 9/11 ready) and clears when removed. Two concurrent
+`replay` invocations of the same (lane, model, task) each executed exactly
+once, published an intact evidence log with no `.new` residue, and left no
+scratch behind.
 Every contract's start and golden proof in that bundle was executed on a
 disposable copy, and a post-proof replay confirms the canonical CARGO_HOME
 (8,343 files) and workspaces are byte-identical afterwards.

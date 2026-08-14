@@ -626,6 +626,14 @@ def workspace_state(start: Path) -> dict[str, Any]:
     * ``submodules`` -- ``git submodule status`` lines, so an initialized
       submodule that moves or goes dirty (ClickHouse ships 123 of them) is
       caught instead of silently changing what gets compiled.
+    * ``tree`` -- a full lstat+content digest of the *entire* copied tree with
+      only ``.git`` metadata excluded. This is what catches build residue that
+      git itself hides: a ``.gitignore``d ``build/``, ``target/`` or
+      ``node_modules/`` artifact is invisible to ``git status`` (and to
+      ``--untracked-files=all`` unless ``--ignored`` is passed), yet it is
+      copied into every replay scratch and can change what the Oracle
+      compiles. Recording and validating the copied tree itself means ignored
+      residuals, symlinks and empty directories all block.
 
     The manifest records this verbatim, and both preflight and replay compare
     the live value against it: any difference is a blocker, never a candidate
@@ -656,6 +664,8 @@ def workspace_state(start: Path) -> dict[str, Any]:
         "submodules": sorted(
             line.strip() for line in submodules.stdout.splitlines() if line.strip()
         ),
+        # Authoritative: the copied tree itself, minus git metadata.
+        "tree": _tree_digest_impl(start, {".git"}),
     }
 
 

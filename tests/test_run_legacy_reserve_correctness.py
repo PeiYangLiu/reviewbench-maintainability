@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -50,6 +51,16 @@ def make_git_repo(root: Path) -> str:
     run("git", "-C", str(root), "add", "-A")
     run("git", "-C", str(root), "commit", "-q", "-m", "init")
     return run("git", "-C", str(root), "rev-parse", "HEAD").strip()
+
+
+
+def assert_no_scratch_files(work_root: Path):
+    """No replay scratch content may linger (per-invocation dirs may be
+    removed leaving empty parents, but never files)."""
+    leftovers = [
+        path for path in work_root.rglob("*") if path.is_file() or path.is_symlink()
+    ]
+    assert leftovers == [], leftovers
 
 
 def strict_task(task_id, repo="owner/repo", language="C/C++"):
@@ -858,8 +869,7 @@ def test_replay_native_applies_patch_and_records_pass(tmp_path, monkeypatch):
     assert (task_dir / "start" / "file.txt").read_text(encoding="utf-8") == "a\nb\nc\n"
     # the disposable scratch workspace must not linger under output --
     # only the small evidence log does.
-    scratch = tmp_path / "work/native" / MODULE.model_component("my-model") / task_id
-    assert not scratch.exists()
+    assert_no_scratch_files(tmp_path / "work")
     assert row["log"] == "legacy/evidence/native/{}/{}/run.log".format(
         MODULE.model_component("my-model"), task_id
     )
@@ -1265,21 +1275,17 @@ def test_asset_state_and_docker_image_id_do_not_raise_without_docker(tmp_path):
     assert "docker_image_id" in state
 
 
-def test_directory_identity_detects_in_place_content_replacement_at_same_mtime(
-    tmp_path,
-):
-    # Code-review finding: use a bounded but content-sensitive directory
-    # identity, not only mtime on the parent -- a same-path in-place
-    # replacement of a source tree's contents (a common outcome of
-    # rsync/cp -a/container-mount refreshes) must be detected even when
-    # the replacement reuses the exact same size and mtime.
+def test_content_tree_digest_detects_in_place_replacement_at_same_mtime(tmp_path):
+    # Historically this used a *bounded* directory identity (500 files, first
+    # 64 KiB per file). It is now the same full lstat+content digest the
+    # recovered contracts use, so nothing is sampled away.
     tree = tmp_path / "tree"
     tree.mkdir()
     target = tree / "file.txt"
     target.write_text("original content!", encoding="utf-8")
     original_stat = target.stat()
 
-    before = MODULE.directory_identity(tree)
+    before = MODULE.content_tree_digest(tree)
 
     target.write_text("REPLACED content!", encoding="utf-8")  # same length
     os.utime(target, (original_stat.st_atime, original_stat.st_mtime))
@@ -1288,11 +1294,117 @@ def test_directory_identity_detects_in_place_content_replacement_at_same_mtime(
 
     # A parent-only stat (path_identity) would see no difference at all.
     assert MODULE.path_identity(tree) == MODULE.path_identity(tree)
+    assert MODULE.content_tree_digest(tree) != before
+    assert MODULE.content_tree_digest(tmp_path / "does-not-exist") is None
+    assert MODULE.content_file_digest(None) is None
 
-    after = MODULE.directory_identity(tree)
-    assert after != before
 
-    assert MODULE.directory_identity(tmp_path / "does-not-exist") is None
+def test_bounded_helpers_are_gone_from_the_module():
+    """The sampled helpers must not exist any more: their presence is what
+    let a >500-file tree, a tail-of-file edit, a symlink or an empty
+    directory escape a provenance decision."""
+    for name in ("directory_identity", "safe_file_digest", "_bounded_file_digest"):
+        assert not hasattr(MODULE, name), name
+
+
+def test_legacy_lane_digests_cover_beyond_the_old_500_file_cap(tmp_path):
+    """A change to the 900th file (past the old cap) must be visible."""
+    tree = tmp_path / "cache"
+    tree.mkdir()
+    for index in range(900):
+        (tree / f"blob-{index:04d}.bin").write_bytes(b"x" * 32)
+    before = MODULE.content_tree_digest(tree)
+    assert before["file_count"] == 900
+    (tree / "blob-0899.bin").write_bytes(b"y" * 32)  # same size, last file
+    assert MODULE.content_tree_digest(tree) != before
+
+
+def test_legacy_lane_digests_cover_file_tails_beyond_64kib(tmp_path):
+    """A change past the first 64 KiB of a file must be visible."""
+    tree = tmp_path / "cache"
+    tree.mkdir()
+    blob = tree / "big.bin"
+    blob.write_bytes(b"a" * (128 * 1024))
+    before = MODULE.content_tree_digest(tree)
+    payload = bytearray(blob.read_bytes())
+    payload[-1] = ord("b")  # far beyond the old 64 KiB read cap
+    blob.write_bytes(bytes(payload))
+    assert MODULE.content_tree_digest(tree) != before
+
+
+def test_legacy_lane_digests_cover_symlinks_and_empty_dirs(tmp_path):
+    tree = tmp_path / "cache"
+    (tree / "real").mkdir(parents=True)
+    (tree / "real/a").write_text("a\n", encoding="utf-8")
+    (tree / "hollow").mkdir()
+    os.symlink("real", tree / "dirlink")
+    before = MODULE.content_tree_digest(tree)
+    assert before["dir_count"] == 2 and before["symlink_count"] == 1
+    (tree / "dirlink").unlink()
+    os.symlink("hollow", tree / "dirlink")
+    assert MODULE.content_tree_digest(tree) != before
+    (tree / "dirlink").unlink()
+    os.symlink("real", tree / "dirlink")
+    assert MODULE.content_tree_digest(tree) == before
+    (tree / "hollow").rmdir()
+    assert MODULE.content_tree_digest(tree) != before
+
+
+def test_every_legacy_lane_asset_state_uses_full_content_digests(tmp_path):
+    """JVM/TS-JS/native/rust historical asset states must carry full digests
+    (``kind``/``entry_count``), never the old bounded sample shape."""
+    legacy_root = tmp_path / "legacy"
+    repo = legacy_root / "repos/owner__repo"
+    make_git_repo(repo)
+    for index in range(600):  # beyond the old traversal cap
+        (repo / f"f{index}.txt").write_text("x", encoding="utf-8")
+    cache_home = legacy_root / "strict_screen_20260726/oracle_recovery/java/cache/home"
+    cache_home.mkdir(parents=True)
+    (cache_home.parent / "oracle.init.gradle").write_text("g", encoding="utf-8")
+    (cache_home / "blob").write_text("b", encoding="utf-8")
+    session = (
+        legacy_root / "strict_screen_20260726/oracle_recovery/tsjs/20_x/session"
+    )
+    session.mkdir(parents=True)
+    (session / "s.txt").write_text("s", encoding="utf-8")
+    tools = (
+        legacy_root
+        / "strict_screen_20260726/oracle_recovery/tsjs/_node_tools/node_modules"
+    )
+    tools.mkdir(parents=True)
+    (tools / "t.txt").write_text("t", encoding="utf-8")
+
+    jvm_oracle = strict_oracle(
+        "github__apache__solr__pull_3433__comment_2231064740__modularity",
+        repo="owner/repo",
+        command="java -javaagent:/oracle-cache/oracle.init.gradle test",
+        environment={
+            "container": "img",
+            "cache": "oracle_recovery/java/cache/home",
+        },
+    )
+    jvm_state = MODULE.asset_state(
+        "github__apache__solr__pull_3433__comment_2231064740__modularity",
+        "jvm", jvm_oracle, legacy_root,
+    )
+    assert jvm_state["repo_checkout"]["kind"] == "tree"
+    assert jvm_state["repo_checkout"]["file_count"] >= 600
+    assert jvm_state["cache_home"]["kind"] == "tree"
+    assert jvm_state["oracle_cache_blobs"]["oracle.init.gradle"]["sha256"]
+
+    tsjs_oracle = strict_oracle(
+        "github__discourse__discourse__pull_37336__comment_2752215814__complexity",
+        repo="owner/repo",
+        historical_node="18.20.8",
+        recovery_artifact="oracle_recovery/tsjs/20_x",
+    )
+    tsjs_state = MODULE.asset_state(
+        "github__discourse__discourse__pull_37336__comment_2752215814__complexity",
+        "tsjs", tsjs_oracle, legacy_root,
+    )
+    assert tsjs_state["repo_checkout"]["kind"] == "tree"
+    assert tsjs_state["session"]["kind"] == "tree"
+    assert tsjs_state["shared_node_tools"]["kind"] == "tree"
 
 
 def test_asset_state_binds_rust_start_tree_identity(tmp_path):
@@ -1576,9 +1688,8 @@ def test_replay_jvm_applies_patch_persists_evidence_and_removes_worktree(
         ["git", "-C", str(legacy_root / "repos/org__repo"), "worktree", "list"],
         stdout=subprocess.PIPE, text=True,
     ).stdout
-    jvm_scratch = tmp_path / "work/jvm" / MODULE.model_component("my-model") / task_id
-    assert str(jvm_scratch / "workspace") not in worktree_list
-    assert not jvm_scratch.exists()
+    assert "/workspace" not in worktree_list
+    assert_no_scratch_files(tmp_path / "work")
 
 
 def test_replay_jvm_apply_error_persists_error_log_and_removes_worktree(
@@ -1628,9 +1739,7 @@ def test_replay_jvm_apply_error_persists_error_log_and_removes_worktree(
         f"legacy/evidence/jvm/{MODULE.model_component('my-model')}/{task_id}/apply-error.log"
     )
     assert (output / row["error_log"]).is_file()
-    assert not (
-        tmp_path / "work/jvm" / MODULE.model_component("my-model") / task_id
-    ).exists()
+    assert_no_scratch_files(tmp_path / "work")
 
 
 def test_replay_tsjs_runs_install_and_test_and_persists_evidence(tmp_path, monkeypatch):
@@ -1695,9 +1804,7 @@ def test_replay_tsjs_runs_install_and_test_and_persists_evidence(tmp_path, monke
     )
     assert (output / row["log"]).is_file()
     assert row["task_fingerprint"] == BASE.task_fingerprint(task)
-    assert not (
-        tmp_path / "work/tsjs" / MODULE.model_component("my-model") / task_id
-    ).exists()
+    assert_no_scratch_files(tmp_path / "work")
 
 
 def test_replay_tsjs_infra_retry_on_install_failure_persists_install_log(
@@ -2631,3 +2738,191 @@ def test_adapter_blocks_on_directory_symlink_and_empty_dir_drift(
         "has drifted" in b
         for b in MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
     )
+
+
+# ---------------------------------------------------------------------------
+# Exact-start copies: gitignored build residue must block
+# ---------------------------------------------------------------------------
+
+
+def test_workspace_state_binds_gitignored_build_output(tmp_path, monkeypatch):
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    start = assets / "workspaces/case/start"
+    (start / ".gitignore").write_text("build/\n*.o\n", encoding="utf-8")
+    run("git", "-C", str(start), "add", "-A")
+    run("git", "-C", str(start), "-c", "user.email=a@b", "-c", "user.name=a",
+        "commit", "-q", "-m", "ignore build")
+    head = run("git", "-C", str(start), "rev-parse", "HEAD").strip()
+    MODULE.load_recovery_assets(assets)
+    entry = MODULE.recovered_entry(TSFILE_ID)
+    _ready_entry(
+        assets,
+        start_sha=head,
+        workspace_state=MODULE.workspace_git_state(start),
+        mount_input_digests=MODULE.mount_input_digests(dict(entry, start_sha=head), assets),
+    )
+    assert MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha") == []
+
+    # a *gitignored* build residual: git status reports nothing at all ...
+    (start / "build").mkdir()
+    (start / "build/artifact.o").write_text("obj\n", encoding="utf-8")
+    status = run("git", "-C", str(start), "status", "--porcelain")
+    assert status.strip() == "", "git status must be blind to this on purpose"
+    # ... but the recorded copied-tree digest is not
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("tree digest" in b and "gitignored" in b for b in blockers)
+
+    shutil.rmtree(start / "build")
+    assert MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha") == []
+
+    # an ignored *file* pattern too
+    (start / "stale.o").write_text("obj\n", encoding="utf-8")
+    assert run("git", "-C", str(start), "status", "--porcelain").strip() == ""
+    assert any(
+        "tree digest" in b
+        for b in MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    )
+    (start / "stale.o").unlink()
+    assert MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha") == []
+
+
+def test_workspace_state_tree_excludes_only_git_metadata(tmp_path):
+    repo = tmp_path / "repo"
+    make_git_repo(repo)
+    before = MODULE.workspace_git_state(repo)
+    assert before["tree"]["kind"] == "tree"
+    # touching .git internals (gc, reflog, index refresh) must not churn it
+    (repo / ".git/COMMIT_EDITMSG").write_text("noise\n", encoding="utf-8")
+    (repo / ".git/newdir").mkdir()
+    assert MODULE.workspace_git_state(repo)["tree"] == before["tree"]
+    # everything else does
+    (repo / "another.txt").write_text("x\n", encoding="utf-8")
+    assert MODULE.workspace_git_state(repo)["tree"] != before["tree"]
+
+
+# ---------------------------------------------------------------------------
+# Concurrency: duplicate replays of the same (lane, model, task)
+# ---------------------------------------------------------------------------
+
+
+def _concurrent_replay_worker(payload):
+    """Run in a *separate process*: emulate one full replay execution --
+    lock, scratch creation, work, evidence persistence, cleanup."""
+    import importlib.util
+    import os
+    import time
+    from pathlib import Path
+
+    (
+        scripts_dir, legacy_dir, work_root, output, lane, model, task_id, marker
+    ) = payload
+    spec = importlib.util.spec_from_file_location(
+        "run_legacy_reserve_correctness",
+        Path(scripts_dir) / "run_legacy_reserve_correctness.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    observed = []
+    with module.execution_lock(Path(legacy_dir), lane, model, task_id):
+        scratch = module.invocation_scratch(Path(work_root), lane, model, task_id)
+        scratch.mkdir(parents=True, exist_ok=True)
+        # write a log slowly so an unsynchronized peer would interleave
+        log = scratch / "run.log"
+        for index in range(20):
+            with log.open("a") as handle:
+                handle.write(f"{marker}-{index}\n")
+            time.sleep(0.005)
+            observed.append(sorted(p.name for p in scratch.iterdir()))
+        evidence = module.persist_evidence(
+            Path(output), lane, model, task_id, scratch
+        )
+        published = (
+            Path(output) / evidence["run.log"]
+        ).read_text().strip().splitlines()
+    return {
+        "pid": os.getpid(),
+        "scratch": str(scratch),
+        "published_marker": {line.split("-")[0] for line in published},
+        "published_lines": len(published),
+        "saw_only_own_files": all(files == ["run.log"] for files in observed),
+        "scratch_removed": not scratch.exists(),
+    }
+
+
+def test_concurrent_duplicate_replays_cannot_clobber_each_other(tmp_path):
+    """Two processes replaying the same (lane, model, task) must serialize,
+    keep separate scratch trees, and publish complete evidence."""
+    import multiprocessing
+
+    legacy_dir = tmp_path / "output/legacy/correctness"
+    legacy_dir.mkdir(parents=True)
+    work_root = tmp_path / "work"
+    output = tmp_path / "output"
+    lane, model, task_id = "native", "my-model", "github__x__y__pull_1__c__z"
+    payloads = [
+        (
+            str(SCRIPTS_DIR), str(legacy_dir), str(work_root), str(output),
+            lane, model, task_id, marker,
+        )
+        for marker in ("alpha", "beta")
+    ]
+    with multiprocessing.get_context("spawn").Pool(2) as pool:
+        results = pool.map(_concurrent_replay_worker, payloads)
+
+    # distinct per-invocation scratch trees, both cleaned up
+    assert results[0]["scratch"] != results[1]["scratch"]
+    assert all(result["scratch_removed"] for result in results)
+    # neither process ever saw the other's files in its own scratch
+    assert all(result["saw_only_own_files"] for result in results)
+    # each published a complete, single-writer evidence log (20 lines, one
+    # marker) -- no interleaving, no truncation by the peer
+    for result in results:
+        assert result["published_lines"] == 20, result
+        assert len(result["published_marker"]) == 1, result
+    # the surviving evidence file is one of them, intact, never a mix
+    published = (
+        output / "legacy/evidence" / lane / MODULE.model_component(model)
+        / BASE.safe_component(task_id) / "run.log"
+    )
+    lines = published.read_text().strip().splitlines()
+    assert len(lines) == 20
+    assert len({line.split("-")[0] for line in lines}) == 1
+    # no half-written staging files are left behind
+    assert list(published.parent.glob("*.new")) == []
+    assert_no_scratch_files(work_root)
+
+
+def test_execution_lock_serializes_same_pair_and_not_different_pairs(tmp_path):
+    legacy_dir = tmp_path / "legacy"
+    order = []
+
+    def hold(lane, model, task_id, tag):
+        with MODULE.execution_lock(legacy_dir, lane, model, task_id):
+            order.append(f"enter-{tag}")
+            time.sleep(0.05)
+            order.append(f"exit-{tag}")
+
+    with ThreadPoolExecutor(2) as pool:
+        list(pool.map(
+            lambda args: hold(*args),
+            [
+                ("native", "m", "task-a", "a1"),
+                ("native", "m", "task-a", "a2"),
+            ],
+        ))
+    # strict serialization: no interleaved enter/enter
+    assert order in (
+        ["enter-a1", "exit-a1", "enter-a2", "exit-a2"],
+        ["enter-a2", "exit-a2", "enter-a1", "exit-a1"],
+    )
+    # different pairs use different lock files
+    lock_names = sorted(p.name for p in legacy_dir.glob(".exec-*.lock"))
+    assert lock_names == [
+        f".exec-native-{MODULE.model_component('m')}-task-a.lock"
+    ]
+    MODULE.execution_lock(legacy_dir, "native", "m", "task-b").__enter__()
+    assert len(list(legacy_dir.glob(".exec-*.lock"))) == 2
+    # lock files must be excluded from artifact hashing by name convention
+    assert all(name.endswith(".lock") for name in lock_names)
