@@ -581,6 +581,156 @@ lane, drift detection against the 14-task manifest, resume/skip behavior,
 and candidate-missing rows that normalize cleanly through the real
 `normalized_record()`.
 
+#### 7.1.2 Go/Python + scripted legacy replay adapter (19 of the 40)
+
+`scripts/run_legacy_gopy_scripted_correctness.py` closes the gap for the
+other large slice: the 19 published-hard tasks whose lane is `gopy` (15) or
+`scripted` (4). Their per-task replay recipes are recorded in a reviewable
+data file, `data/legacy_contracts/gopy_scripted_20260808.json`
+(`reviewbench-legacy-replay-contract/v1`), so the executable contract is
+auditable independently of the code that runs it. Every one of the 19 IDs
+appears there exactly once, either `recovered` (with a fully pinned recipe)
+or `blocked` (with the exact lost assets, the evidence that they are lost,
+and what re-engineering would be required).
+
+Like the reserve adapter, it writes only
+`output/legacy/correctness/{gopy,scripted}.jsonl` -- the files `finalize()`
+already merges and normalizes through the same `normalized_record()` used
+for the 374 modern tasks -- and it consumes the already-staged,
+checksum-verified `generation_results.normalized.jsonl` from
+`prepare --allow-partial-modern`.
+
+Recovered recipe kinds (all replay the historical behavioral Oracle; no
+source-shape substitute is ever used):
+
+- `go_docker_p2p` (aws/eks-anywhere#2274, pingcap/tidb#68028): fresh
+  `git worktree` of the retained clone at the exact `start_sha`, staged
+  candidate patch applied, then the historical container (`golang:1.25-bookworm`,
+  the task's own dedicated `rb-wave2-*-mod`/`-build` Go cache volumes,
+  recorded `network: host`) runs
+  `go test -count=1 -json -run <oracle.test_selector> <test_target>` from the
+  recorded `module_dir`. Correctness requires *every* name in the Oracle's own
+  `pass_to_pass_tests` list (23 and 162 respectively) to report a `pass`
+  action in the JSON event stream; a build failure or a vanished test counts
+  as a failure, never as absent.
+- `go_docker_session_oracle` (unikraft/kraftkit#2007): same materialization
+  plus the retained, SHA-256-pinned session Oracle
+  (`initrd/recovery_oracle_test.go`, recovered from the incremental-go-2
+  recovery artifacts) copied into the worktree, then the historical
+  `go test -tags containers_image_openpgp -run ^TestRecoveryDirectoryCPIO$
+  ./initrd` under `golang:1.24.0-bookworm` (the recorded *start*-revision
+  toolchain), `CGO_ENABLED=0`, `GOTOOLCHAIN=local`, offline.
+- `python_image_pytest` (scikit-learn#18359): the historical image
+  `reviewbench-sklearn-18359` bakes the exact start checkout (built in place
+  with Python 3.8.20 / numpy 1.19.2 / scipy 1.5.2 / Cython 0.29.21 /
+  pytest 6.1.1) plus the original `run-recovery` harness; a disposable
+  container applies the candidate patch to that in-image workspace and runs
+  the historical `pytest -q sklearn/inspection/_plot/tests/
+  test_plot_partial_dependence.py --junitxml=...`, scored from the JUnit
+  report against the recorded 55 passing tests.
+
+Fail-closed guarantees: a task is replayed only when its contract entry is
+`recovered` **and** every live asset resolves right now (repo checkout
+containing the exact `start_sha`; Docker image present and matching the
+recorded image ID; Go module/build cache volumes present; session Oracle
+asset matching its recorded SHA-256; and, for the in-image workspace, an
+anchor file byte-identical both to the recorded digest and to the repository
+blob at `start_sha`). Anything missing is a preflight blocker: the task is
+never scored, never guessed, and never reported as a model failure. Blocked
+entries additionally re-verify their recorded `missing_assets`; if all of
+them reappear, preflight reports `blocker_possibly_resolved` and fails, so a
+recovered asset cannot be silently ignored. Nothing is fetched from the
+network to make a run succeed: containers use the recorded network mode,
+Go runs with `GOTOOLCHAIN=local`, and dependency resolution comes only from
+the retained, `go.sum`-verified module caches.
+
+Recovered assets live outside the repository (they are large and/or
+binary) under a dedicated asset root with a `MANIFEST.json` and
+`SHA256SUMS`:
+
+```text
+/data/<user>/reviewbench-openmodels/legacy-recovery-assets/gopy-scripted/
+  assets/kraftkit-2007/oracle-start_test.go      # session Oracle (pinned)
+  assets/sklearn-18359/run-recovery.sh           # historical harness copy
+  caches/rb-wave2-eks-anywhere-2274-mod.tar.gz   # go.sum-pinned module cache
+  caches/rb-wave2-tidb-68028-mod.tar.gz
+  caches/incgo2-mod124kraft.tar.gz
+```
+
+`restore-caches` recreates a lost Go module cache volume from those packaged
+archives after verifying them against `SHA256SUMS` -- never from the network,
+and never over an existing volume.
+
+Commands:
+
+```bash
+# 1) Stage patches as in 7.1.1 (prepare --allow-partial-modern).
+
+# 2) Fail-closed preflight of the 19 gopy/scripted contracts (no execution):
+python3 scripts/run_legacy_gopy_scripted_correctness.py preflight \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --legacy-root <retained-session-root> \
+  --asset-root  <legacy-recovery-assets>/gopy-scripted \
+  --session-files <historical REVIEWBENCH_SESSION_FILES root> \
+  --output <output> --allow-blocked
+
+# 3) Replay only what preflight reports ready, for one staged model:
+python3 scripts/run_legacy_gopy_scripted_correctness.py replay \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --legacy-root <retained-session-root> \
+  --asset-root  <legacy-recovery-assets>/gopy-scripted \
+  --output <output> --model '<model>' --allow-blocked
+
+# 4) Finalize as usual (blocked pairs remain visible, not fabricated).
+
+# Optional: rebuild a lost module cache volume from the packaged archive.
+python3 scripts/run_legacy_gopy_scripted_correctness.py restore-caches \
+  --asset-root <legacy-recovery-assets>/gopy-scripted
+```
+
+Status as of 2026-08-13: preflight reports **4 of 19 ready**
+(aws/eks-anywhere#2274, pingcap/tidb#68028, unikraft/kraftkit#2007,
+scikit-learn#18359) and 15 blocked. A real replay of the staged
+`MiniMaxAI/MiniMax-M2.1` candidates over the four ready tasks produced three
+`pass` rows (tidb 162/162, scikit-learn 55/55, kraftkit 1/1) and one genuine
+behavioral `fail` (eks-anywhere: the candidate broke compilation of
+`pkg/providers/tinkerbell/create.go`, so 0/23 PASS_TO_PASS tests ran).
+
+The 15 blocked tasks split into three root causes, all recorded per task in
+the contract file:
+
+1. **Lost session Oracle / harness** (11): alchemiscale#421, Pyomo#3698,
+   chazari-x/yandex-pr-diplom#1, codecov/shared#90, labscript-suite/lyse#119,
+   open-formulieren/open-forms#3125, opentelemetry-go-contrib#6172,
+   ozontech/seq-ui#44, postman17/metrics#13, redis/redis-py#3350,
+   runfinch/finch-core#780. Their pinned toolchains (Docker images, module
+   cache volumes) survive, but the session-authored behavioral test or shell
+   harness that *was* the Oracle lived under the deleted `increment5-recovery`
+   / `recovery/wave2-*` trees. Re-authoring them would create a new Oracle,
+   not replay the published one.
+2. **Lost toolchain/runtime** (3): hashicorp/nomad#16383 (Node 16.20 +
+   Chromium 120 Ember environment, never pinned by digest),
+   scala-js#4707 (project-pinned sbt 1.5.8 launcher absent from the retained
+   JVM cache, so replay would require an unpinned network resolution),
+   scala-js#4988 (session-authored `FunctionBuilderOracleTest`, absent from
+   the repository at `start_sha`).
+3. **No recorded execution recipe** (1): Agoric/agoric-sdk#8072 -- both the
+   published Oracle and its unsanitized source artifact (`oracle_next_go.jsonl`)
+   carry only coverage/PASS_TO_PASS evidence and no command, environment or
+   selector at all.
+
+`tests/test_run_legacy_gopy_scripted_correctness.py` covers this adapter with
+synthetic fixtures only (no real builds or containers): contract schema and
+scope-drift validation against the published release, PASS_TO_PASS judging
+over `go test -json` streams (including build failures and vanished tests),
+JUnit parsing, per-recipe blocker detection (missing image, retagged image,
+missing cache volume, start SHA absent from the checkout, tampered session
+Oracle, drifted in-image workspace), reappeared-asset detection for blocked
+entries, provenance/staleness and row retraction, lock-safe raw-row merging,
+and CLI fail-closed behavior.
+
 ### 7.2 Current five-model correctness replay
 
 At `2026-08-11T03:40:36Z`, five completed model archives passed generation
