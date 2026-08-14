@@ -296,23 +296,98 @@ def test_proof_blockers_require_start_and_golden():
         "contract declares a source-only golden patch but has no successful "
         "golden proof run",
     ]
-    start_only = [{"variant": "start", "exit_code": 0}]
+    start_only = [{"variant": "start", "run": 1, "exit_code": 0}]
     assert any(
         "no successful golden proof" in text
         for text in MODULE.proof_blockers(recipe, start_only)
     )
     assert MODULE.proof_status(recipe, start_only) == "failed"
     failing_golden = start_only + [
-        {"variant": "golden", "exit_code": 1, "stage": "apply",
+        {"variant": "golden", "run": 1, "exit_code": 1, "stage": "apply",
          "error": "golden patch failed to apply"}
     ]
     blockers = MODULE.proof_blockers(recipe, failing_golden)
-    assert any("last failure: apply" in text for text in blockers)
-    both = start_only + [{"variant": "golden", "exit_code": 0}]
+    assert any("golden patch failed to apply" in text for text in blockers)
+    assert any("latest golden proof run" in text for text in blockers)
+    both = start_only + [{"variant": "golden", "run": 1, "exit_code": 0}]
     assert MODULE.proof_blockers(recipe, both) == []
     assert MODULE.proof_status(recipe, both) == "ready"
     # a contract with no golden patch only needs a start proof
     assert MODULE.proof_blockers({}, start_only) == []
+
+
+@pytest.mark.parametrize("variant", ["start", "golden"])
+def test_proof_blockers_block_an_old_success_followed_by_a_later_failure(
+    variant,
+):
+    """An earlier green run must never clear a later failure.
+
+    Both runs carry the *same* recipe fingerprint, so the staleness rule does
+    not apply: this is a contract that worked and then stopped working, which
+    is exactly the state that must never be scored against.
+    """
+    recipe = {"golden_patch": "harness/x/golden.patch"}
+    runs = [
+        {"variant": "start", "run": 1, "exit_code": 0, "stage": "execute",
+         "recipe_fingerprint": "fp-v1"},
+        {"variant": "golden", "run": 1, "exit_code": 0, "stage": "execute",
+         "recipe_fingerprint": "fp-v1"},
+    ]
+    assert MODULE.proof_blockers(recipe, runs, "fp-v1") == []
+    assert MODULE.proof_status(recipe, runs, "fp-v1") == "ready"
+
+    runs = runs + [
+        {"variant": variant, "run": 2, "exit_code": 1, "stage": "execute",
+         "error": "regressed", "recipe_fingerprint": "fp-v1"}
+    ]
+    blockers = MODULE.proof_blockers(recipe, runs, "fp-v1")
+    assert any("failed" in text for text in blockers), blockers
+    latest_text = (
+        "the latest start-tree proof run" if variant == "start"
+        else "the latest golden proof run"
+    )
+    assert any(latest_text in text for text in blockers), blockers
+    assert MODULE.proof_status(recipe, runs, "fp-v1") == "failed"
+
+    # ... and a *newer* success after that failure clears it again, because
+    # readiness follows the latest evidence, not the worst evidence ever seen.
+    recovered = runs + [
+        {"variant": variant, "run": 3, "exit_code": 0, "stage": "execute",
+         "recipe_fingerprint": "fp-v1"}
+    ]
+    assert any(
+        "an earlier success does not clear a later failure" in text
+        for text in MODULE.proof_blockers(recipe, recovered, "fp-v1")
+    ), "a recorded failure at the current fingerprint must still block"
+
+
+def test_proof_blockers_ignore_a_failure_recorded_under_a_stale_fingerprint():
+    """A failure from a superseded recipe is stale evidence like any other."""
+    recipe = {"golden_patch": "harness/x/golden.patch"}
+    runs = [
+        {"variant": "start", "run": 1, "exit_code": 1, "stage": "execute",
+         "recipe_fingerprint": "fp-old"},
+        {"variant": "golden", "run": 1, "exit_code": 1, "stage": "execute",
+         "recipe_fingerprint": "fp-old"},
+        {"variant": "start", "run": 2, "exit_code": 0, "stage": "execute",
+         "recipe_fingerprint": "fp-new"},
+        {"variant": "golden", "run": 2, "exit_code": 0, "stage": "execute",
+         "recipe_fingerprint": "fp-new"},
+    ]
+    assert MODULE.proof_blockers(recipe, runs, "fp-new") == []
+    # with no fingerprint filter at all, the failures are still visible
+    assert MODULE.proof_blockers(recipe, runs) != []
+
+
+def test_latest_run_follows_record_order_not_exit_code():
+    runs = [
+        {"variant": "start", "run": 1, "exit_code": 0},
+        {"variant": "golden", "run": 1, "exit_code": 0},
+        {"variant": "start", "run": 2, "exit_code": 1},
+    ]
+    assert MODULE.latest_run(runs, "start") == runs[-1]
+    assert MODULE.latest_run(runs, "golden") == runs[1]
+    assert MODULE.latest_run(runs, "missing") is None
 
 
 def test_smoke_records_a_golden_apply_failure_and_stays_not_ready(

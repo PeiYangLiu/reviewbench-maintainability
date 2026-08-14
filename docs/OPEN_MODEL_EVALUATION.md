@@ -1159,13 +1159,40 @@ hard, fail-closed blockers rather than fabricated contracts:
   command, image or harness, the retained checkout does not contain the task
   `start_sha`, and no pinned Bazel toolchain/output-base cache was retained.
 
+**Proof-run readiness is fail-closed on current evidence.** A recovered
+contract's recorded proof runs are judged only at the manifest's current
+`recipe_fingerprint`; stale runs from a superseded recipe are dropped (and
+reported). Among the remaining runs, **any** failure blocks, and the **latest**
+start run -- plus the latest golden run where a source-only golden is declared
+-- must both have succeeded. An old success followed by a later failure at the
+same fingerprint is a contract that stopped working, so it never re-enters the
+ready set; `smoke --golden --reset` is the supported way to clear a recorded
+failure. `recover_legacy_native_rust.proof_blockers` and the adapter's
+`recovered_blockers` implement the identical rule, so the recovery tool and the
+replay adapter can never disagree about which contracts are runnable.
+
+**Asset-root provenance is lane-specific.** A combined invocation supplies both
+roots, but a native/rust row's replay never reads the `jvm-tsjs` pinned-asset
+root and a jvm/tsjs row's replay never reads the `native-rust` bundle.
+`lane_asset_root()` therefore resolves exactly one root per row -- the
+`native-rust` bundle for recovered contracts and for every `native`/`rust`
+task, the `jvm-tsjs` root for every `jvm`/`tsjs` task -- and that value, not
+whatever the CLI happened to be given, is what
+`replay_contract_fingerprint`/`asset_state` bind and what `cmd_replay` threads
+into `row_provenance_fields` and the replay functions. Adding the other lane
+group's root to a command line therefore cannot invalidate a row, while moving
+a lane's *own* root still does. The normalization also happens *inside* the
+fingerprint and asset state, so a caller that passes the raw CLI root cannot
+reintroduce the drift.
+
 Real combined runs against both roots, on the merged branch:
 
 | command | scope | result |
 |---|---|---|
 | `preflight` | full release, both roots | 19 ready / 2 blocked of 21; 6/6 jvm, 3/4 tsjs, 8/9 native, 2/2 rust; 14/14 reserve-20260728 |
 | `verify-contracts` | solr, OpossumUI, FluidFramework, angular | solr 215/215, OpossumUI 2/2, FluidFramework 152/152 reproduced at their unpatched starts; angular blocked |
-| `replay` (one invocation) | singularity-eos (native), anchor (rust), OpossumUI (tsjs), angular | native `pass`, rust `fail` (broken candidate patch, not infra), tsjs `pass` with `pinned_trees_drifted_during_run: []`; angular blocked; no scratch left behind |
+| `replay` (one invocation) | singularity-eos (native), anchor (rust), OpossumUI (tsjs), RepoSense (jvm) | native `pass`, rust `fail` (broken candidate patch, not infra), tsjs `pass` with `pinned_trees_drifted_during_run: []`; RepoSense `infra_retry` because the candidate's own Java does not compile and the mandatory prime therefore fails before the scored command; no scratch left behind |
+| `replay` again, same arguments | as above | `skipped_resume: 4`, `stale_reran: 0`, `executed: 0` -- the lane-specific asset-root provenance makes a combined resume a no-op for all four lanes |
 
 ### 7.2 Current five-model correctness replay
 

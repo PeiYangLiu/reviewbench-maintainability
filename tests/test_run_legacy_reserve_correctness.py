@@ -4497,10 +4497,9 @@ def test_recovered_contract_requires_a_golden_proof_when_golden_declared(
              "recipe_fingerprint": "fp-v1"},
         ],
     )
-    assert any(
-        "no successful golden proof run" in b
-        for b in MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
-    )
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("latest recorded golden proof run failed" in b for b in blockers)
+    assert any("an earlier success does not clear" in b for b in blockers)
     # start + golden clears it
     _ready_entry(
         assets,
@@ -4512,6 +4511,100 @@ def test_recovered_contract_requires_a_golden_proof_when_golden_declared(
         ],
     )
     assert MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha") == []
+
+
+@pytest.mark.parametrize("variant", ["start", "golden"])
+def test_recovered_contract_blocks_when_an_old_success_is_followed_by_a_failure(
+    tmp_path, monkeypatch, variant
+):
+    """Old green run + later failure at the *same* fingerprint must block.
+
+    This is not a staleness case: both runs describe the current recipe. A
+    contract that worked and then stopped working must never be scored
+    against, so "some recorded run passed" is not a sufficient test.
+    """
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    green = [
+        {"variant": "start", "run": 1, "exit_code": 0, "stage": "execute",
+         "recipe_fingerprint": "fp-v1"},
+        {"variant": "golden", "run": 1, "exit_code": 0, "stage": "execute",
+         "recipe_fingerprint": "fp-v1"},
+    ]
+    _ready_entry(
+        assets,
+        golden_patch="harness/case/golden.patch",
+        hashed_files=[],
+        proof_runs=green,
+    )
+    assert MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha") == []
+
+    _ready_entry(
+        assets,
+        proof_runs=green + [
+            {"variant": variant, "run": 2, "exit_code": 1, "stage": "execute",
+             "recipe_fingerprint": "fp-v1"},
+        ],
+    )
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("an earlier success does not clear" in b for b in blockers), blockers
+    expected = (
+        "latest recorded start-tree proof run failed" if variant == "start"
+        else "latest recorded golden proof run failed"
+    )
+    assert any(expected in b for b in blockers), blockers
+
+
+def test_recovered_contract_blocks_when_only_the_latest_run_failed(
+    tmp_path, monkeypatch
+):
+    """Even a single failing run with no prior success is caught by *both*
+    rules, so weakening either one alone cannot re-admit the contract."""
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    _ready_entry(
+        assets,
+        golden_patch="harness/case/golden.patch",
+        hashed_files=[],
+        proof_runs=[
+            {"variant": "start", "run": 1, "exit_code": 0, "stage": "execute",
+             "recipe_fingerprint": "fp-v1"},
+            {"variant": "golden", "run": 1, "exit_code": 137, "stage": "execute",
+             "recipe_fingerprint": "fp-v1"},
+        ],
+    )
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("exit 137" in b for b in blockers), blockers
+
+
+def test_recovered_contract_ignores_failures_from_a_superseded_fingerprint(
+    tmp_path, monkeypatch
+):
+    """A failure recorded under a superseded recipe is stale evidence.
+
+    It is dropped by the staleness filter *before* the fail-closed rules, so
+    a re-proved contract is not blocked forever by the run that motivated the
+    re-proof -- while the presence of stale runs is still reported.
+    """
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    _ready_entry(
+        assets,
+        golden_patch="harness/case/golden.patch",
+        hashed_files=[],
+        proof_runs=[
+            {"variant": "start", "run": 1, "exit_code": 1, "stage": "execute",
+             "recipe_fingerprint": "fp-old"},
+            {"variant": "start", "run": 2, "exit_code": 0, "stage": "execute",
+             "recipe_fingerprint": "fp-v1"},
+            {"variant": "golden", "run": 1, "exit_code": 0, "stage": "execute",
+             "recipe_fingerprint": "fp-v1"},
+        ],
+    )
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    # the stale run is reported, but it is not treated as a current failure
+    assert any("different recipe fingerprint" in b for b in blockers), blockers
+    assert not any("an earlier success does not clear" in b for b in blockers)
 
 
 def test_replay_recovered_returns_infra_not_fail_when_assets_drift(

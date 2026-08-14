@@ -12,10 +12,12 @@ they are pinned here in one file that exercises both groups together.
 from __future__ import annotations
 
 import argparse
+import collections
 import importlib.util
 import json
 import multiprocessing
 import os
+import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -741,3 +743,412 @@ def test_concurrent_jvm_and_native_replays_publish_independent_evidence(tmp_path
         path for path in work_root.rglob("*") if path.is_file() or path.is_symlink()
     ]
     assert leftovers == [], leftovers
+
+
+# ---------------------------------------------------------------------------
+# Asset-root provenance is lane-specific and stable across combined runs
+# ---------------------------------------------------------------------------
+
+
+def test_lane_asset_root_selects_each_lane_groups_own_root(tmp_path):
+    native = make_native_rust_root(tmp_path / "native-rust")
+    jvm = make_jvm_tsjs_root(tmp_path / "jvm-tsjs")
+    MODULE.load_recovery_assets(native)
+    for lane in ("native", "rust"):
+        assert MODULE.lane_asset_root(lane, "any-task", jvm) == native
+    for lane in ("jvm", "tsjs"):
+        assert MODULE.lane_asset_root(lane, "any-task", jvm) == jvm
+    # idempotent: re-normalizing an already-correct root is a no-op
+    for lane in ("native", "rust", "jvm", "tsjs"):
+        once = MODULE.lane_asset_root(lane, "any-task", jvm)
+        assert MODULE.lane_asset_root(lane, "any-task", once) == once
+
+
+def test_a_recovered_contract_binds_the_native_rust_root_whatever_its_lane(
+    tmp_path,
+):
+    native = make_native_rust_root(
+        tmp_path / "native-rust", tasks=[{"id": "task-x"}]
+    )
+    jvm = make_jvm_tsjs_root(tmp_path / "jvm-tsjs")
+    MODULE.load_recovery_assets(native)
+    assert MODULE.lane_asset_root("tsjs", "task-x", jvm) == native
+    assert MODULE.lane_asset_root("tsjs", "other", jvm) == jvm
+
+
+NATIVE_TASK_ID = (
+    "github__ClickHouse__ClickHouse__pull_74193__comment_2024566878__duplication"
+)
+RUST_TASK_ID = (
+    "github__FuelLabs__fuel-tx__pull_197__comment_1003742605__complexity"
+)
+JVM_TASK_ID = (
+    "github__Consensys__web3signer__pull_489__comment_789312375__modularity"
+)
+TSJS_TASK_ID = (
+    "github__discourse__discourse__pull_37336__comment_2752215814__complexity"
+)
+
+
+def _lane_fixture(lane, tmp_path):
+    """Minimal legacy root + oracle for one lane, enough to fingerprint."""
+    legacy_root = tmp_path / "legacy"
+    if lane == "native":
+        manifest = MODULE.NATIVE_MANIFEST[NATIVE_TASK_ID]
+        task_dir = legacy_root / "strict_screen_20260726" / manifest["task_dir"]
+        (task_dir / "start").mkdir(parents=True)
+        (task_dir / "start/file.txt").write_text("x", encoding="utf-8")
+        return NATIVE_TASK_ID, legacy_root, {"repo": "a/b", "environment": {}}
+    if lane == "rust":
+        recovery = (
+            legacy_root / "strict_screen_20260726/oracle_recovery/rust/fuel-tx"
+        )
+        (recovery / "start").mkdir(parents=True)
+        (recovery / "start/Cargo.toml").write_text("x", encoding="utf-8")
+        cargo = (
+            legacy_root / "strict_screen_20260726/oracle_recovery/rust/cache/cargo"
+        )
+        cargo.mkdir(parents=True)
+        (cargo / "config").write_text("c", encoding="utf-8")
+        return RUST_TASK_ID, legacy_root, {
+            "repo": "a/b",
+            "artifacts": {"directory": "oracle_recovery/rust/fuel-tx"},
+            "environment": {
+                "docker_image": "rust:1",
+                "cargo_cache": "oracle_recovery/rust/cache/cargo",
+            },
+        }
+    if lane == "jvm":
+        cache_home = (
+            legacy_root / "strict_screen_20260726/oracle_recovery/java/cache/home"
+        )
+        cache_home.mkdir(parents=True)
+        (cache_home.parent / "oracle.init.gradle").write_text("g", encoding="utf-8")
+        repo = legacy_root / "repos/org__repo"
+        repo.mkdir(parents=True)
+        (repo / "build.gradle").write_text("b", encoding="utf-8")
+        return JVM_TASK_ID, legacy_root, {
+            "repo": "org/repo",
+            "command": "gradle test --init-script /oracle-cache/oracle.init.gradle",
+            "environment": {
+                "container": "img",
+                "cache": "strict_screen_20260726/oracle_recovery/java/cache/home",
+            },
+        }
+    session = (
+        legacy_root / "strict_screen_20260726/oracle_recovery/tsjs/20_x/session"
+    )
+    session.mkdir(parents=True)
+    (session / "s.txt").write_text("s", encoding="utf-8")
+    tools = (
+        legacy_root
+        / "strict_screen_20260726/oracle_recovery/tsjs/_node_tools/node_modules"
+    )
+    tools.mkdir(parents=True)
+    (tools / "t.txt").write_text("t", encoding="utf-8")
+    repo = legacy_root / "repos/discourse__discourse"
+    repo.mkdir(parents=True)
+    return TSJS_TASK_ID, legacy_root, {
+        "repo": "discourse/discourse",
+        "artifacts": {"directory": "oracle_recovery/tsjs/20_x"},
+        "environment": {"historical_node_version": "20.19.5"},
+    }
+
+
+@pytest.mark.parametrize("lane", ["native", "rust", "jvm", "tsjs"])
+def test_an_unrelated_lane_root_never_changes_a_rows_fingerprint(
+    tmp_path, lane, monkeypatch
+):
+    """The core regression: adding the *other* lane group's root to a combined
+    invocation must not invalidate this lane's already-recorded rows."""
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:x")
+    task_id, legacy_root, oracle = _lane_fixture(lane, tmp_path)
+    native = make_native_rust_root(tmp_path / "native-rust")
+    jvm = make_jvm_tsjs_root(tmp_path / "jvm-tsjs")
+    own, unrelated = (
+        (native, jvm) if lane in ("native", "rust") else (jvm, native)
+    )
+
+    def fingerprint(pinned_root):
+        # Deliberately the *raw* CLI jvm/tsjs root, not a pre-normalized one:
+        # the normalization has to happen inside the fingerprint so that no
+        # caller can reintroduce cross-lane drift.
+        MODULE.invalidate_cache_digests()
+        return MODULE.replay_contract_fingerprint(
+            task_id, lane, oracle, legacy_root, [], pinned_root
+        )
+
+    # single-lane invocation: only this lane's own root is supplied
+    MODULE.load_recovery_assets(native if lane in ("native", "rust") else None)
+    alone = fingerprint(own if lane in ("jvm", "tsjs") else None)
+    assert own is not None
+
+    # combined invocation: both roots supplied
+    MODULE.load_recovery_assets(native)
+    combined = fingerprint(jvm)
+    assert combined == alone, (lane, "unrelated root changed the fingerprint")
+
+    # sanity: changing this lane's *own* root still invalidates the row
+    other_own = (
+        make_native_rust_root(tmp_path / "native-rust-2")
+        if lane in ("native", "rust")
+        else make_jvm_tsjs_root(tmp_path / "jvm-tsjs-2")
+    )
+    MODULE.load_recovery_assets(
+        other_own if lane in ("native", "rust") else native
+    )
+    moved = fingerprint(jvm if lane in ("native", "rust") else other_own)
+    assert moved != alone, (lane, "own root change must invalidate the row")
+    assert unrelated is not None
+
+
+@pytest.mark.parametrize("lane", ["native", "rust", "jvm", "tsjs"])
+def test_asset_state_never_resolves_through_the_other_lane_groups_root(
+    tmp_path, lane, monkeypatch
+):
+    """``asset_state`` must normalize the same way the fingerprint does.
+
+    Otherwise a rust cargo cache could resolve inside the jvm/tsjs pinned root
+    (their layouts both mirror ``strict_screen_20260726/``) and bind an
+    unrelated tree into rust provenance.
+    """
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:x")
+    task_id, legacy_root, oracle = _lane_fixture(lane, tmp_path)
+    native = make_native_rust_root(tmp_path / "native-rust")
+    jvm = make_jvm_tsjs_root(tmp_path / "jvm-tsjs")
+    # Plant a decoy at the mirrored relative path inside the *wrong* root and
+    # remove the retained original, so a resolution that consulted the jvm/tsjs
+    # root for a rust asset would silently bind the decoy tree.
+    decoy = jvm / "strict_screen_20260726/oracle_recovery/rust/cache/cargo"
+    decoy.mkdir(parents=True)
+    (decoy / "config").write_text("decoy", encoding="utf-8")
+    retained_cargo = (
+        legacy_root / "strict_screen_20260726/oracle_recovery/rust/cache/cargo"
+    )
+    if retained_cargo.is_dir():
+        shutil.rmtree(retained_cargo)
+    MODULE.load_recovery_assets(native)
+
+    MODULE.invalidate_cache_digests()
+    with_jvm_root = MODULE.asset_state(task_id, lane, oracle, legacy_root, jvm)
+    MODULE.invalidate_cache_digests()
+    without = MODULE.asset_state(task_id, lane, oracle, legacy_root, None)
+    if lane in ("native", "rust"):
+        assert with_jvm_root == without, lane
+    else:
+        # jvm/tsjs legitimately resolve through their own root
+        assert MODULE.lane_asset_root(lane, task_id, jvm) == jvm
+
+
+def _strict_task(task_id, repo="owner/repo", language="C/C++"):
+    return {
+        "id": task_id,
+        "repo": repo,
+        "start_sha": "start",
+        "target_sha": "target",
+        "pr_number": 1,
+        "inferred_language": language,
+    }
+
+
+def _strict_oracle(task_id, **overrides):
+    base = {
+        "id": task_id,
+        "repo": "owner/repo",
+        "start_sha": "start",
+        "target_sha": "target",
+        "pr_number": 1,
+        "golden_correctness_ok": True,
+        "pass_to_pass": 1,
+        "changed_lines_covered": True,
+        "language": "C/C++",
+    }
+    base.update(overrides)
+    return base
+
+
+def _write_jsonl(path, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+LANGUAGE_BY_LANE = {
+    "native": "C/C++",
+    "jvm": "Java",
+    "rust": "Rust",
+    "tsjs": "TypeScript",
+}
+
+
+def build_release(root):
+    """A full, valid release covering every task in this adapter's scope."""
+    tasks_path = root / "tasks.jsonl"
+    oracles_path = root / "oracles.jsonl"
+    tasks, oracles = [], []
+    for task_id in MODULE.TASK_IDS:
+        language = LANGUAGE_BY_LANE[MODULE.EXPECTED_LANE[task_id]]
+        tasks.append(_strict_task(task_id, language=language))
+        oracles.append(_strict_oracle(task_id, language=language))
+    _write_jsonl(tasks_path, tasks)
+    _write_jsonl(oracles_path, oracles)
+    return tasks_path, oracles_path
+
+
+def stage_all_generations(output, model, tasks_by_id):
+    destination = output / "inputs/models" / MODULE.BASE.safe_component(model)
+    patch_dir = destination / "patches"
+    patch_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for task_id, task in tasks_by_id.items():
+        patch_path = patch_dir / f"{task_id}.patch"
+        patch_path.write_text("diff --git a/x b/x\n", encoding="utf-8")
+        rows.append(
+            {
+                "id": task_id,
+                "model": model,
+                "start_sha": task["start_sha"],
+                "apply_ok": True,
+                "patch_file": str(patch_path),
+                "patch_sha256": MODULE.BASE.sha256(patch_path),
+            }
+        )
+    _write_jsonl(destination / "generation_results.normalized.jsonl", rows)
+
+
+def _capture_summaries(monkeypatch):
+    """Capture what ``cmd_replay`` prints, so its summary can be asserted."""
+    summaries: list[str] = []
+    real_print = print
+
+    def capture(payload, *args, **kwargs):
+        summaries.append(payload)
+        return real_print(payload, *args, **kwargs)
+
+    monkeypatch.setitem(MODULE.__dict__, "print", capture)
+    return summaries
+
+
+def _resume_fake_replay(task_id, model, task, oracle, generation, legacy_root,
+                        work_root, output, timeout, **kwargs):
+    """Stand-in replay that records provenance exactly as the real ones do."""
+    lane = MODULE.EXPECTED_LANE[task_id]
+    row = {
+        "id": task_id,
+        "model": model,
+        "lane": lane,
+        "source_kind": "published_legacy",
+        "start_sha": task.get("start_sha", "start"),
+        "patch_sha256": generation.get("patch_sha256"),
+        "status": "pass",
+        "correctness_ok": True,
+        "patch_apply": True,
+        "scope_ok": True,
+    }
+    row.update(
+        MODULE.row_provenance_fields(
+            task, oracle, task_id, lane, generation, legacy_root, [],
+            kwargs.get("asset_root")
+            if lane in ("jvm", "tsjs")
+            else MODULE.lane_asset_root(lane, task_id),
+        )
+    )
+    return row
+
+
+def test_combined_replay_resume_reruns_nothing_for_any_of_the_four_lanes(
+    tmp_path, monkeypatch
+):
+    """End-to-end resume regression across all four lanes.
+
+    A first ``replay`` executes every task; a second, identical combined
+    invocation -- with *both* asset roots supplied -- must skip every row.
+    Before the lane-specific normalization, native/rust rows were recorded
+    with ``asset_root: None`` while ``row_is_stale`` recomputed them against
+    the jvm/tsjs root, so those rows were rerun on every resume.
+    """
+    tasks_path, oracles_path = build_release(tmp_path / "release")
+    tasks_by_id, _, _ = MODULE.load_release_and_plan(tasks_path, oracles_path)
+    output = tmp_path / "output"
+    stage_all_generations(output, "my-model", tasks_by_id)
+    native = make_native_rust_root(tmp_path / "native-rust")
+    jvm = make_jvm_tsjs_root(tmp_path / "jvm-tsjs")
+
+    monkeypatch.setattr(MODULE, "task_blockers", lambda *a, **k: [])
+    for lane_name in list(MODULE.REPLAY_FUNCTIONS):
+        monkeypatch.setitem(
+            MODULE.REPLAY_FUNCTIONS, lane_name, _resume_fake_replay
+        )
+
+    argv = [
+        "replay",
+        "--tasks", str(tasks_path),
+        "--oracles", str(oracles_path),
+        "--legacy-root", str(tmp_path / "legacy"),
+        "--output", str(output),
+        "--model", "my-model",
+        "--asset-root", f"native-rust={native}",
+        "--asset-root", f"jvm-tsjs={jvm}",
+    ]
+    assert MODULE.cmd_replay(MODULE.parse_args(argv)) == 0
+    executed_lanes = collections.Counter()
+    for lane_name in ("native", "rust", "jvm", "tsjs"):
+        path = output / "legacy/correctness" / f"{lane_name}.jsonl"
+        if path.is_file():
+            executed_lanes[lane_name] = len(MODULE.BASE.read_jsonl(path))
+    assert set(executed_lanes) == {"native", "rust", "jvm", "tsjs"}, executed_lanes
+
+    # second identical invocation: everything must resume-skip
+    summaries = _capture_summaries(monkeypatch)
+    assert MODULE.cmd_replay(MODULE.parse_args(argv)) == 0
+    summary = json.loads(summaries[-1])
+    assert summary["skipped_resume"] == len(MODULE.TASK_IDS), summary
+    assert summary["executed"] == 0, summary
+    assert summary["stale_reran"] == 0, summary
+
+
+def test_combined_replay_resume_still_reruns_when_a_lanes_own_root_moves(
+    tmp_path, monkeypatch
+):
+    """Stability must not become blindness: moving a lane's own root still
+    invalidates that lane's rows."""
+    tasks_path, oracles_path = build_release(tmp_path / "release")
+    tasks_by_id, _, _ = MODULE.load_release_and_plan(tasks_path, oracles_path)
+    output = tmp_path / "output"
+    stage_all_generations(output, "my-model", tasks_by_id)
+    native = make_native_rust_root(tmp_path / "native-rust")
+    moved_native = make_native_rust_root(tmp_path / "native-rust-moved")
+    jvm = make_jvm_tsjs_root(tmp_path / "jvm-tsjs")
+
+    monkeypatch.setattr(MODULE, "task_blockers", lambda *a, **k: [])
+    for lane_name in list(MODULE.REPLAY_FUNCTIONS):
+        monkeypatch.setitem(
+            MODULE.REPLAY_FUNCTIONS, lane_name, _resume_fake_replay
+        )
+
+    def argv(native_root):
+        return [
+            "replay",
+            "--tasks", str(tasks_path),
+            "--oracles", str(oracles_path),
+            "--legacy-root", str(tmp_path / "legacy"),
+            "--output", str(output),
+            "--model", "my-model",
+            "--asset-root", f"native-rust={native_root}",
+            "--asset-root", f"jvm-tsjs={jvm}",
+        ]
+
+    assert MODULE.cmd_replay(MODULE.parse_args(argv(native))) == 0
+
+    summaries = _capture_summaries(monkeypatch)
+    assert MODULE.cmd_replay(MODULE.parse_args(argv(moved_native))) == 0
+    summary = json.loads(summaries[-1])
+    native_rust_tasks = sum(
+        1 for task_id in MODULE.TASK_IDS
+        if MODULE.EXPECTED_LANE[task_id] in ("native", "rust")
+    )
+    jvm_tsjs_tasks = len(MODULE.TASK_IDS) - native_rust_tasks
+    assert summary["stale_reran"] == native_rust_tasks, summary
+    assert summary["skipped_resume"] == jvm_tsjs_tasks, summary

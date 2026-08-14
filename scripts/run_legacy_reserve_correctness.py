@@ -906,6 +906,43 @@ def resolve_asset_roots(args: argparse.Namespace) -> tuple[Path | None, Path | N
     return roots.get("jvm-tsjs"), roots.get("native-rust")
 
 
+# Lanes whose durable assets live in the ``native-rust`` recovery bundle
+# rather than in the ``jvm-tsjs`` pinned-asset root.
+NATIVE_RUST_LANES = ("native", "rust")
+
+
+def lane_asset_root(
+    lane: str, task_id: str, asset_root: Path | None = None
+) -> Path | None:
+    """The durable asset root that actually participates in *this* row.
+
+    Provenance must be lane-specific and stable. A combined invocation passes
+    both roots, but a native/rust row's replay never reads the ``jvm-tsjs``
+    pinned-asset root and a jvm/tsjs row's replay never reads the
+    ``native-rust`` recovery bundle. Folding "whichever root the CLI happened
+    to be given" into a row's ``replay_contract_fingerprint`` would therefore
+    make every native/rust row stale the moment a jvm/tsjs root was added to
+    the command line (and vice versa), forcing pointless full reruns of work
+    that nothing about the row actually changed.
+
+    So each row binds exactly one root:
+
+    * a task covered by a recovered contract, and every ``native``/``rust``
+      task, binds the ``native-rust`` bundle (``RECOVERY_STATE``), because
+      that bundle is what decides whether a recovered contract exists and
+      supplies the workspace/caches the replay mounts;
+    * every ``jvm``/``tsjs`` task binds the ``jvm-tsjs`` pinned-asset root,
+      which is where ``resolve_legacy_relative`` and the pinned-asset helpers
+      look when the retained session root no longer has an asset.
+
+    Changing a lane's *own* root still invalidates that lane's rows, which is
+    the invalidation this fingerprint exists to provide.
+    """
+    if recovered_entry(task_id) is not None or lane in NATIVE_RUST_LANES:
+        return RECOVERY_STATE["assets_root"]
+    return asset_root
+
+
 def workspace_git_state(start: Path) -> dict[str, Any]:
     """Live HEAD plus tracked/untracked/submodule state of a workspace.
 
@@ -1174,6 +1211,25 @@ def mount_input_digests(entry: dict[str, Any], assets_root: Path) -> dict[str, A
     return digests
 
 
+def _proof_run_label(run_row: dict[str, Any]) -> str:
+    """Short human label for one recorded proof run."""
+    return (
+        f"({run_row.get('variant')} run {run_row.get('run')}, stage "
+        f"{run_row.get('stage')}, exit {run_row.get('exit_code')})"
+    )
+
+
+def _latest_proof_run(
+    proof_runs: list[dict[str, Any]], variant: str
+) -> dict[str, Any] | None:
+    """The most recently recorded run of ``variant`` (list order is
+    execution order)."""
+    matching = [
+        run_row for run_row in proof_runs if run_row.get("variant") == variant
+    ]
+    return matching[-1] if matching else None
+
+
 def recovered_blockers(task_id: str, entry: dict[str, Any]) -> list[str]:
     """Re-verify a recovered contract against live disk/Docker state.
 
@@ -1361,25 +1417,51 @@ def recovered_blockers(task_id: str, entry: dict[str, Any]) -> list[str]:
             run_row for run_row in proof_runs
             if run_row.get("recipe_fingerprint") == recorded_fingerprint
         ]
-    if not any(
-        run_row.get("variant") == "start" and run_row.get("exit_code") == 0
-        for run_row in proof_runs
-    ):
+    # Fail closed on the runs that are still current, exactly as
+    # ``recover_legacy_native_rust.proof_blockers`` does. An old success
+    # followed by a later failure at the *same* recipe fingerprint means the
+    # contract does not currently work, so "some run passed" is not a
+    # sufficient test: any failure blocks, and the latest start (and latest
+    # golden, where a source-only golden is declared) must both have
+    # succeeded. ``proof_runs`` is append-only in execution order, so the last
+    # matching entry is the latest attempt.
+    failed = [
+        run_row for run_row in proof_runs if run_row.get("exit_code") != 0
+    ]
+    if failed:
+        blockers.append(
+            f"{len(failed)} recorded proof run(s) at the manifest's recipe "
+            "fingerprint failed "
+            f"{[_proof_run_label(run_row) for run_row in failed]}; an earlier "
+            "success does not clear a later failure -- re-run "
+            "scripts/recover_legacy_native_rust.py smoke --golden --reset"
+        )
+    latest_start = _latest_proof_run(proof_runs, "start")
+    if latest_start is None:
         blockers.append(
             "recovered contract has no successful start-tree proof run "
             "recorded in recovery-manifest.json"
         )
-    if entry.get("golden_patch") and not any(
-        run_row.get("variant") == "golden" and run_row.get("exit_code") == 0
-        for run_row in proof_runs
-    ):
+    elif latest_start.get("exit_code") != 0:
+        blockers.append(
+            "the latest recorded start-tree proof run failed "
+            f"{_proof_run_label(latest_start)}"
+        )
+    if entry.get("golden_patch"):
         # PASS_TO_PASS: a contract that declares a source-only golden is only
         # trustworthy once that golden has been shown to apply and pass.
-        blockers.append(
-            "recovered contract declares a source-only golden patch but has "
-            "no successful golden proof run recorded in "
-            "recovery-manifest.json"
-        )
+        latest_golden = _latest_proof_run(proof_runs, "golden")
+        if latest_golden is None:
+            blockers.append(
+                "recovered contract declares a source-only golden patch but "
+                "has no successful golden proof run recorded in "
+                "recovery-manifest.json"
+            )
+        elif latest_golden.get("exit_code") != 0:
+            blockers.append(
+                "the latest recorded golden proof run failed "
+                f"{_proof_run_label(latest_golden)}"
+            )
     return blockers
 
 
@@ -1464,13 +1546,19 @@ def replay_contract_fingerprint(
     replacing/retagging one at the same path all invalidate any
     previously-recorded row instead of being resumed past.
     """
+    # Normalize to the root this lane actually replays against, whatever the
+    # caller passed. A combined invocation supplies both roots, and binding an
+    # unrelated one here would make every row of the other lane group stale
+    # (see ``lane_asset_root``). Doing it inside the fingerprint -- not only at
+    # the call sites -- means no caller can reintroduce that drift.
+    lane_root = lane_asset_root(lane, task_id, asset_root)
     payload: dict[str, Any] = {
         "adapter_contract_version": ADAPTER_CONTRACT_VERSION,
         "legacy_root": str(legacy_root),
-        "asset_root": str(asset_root) if asset_root else None,
+        "asset_root": str(lane_root) if lane_root else None,
         "blockers": sorted(blockers),
         "asset_state": asset_state(
-            task_id, lane, oracle, legacy_root, asset_root
+            task_id, lane, oracle, legacy_root, lane_root
         ),
     }
     entry = recovered_entry(task_id)
@@ -2996,6 +3084,11 @@ def asset_state(
     entry = recovered_entry(task_id)
     if entry is not None:
         return recovered_asset_state(entry)
+    # Same normalization as ``replay_contract_fingerprint``: a native/rust
+    # asset state must never resolve through the jvm/tsjs pinned root, and
+    # vice versa. ``lane_asset_root`` is idempotent, so re-normalizing an
+    # already-correct root is a no-op.
+    asset_root = lane_asset_root(lane, task_id, asset_root)
     if lane == "native":
         manifest = NATIVE_MANIFEST.get(task_id)
         if manifest is None:
@@ -3526,7 +3619,8 @@ def replay_recovered(
     assert entry is not None
     assets_root: Path = RECOVERY_STATE["assets_root"]
     provenance = row_provenance_fields(
-        task, oracle, task_id, lane, generation, legacy_root, []
+        task, oracle, task_id, lane, generation, legacy_root, [],
+        lane_asset_root(lane, task_id),
     )
 
     # Re-verify every mounted input immediately before doing any work, not
@@ -3713,7 +3807,8 @@ def replay_native(
     shutil.rmtree(scratch, ignore_errors=True)
     scratch.mkdir(parents=True, exist_ok=True)
     provenance = row_provenance_fields(
-        task, oracle, task_id, "native", generation, legacy_root, []
+        task, oracle, task_id, "native", generation, legacy_root, [],
+        lane_asset_root("native", task_id),
     )
 
     workspace_source = task_dir if manifest["workspace"] == "." else task_dir / manifest["workspace"]
@@ -3811,7 +3906,8 @@ def replay_rust(
     shutil.rmtree(scratch, ignore_errors=True)
     scratch.mkdir(parents=True, exist_ok=True)
     provenance = row_provenance_fields(
-        task, oracle, task_id, "rust", generation, legacy_root, []
+        task, oracle, task_id, "rust", generation, legacy_root, [],
+        lane_asset_root("rust", task_id),
     )
     workspace_scratch = scratch / "workspace"
     shutil.copytree(task_dir / "start", workspace_scratch, symlinks=True)
@@ -4843,12 +4939,17 @@ def cmd_replay(args: argparse.Namespace) -> int:
         blockers = task_blockers(
             task_id, lane, oracle, legacy_root, task["start_sha"], asset_root
         )
+        # The one root this row's replay actually reads. Every provenance and
+        # replay call below is given *this* value rather than the raw CLI
+        # jvm/tsjs root, so a combined invocation that also supplies the other
+        # lane group's root cannot make this row look stale.
+        lane_root = lane_asset_root(lane, task_id, asset_root)
 
         existing_row = by_lane[lane].get(key)
         if existing_row is not None and not args.force:
             if not row_is_stale(
                 existing_row, task, oracle, task_id, lane, generation,
-                legacy_root, blockers, asset_root,
+                legacy_root, blockers, lane_root,
             ):
                 summary["skipped_resume"] += 1
                 continue
@@ -4864,7 +4965,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
                 legacy_dir, lane,
                 missing_row(
                     task_id, model, lane, row["start_sha"], task, oracle,
-                    generation, legacy_root, blockers, asset_root,
+                    generation, legacy_root, blockers, lane_root,
                 ),
             )
             summary["candidate_missing"] += 1
@@ -4906,7 +5007,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
                         work_root, output, args.timeout,
                         **(
                             {
-                                "asset_root": asset_root,
+                                "asset_root": lane_root,
                                 "offline": not args.allow_network,
                             }
                             if lane in ("jvm", "tsjs")
@@ -4945,7 +5046,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
             raw_row.update(
                 row_provenance_fields(
                     task, oracle, task_id, lane, generation, legacy_root,
-                    blockers, asset_root,
+                    blockers, lane_root,
                 )
             )
         by_lane[lane] = append_raw_row(legacy_dir, lane, raw_row)

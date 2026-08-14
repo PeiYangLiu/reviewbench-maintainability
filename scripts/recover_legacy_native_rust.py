@@ -1318,6 +1318,28 @@ def purge_directory(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
+def _run_label(row: dict[str, Any]) -> str:
+    """Short human label for one recorded proof run."""
+    return (
+        f"{row.get('variant')} run {row.get('run')} "
+        f"(stage {row.get('stage')}, exit {row.get('exit_code')})"
+    )
+
+
+def latest_run(
+    runs: list[dict[str, Any]], variant: str
+) -> dict[str, Any] | None:
+    """The most recently *recorded* run of ``variant``.
+
+    ``runs`` is append-only in execution order, so the last matching element
+    is the latest attempt. This is what a contract's readiness must be judged
+    on: an old success followed by a later failure means the contract does
+    not currently work.
+    """
+    matching = [row for row in runs if row.get("variant") == variant]
+    return matching[-1] if matching else None
+
+
 def proof_blockers(
     recipe: dict[str, Any],
     runs: list[dict[str, Any]],
@@ -1327,14 +1349,29 @@ def proof_blockers(
 
     A start-tree proof alone is never enough for a contract that declares a
     source-only golden: the Oracle is PASS_TO_PASS, so the golden must be
-    shown to apply *and* to pass. Any recorded failing run (apply or execute)
-    also keeps the contract out of the ready set.
+    shown to apply *and* to pass.
 
-    When ``fingerprint`` (the contract's current ``recipe_fingerprint``) is
-    supplied, only proof runs stamped with that exact fingerprint count: a
-    proof recorded before the command, golden command, image, workspace,
-    mounted cache, harness bytes or adapter contract version changed is
-    *stale evidence* and must not keep a contract in the ready set.
+    Readiness is judged **fail-closed on the runs that are still current**:
+
+    * When ``fingerprint`` (the contract's current ``recipe_fingerprint``) is
+      supplied, only proof runs stamped with that exact fingerprint count. A
+      proof recorded before the command, golden command, image, workspace,
+      mounted cache, harness bytes or adapter contract version changed is
+      *stale evidence* and must not keep a contract in the ready set.
+    * **Any** failing run at the current fingerprint blocks, even if an
+      earlier run at the same fingerprint succeeded. "It passed once and then
+      started failing" is a broken contract, not a ready one; a flaky or
+      since-broken Oracle must never be scored against.
+    * The **latest** start run must exist and have succeeded, and -- for a
+      contract declaring a source-only golden -- so must the latest golden
+      run. This is deliberately redundant with the rule above: it also
+      catches the case where the failure is the newest evidence and any
+      future relaxation of the "no failures at all" rule would otherwise
+      silently re-admit an old success.
+
+    Re-running ``smoke --reset`` (which drops superseded runs before
+    recording new ones) is the supported way to clear a recorded failure --
+    never editing the proof file.
     """
     blockers: list[str] = []
     if fingerprint is not None:
@@ -1352,21 +1389,35 @@ def proof_blockers(
                 f"{fingerprint[:12]}"
             )
         runs = fresh
-    if not any(
-        row.get("variant") == "start" and row.get("exit_code") == 0 for row in runs
-    ):
+    failed = [row for row in runs if row.get("exit_code") != 0]
+    if failed:
+        blockers.append(
+            f"{len(failed)} proof run(s) at the current recipe fingerprint "
+            f"failed: {[_run_label(row) for row in failed]}; an earlier "
+            "success does not clear a later failure (re-run "
+            "`recover_legacy_native_rust.py smoke --golden --reset` once the "
+            "contract works again)"
+        )
+    latest_start = latest_run(runs, "start")
+    if latest_start is None:
         blockers.append("no successful start-tree proof run")
+    elif latest_start.get("exit_code") != 0:
+        blockers.append(
+            "the latest start-tree proof run at the current recipe "
+            f"fingerprint failed: {_run_label(latest_start)}"
+        )
     if recipe.get("golden_patch"):
-        golden = [row for row in runs if row.get("variant") == "golden"]
-        if not any(row.get("exit_code") == 0 for row in golden):
-            failed = [row for row in golden if row.get("exit_code") != 0]
-            detail = (
-                f" (last failure: {failed[-1].get('stage')} -> "
-                f"{failed[-1].get('error')})" if failed else ""
-            )
+        latest_golden = latest_run(runs, "golden")
+        if latest_golden is None:
             blockers.append(
                 "contract declares a source-only golden patch but has no "
-                f"successful golden proof run{detail}"
+                "successful golden proof run"
+            )
+        elif latest_golden.get("exit_code") != 0:
+            blockers.append(
+                "the latest golden proof run at the current recipe "
+                f"fingerprint failed: {_run_label(latest_golden)} -> "
+                f"{latest_golden.get('error')}"
             )
     return blockers
 
