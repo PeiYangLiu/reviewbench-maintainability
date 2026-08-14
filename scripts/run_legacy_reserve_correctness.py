@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Provenance-preserving correctness replay adapter for the 14 published-hard
-tasks whose Oracles were recovered under the 20260728 reserve and therefore
-lack a modern ``lane_results_source`` replay contract (``source_kind ==
-"published_legacy"`` in ``run_open_model_correctness.py``'s task plan).
+"""Provenance-preserving correctness replay adapter for the 17 published-hard
+tasks whose Oracles were recovered under the 20260728 reserve (and the older
+increment5/legacy159 recoveries) and therefore lack a modern
+``lane_results_source`` replay contract (``source_kind == "published_legacy"``
+in ``run_open_model_correctness.py``'s task plan).
 
 This script does NOT reinvent normalization or finalization. It only
 populates the extension point that ``run_open_model_correctness.py``
@@ -22,13 +23,30 @@ Design summary
   session root; a fresh disposable copy of that checkout is made per
   (task, model) pair, the staged candidate patch is applied there, and the
   historical, previously-*proven* Docker command is replayed unmodified.
-* JVM (5 tasks), TS/JS (2 tasks): the hard Oracle record itself is already
-  fully self-contained (``command``/``environment`` for jvm,
-  ``test_command``/``install_command``/``historical_node``/``workspace``
-  for tsjs). A fresh git worktree of the retained ``repos/<org>__<repo>``
-  clone is checked out at the exact ``start_sha``, the staged candidate
-  patch is applied there, and the Oracle's own command is replayed with the
-  historical toolchain (Docker image / pinned Node runtime).
+* JVM (6 tasks), TS/JS (4 tasks): the exact start commit is materialized
+  the way the historical harness did (``git archive | tar`` plus ``git init``
+  and one empty commit -- a self-contained tree, not a ``git worktree``
+  whose ``.git`` file would dangle inside the Oracle container), the staged
+  candidate patch is applied there, and the Oracle's own command is replayed
+  with the historical toolchain (Docker image / pinned Node runtime) against
+  *pinned, hashed durable assets* under ``--asset-root``, with no network.
+
+  ``JVM_MANIFEST``/``TSJS_MANIFEST`` carry the parts of the historical
+  execution recipe that were never published with the Oracle records and
+  had to be recovered from the retained harness and run logs themselves:
+  the exact per-task Gradle cache partition, the session-authored
+  ``oracle.*`` behavior tests, RepoSense's pre-repeat priming command, the
+  Discourse ``node_modules`` symlink into the retained shared Node tools,
+  the proven OpossumUI ``react-scripts`` invocation (the published
+  ``test_command`` string is stale and cannot reproduce the published
+  signature), and the FluidFramework pnpm/mocha recipe recovered from the
+  pre-release ``legacy159_oracle_typescript.jsonl`` record that the
+  published Oracle names as its own source artifact.
+
+  ``verify-contracts`` replays every one of them at its exact *unpatched*
+  start, through the same code path scoring uses, and requires the frozen
+  ``pass_to_pass``/signature evidence to be reproduced before the task may be
+  treated as runner-ready.
 
 Never fabricate: any task whose required runner/harness/image/cache asset
 cannot be found under ``--legacy-root`` is reported as a preflight blocker
@@ -122,6 +140,7 @@ import shutil
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 from typing import Any
 
@@ -152,12 +171,15 @@ TASK_IDS: tuple[str, ...] = (
     "github__SciCompMod__memilio__pull_690__comment_1394151706__complexity",
     "github__SkriptLang__Skript__pull_7136__comment_1835154932__complexity",
     "github__XRPLF__rippled__pull_5143__comment_1786919023__duplication",
+    "github__angular__components__pull_24601__comment_830247812__complexity",
     "github__apache__solr__pull_3433__comment_2231064740__modularity",
     "github__discourse__discourse__pull_37336__comment_2752215814__complexity",
     "github__hibernate__hibernate-orm__pull_4938__comment_844341285__duplication",
     "github__lanl__singularity-eos__pull_75__comment_792881520__duplication",
+    "github__microsoft__FluidFramework__pull_27466__comment_3350352130__complexity",
     "github__opossum-tool__OpossumUI__pull_987__comment_972768731__duplication",
     "github__reposense__RepoSense__pull_2078__comment_1472205280__duplication",
+    "github__sniffy__sniffy__pull_554__comment_3568493577__modularity",
 )
 EXPECTED_LANE = {
     "github__ClickHouse__ClickHouse__pull_74193__comment_2024566878__duplication": "native",
@@ -168,12 +190,15 @@ EXPECTED_LANE = {
     "github__SciCompMod__memilio__pull_690__comment_1394151706__complexity": "native",
     "github__SkriptLang__Skript__pull_7136__comment_1835154932__complexity": "jvm",
     "github__XRPLF__rippled__pull_5143__comment_1786919023__duplication": "native",
+    "github__angular__components__pull_24601__comment_830247812__complexity": "tsjs",
     "github__apache__solr__pull_3433__comment_2231064740__modularity": "jvm",
     "github__discourse__discourse__pull_37336__comment_2752215814__complexity": "tsjs",
     "github__hibernate__hibernate-orm__pull_4938__comment_844341285__duplication": "jvm",
     "github__lanl__singularity-eos__pull_75__comment_792881520__duplication": "native",
+    "github__microsoft__FluidFramework__pull_27466__comment_3350352130__complexity": "tsjs",
     "github__opossum-tool__OpossumUI__pull_987__comment_972768731__duplication": "tsjs",
     "github__reposense__RepoSense__pull_2078__comment_1472205280__duplication": "jvm",
+    "github__sniffy__sniffy__pull_554__comment_3568493577__modularity": "jvm",
 }
 
 # Historical, previously-*proven* Docker replay recipes for the 6 native
@@ -294,6 +319,242 @@ TSJS_NODE_OVERRIDES = {
     "github__opossum-tool__OpossumUI__pull_987__comment_972768731__duplication": "18.20.8",
 }
 
+# ---------------------------------------------------------------------------
+# Recovered JVM replay manifest (20260728 reserve)
+# ---------------------------------------------------------------------------
+#
+# The published JVM Oracles carry their own ``command``/``environment``, but
+# three pieces of the historical execution recipe were *not* published with
+# them and had to be recovered from the retained harness itself
+# (strict_screen_20260726/oracle_recovery/java/execute.py and the per-task
+# artifact directories):
+#
+# * ``cache_index`` -- the historical GRADLE_USER_HOME was
+#   ``/cachehome/gradle-task-<index>`` where <index> is the numeric prefix of
+#   the Oracle's own ``artifacts.directory``. Replaying with a different
+#   per-task cache home would resolve dependencies into a cold cache and
+#   diverge; this pins the exact historical cache partition.
+# * ``prime_command`` -- RepoSense's published command carries
+#   ``-x compileTestJava`` because the historical harness ran it as a *repeat*
+#   inside a workspace an earlier run had already compiled. In a fresh
+#   materialization the scored command alone would find no test classes, so the
+#   recorded pre-repeat command (Oracle ``attempts[0].command`` plus the same
+#   init-script instrumentation) is replayed first, exactly reproducing the
+#   historical workspace state, and only the scored command's result counts.
+# * ``session_tests`` -- Skript and RepoSense are scored against session-authored
+#   behavior tests in the ``oracle`` package that the harness copied into the
+#   workspace from ``<artifacts.directory>/session-tests``.
+#
+# ``expected_tests`` is the frozen ``pass_to_pass`` evidence and is what
+# ``verify-contracts`` requires a fresh unpatched start replay to reproduce
+# before the task may be treated as runner-ready.
+JVM_MANIFEST: dict[str, dict[str, Any]] = {
+    "github__Consensys__web3signer__pull_489__comment_789312375__modularity": {
+        "cache_index": "8",
+        "session_tests": False,
+        "prime_command": None,
+        "test_results_globs": ("acceptance-tests/build/test-results/**/*.xml",),
+        "expected_tests": 6,
+        # This Oracle's own acceptance-test harness downloads HashiCorp Vault
+        # at build time (:acceptance-tests:downloadVault, a conditional GET
+        # against releases.hashicorp.com), exactly as the historical run did.
+        # It therefore keeps a network namespace, but the downloaded archive is
+        # pre-placed from a pinned, hashed copy so the conditional request is a
+        # no-op and the Vault binary under test is byte-identical to the
+        # historical one; dependency resolution is served by the pinned cache
+        # and its file:// mirror, which oracle.init.gradle declares first.
+        "network": "bridge",
+        "prefetch": (
+            {
+                "asset": "prefetch/web3signer-hashicorp.zip",
+                "workspace_path": "acceptance-tests/build/hashicorp.zip",
+                "sha256": (
+                    "f486da4f6d08e42eb2c17e95cf36cc7f9d9c0e7cc8ced06ce3fca7c3"
+                    "abd7db3d"
+                ),
+            },
+        ),
+    },
+    "github__SkriptLang__Skript__pull_7136__comment_1835154932__complexity": {
+        "cache_index": "17",
+        "session_tests": True,
+        "prime_command": None,
+        "test_results_globs": ("build/test-results/**/*.xml",),
+        "expected_tests": 1,
+    },
+    "github__apache__solr__pull_3433__comment_2231064740__modularity": {
+        "cache_index": "31",
+        "session_tests": False,
+        "prime_command": None,
+        "test_results_globs": ("solr/modules/ltr/build/test-results/**/*.xml",),
+        "expected_tests": 215,
+        # Solr's gradlew downloads its own wrapper jar from raw.githubusercontent
+        # when it is absent, which a network-isolated replay cannot do. The jar
+        # is pinned as a durable asset and installed from it after verifying the
+        # repository's *own* recorded gradle-wrapper.jar.sha256, so the
+        # installed bytes are exactly what the checked-out revision demands.
+        "needs_gradle_wrapper_jar": True,
+    },
+    "github__hibernate__hibernate-orm__pull_4938__comment_844341285__duplication": {
+        "cache_index": "35",
+        "session_tests": False,
+        "prime_command": None,
+        "test_results_globs": (
+            "hibernate-spatial/target/test-results/**/*.xml",
+            "hibernate-spatial/build/test-results/**/*.xml",
+        ),
+        "expected_tests": 4,
+    },
+    "github__reposense__RepoSense__pull_2078__comment_1472205280__duplication": {
+        "cache_index": "41",
+        "session_tests": True,
+        "prime_command": (
+            "bash ./gradlew --no-daemon --console=plain cleanTest test "
+            "--tests 'oracle.RepoConfigurationBehaviorOracleTest' "
+            "-I /oracle-cache/oracle.init.gradle"
+        ),
+        "test_results_globs": ("build/test-results/**/*.xml",),
+        "expected_tests": 1,
+    },
+    # sniffy's published Oracle predates the JVM ``environment`` block: it
+    # records only ``command`` plus ``toolchain``
+    # ("Maven 3.9.9; Eclipse Temurin JDK 17; JaCoCo 0.8.8"). The container and
+    # cache home below are the exact, unambiguous encoding of that recorded
+    # toolchain string; no other field is invented.
+    "github__sniffy__sniffy__pull_554__comment_3568493577__modularity": {
+        "cache_index": "sniffy",
+        "session_tests": False,
+        "prime_command": None,
+        "container": "maven:3.9.9-eclipse-temurin-17",
+        "cache": "strict_screen_20260726/oracle_recovery/java/cache/home",
+        # Only the scored reactor module counts: `-am` also builds and tests
+        # sniffy-core, whose 374 tests are not this Oracle's anchor.
+        "test_results_globs": ("sniffy-module-nio/**/surefire-reports/*.xml",),
+        "expected_tests": 131,
+        # This Oracle's behavior anchor *is* network behavior (Sniffy's socket
+        # and NIO channel monitoring binds loopback sockets and resolves the
+        # local host name), so running it in an isolated network namespace
+        # would change the behavior under test rather than isolate it.
+        # Dependency resolution is still pinned and reproducible: Maven is put
+        # in offline mode through MAVEN_ARGS, so every artifact must come from
+        # the pinned .m2 in the durable cache home.
+        "network": "bridge",
+        "offline_env": {"MAVEN_ARGS": "-o"},
+    },
+}
+
+
+def jvm_container(oracle: dict[str, Any], task_id: str) -> str:
+    environment = oracle.get("environment") or {}
+    return str(
+        environment.get("container")
+        or JVM_MANIFEST.get(task_id, {}).get("container")
+        or ""
+    )
+
+
+def jvm_cache(oracle: dict[str, Any], task_id: str) -> str:
+    environment = oracle.get("environment") or {}
+    return str(
+        environment.get("cache")
+        or JVM_MANIFEST.get(task_id, {}).get("cache")
+        or ""
+    )
+
+
+# ---------------------------------------------------------------------------
+# Recovered TS/JS replay manifest (20260728 reserve)
+# ---------------------------------------------------------------------------
+#
+# ``node_modules`` describes how the historical run made a runnable dependency
+# tree available; it is never re-resolved from the network at replay time:
+#
+# * ``shared_node_tools`` -- the retained
+#   ``oracle_recovery/tsjs/_node_tools/node_modules`` tree is symlinked into the
+#   workspace exactly as the historical ``_work/discourse__discourse`` checkout
+#   did (the symlink is still present in the retained tree), which is what makes
+#   the session Vitest config resolve ``vitest/config``.
+# * ``pinned`` -- a durable, hashed ``node_modules`` snapshot under the recovery
+#   asset root, hardlink-copied per replay.
+#
+# ``test_command`` is the *executed* historical command recovered from the
+# retained run logs, which for OpossumUI differs from the (stale) published
+# ``test_command`` field: the retained probe4/recovery-*-run logs show the
+# proven invocation targets ``ProjectStatisticsPopup.test.tsx`` through
+# ``node_modules/.bin/react-scripts`` and is the one whose output matches the
+# published ``start_signature``/``golden_signature``
+# ("Test Suites: 1 passed, 1 total|Tests: 2 passed, 2 total"). Going through the
+# published ``yarn test:local ...`` string instead expands to the whole ``src/``
+# suite and can never reproduce that signature, so it would turn recovered
+# infrastructure into model failure.
+TSJS_MANIFEST: dict[str, dict[str, Any]] = {
+    "github__discourse__discourse__pull_37336__comment_2752215814__complexity": {
+        "node": "20.19.5",
+        "node_modules": "shared_node_tools",
+        "session_from_recovery": True,
+        "workspace": ".",
+        "test_command": "vitest run --config session/vitest.config.js --coverage",
+        "expected_signature": "Test Files  1 passed (1)",
+        # Vitest reports suites ("Test Files") and cases ("Tests") separately;
+        # the frozen signature is "Test Files: 1 passed (1)|Tests: 2 passed (2)"
+        # so the executed-case count must be read from the "Tests" line.
+        "test_count_patterns": (r"\bTests\s+(\d+) passed",),
+        "expected_tests": 2,
+        "runtime_root": "legacy",
+    },
+    "github__opossum-tool__OpossumUI__pull_987__comment_972768731__duplication": {
+        "node": "18.20.8",
+        "node_modules": "pinned",
+        "pinned_node_modules": "tsjs/node_modules/opossum-tool__OpossumUI",
+        "session_from_recovery": False,
+        "workspace": ".",
+        "test_command": (
+            "node_modules/.bin/react-scripts test --watchAll=false "
+            "src/Frontend/Components/ProjectStatisticsPopup/__tests__/"
+            "ProjectStatisticsPopup.test.tsx --runInBand "
+            "--setupFilesAfterEnv=./setupTests.ts"
+        ),
+        "expected_signature": "Test Suites: 1 passed, 1 total",
+        "test_count_patterns": (r"\bTests:\s+(\d+) passed",),
+        "expected_tests": 2,
+        "runtime_root": "legacy",
+    },
+    # Recovered verbatim from the retained pre-release oracle record
+    # legacy159_oracle_typescript.jsonl ("commands"/"environment_notes"), the
+    # declared source artifact of the published FluidFramework Oracle
+    # (release_oracle_provenance.source_artifact ==
+    # "legacy159_oracle_typescript_normalized.jsonl"), which is the only place
+    # the executable recipe survives: the published record carries coverage and
+    # pass_to_pass only. Replayed at the *released task* start commit.
+    "github__microsoft__FluidFramework__pull_27466__comment_3350352130__complexity": {
+        "node": "22.22.2",
+        "node_modules": "pnpm_workspace",
+        "package_manager": "pnpm@10.33.0",
+        "install_command": "pnpm install --frozen-lockfile",
+        "build_command": "pnpm --dir packages/dds/tree build",
+        "session_from_recovery": False,
+        "workspace": "packages/dds/tree",
+        "test_env": {
+            "MOCHA_SPEC": (
+                "lib/test/feature-libraries/default-field-kinds/"
+                "defaultChangeFamily.spec.js"
+            )
+        },
+        "test_command": "pnpm exec mocha lib/test/shared-tree/editing.spec.js --reporter dot",
+        "expected_signature": None,
+        "test_count_patterns": (r"(\d+) passing",),
+        # The published Oracle's pass_to_pass (151) was measured at the PR
+        # *base* commit (legacy159 start_sha 4b1a8bec...); the released task's
+        # exact start (55842a0e..., the PR head at the review comment) carries
+        # the PR's own earlier spec edits, and a fresh unpatched start replay
+        # of the very same Oracle command reproduces 152 passing / 2 pending.
+        # The validated-at-exact-start count is what a candidate must preserve.
+        "expected_tests": 152,
+        "runtime_root": "assets",
+    },
+}
+
+
 INFRA_RETRY = "infra_retry"
 CANDIDATE_MISSING = "candidate_missing"
 
@@ -305,7 +566,7 @@ CANDIDATE_MISSING = "candidate_missing"
 # silently treating them as fresh (code-review finding: "resume must
 # validate current task/oracle/replay-contract fingerprints and rerun
 # stale rows").
-ADAPTER_CONTRACT_VERSION = "v4-2026-08-11-retained-node-tools"
+ADAPTER_CONTRACT_VERSION = "v5-2026-08-13-jvm-tsjs-asset-recovery"
 
 
 def replay_contract_fingerprint(
@@ -314,6 +575,7 @@ def replay_contract_fingerprint(
     oracle: dict[str, Any],
     legacy_root: Path,
     blockers: list[str],
+    asset_root: Path | None = None,
 ) -> str:
     """Fingerprint of *this adapter's* replay recipe for ``task_id`` as
     resolved against the *current* ``--legacy-root``.
@@ -336,8 +598,11 @@ def replay_contract_fingerprint(
     payload: dict[str, Any] = {
         "adapter_contract_version": ADAPTER_CONTRACT_VERSION,
         "legacy_root": str(legacy_root),
+        "asset_root": str(asset_root) if asset_root else None,
         "blockers": sorted(blockers),
-        "asset_state": asset_state(task_id, lane, oracle, legacy_root),
+        "asset_state": asset_state(
+            task_id, lane, oracle, legacy_root, asset_root
+        ),
     }
     if lane == "native":
         payload["native_manifest"] = NATIVE_MANIFEST[task_id]
@@ -352,6 +617,7 @@ def row_provenance_fields(
     generation: dict[str, Any],
     legacy_root: Path,
     blockers: list[str],
+    asset_root: Path | None = None,
 ) -> dict[str, Any]:
     """Strong provenance fields folded into every raw row.
 
@@ -367,7 +633,7 @@ def row_provenance_fields(
         "task_fingerprint": BASE.task_fingerprint(task),
         "oracle_fingerprint": BASE.canonical_hash(oracle),
         "replay_contract_fingerprint": replay_contract_fingerprint(
-            task_id, lane, oracle, legacy_root, blockers
+            task_id, lane, oracle, legacy_root, blockers, asset_root
         ),
         "generation_apply_ok": generation.get("apply_ok"),
     }
@@ -382,6 +648,7 @@ def row_is_stale(
     generation: dict[str, Any],
     legacy_root: Path,
     blockers: list[str],
+    asset_root: Path | None = None,
 ) -> bool:
     """True if a previously-recorded raw row no longer matches the current
     task, Oracle, adapter replay contract, live asset provenance, or staged
@@ -389,7 +656,7 @@ def row_is_stale(
     rather than treated as already-done on resume.
     """
     current = row_provenance_fields(
-        task, oracle, task_id, lane, generation, legacy_root, blockers
+        task, oracle, task_id, lane, generation, legacy_root, blockers, asset_root
     )
     if any(existing_row.get(field) != value for field, value in current.items()):
         return True
@@ -429,9 +696,13 @@ def lane_lock(legacy_dir: Path, lane: str):
 # ---------------------------------------------------------------------------
 
 
-def resolve_legacy_relative(value: str, legacy_root: Path) -> Path:
+def resolve_legacy_relative(
+    value: str,
+    legacy_root: Path,
+    asset_root: Path | None = None,
+) -> Path:
     """Resolve a path recorded by a historical Oracle against the retained
-    session root.
+    session root, falling back to the recovery asset root.
 
     JVM Oracle path fields (``artifacts.directory``, ``environment.cache``)
     are recorded already prefixed with ``strict_screen_20260726/`` (i.e.
@@ -441,13 +712,33 @@ def resolve_legacy_relative(value: str, legacy_root: Path) -> Path:
     Both conventions are handled explicitly rather than assumed, since
     silently guessing wrong would resolve to the wrong (or a nonexistent)
     directory.
+
+    ``asset_root`` is the durable recovery-asset root
+    (``--asset-root``). Assets that no longer exist under the retained
+    session root (most importantly the JVM Oracles'
+    ``environment.cache`` Gradle/Maven cache home and its
+    ``/oracle-cache`` blobs) are reconstructed there under the *same*
+    recorded relative path, so resolution stays a pure function of the
+    Oracle's own recorded value. The retained root always wins when it
+    still has the asset, so recovery can never shadow retained evidence.
     """
     if value.startswith("strict_screen_20260726/"):
-        return (legacy_root / value).resolve()
-    return (legacy_root / "strict_screen_20260726" / value).resolve()
+        retained = (legacy_root / value).resolve()
+        relative = value
+    else:
+        retained = (legacy_root / "strict_screen_20260726" / value).resolve()
+        relative = f"strict_screen_20260726/{value}"
+    if retained.exists() or asset_root is None:
+        return retained
+    recovered = (asset_root / relative).resolve()
+    return recovered if recovered.exists() else retained
 
 
-def artifacts_directory(oracle: dict[str, Any], legacy_root: Path) -> Path:
+def artifacts_directory(
+    oracle: dict[str, Any],
+    legacy_root: Path,
+    asset_root: Path | None = None,
+) -> Path:
     """Resolve an Oracle's ``artifacts.directory``/``recovery_artifact``."""
     value = str(
         oracle.get("recovery_artifact")
@@ -456,7 +747,8 @@ def artifacts_directory(oracle: dict[str, Any], legacy_root: Path) -> Path:
     )
     if not value:
         raise ValueError("Oracle is missing an artifacts/recovery directory")
-    return resolve_legacy_relative(value, legacy_root)
+    return resolve_legacy_relative(value, legacy_root, asset_root)
+
 
 
 def oracle_recovery_root(legacy_root: Path) -> Path:
@@ -696,6 +988,115 @@ def git_worktree_checkout(repo_source: Path, start_sha: str, dest: Path) -> None
         )
 
 
+def materialize_start(repo_source: Path, start_sha: str, dest: Path) -> None:
+    """Materialize the exact start commit the way the historical harness did.
+
+    ``strict_screen_20260726/oracle_recovery/java/execute.py``'s
+    ``materialize()`` streamed ``git archive <sha> | tar -x`` into a fresh
+    directory and then ran ``git init`` plus one empty commit, producing a
+    *self-contained* working tree. That detail is load-bearing rather than
+    cosmetic: a ``git worktree`` checkout's ``.git`` file points at an
+    absolute path inside the retained bare clone that is not mounted into
+    the Oracle container, so repository-introspecting builds break (e.g.
+    RepoSense's ``versionDetails()`` fails to evaluate build.gradle at all),
+    and the resulting failure would be scored as a model failure. This
+    reproduces the historical materialization exactly, and the fresh
+    single-commit repository is also what makes ``git apply`` of a candidate
+    patch behave identically to the historical harness.
+    """
+    shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True, exist_ok=True)
+    archive = subprocess.Popen(
+        ["git", "-C", str(repo_source), "archive", "--format=tar", start_sha],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    extract = subprocess.Popen(
+        ["tar", "-x", "-C", str(dest)],
+        stdin=archive.stdout,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    assert archive.stdout is not None
+    archive.stdout.close()
+    extract_rc = extract.wait()
+    archive_rc = archive.wait()
+    if extract_rc or archive_rc:
+        detail = (archive.stderr.read() if archive.stderr else b"").decode(
+            "utf-8", "replace"
+        )
+        raise RuntimeError(
+            f"exact-start materialization failed for {start_sha}: {detail[-2000:]}"
+        )
+    subprocess.run(
+        ["git", "init", "-q"],
+        cwd=dest,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git", "-c", "user.name=Oracle", "-c", "user.email=oracle@invalid",
+            "commit", "-q", "--allow-empty", "-m", "start-anchor",
+        ],
+        cwd=dest,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    )
+
+
+def link_tree(source: Path, dest: Path) -> None:
+    """Hardlink-copy a pinned dependency tree into a disposable workspace.
+
+    Used for the pinned ``node_modules`` snapshots under the recovery asset
+    root: the replay gets a private, writable directory tree without copying
+    (or re-resolving) hundreds of megabytes per (task, model) pair, and the
+    pinned asset itself is never mutated.
+    """
+    shutil.rmtree(dest, ignore_errors=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        ["cp", "-al", f"{source}/.", str(dest)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if result.returncode != 0:
+        shutil.copytree(source, dest, symlinks=True, dirs_exist_ok=True)
+
+
+def node_runtime_bin(
+    node: str,
+    legacy_root: Path,
+    asset_root: Path | None,
+    runtime_root: str = "legacy",
+) -> Path | None:
+    """Resolve the pinned Node runtime for a tsjs task.
+
+    ``runtime_root == "legacy"`` are the runtimes retained with the historical
+    session; ``"assets"`` are runtimes pinned into the recovery asset root
+    (downloaded once from nodejs.org, hashed into the asset manifest, and
+    reused offline afterwards) for versions the retained session never held.
+    Both roots are searched regardless of the declared preference so a runtime
+    is never re-downloaded when it is already retained.
+    """
+    if not node:
+        return None
+    relative = Path("tsjs/_runtimes") / f"node-v{node}-linux-x64" / "bin"
+    candidates = []
+    if runtime_root == "assets" and asset_root is not None:
+        candidates.append(asset_root / relative)
+    candidates.append(oracle_recovery_root(legacy_root) / relative)
+    if asset_root is not None:
+        candidates.append(asset_root / relative)
+    for candidate in candidates:
+        if (candidate / "node").is_file():
+            return candidate
+    return None
+
+
 def commit_present(repo_dir: Path, sha: str) -> bool:
     """True if ``sha`` resolves to an actual commit object reachable in
     the retained repo checkout.
@@ -716,9 +1117,17 @@ def commit_present(repo_dir: Path, sha: str) -> bool:
 
 
 def tsjs_node_version(task_id: str, oracle: dict[str, Any]) -> str:
+    """Pinned Node version for a tsjs task.
+
+    Prefers the Oracle's own ``historical_node``; falls back to the recovered
+    ``TSJS_MANIFEST`` entry for Oracles published without it (FluidFramework's
+    published record carries only coverage/pass_to_pass -- its Node version is
+    recovered from the pre-release record it names as its source artifact).
+    """
     return str(
         TSJS_NODE_OVERRIDES.get(task_id)
         or oracle.get("historical_node")
+        or TSJS_MANIFEST.get(task_id, {}).get("node")
         or ""
     )
 
@@ -1008,14 +1417,18 @@ def jvm_blockers(
     task_id: str,
     oracle: dict[str, Any],
     legacy_root: Path,
+    asset_root: Path | None = None,
 ) -> list[str]:
     blockers = []
     command = oracle.get("command")
     if not command:
         blockers.append("Oracle is missing command")
         return blockers
-    environment = oracle.get("environment") or {}
-    image = environment.get("container")
+    manifest = JVM_MANIFEST.get(task_id)
+    if manifest is None:
+        blockers.append(f"no recovered jvm replay manifest for {task_id}")
+        return blockers
+    image = jvm_container(oracle, task_id)
     if not image:
         blockers.append("Oracle is missing environment.container")
     elif not docker_image_present(image):
@@ -1024,9 +1437,9 @@ def jvm_blockers(
     checkout = repo_checkout_dir(legacy_root, repo)
     if not checkout.is_dir():
         blockers.append(f"missing retained repo checkout: {checkout}")
-    cache = environment.get("cache")
+    cache = jvm_cache(oracle, task_id)
     if cache:
-        cache_home = resolve_legacy_relative(cache, legacy_root)
+        cache_home = resolve_legacy_relative(cache, legacy_root, asset_root)
         cache_root = cache_home.parent
         if not cache_home.is_dir():
             blockers.append(
@@ -1040,6 +1453,19 @@ def jvm_blockers(
                 blockers.append(f"missing /oracle-cache asset: {asset}")
     else:
         blockers.append("Oracle is missing environment.cache")
+    if manifest.get("session_tests"):
+        try:
+            recovery_dir = artifacts_directory(oracle, legacy_root, asset_root)
+        except ValueError as error:
+            blockers.append(str(error))
+        else:
+            session_tests = recovery_dir / "session-tests"
+            if not session_tests.is_dir():
+                blockers.append(
+                    "missing retained session behavior tests: "
+                    f"{session_tests} (the Oracle scores a session-authored "
+                    "oracle.* test that must be installed into the workspace)"
+                )
     return blockers
 
 
@@ -1048,19 +1474,17 @@ def tsjs_blockers(
     oracle: dict[str, Any],
     legacy_root: Path,
     start_sha: str,
+    asset_root: Path | None = None,
 ) -> list[str]:
     blockers = []
-    if not oracle.get("test_command"):
-        blockers.append("Oracle is missing test_command")
-    else:
-        test_parts = shlex.split(str(oracle["test_command"]))
-        if test_parts and test_parts[0] == "vitest":
-            vitest = (
-                oracle_recovery_root(legacy_root)
-                / "tsjs/_node_tools/node_modules/.bin/vitest"
-            )
-            if not vitest.is_file():
-                blockers.append(f"missing retained Vitest binary: {vitest}")
+    manifest = TSJS_MANIFEST.get(task_id)
+    if manifest is None:
+        blockers.append(
+            f"no recovered tsjs replay manifest for {task_id}: the historical "
+            "recovery artifacts that carried this Oracle's executable harness "
+            "are not present under --legacy-root or --asset-root"
+        )
+        return blockers
     repo = oracle.get("repo") or ""
     checkout = repo_checkout_dir(legacy_root, repo)
     if not checkout.is_dir():
@@ -1084,20 +1508,50 @@ def tsjs_blockers(
     node = tsjs_node_version(task_id, oracle)
     if not node:
         blockers.append("Oracle is missing historical_node")
-    else:
-        runtime = (
-            oracle_recovery_root(legacy_root)
-            / "tsjs/_runtimes"
-            / f"node-v{node}-linux-x64/bin/node"
+    elif node_runtime_bin(
+        node, legacy_root, asset_root, manifest.get("runtime_root", "legacy")
+    ) is None:
+        blockers.append(f"missing pinned Node {node} runtime")
+
+    provisioning = manifest["node_modules"]
+    if provisioning == "shared_node_tools":
+        tools = (
+            oracle_recovery_root(legacy_root) / "tsjs/_node_tools/node_modules"
         )
-        if not runtime.is_file():
-            blockers.append(f"missing pinned Node runtime: {runtime}")
-    try:
-        recovery_dir = artifacts_directory(oracle, legacy_root)
-        if not recovery_dir.is_dir():
-            blockers.append(f"missing recovery artifact directory: {recovery_dir}")
-    except ValueError as error:
-        blockers.append(str(error))
+        if not tools.is_dir():
+            blockers.append(f"missing retained shared Node tools: {tools}")
+    elif provisioning == "pinned":
+        if asset_root is None:
+            blockers.append(
+                "--asset-root is required for a pinned node_modules snapshot"
+            )
+        else:
+            pinned = asset_root / manifest["pinned_node_modules"]
+            if not (pinned / ".bin").is_dir() and not pinned.is_dir():
+                blockers.append(f"missing pinned node_modules asset: {pinned}")
+    elif provisioning == "pnpm_workspace":
+        if asset_root is None:
+            blockers.append(
+                "--asset-root is required for a pinned pnpm workspace store"
+            )
+        else:
+            store = asset_root / "tsjs/pnpm-store"
+            if not store.is_dir():
+                blockers.append(f"missing pinned pnpm store: {store}")
+    else:  # pragma: no cover - defensive
+        blockers.append(f"unsupported node_modules provisioning: {provisioning}")
+
+    if manifest.get("session_from_recovery"):
+        try:
+            recovery_dir = artifacts_directory(oracle, legacy_root, asset_root)
+        except ValueError as error:
+            blockers.append(str(error))
+        else:
+            session_dir = recovery_dir / "session"
+            if not session_dir.is_dir():
+                blockers.append(
+                    f"missing recovered session harness directory: {session_dir}"
+                )
     return blockers
 
 
@@ -1107,15 +1561,16 @@ def task_blockers(
     oracle: dict[str, Any],
     legacy_root: Path,
     start_sha: str,
+    asset_root: Path | None = None,
 ) -> list[str]:
     if lane == "native":
         return native_blockers(task_id, legacy_root)
     if lane == "rust":
         return rust_blockers(task_id, oracle, legacy_root)
     if lane == "jvm":
-        return jvm_blockers(task_id, oracle, legacy_root)
+        return jvm_blockers(task_id, oracle, legacy_root, asset_root)
     if lane == "tsjs":
-        return tsjs_blockers(task_id, oracle, legacy_root, start_sha)
+        return tsjs_blockers(task_id, oracle, legacy_root, start_sha, asset_root)
     return [f"unsupported lane: {lane}"]  # pragma: no cover - defensive
 
 
@@ -1124,6 +1579,7 @@ def asset_state(
     lane: str,
     oracle: dict[str, Any],
     legacy_root: Path,
+    asset_root: Path | None = None,
 ) -> dict[str, Any]:
     """Identity of the actual replay source trees and other required
     assets a lane's replay recipe depends on under the *current*
@@ -1177,53 +1633,83 @@ def asset_state(
             ),
         }
     if lane == "jvm":
-        environment = oracle.get("environment") or {}
-        image = environment.get("container")
-        cache = environment.get("cache")
+        image = jvm_container(oracle, task_id)
+        cache = jvm_cache(oracle, task_id)
         repo = oracle.get("repo") or ""
         checkout = repo_checkout_dir(legacy_root, repo) if repo else None
         cache_blobs: dict[str, str | None] = {}
         if cache:
-            cache_root = resolve_legacy_relative(cache, legacy_root).parent
+            cache_root = resolve_legacy_relative(
+                cache, legacy_root, asset_root
+            ).parent
             for token in oracle_cache_tokens(oracle.get("command") or ""):
                 cache_blobs[token] = safe_file_digest(cache_root / token)
+        session_tests = None
+        if JVM_MANIFEST.get(task_id, {}).get("session_tests"):
+            try:
+                session_tests = directory_identity(
+                    artifacts_directory(oracle, legacy_root, asset_root)
+                    / "session-tests"
+                )
+            except ValueError:
+                session_tests = None
         return {
             "docker_image_id": docker_image_id(image) if image else None,
-            # the exact repo checkout replay_jvm worktree-checks-out from
+            # the exact repo checkout replay_jvm materializes the start from
             "repo_checkout": directory_identity(checkout) if checkout else None,
             # the exact /oracle-cache blobs the recorded command requires
             "oracle_cache_blobs": cache_blobs,
             "cache_home": (
-                directory_identity(resolve_legacy_relative(cache, legacy_root))
+                directory_identity(
+                    resolve_legacy_relative(cache, legacy_root, asset_root)
+                )
                 if cache
                 else None
             ),
+            # the session-authored behavior tests installed into the workspace
+            "session_tests": session_tests,
+            "manifest": JVM_MANIFEST.get(task_id),
         }
     if lane == "tsjs":
+        manifest = TSJS_MANIFEST.get(task_id)
+        if manifest is None:
+            return {"manifest": None}
         node = tsjs_node_version(task_id, oracle)
-        runtime = (
-            oracle_recovery_root(legacy_root) / "tsjs/_runtimes"
-            / f"node-v{node}-linux-x64/bin/node"
-            if node
-            else None
+        runtime = node_runtime_bin(
+            node, legacy_root, asset_root, manifest.get("runtime_root", "legacy")
         )
         repo = oracle.get("repo") or ""
         checkout = repo_checkout_dir(legacy_root, repo) if repo else None
-        try:
-            recovery_dir = artifacts_directory(oracle, legacy_root)
-            session_tree = directory_identity(recovery_dir / "session")
-        except ValueError:
-            session_tree = None
+        session_tree = None
+        if manifest.get("session_from_recovery"):
+            try:
+                session_tree = directory_identity(
+                    artifacts_directory(oracle, legacy_root, asset_root) / "session"
+                )
+            except ValueError:
+                session_tree = None
+        dependencies: dict[str, Any] | None = None
+        provisioning = manifest["node_modules"]
+        if provisioning == "shared_node_tools":
+            dependencies = directory_identity(
+                oracle_recovery_root(legacy_root) / "tsjs/_node_tools/node_modules"
+            )
+        elif provisioning == "pinned" and asset_root is not None:
+            dependencies = directory_identity(
+                asset_root / manifest["pinned_node_modules"]
+            )
+        elif provisioning == "pnpm_workspace" and asset_root is not None:
+            dependencies = directory_identity(asset_root / "tsjs/pnpm-store")
         return {
-            "node_runtime": safe_file_digest(runtime) if runtime else None,
-            "shared_node_tools": directory_identity(
-                oracle_recovery_root(legacy_root)
-                / "tsjs/_node_tools/node_modules"
+            "node_runtime": (
+                safe_file_digest(runtime / "node") if runtime else None
             ),
-            # the exact repo checkout replay_tsjs worktree-checks-out from
+            "node_modules": dependencies,
+            # the exact repo checkout replay_tsjs materializes the start from
             "repo_checkout": directory_identity(checkout) if checkout else None,
-            # the exact recovered session/ tree copied into the worktree
+            # the exact recovered session/ tree copied into the workspace
             "session": session_tree,
+            "manifest": manifest,
         }
     return {}  # pragma: no cover - defensive
 
@@ -1236,6 +1722,9 @@ def asset_state(
 
 def cmd_preflight(args: argparse.Namespace) -> int:
     legacy_root = Path(args.legacy_root).expanduser().resolve()
+    asset_root = (
+        Path(args.asset_root).expanduser().resolve() if args.asset_root else None
+    )
     tasks_path = Path(args.tasks).resolve()
     oracles_path = Path(args.oracles).resolve()
     tasks_by_id, oracles_by_id, plan = load_release_and_plan(
@@ -1249,7 +1738,7 @@ def cmd_preflight(args: argparse.Namespace) -> int:
         task_id = row["id"]
         oracle = oracles_by_id[task_id]
         blockers = task_blockers(
-            task_id, row["lane"], oracle, legacy_root, row["start_sha"]
+            task_id, row["lane"], oracle, legacy_root, row["start_sha"], asset_root
         )
         status = "ready" if not blockers else "blocked"
         if status == "ready":
@@ -1268,6 +1757,7 @@ def cmd_preflight(args: argparse.Namespace) -> int:
         "schema_version": "reviewbench-legacy-reserve-preflight/v1",
         "created_at": BASE.utc_now(),
         "legacy_root": str(legacy_root),
+        "asset_root": str(asset_root) if asset_root else None,
         "tasks_sha256": BASE.sha256(tasks_path),
         "oracles_sha256": BASE.sha256(oracles_path),
         "reserve_task_count": len(TASK_IDS),
@@ -1432,6 +1922,7 @@ def missing_row(
     generation: dict[str, Any],
     legacy_root: Path,
     blockers: list[str],
+    asset_root: Path | None = None,
 ) -> dict[str, Any]:
     row = {
         "id": task_id,
@@ -1449,7 +1940,8 @@ def missing_row(
     }
     row.update(
         row_provenance_fields(
-            task, oracle, task_id, lane, generation, legacy_root, blockers
+            task, oracle, task_id, lane, generation, legacy_root, blockers,
+            asset_root,
         )
     )
     return row
@@ -1645,6 +2137,135 @@ def replay_rust(
     return row
 
 
+def jvm_test_count(workspace: Path, globs: tuple[str, ...]) -> tuple[int, int]:
+    """Count executed/failed tests from the build's own JUnit XML reports.
+
+    Mirrors ``execute.py``'s ``test_count`` (which scored the historical
+    evidence off the very same focused report globs) so a "green" exit code
+    that executed zero tests can never be scored as a pass.
+    """
+    total = failed = 0
+    for pattern in globs:
+        for report in workspace.glob(pattern):
+            try:
+                root = ElementTree.parse(report).getroot()
+            except Exception:  # pragma: no cover - malformed report
+                continue
+            suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+            for suite in suites:
+                total += int(suite.attrib.get("tests", 0) or 0)
+                failed += int(suite.attrib.get("failures", 0) or 0)
+                failed += int(suite.attrib.get("errors", 0) or 0)
+    return total, failed
+
+
+def jvm_docker_command(
+    oracle: dict[str, Any],
+    task_id: str,
+    legacy_root: Path,
+    asset_root: Path | None,
+    workspace: Path,
+    task_dir: Path,
+    shell_command: str,
+    offline: bool,
+) -> list[str]:
+    """Build the historical JVM Oracle container invocation.
+
+    Reproduces ``execute.py``'s docker recipe: the workspace at /workspace,
+    a per-replay /task scratch (the Oracle commands write
+    ``/task/start.exec``, so it must exist and be writable or the JaCoCo
+    agent aborts the JVM), the /oracle-cache asset directory, the pinned
+    cache home at /cachehome, and the exact historical per-task
+    ``GRADLE_USER_HOME=/cachehome/gradle-task-<index>`` partition. Note that
+    ``CI`` is deliberately *not* set: the historical harness did not set it,
+    and Solr's build turns error-prone's ``-Werror`` on inside CI, which
+    fails the unpatched start compile outright.
+    """
+    manifest = JVM_MANIFEST[task_id]
+    cache_home = resolve_legacy_relative(
+        jvm_cache(oracle, task_id), legacy_root, asset_root
+    )
+    cache_root = cache_home.parent
+    passwd = cache_root / "container.passwd"
+    if not passwd.is_file():
+        passwd.parent.mkdir(parents=True, exist_ok=True)
+        passwd.write_text(
+            "root:x:0:0:root:/root:/bin/bash\n"
+            f"oracle:x:{os.getuid()}:{os.getgid()}:Oracle:/cachehome:/bin/bash\n",
+            encoding="utf-8",
+        )
+    command = [
+        "docker", "run", "--rm",
+        "--user", f"{os.getuid()}:{os.getgid()}",
+        "-e", "HOME=/cachehome",
+        "-e", f"GRADLE_USER_HOME=/cachehome/gradle-task-{manifest['cache_index']}",
+        "-e", "MAVEN_CONFIG=/cachehome/.m2",
+        "-e", "TERM=dumb",
+    ]
+    if offline:
+        # Scored replays are executed with no network at all: every artifact
+        # must already be in the pinned, hashed cache home. This is what makes
+        # the replay reproducible rather than dependent on live repositories.
+        # The single exception is an Oracle whose behavior anchor *is* network
+        # behavior; it keeps a network namespace but pins its package manager
+        # into offline mode so dependency resolution stays cache-only.
+        if manifest.get("network") == "bridge":
+            command += ["--hostname", "oracle", "--add-host", "oracle:127.0.0.1"]
+        else:
+            command += ["--network", "none"]
+        for key, value in (manifest.get("offline_env") or {}).items():
+            command += ["-e", f"{key}={value}"]
+    else:
+        mirror = os.environ.get("ORACLE_JCENTER_MIRROR", "")
+        if mirror:
+            command += ["-e", f"ORACLE_JCENTER_MIRROR={mirror}"]
+    command += [
+        "-v", f"{workspace}:/workspace",
+        "-v", f"{task_dir}:/task",
+        "-v", f"{cache_root}:/oracle-cache",
+        "-v", f"{cache_home}:/cachehome",
+        "-v", f"{passwd}:/etc/passwd:ro",
+        "-w", "/workspace",
+        jvm_container(oracle, task_id),
+        "bash", "-lc", shell_command,
+    ]
+    return command
+
+
+def install_pinned_gradle_wrapper(
+    workspace: Path,
+    legacy_root: Path,
+    asset_root: Path | None,
+    cache_home: Path,
+) -> str | None:
+    """Install the repository's own Gradle wrapper jar from the pinned store.
+
+    Solr's checked-in ``gradlew`` fetches ``gradle-wrapper.jar`` from
+    raw.githubusercontent.com when it is absent, which a network-isolated
+    replay cannot do -- and failing there would be scored as a model failure.
+    The jar is pinned as a durable asset keyed by *the repository's own*
+    recorded ``gradle-wrapper.jar.sha256``, and the pinned bytes are verified
+    against that recorded digest before being installed, so this can only ever
+    supply exactly what the checked-out revision itself demands.
+    """
+    marker = workspace / "gradle/wrapper/gradle-wrapper.jar.sha256"
+    jar = workspace / "gradle/wrapper/gradle-wrapper.jar"
+    if jar.is_file() or not marker.is_file():
+        return None
+    expected = marker.read_text(encoding="utf-8", errors="replace").strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        return None
+    pinned = cache_home.parent / "gradle-wrapper" / f"{expected}.jar"
+    if not pinned.is_file():
+        return None
+    digest = hashlib.sha256(pinned.read_bytes()).hexdigest()
+    if digest != expected:
+        return None
+    jar.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(pinned, jar)
+    return expected
+
+
 def replay_jvm(
     task_id: str,
     model: str,
@@ -1655,31 +2276,74 @@ def replay_jvm(
     work_root: Path,
     output: Path,
     timeout: int,
+    asset_root: Path | None = None,
+    offline: bool = True,
 ) -> dict[str, Any]:
-    environment = oracle.get("environment") or {}
+    manifest = JVM_MANIFEST[task_id]
     repo = oracle["repo"]
     repo_source = repo_checkout_dir(legacy_root, repo)
+    start_sha = oracle.get("start_sha") or task["start_sha"]
     scratch = work_root / "jvm" / model_component(model) / task_id
     workspace_scratch = scratch / "workspace"
+    task_scratch = scratch / "task"
     provenance = row_provenance_fields(
-        task, oracle, task_id, "jvm", generation, legacy_root, []
+        task, oracle, task_id, "jvm", generation, legacy_root, [], asset_root
     )
-    git_worktree_checkout(repo_source, oracle["start_sha"], workspace_scratch)
+    shutil.rmtree(scratch, ignore_errors=True)
+    task_scratch.mkdir(parents=True, exist_ok=True)
+    materialize_start(repo_source, start_sha, workspace_scratch)
     result: dict[str, Any]
+    log_kind = "run.log"
     try:
+        if manifest.get("session_tests"):
+            session_tests = (
+                artifacts_directory(oracle, legacy_root, asset_root) / "session-tests"
+            )
+            shutil.copytree(session_tests, workspace_scratch, dirs_exist_ok=True)
+
+        prefetched = []
+        for entry in manifest.get("prefetch") or ():
+            source = (
+                resolve_legacy_relative(
+                    jvm_cache(oracle, task_id), legacy_root, asset_root
+                ).parent
+                / entry["asset"]
+            )
+            if not source.is_file():
+                continue
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            if digest != entry["sha256"]:
+                continue
+            destination = workspace_scratch / entry["workspace_path"]
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            prefetched.append(entry["workspace_path"])
+
+        wrapper_sha256 = None
+        if manifest.get("needs_gradle_wrapper_jar"):
+            wrapper_sha256 = install_pinned_gradle_wrapper(
+                workspace_scratch,
+                legacy_root,
+                asset_root,
+                resolve_legacy_relative(
+                    jvm_cache(oracle, task_id), legacy_root, asset_root
+                ),
+            )
+
         patch_path = Path(generation["patch_file"])
         ok, detail = apply_patch(workspace_scratch, patch_path)
         if not ok:
-            scratch.mkdir(parents=True, exist_ok=True)
             (scratch / "apply-error.log").write_text(detail, encoding="utf-8")
+            log_kind = "apply-error.log"
             result = {
                 "id": task_id,
                 "model": model,
                 "lane": "jvm",
                 "source_kind": "published_legacy",
-                "start_sha": oracle["start_sha"],
+                "start_sha": start_sha,
                 "patch_sha256": generation.get("patch_sha256"),
                 "status": "apply_error",
+                "candidate_result": "apply_error",
                 "correctness_ok": False,
                 "patch_apply": False,
                 "scope_ok": None,
@@ -1690,35 +2354,50 @@ def replay_jvm(
             changed = patch_changed_paths(patch_text)
             scope_ok = scope_is_safe(changed)
 
-            cache_home = resolve_legacy_relative(environment["cache"], legacy_root)
-            cache_root = cache_home.parent
-            safe_id = BASE.safe_component(task_id)
-            docker_cmd = [
-                "docker", "run", "--rm",
-                "-e", "HOME=/cachehome",
-                "-e", f"GRADLE_USER_HOME=/cachehome/gradle-task-{safe_id}",
-                "-e", "MAVEN_CONFIG=/cachehome/.m2",
-                "-v", f"{workspace_scratch}:/workspace",
-                "-v", f"{cache_root}:/oracle-cache",
-                "-v", f"{cache_home}:/cachehome",
-                "-w", "/workspace",
-                environment["container"],
-                "bash", "-lc", oracle["command"],
-            ]
+            prime_command = manifest.get("prime_command")
+            if prime_command:
+                run_subprocess(
+                    jvm_docker_command(
+                        oracle, task_id, legacy_root, asset_root,
+                        workspace_scratch, task_scratch, prime_command, offline,
+                    ),
+                    cwd=None,
+                    log_path=scratch / "prime.log",
+                    timeout=timeout,
+                )
             log_path = scratch / "run.log"
             exit_code, duration, error = run_subprocess(
-                docker_cmd, cwd=None, log_path=log_path, timeout=timeout
+                jvm_docker_command(
+                    oracle, task_id, legacy_root, asset_root,
+                    workspace_scratch, task_scratch, str(oracle["command"]), offline,
+                ),
+                cwd=None,
+                log_path=log_path,
+                timeout=timeout,
             )
-            correctness_ok = exit_code == 0
-            expected = BASE.pass_to_pass_count(oracle.get("pass_to_pass"))
+            executed, failures = jvm_test_count(
+                workspace_scratch, manifest["test_results_globs"]
+            )
+            expected = (
+                BASE.pass_to_pass_count(oracle.get("pass_to_pass"))
+                or manifest["expected_tests"]
+            )
+            # A zero-test "success" is never a pass: the historical evidence
+            # recorded a concrete executed-test count for every one of these
+            # Oracles, so an empty run means the harness did not actually
+            # execute the behavior anchor.
+            correctness_ok = (
+                exit_code == 0 and failures == 0 and executed >= expected
+            )
             result = {
                 "id": task_id,
                 "model": model,
                 "lane": "jvm",
                 "source_kind": "published_legacy",
-                "start_sha": oracle["start_sha"],
+                "start_sha": start_sha,
                 "patch_sha256": generation.get("patch_sha256"),
                 "status": "pass" if correctness_ok else "fail",
+                "candidate_result": "pass" if correctness_ok else "fail",
                 "correctness_ok": correctness_ok,
                 "patch_apply": True,
                 "scope_ok": scope_ok,
@@ -1727,18 +2406,93 @@ def replay_jvm(
                 "duration_seconds": duration,
                 "error": error,
                 "pass_to_pass_total": expected,
-                "pass_to_pass_passed": expected if correctness_ok else 0,
+                "pass_to_pass_passed": max(executed - failures, 0),
                 "failed_tests": [] if correctness_ok else ["gradle-test"],
+                "offline_replay": offline,
+                "container_network": (
+                    manifest.get("network", "none") if offline else "bridge"
+                ),
+                "pinned_gradle_wrapper_sha256": wrapper_sha256,
+                "prefetched_assets": prefetched,
             }
     finally:
-        remove_worktree(repo_source, workspace_scratch)
+        shutil.rmtree(workspace_scratch, ignore_errors=True)
     evidence = persist_evidence(output, "jvm", model, task_id, scratch)
-    if result["status"] == "apply_error":
+    if log_kind == "apply-error.log":
         result["error_log"] = evidence.get("apply-error.log")
     else:
         result["log"] = evidence.get("run.log")
+        if evidence.get("prime.log"):
+            result["prime_log"] = evidence["prime.log"]
     result.update(provenance)
     return result
+
+
+def provision_tsjs_dependencies(
+    task_id: str,
+    manifest: dict[str, Any],
+    legacy_root: Path,
+    asset_root: Path | None,
+    workspace: Path,
+    env: dict[str, str],
+    scratch: Path,
+    timeout: int,
+    offline: bool = True,
+) -> tuple[bool, str]:
+    """Make the historical dependency tree available without re-resolving it.
+
+    Returns ``(ok, detail)``; ``ok is False`` is an *infrastructure* failure
+    and is never scored as a candidate failure.
+    """
+    provisioning = manifest["node_modules"]
+    destination = workspace / "node_modules"
+    if provisioning == "shared_node_tools":
+        # The retained historical workspace
+        # (oracle_recovery/tsjs/_work/discourse__discourse) still carries this
+        # exact symlink; without it the session Vitest config cannot resolve
+        # "vitest/config" and every candidate fails for infrastructure reasons.
+        shutil.rmtree(destination, ignore_errors=True)
+        destination.symlink_to(
+            oracle_recovery_root(legacy_root) / "tsjs/_node_tools/node_modules"
+        )
+        return True, "symlinked retained shared node tools"
+    if provisioning == "pinned":
+        assert asset_root is not None
+        link_tree(asset_root / manifest["pinned_node_modules"], destination)
+        return True, "hardlink-copied pinned node_modules snapshot"
+    if provisioning == "pnpm_workspace":
+        assert asset_root is not None
+        store = asset_root / "tsjs/pnpm-store"
+        package_manager = manifest["package_manager"]
+        install = shlex.split(manifest["install_command"])
+        # A scored replay must be a pure function of the pinned store, so the
+        # package manager is put in offline mode rather than trusted to happen
+        # to hit only cached metadata.
+        offline_flags = ["--offline"] if offline else []
+        exit_code, _, detail = run_subprocess(
+            ["corepack", package_manager, *install[1:],
+             f"--config.store-dir={store}", *offline_flags],
+            cwd=workspace,
+            log_path=scratch / "install.log",
+            env=env,
+            timeout=timeout,
+        )
+        if exit_code != 0:
+            return False, f"install_command failed: {detail}"
+        build = manifest.get("build_command")
+        if build:
+            build_parts = shlex.split(build)
+            exit_code, _, detail = run_subprocess(
+                ["corepack", package_manager, *build_parts[1:]],
+                cwd=workspace,
+                log_path=scratch / "build.log",
+                env=env,
+                timeout=timeout,
+            )
+            if exit_code != 0:
+                return False, f"build_command failed: {detail}"
+        return True, "installed from pinned pnpm store"
+    return False, f"unsupported node_modules provisioning: {provisioning}"
 
 
 def replay_tsjs(
@@ -1751,21 +2505,27 @@ def replay_tsjs(
     work_root: Path,
     output: Path,
     timeout: int,
+    asset_root: Path | None = None,
+    offline: bool = True,
 ) -> dict[str, Any]:
+    manifest = TSJS_MANIFEST[task_id]
     repo = oracle["repo"]
     repo_source = repo_checkout_dir(legacy_root, repo)
     scratch = work_root / "tsjs" / model_component(model) / task_id
     workspace_scratch = scratch / "workspace"
     provenance = row_provenance_fields(
-        task, oracle, task_id, "tsjs", generation, legacy_root, []
+        task, oracle, task_id, "tsjs", generation, legacy_root, [], asset_root
     )
-    git_worktree_checkout(repo_source, task["start_sha"], workspace_scratch)
+    shutil.rmtree(scratch, ignore_errors=True)
+    scratch.mkdir(parents=True, exist_ok=True)
+    materialize_start(repo_source, task["start_sha"], workspace_scratch)
     result: dict[str, Any]
     log_kind = "run.log"
     try:
-        recovery_dir = artifacts_directory(oracle, legacy_root)
-        session_dir = recovery_dir / "session"
-        if session_dir.is_dir():
+        if manifest.get("session_from_recovery"):
+            session_dir = (
+                artifacts_directory(oracle, legacy_root, asset_root) / "session"
+            )
             destination = workspace_scratch / "session"
             shutil.rmtree(destination, ignore_errors=True)
             shutil.copytree(session_dir, destination, symlinks=True)
@@ -1773,7 +2533,6 @@ def replay_tsjs(
         patch_path = Path(generation["patch_file"])
         ok, detail = apply_patch(workspace_scratch, patch_path)
         if not ok:
-            scratch.mkdir(parents=True, exist_ok=True)
             (scratch / "apply-error.log").write_text(detail, encoding="utf-8")
             log_kind = "apply-error.log"
             result = {
@@ -1796,31 +2555,26 @@ def replay_tsjs(
             scope_ok = scope_is_safe(changed)
 
             node = tsjs_node_version(task_id, oracle)
-            runtime_bin = (
-                oracle_recovery_root(legacy_root)
-                / "tsjs/_runtimes"
-                / f"node-v{node}-linux-x64/bin"
+            runtime_bin = node_runtime_bin(
+                node, legacy_root, asset_root, manifest.get("runtime_root", "legacy")
             )
             env = dict(os.environ)
             env["PATH"] = f"{runtime_bin}:{env.get('PATH', '')}"
             env["CI"] = "true"
-            workspace = oracle.get("workspace") or "."
-            cwd = workspace_scratch if workspace == "." else workspace_scratch / workspace
+            env["HUSKY"] = "0"
+            env["NOYARNPOSTINSTALL"] = "1"
+            env["PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"] = "1"
+            env["PUPPETEER_SKIP_DOWNLOAD"] = "true"
+            env["COREPACK_ENABLE_DOWNLOAD_PROMPT"] = "0"
+            env.update(
+                {str(key): str(value) for key, value in (manifest.get("test_env") or {}).items()}
+            )
 
-            install_log = scratch / "install.log"
-            install_command = oracle.get("install_command")
-            install_failed = False
-            error = ""
-            if install_command:
-                exit_code, _, error = run_subprocess(
-                    shlex.split(install_command),
-                    cwd=cwd,
-                    log_path=install_log,
-                    env=env,
-                    timeout=timeout,
-                )
-                install_failed = exit_code != 0
-            if install_failed:
+            provisioned, provision_detail = provision_tsjs_dependencies(
+                task_id, manifest, legacy_root, asset_root, workspace_scratch,
+                env, scratch, timeout, offline,
+            )
+            if not provisioned:
                 log_kind = "install.log"
                 result = {
                     "id": task_id,
@@ -1829,18 +2583,24 @@ def replay_tsjs(
                     "source_kind": "published_legacy",
                     "start_sha": task["start_sha"],
                     "patch_sha256": generation.get("patch_sha256"),
-                    "status": "infra_retry",
-                    "candidate_result": "infra_retry",
+                    "status": INFRA_RETRY,
+                    "candidate_result": INFRA_RETRY,
                     "correctness_ok": None,
                     "patch_apply": True,
                     "scope_ok": scope_ok,
-                    "error": f"install_command failed: {error}",
+                    "error": provision_detail,
                 }
             else:
+                workspace = manifest.get("workspace") or "."
+                cwd = (
+                    workspace_scratch
+                    if workspace == "."
+                    else workspace_scratch / workspace
+                )
                 run_log = scratch / "run.log"
                 exit_code, duration, error = run_subprocess(
                     resolve_node_command(
-                        oracle["test_command"],
+                        str(manifest["test_command"]),
                         cwd,
                         oracle_recovery_root(legacy_root)
                         / "tsjs/_node_tools/node_modules/.bin",
@@ -1851,9 +2611,19 @@ def replay_tsjs(
                     timeout=timeout,
                 )
                 text = run_log.read_text(errors="replace") if run_log.is_file() else ""
-                passed = test_count(text, GENERIC_TEST_COUNT_PATTERNS)
-                expected = BASE.pass_to_pass_count(oracle.get("pass_to_pass"))
-                correctness_ok = exit_code == 0 and (not expected or passed >= expected)
+                passed = test_count(
+                    text,
+                    tuple(manifest.get("test_count_patterns") or ())
+                    or GENERIC_TEST_COUNT_PATTERNS,
+                )
+                expected = manifest["expected_tests"]
+                signature = manifest.get("expected_signature")
+                signature_ok = not signature or signature in re.sub(
+                    r"\x1b\[[0-9;]*[A-Za-z]", "", text
+                )
+                correctness_ok = (
+                    exit_code == 0 and passed >= expected and signature_ok
+                )
                 result = {
                     "id": task_id,
                     "model": model,
@@ -1873,14 +2643,23 @@ def replay_tsjs(
                     "pass_to_pass_total": expected,
                     "pass_to_pass_passed": passed,
                     "failed_tests": [] if correctness_ok else ["tsjs-test"],
+                    "dependency_provisioning": provision_detail,
                 }
     finally:
-        remove_worktree(repo_source, workspace_scratch)
+        # node_modules may be a symlink into a retained shared tree; never
+        # follow it while cleaning up the disposable workspace.
+        link = workspace_scratch / "node_modules"
+        if link.is_symlink():
+            link.unlink()
+        shutil.rmtree(workspace_scratch, ignore_errors=True)
     evidence = persist_evidence(output, "tsjs", model, task_id, scratch)
     if log_kind == "apply-error.log":
         result["error_log"] = evidence.get("apply-error.log")
     else:
         result["log"] = evidence.get(log_kind)
+        for extra in ("install.log", "build.log"):
+            if extra != log_kind and evidence.get(extra):
+                result[extra.replace(".", "_")] = evidence[extra]
     result.update(provenance)
     return result
 
@@ -1893,8 +2672,114 @@ REPLAY_FUNCTIONS = {
 }
 
 
+def cmd_verify_contracts(args: argparse.Namespace) -> int:
+    """Replay each recovered Oracle at its exact *unpatched* start commit and
+    require the frozen historical evidence to be reproduced.
+
+    This is what makes the recovery auditable rather than asserted: an Oracle
+    whose pinned assets were reconstructed (the JVM ``/oracle-cache``
+    init script and Gradle/Maven cache home, the pinned ``node_modules``
+    snapshots, the pinned Node/pnpm runtimes) only becomes runner-ready once a
+    fresh, network-isolated start replay reproduces the published
+    ``pass_to_pass``/signature evidence. It runs the *same* code path as a
+    scored replay, with an empty candidate patch, so nothing can be validated
+    through a path that scoring does not use.
+    """
+    legacy_root = Path(args.legacy_root).expanduser().resolve()
+    asset_root = (
+        Path(args.asset_root).expanduser().resolve() if args.asset_root else None
+    )
+    tasks_path = Path(args.tasks).resolve()
+    oracles_path = Path(args.oracles).resolve()
+    output = Path(args.output).resolve()
+    tasks_by_id, oracles_by_id, plan = load_release_and_plan(tasks_path, oracles_path)
+    rows = [
+        row
+        for row in select_scope(plan, args.task_id or None)
+        if row["lane"] in ("jvm", "tsjs")
+    ]
+
+    work_root = (
+        Path(args.work_root).resolve() if args.work_root else output / "legacy/verify-work"
+    )
+    work_root.mkdir(parents=True, exist_ok=True)
+    empty_patch = work_root / "unpatched-start.patch"
+    empty_patch.write_text("", encoding="utf-8")
+    generation = {
+        "patch_file": str(empty_patch),
+        "patch_sha256": BASE.sha256(empty_patch),
+        "apply_ok": True,
+    }
+
+    results = []
+    verified = 0
+    for row in rows:
+        task_id = row["id"]
+        lane = row["lane"]
+        oracle = oracles_by_id[task_id]
+        task = tasks_by_id[task_id]
+        blockers = task_blockers(
+            task_id, lane, oracle, legacy_root, task["start_sha"], asset_root
+        )
+        if blockers:
+            results.append(
+                {
+                    "id": task_id,
+                    "lane": lane,
+                    "status": "blocked",
+                    "blockers": blockers,
+                }
+            )
+            continue
+        manifest = (JVM_MANIFEST if lane == "jvm" else TSJS_MANIFEST)[task_id]
+        expected = manifest["expected_tests"]
+        raw = REPLAY_FUNCTIONS[lane](
+            task_id, "unpatched-start", task, oracle, generation, legacy_root,
+            work_root, output, args.timeout,
+            asset_root=asset_root, offline=not args.allow_network,
+        )
+        observed = raw.get("pass_to_pass_passed")
+        ok = bool(raw.get("correctness_ok")) and (observed or 0) >= expected
+        if ok:
+            verified += 1
+        results.append(
+            {
+                "id": task_id,
+                "lane": lane,
+                "status": "verified" if ok else "evidence_mismatch",
+                "start_sha": raw.get("start_sha"),
+                "exit_code": raw.get("exit_code"),
+                "expected_tests": expected,
+                "observed_tests": observed,
+                "duration_seconds": raw.get("duration_seconds"),
+                "log": raw.get("log"),
+                "offline": not args.allow_network,
+            }
+        )
+
+    report = {
+        "schema_version": "reviewbench-legacy-reserve-contract-verification/v1",
+        "created_at": BASE.utc_now(),
+        "legacy_root": str(legacy_root),
+        "asset_root": str(asset_root) if asset_root else None,
+        "adapter_contract_version": ADAPTER_CONTRACT_VERSION,
+        "tasks_sha256": BASE.sha256(tasks_path),
+        "oracles_sha256": BASE.sha256(oracles_path),
+        "scoped_task_count": len(rows),
+        "verified_task_count": verified,
+        "tasks": sorted(results, key=lambda entry: entry["id"]),
+    }
+    output.mkdir(parents=True, exist_ok=True)
+    BASE.atomic_json(output / "legacy-reserve-contract-verification.json", report)
+    print(json.dumps(report, indent=2))
+    return 0 if verified == len(rows) or args.allow_blocked else 1
+
+
 def cmd_replay(args: argparse.Namespace) -> int:
     legacy_root = Path(args.legacy_root).expanduser().resolve()
+    asset_root = (
+        Path(args.asset_root).expanduser().resolve() if args.asset_root else None
+    )
     tasks_path = Path(args.tasks).resolve()
     oracles_path = Path(args.oracles).resolve()
     output = Path(args.output).resolve()
@@ -1943,13 +2828,15 @@ def cmd_replay(args: argparse.Namespace) -> int:
         # ``row_is_stale`` folds ``blockers``/``legacy_root`` into the
         # replay-contract fingerprint it compares against, so any change
         # here forces a fall-through instead of a resume-skip.
-        blockers = task_blockers(task_id, lane, oracle, legacy_root, task["start_sha"])
+        blockers = task_blockers(
+            task_id, lane, oracle, legacy_root, task["start_sha"], asset_root
+        )
 
         existing_row = by_lane[lane].get(key)
         if existing_row is not None and not args.force:
             if not row_is_stale(
                 existing_row, task, oracle, task_id, lane, generation,
-                legacy_root, blockers,
+                legacy_root, blockers, asset_root,
             ):
                 summary["skipped_resume"] += 1
                 continue
@@ -1965,7 +2852,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
                 legacy_dir, lane,
                 missing_row(
                     task_id, model, lane, row["start_sha"], task, oracle,
-                    generation, legacy_root, blockers,
+                    generation, legacy_root, blockers, asset_root,
                 ),
             )
             summary["candidate_missing"] += 1
@@ -1995,6 +2882,11 @@ def cmd_replay(args: argparse.Namespace) -> int:
             raw_row = REPLAY_FUNCTIONS[lane](
                 task_id, model, task, oracle, generation, legacy_root, work_root,
                 output, args.timeout,
+                **(
+                    {"asset_root": asset_root, "offline": not args.allow_network}
+                    if lane in ("jvm", "tsjs")
+                    else {}
+                ),
             )
         except LookupError as error:
             # A missing-key/index error (e.g. reading a field an Oracle
@@ -2027,7 +2919,8 @@ def cmd_replay(args: argparse.Namespace) -> int:
             }
             raw_row.update(
                 row_provenance_fields(
-                    task, oracle, task_id, lane, generation, legacy_root, blockers
+                    task, oracle, task_id, lane, generation, legacy_root,
+                    blockers, asset_root,
                 )
             )
         by_lane[lane] = append_raw_row(legacy_dir, lane, raw_row)
@@ -2046,6 +2939,15 @@ def add_release_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--tasks", required=True)
     parser.add_argument("--oracles", required=True)
     parser.add_argument("--legacy-root", required=True)
+    parser.add_argument(
+        "--asset-root",
+        help="Durable recovery-asset root holding the reconstructed pinned "
+        "assets the retained session root no longer carries (JVM "
+        "/oracle-cache + Gradle/Maven cache home, pinned node_modules "
+        "snapshots, pinned pnpm store and Node runtimes). Recorded Oracle "
+        "paths are resolved here only when the retained root does not have "
+        "them, so retained evidence always wins.",
+    )
     parser.add_argument(
         "--task-id",
         action="append",
@@ -2089,6 +2991,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "this points.",
     )
     replay.add_argument("--timeout", type=int, default=1800)
+    replay.add_argument(
+        "--allow-network",
+        action="store_true",
+        help="Permit network access during jvm/tsjs replay. Off by default: "
+        "scored replays run with no network so the result is a pure function "
+        "of the pinned, hashed durable assets. Use only to (re)warm those "
+        "assets, never to score.",
+    )
     replay.add_argument("--force", action="store_true")
     replay.add_argument("--dry-run", action="store_true")
     replay.add_argument(
@@ -2097,6 +3007,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Exit 0 even if some tasks are blocked (report only)",
     )
     replay.set_defaults(func=cmd_replay)
+
+    verify = sub.add_parser(
+        "verify-contracts",
+        help="Replay every recovered jvm/tsjs Oracle at its exact unpatched "
+        "start and require the frozen historical evidence to be reproduced",
+    )
+    add_release_args(verify)
+    verify.add_argument("--output", required=True)
+    verify.add_argument("--work-root")
+    verify.add_argument("--timeout", type=int, default=7200)
+    verify.add_argument(
+        "--allow-network",
+        action="store_true",
+        help="Permit network access (use only to warm the pinned assets)",
+    )
+    verify.add_argument(
+        "--allow-blocked",
+        action="store_true",
+        help="Exit 0 even if some contracts are blocked/mismatched",
+    )
+    verify.set_defaults(func=cmd_verify_contracts)
 
     return parser.parse_args(argv)
 

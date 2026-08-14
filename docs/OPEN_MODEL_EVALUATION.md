@@ -468,17 +468,18 @@ replay contracts are recovered into the seven-lane format. For development
 only, `prepare` and `run` accept `--allow-partial-modern`; such an artifact is
 explicitly marked partial and cannot produce a complete manifest.
 
-#### 7.1.1 Reserve-20260728 replay adapter (14 of the 40)
+#### 7.1.1 Reserve-20260728 replay adapter (17 of the 40)
 
 `scripts/run_legacy_reserve_correctness.py` closes part of this gap for the
-14 (of the 40) published-hard tasks whose Oracle was recovered under
-`data/releases/reserves/20260728/` and that still have a genuine, previously
-proven (or at least fully self-contained) legacy harness on the retained
-session root: native 6 (ClickHouse, Desbordante, IntelPython/dpnp,
-SciCompMod/memilio, XRPLF/rippled, lanl/singularity-eos), JVM 5
-(Consensys/web3signer, SkriptLang/Skript, apache/solr, hibernate-orm,
-reposense/RepoSense), Rust 1 (FuelLabs/fuel-tx), TS/JS 2
-(discourse/discourse, opossum-tool/OpossumUI).
+17 (of the 40) published-hard tasks whose Oracle was recovered under
+`data/releases/reserves/20260728/` (or the older increment5/legacy159
+recoveries) and that still have a genuine, previously proven (or fully
+recoverable) legacy harness: native 6 (ClickHouse, Desbordante,
+IntelPython/dpnp, SciCompMod/memilio, XRPLF/rippled, lanl/singularity-eos),
+JVM 6 (Consensys/web3signer, SkriptLang/Skript, apache/solr, hibernate-orm,
+reposense/RepoSense, sniffy/sniffy), Rust 1 (FuelLabs/fuel-tx), TS/JS 4
+(discourse/discourse, opossum-tool/OpossumUI, microsoft/FluidFramework,
+angular/components).
 
 It reuses the existing `run_open_model_correctness.py` extension point
 (`source_kind == "published_legacy"`, lane inferred by `legacy_lane()`) and
@@ -495,23 +496,94 @@ Design:
   patch there and re-running the exact (for 5 of 6 native tasks: previously
   *proven*, recorded in the historical `native.jsonl`) Docker command; the
   retained checkout itself is never mutated.
-- JVM + TS/JS replay a fresh `git worktree` of the retained
-  `repos/<org>__<repo>` clone at the Oracle's exact `start_sha`, apply the
-  staged patch there, and run the Oracle's own self-contained
-  `command`/`test_command` fields with the historical toolchain (pinned
-  Docker image or Node runtime).
-- Any task whose required Docker image, retained repo checkout, Gradle/cargo
-  cache, or Node runtime is missing is reported as a **preflight blocker**
-  and is left out of the raw output entirely -- it is never scored as a
-  pass/fail. `finalize --allow-incomplete` will show it under
-  `missing_pairs` until the asset is recovered.
+- JVM + TS/JS materialize the exact start commit the way the historical
+  harness did (`git archive | tar` plus `git init` and one empty commit --
+  **not** a `git worktree`, whose `.git` file points at an absolute path
+  inside the retained clone that is not mounted into the Oracle container and
+  therefore breaks repository-introspecting builds), apply the staged patch
+  there, and run the Oracle's own `command`/`test_command` with the historical
+  toolchain against **pinned, hashed durable assets** under `--asset-root`.
+- Scored JVM/TS-JS replays run with **no network** (`docker run
+  --network none`, `pnpm --offline`). Network access is only ever used to
+  *warm* the pinned durable assets, never to score. The single documented
+  exception is sniffy, whose behavior anchor *is* network behavior (Sniffy
+  monitors sockets and NIO channels on loopback); it keeps a network
+  namespace but pins Maven into offline mode (`MAVEN_ARGS=-o`), so
+  dependency resolution is still cache-only. Every row records
+  `offline_replay` and `container_network`.
+- `JVM_MANIFEST`/`TSJS_MANIFEST` carry the parts of the historical execution
+  recipe that were never published with the Oracle records and had to be
+  recovered from the retained harness and run logs: the exact per-task Gradle
+  cache partition (`/cachehome/gradle-task-<index>`), the session-authored
+  `oracle.*` behavior tests, RepoSense's pre-repeat priming command (its
+  published command carries `-x compileTestJava`, which only works in a
+  workspace an earlier run already compiled), the Discourse `node_modules`
+  symlink into the retained shared Node tools, the proven OpossumUI
+  `react-scripts` invocation, and the FluidFramework pnpm/mocha recipe.
+- Any task whose required Docker image, retained repo checkout, cache home,
+  session harness, pinned dependency snapshot or Node runtime is missing is
+  reported as a **preflight blocker** and is left out of the raw output
+  entirely -- it is never scored as a pass/fail. `finalize
+  --allow-incomplete` will show it under `missing_pairs` until the asset is
+  recovered.
+
+##### Recovered durable assets
+
+Assets the retained session root no longer carries were reconstructed under a
+dedicated, hashed asset root and are resolved through `--asset-root` at the
+*same recorded relative path*, so the retained root always wins when it still
+has an asset:
+
+```text
+/data/v-peiyangliu/reviewbench-openmodels/legacy-recovery-assets/jvm-tsjs
+  manifest.json, SHA256SUMS
+  strict_screen_20260726/oracle_recovery/java/cache/
+    oracle.init.gradle      reconstructed (see below)
+    jacocoagent.jar, jacococli.jar
+    home/                   pinned Gradle/Maven cache home
+    m2-mirror/              file:// mirror of the pinned cache, so the
+                            JCenter-only 2021/2022 build-classpath artifacts
+                            stay resolvable with no network
+    gradle-wrapper/         pinned wrapper jars, keyed and verified by the
+                            repository's own gradle-wrapper.jar.sha256
+  tsjs/node_modules/opossum-tool__OpossumUI   pinned dependency snapshot
+  tsjs/yarn-cache, tsjs/pnpm-store            pinned package-manager stores
+  tsjs/_runtimes/node-v22.22.2-linux-x64      pinned Node runtime
+```
+
+`oracle.init.gradle` -- required by four of the JVM Oracle commands and lost
+with the session -- is a *deterministic reconstruction*, not a guess. Each of
+its behaviors is forced by retained evidence: `execute.py` attaches JaCoCo to
+Gradle Oracles only through this script, yet the pure-Gradle task directories
+still contain a populated `start.exec`; Skript's frozen golden log runs a
+`:oracleSessionTest` task that does not exist in its own `build.gradle` (whose
+`test` task is `test { exclude '**/*' }`); and the directly retained successor
+of the file (`hard_oracle_20260804/jvm/cache/tools/oracle-gradle.init.gradle`)
+disables project-configured JaCoCo. It also refuses to attach the agent when
+the Oracle command already exports it through `JAVA_TOOL_OPTIONS`, because
+double-attaching aborts every test JVM with a `LinkageError`.
+
+##### Contract verification against frozen evidence
+
+`verify-contracts` replays every recovered JVM/TS-JS Oracle at its exact
+*unpatched* start, through the same code path scoring uses (an empty candidate
+patch), and requires the frozen `pass_to_pass`/signature evidence to be
+reproduced before a task is treated as runner-ready:
+
+```bash
+python3 scripts/run_legacy_reserve_correctness.py verify-contracts \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --legacy-root <retained-session-root> \
+  --asset-root <recovery-asset-root> \
+  --output <output>
+```
 
 Commands:
 
 ```bash
 # 1) Stage patches for an arbitrary model across the full 414-task release
-#    (allow the 40 published-legacy tasks, including our 14, to stay
-#    unresolved for now):
+#    (allow the 40 published-legacy tasks to stay unresolved for now):
 python3 scripts/run_open_model_correctness.py prepare \
   --tasks data/releases/hard/20260808/tasks.jsonl \
   --oracles data/releases/hard/20260808/oracles.jsonl \
@@ -519,11 +591,12 @@ python3 scripts/run_open_model_correctness.py prepare \
   --model '<model>=<generation_results.jsonl>' \
   --allow-partial-modern
 
-# 2) Fail-closed preflight of the 14 reserve tasks (no execution):
+# 2) Fail-closed preflight (no execution):
 python3 scripts/run_legacy_reserve_correctness.py preflight \
   --tasks data/releases/hard/20260808/tasks.jsonl \
   --oracles data/releases/hard/20260808/oracles.jsonl \
   --legacy-root <retained-session-root> \
+  --asset-root <recovery-asset-root> \
   --output <output> --allow-blocked
 
 # 3) Replay only what preflight reports ready, for the staged model:
@@ -531,6 +604,7 @@ python3 scripts/run_legacy_reserve_correctness.py replay \
   --tasks data/releases/hard/20260808/tasks.jsonl \
   --oracles data/releases/hard/20260808/oracles.jsonl \
   --legacy-root <retained-session-root> \
+  --asset-root <recovery-asset-root> \
   --output <output> --model '<model>'
 
 # 4) Finalize as usual (missing/blocked pairs remain visible, not fabricated):
@@ -540,32 +614,20 @@ python3 scripts/run_open_model_correctness.py finalize \
   --output <output> --allow-incomplete
 ```
 
-As of this writing, a read-only `preflight` pass against the retained
-session root reports 7 of the 14 tasks ready (ClickHouse, dpnp, memilio,
-rippled, singularity-eos, discourse, opossum-tool/OpossumUI) and 7 blocked:
-Desbordante (harness recipe was never proven historically -- every
-historical candidate patch failed to apply through it), the 4 remaining JVM
-tasks plus web3signer's `-javaagent`/`-I` flags (missing recorded Gradle
-cache home and `/oracle-cache` assets under
-`oracle_recovery/java/cache/`), and FuelLabs/fuel-tx (missing recorded
-cargo cache under `oracle_recovery/rust/cache/cargo`). These are reported,
-not invented; recovering the missing cache directories (or the Desbordante
-proof) would move those tasks to "ready" without any code change.
+Status after the 2026-08-13 JVM/TS-JS recovery: preflight reports 9 of the
+10 JVM/TS-JS published-legacy tasks ready (all 6 JVM plus discourse,
+OpossumUI and FluidFramework). The one remaining blocker is
+angular/components: its increment5 recovery directory
+(`increment5-recovery/ts-js/angular-components-24601`), which held the
+session-authored `oracles/oracle.ts` its `esbuild session oracle; c8 node
+oracle-angular-start.js` command executes, is not present under any retained
+root. There is no executable Oracle to replay and one will not be invented, so
+it stays a hard preflight blocker rather than a contract that would score every
+candidate as a failure.
 
-The real preflight was written on 2026-08-11 with all 14 exact IDs and the
-same 7-ready/7-blocked split. Replay is active for the 11 completed models.
-Rows are written concurrently under per-lane locks, bind the current task,
-Oracle, model patch, Docker image and retained source-tree fingerprints, and
-store only output-bundled evidence. Candidate-missing rows remain explicit;
-blocked tasks produce no correctness verdict.
-
-The 11-model replay is now complete for all seven ready tasks. It produced
-79 normalized rows: 33 pass, 38 fail, and 8 candidate-missing. The count is
-two above 7 x 11 because two models also had candidate-missing rows on blocked
-JVM tasks; no blocked task received a correctness verdict. The partial manifest
-still lists the other 4,475 task-model pairs as missing because this artifact
-intentionally contains only the recovered legacy slice. The complete raw
-evidence bundle is stored at:
+The historical 11-model replay artifact (7 ready tasks at the time, 79
+normalized rows: 33 pass, 38 fail, 8 candidate-missing) is unchanged and
+remains stored at:
 
 ```text
 /home/v-peiyangliu/conversationhub/liupeiyang/code_quality/
@@ -576,10 +638,12 @@ SHA-256 8cfa350847d4a86a612b4be4f278ac7c6b4fe64a5f453439a81f4f059598acfd
 
 `tests/test_run_legacy_reserve_correctness.py` covers this adapter with
 tiny synthetic fixtures only (no real builds/containers): patch
-apply/failure handling, git worktree materialization, blocker detection per
-lane, drift detection against the 14-task manifest, resume/skip behavior,
-and candidate-missing rows that normalize cleanly through the real
-`normalized_record()`.
+apply/failure handling, exact-start materialization, blocker detection per
+lane, fail-closed behavior for tasks without a recovered manifest,
+asset-root resolution, the Discourse shared-node-tools symlink, refusal to
+pass a green run that executed no tests, drift detection against the
+task-ID manifest, resume/skip behavior, and candidate-missing rows that
+normalize cleanly through the real `normalized_record()`.
 
 ### 7.2 Current five-model correctness replay
 

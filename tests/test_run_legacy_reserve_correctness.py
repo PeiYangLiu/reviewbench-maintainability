@@ -51,6 +51,17 @@ def make_git_repo(root: Path) -> str:
     return run("git", "-C", str(root), "rev-parse", "HEAD").strip()
 
 
+WEB3SIGNER_TASK_ID = (
+    "github__Consensys__web3signer__pull_489__comment_789312375__modularity"
+)
+REPOSENSE_TASK_ID = (
+    "github__reposense__RepoSense__pull_2078__comment_1472205280__duplication"
+)
+DISCOURSE_TASK_ID = (
+    "github__discourse__discourse__pull_37336__comment_2752215814__complexity"
+)
+
+
 def strict_task(task_id, repo="owner/repo", language="C/C++"):
     return {
         "id": task_id,
@@ -307,10 +318,17 @@ def test_jvm_blockers_flags_missing_cache_and_repo(tmp_path, monkeypatch):
             "cache": "strict_screen_20260726/oracle_recovery/java/cache/home",
         },
     }
-    blockers = MODULE.jvm_blockers("id", oracle, tmp_path)
+    blockers = MODULE.jvm_blockers(WEB3SIGNER_TASK_ID, oracle, tmp_path)
     assert any("missing retained repo checkout" in b for b in blockers)
     assert any("missing recorded Gradle cache home" in b for b in blockers)
     assert any("oracle.init.gradle" in b for b in blockers)
+
+
+def test_jvm_blockers_fails_closed_without_a_recovered_manifest(tmp_path):
+    # A task the recovery has no replay manifest for must never be replayed
+    # through a guessed recipe: it fails closed as a preflight blocker.
+    blockers = MODULE.jvm_blockers("unknown-task", {"command": "gradle test"}, tmp_path)
+    assert blockers == ["no recovered jvm replay manifest for unknown-task"]
 
 
 def test_jvm_blockers_clears_when_cache_and_repo_present(tmp_path, monkeypatch):
@@ -327,8 +345,64 @@ def test_jvm_blockers_clears_when_cache_and_repo_present(tmp_path, monkeypatch):
             "cache": "strict_screen_20260726/oracle_recovery/java/cache/home",
         },
     }
-    blockers = MODULE.jvm_blockers("id", oracle, tmp_path)
+    blockers = MODULE.jvm_blockers(WEB3SIGNER_TASK_ID, oracle, tmp_path)
     assert blockers == []
+
+
+def test_jvm_blockers_resolve_recovered_cache_through_asset_root(
+    tmp_path, monkeypatch
+):
+    # The retained session root no longer carries the JVM cache home or the
+    # /oracle-cache blobs; they are reconstructed under --asset-root at the
+    # very same recorded relative path and must resolve from there.
+    monkeypatch.setattr(MODULE, "docker_image_present", lambda image: True)
+    legacy_root = tmp_path / "legacy"
+    asset_root = tmp_path / "assets"
+    (legacy_root / "repos/Consensys__web3signer").mkdir(parents=True)
+    cache_home = (
+        asset_root / "strict_screen_20260726/oracle_recovery/java/cache/home"
+    )
+    cache_home.mkdir(parents=True)
+    (cache_home.parent / "oracle.init.gradle").write_text("", encoding="utf-8")
+    oracle = {
+        "repo": "Consensys/web3signer",
+        "command": "bash x -I /oracle-cache/oracle.init.gradle",
+        "environment": {
+            "container": "oracle-java-tools:17",
+            "cache": "strict_screen_20260726/oracle_recovery/java/cache/home",
+        },
+    }
+    assert MODULE.jvm_blockers(WEB3SIGNER_TASK_ID, oracle, legacy_root) != []
+    assert MODULE.jvm_blockers(
+        WEB3SIGNER_TASK_ID, oracle, legacy_root, asset_root
+    ) == []
+
+
+def test_jvm_blockers_require_retained_session_behavior_tests(tmp_path, monkeypatch):
+    # Skript/RepoSense are scored against session-authored oracle.* tests that
+    # must be installed into the workspace; their absence is infrastructure,
+    # not a model failure, so preflight has to catch it.
+    monkeypatch.setattr(MODULE, "docker_image_present", lambda image: True)
+    (tmp_path / "repos/reposense__RepoSense").mkdir(parents=True)
+    cache_home = tmp_path / "strict_screen_20260726/oracle_recovery/java/cache/home"
+    cache_home.mkdir(parents=True)
+    (cache_home.parent / "oracle.init.gradle").write_text("", encoding="utf-8")
+    oracle = {
+        "repo": "reposense/RepoSense",
+        "command": "bash x -I /oracle-cache/oracle.init.gradle",
+        "artifacts": {
+            "directory": (
+                "strict_screen_20260726/oracle_recovery/java/"
+                "41-reposense__RepoSense-pr2078"
+            )
+        },
+        "environment": {
+            "container": "oracle-java-tools:17",
+            "cache": "strict_screen_20260726/oracle_recovery/java/cache/home",
+        },
+    }
+    blockers = MODULE.jvm_blockers(REPOSENSE_TASK_ID, oracle, tmp_path)
+    assert any("session behavior tests" in b for b in blockers)
 
 
 def test_rust_blockers_flags_missing_cargo_cache(tmp_path, monkeypatch):
@@ -357,9 +431,12 @@ def test_tsjs_blockers_flags_missing_runtime(tmp_path, monkeypatch):
     }
     checkout = tmp_path / "repos/discourse__discourse"
     start_sha = make_git_repo(checkout)
-    blockers = MODULE.tsjs_blockers("id", oracle, tmp_path, start_sha)
-    assert any("missing pinned Node runtime" in b for b in blockers)
-    assert any("missing recovery artifact directory" in b for b in blockers)
+    blockers = MODULE.tsjs_blockers(
+        DISCOURSE_TASK_ID, oracle, tmp_path, start_sha
+    )
+    assert any("missing pinned Node 20.19.5 runtime" in b for b in blockers)
+    assert any("missing retained shared Node tools" in b for b in blockers)
+    assert any("session harness directory" in b for b in blockers)
     # The retained checkout does contain the exact start commit, so this
     # unrelated-to-start_sha test must not also report a start_sha blocker.
     assert not any("start_sha" in b for b in blockers)
@@ -406,8 +483,24 @@ def test_tsjs_blockers_flags_missing_start_sha_when_oracle_omits_it(tmp_path):
     }
     checkout = tmp_path / "repos/discourse__discourse"
     make_git_repo(checkout)
-    blockers = MODULE.tsjs_blockers("id", oracle, tmp_path, "")
+    blockers = MODULE.tsjs_blockers(DISCOURSE_TASK_ID, oracle, tmp_path, "")
     assert any("missing start_sha" in b for b in blockers)
+
+
+def test_tsjs_blockers_fail_closed_for_angular_without_recovered_harness(tmp_path):
+    # angular/components' increment5 recovery artifacts (its session-authored
+    # oracles/oracle.ts and esbuild+c8 harness) are not present under any
+    # retained root, so there is no executable Oracle to replay. It must be a
+    # hard preflight blocker rather than a fabricated or silently-degraded
+    # contract that would score every candidate as a failure.
+    blockers = MODULE.tsjs_blockers(
+        "github__angular__components__pull_24601__comment_830247812__complexity",
+        {"repo": "angular/components"},
+        tmp_path,
+        "0" * 40,
+    )
+    assert len(blockers) == 1
+    assert "no recovered tsjs replay manifest" in blockers[0]
 
 
 def test_tsjs_blockers_flags_checkout_missing_exact_start_commit(tmp_path):
@@ -425,7 +518,7 @@ def test_tsjs_blockers_flags_checkout_missing_exact_start_commit(tmp_path):
     checkout = tmp_path / "repos/discourse__discourse"
     make_git_repo(checkout)
     blockers = MODULE.tsjs_blockers(
-        "id", oracle, tmp_path, "0" * 40  # a commit that does not exist
+        DISCOURSE_TASK_ID, oracle, tmp_path, "0" * 40  # a commit that does not exist
     )
     assert any("does not contain the exact task start_sha" in b for b in blockers)
 
@@ -455,7 +548,7 @@ def test_preflight_reports_all_blocked_on_empty_legacy_root(tmp_path, monkeypatc
     # silently treated as passing.
     tasks_path2, oracles_path2 = build_full_release(tmp_path / "release2")
     _, _, plan = MODULE.load_release_and_plan(tasks_path2, oracles_path2)
-    assert len(plan) == 14
+    assert len(plan) == len(MODULE.TASK_IDS)
 
 
 def test_preflight_exits_nonzero_when_blocked_without_allow_flag(tmp_path, monkeypatch):
@@ -492,8 +585,8 @@ def test_preflight_writes_json_report_when_output_given(tmp_path, monkeypatch):
     )
     MODULE.cmd_preflight(args)
     report = json.loads((output / "legacy-reserve-preflight.json").read_text())
-    assert report["scoped_task_count"] == 14
-    assert report["blocked_task_count"] == 14
+    assert report["scoped_task_count"] == len(MODULE.TASK_IDS)
+    assert report["blocked_task_count"] == len(MODULE.TASK_IDS)
     assert all(entry["status"] == "blocked" for entry in report["tasks"])
 
 
@@ -573,7 +666,7 @@ def test_replay_writes_candidate_missing_rows_and_is_resume_aware(tmp_path):
         len(BASE.read_jsonl(output / "legacy/correctness" / f"{lane}.jsonl"))
         for lane in ("native", "jvm", "rust", "tsjs")
     )
-    assert total_rows == 14
+    assert total_rows == len(MODULE.TASK_IDS)
 
     # Resume: rerunning without --force must not duplicate or re-derive rows.
     code_again = MODULE.cmd_replay(args)
@@ -582,7 +675,7 @@ def test_replay_writes_candidate_missing_rows_and_is_resume_aware(tmp_path):
         len(BASE.read_jsonl(output / "legacy/correctness" / f"{lane}.jsonl"))
         for lane in ("native", "jvm", "rust", "tsjs")
     )
-    assert total_rows_again == 14
+    assert total_rows_again == len(MODULE.TASK_IDS)
 
 
 def test_replay_reports_blockers_for_generated_candidates_on_empty_legacy_root(
@@ -1131,7 +1224,10 @@ def test_cmd_replay_retracts_stale_row_when_task_becomes_blocked(tmp_path, monke
     # ready. A resume must not trust the old "pass" row's fingerprint --
     # it must recompute blockers first, discover the task is now blocked,
     # and retract the stale row rather than leaving it on disk.
-    def fake_blockers(task_id, lane_arg, oracle_arg, legacy_root_arg, start_sha_arg):
+    def fake_blockers(
+        task_id, lane_arg, oracle_arg, legacy_root_arg, start_sha_arg,
+        asset_root_arg=None,
+    ):
         if task_id == target_id:
             return ["asset now missing"]
         return []
@@ -1548,16 +1644,28 @@ def test_replay_jvm_applies_patch_persists_evidence_and_removes_worktree(
     generation = {"patch_file": str(patch_path), "patch_sha256": BASE.sha256(patch_path)}
     output = tmp_path / "output"
 
+    work_root = tmp_path / "work"
+    workspace = (
+        work_root / "jvm" / MODULE.model_component("my-model") / task_id / "workspace"
+    )
+
     def fake_run_subprocess(command, *, cwd, log_path, env=None, timeout=1800):
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text("BUILD SUCCESSFUL\n", encoding="utf-8")
+        # The build's own JUnit XML report is what the executed-test count is
+        # read from, so a green exit that ran zero tests can never pass.
+        report = workspace / "acceptance-tests/build/test-results/test/TEST-x.xml"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(
+            '<testsuite tests="6" failures="0" errors="0"/>', encoding="utf-8"
+        )
         return 0, 2.0, ""
 
     monkeypatch.setattr(MODULE, "run_subprocess", fake_run_subprocess)
 
     row = MODULE.replay_jvm(
         task_id, "my-model", task, oracle, generation, legacy_root,
-        tmp_path / "work", output, 60,
+        work_root, output, 60,
     )
     assert row["status"] == "pass"
     assert row["correctness_ok"] is True
@@ -1569,15 +1677,50 @@ def test_replay_jvm_applies_patch_persists_evidence_and_removes_worktree(
     assert row["replay_contract_fingerprint"] == MODULE.replay_contract_fingerprint(
         task_id, "jvm", oracle, legacy_root, []
     )
-    # the git worktree must be fully removed (not just the scratch parent)
-    # so a later replay of the same task can re-checkout cleanly.
+    # The disposable workspace must be gone, and the retained clone must not
+    # have grown a registered worktree: the start is materialized with
+    # `git archive | tar`, exactly as the historical harness did, so the
+    # replay tree is self-contained and safe to bind-mount into a container.
     worktree_list = subprocess.run(
         ["git", "-C", str(legacy_root / "repos/org__repo"), "worktree", "list"],
         stdout=subprocess.PIPE, text=True,
     ).stdout
-    jvm_scratch = tmp_path / "work/jvm" / MODULE.model_component("my-model") / task_id
+    jvm_scratch = work_root / "jvm" / MODULE.model_component("my-model") / task_id
     assert str(jvm_scratch / "workspace") not in worktree_list
     assert not jvm_scratch.exists()
+
+
+def test_replay_jvm_fails_a_green_run_that_executed_no_tests(tmp_path, monkeypatch):
+    legacy_root = tmp_path / "legacy"
+    start_sha = make_git_repo(legacy_root / "repos/org__repo")
+    task_id = WEB3SIGNER_TASK_ID
+    task = strict_task(task_id, repo="org/repo")
+    oracle = {
+        "repo": "org/repo",
+        "start_sha": start_sha,
+        "command": "gradle test",
+        "pass_to_pass": 6,
+        "environment": {
+            "container": "oracle-java-tools:17",
+            "cache": "strict_screen_20260726/oracle_recovery/java/cache/home",
+        },
+    }
+    patch_path = tmp_path / "candidate.patch"
+    patch_path.write_text("", encoding="utf-8")
+    generation = {"patch_file": str(patch_path), "patch_sha256": BASE.sha256(patch_path)}
+
+    def fake_run_subprocess(command, *, cwd, log_path, env=None, timeout=1800):
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("BUILD SUCCESSFUL\n", encoding="utf-8")
+        return 0, 1.0, ""
+
+    monkeypatch.setattr(MODULE, "run_subprocess", fake_run_subprocess)
+    row = MODULE.replay_jvm(
+        task_id, "my-model", task, oracle, generation, legacy_root,
+        tmp_path / "work", tmp_path / "output", 60,
+    )
+    assert row["status"] == "fail"
+    assert row["pass_to_pass_passed"] == 0
 
 
 def test_replay_jvm_apply_error_persists_error_log_and_removes_worktree(
@@ -1643,6 +1786,19 @@ def test_replay_tsjs_runs_install_and_test_and_persists_evidence(tmp_path, monke
         / "node-v20.19.5-linux-x64/bin"
     )
     node_runtime.mkdir(parents=True)
+    (node_runtime / "node").write_text("#!/bin/sh\n", encoding="utf-8")
+    shared_tools = (
+        legacy_root
+        / "strict_screen_20260726/oracle_recovery/tsjs/_node_tools/node_modules"
+    )
+    shared_tools.mkdir(parents=True)
+    session_dir = (
+        legacy_root
+        / "strict_screen_20260726/oracle_recovery/tsjs"
+        / "20_discourse__discourse/session"
+    )
+    session_dir.mkdir(parents=True)
+    (session_dir / "vitest.config.js").write_text("", encoding="utf-8")
     # Real Discourse/Opossum oracles genuinely omit start_sha (the exact
     # start commit lives on the task/task-plan record instead); this
     # oracle intentionally mirrors that real shape -- no start_sha key --
@@ -1675,7 +1831,9 @@ def test_replay_tsjs_runs_install_and_test_and_persists_evidence(tmp_path, monke
 
     def fake_run_subprocess(command, *, cwd, log_path, env=None, timeout=1800):
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text("Test Files: 1 passed\n", encoding="utf-8")
+        log_path.write_text(
+            "Test Files  1 passed (1)\nTests  2 passed (2)\n", encoding="utf-8"
+        )
         return 0, 1.5, ""
 
     monkeypatch.setattr(MODULE, "run_subprocess", fake_run_subprocess)
@@ -1702,39 +1860,26 @@ def test_replay_tsjs_runs_install_and_test_and_persists_evidence(tmp_path, monke
 def test_replay_tsjs_infra_retry_on_install_failure_persists_install_log(
     tmp_path, monkeypatch
 ):
+    # Dependency provisioning failures are infrastructure, never candidate
+    # failures: the FluidFramework contract installs from a pinned pnpm store,
+    # and a failed install must be recorded as infra_retry with its own log
+    # while the Oracle command is never executed.
     legacy_root = tmp_path / "legacy"
-    start_sha = make_git_repo(legacy_root / "repos/discourse__discourse")
-    task_id = "github__discourse__discourse__pull_37336__comment_2752215814__complexity"
-    task = strict_task(task_id, repo="discourse/discourse", language="TypeScript")
+    asset_root = tmp_path / "assets"
+    start_sha = make_git_repo(legacy_root / "repos/microsoft__FluidFramework")
+    task_id = (
+        "github__microsoft__FluidFramework__pull_27466__"
+        "comment_3350352130__complexity"
+    )
+    task = strict_task(task_id, repo="microsoft/FluidFramework", language="TypeScript")
     task["start_sha"] = start_sha
-    node_runtime = (
-        legacy_root / "strict_screen_20260726/oracle_recovery/tsjs/_runtimes"
-        / "node-v20.19.5-linux-x64/bin"
-    )
+    node_runtime = asset_root / "tsjs/_runtimes/node-v22.22.2-linux-x64/bin"
     node_runtime.mkdir(parents=True)
-    # Real-shaped oracle: no start_sha (see comment in the "persists
-    # evidence" test above for why).
-    oracle = {
-        "repo": "discourse/discourse",
-        "historical_node": "20.19.5",
-        "install_command": "false",
-        "test_command": "true",
-        "workspace": ".",
-        "pass_to_pass": 1,
-        "recovery_artifact": "oracle_recovery/tsjs/20_discourse__discourse",
-    }
+    (node_runtime / "node").write_text("#!/bin/sh\n", encoding="utf-8")
+    (asset_root / "tsjs/pnpm-store").mkdir(parents=True)
+    oracle = {"repo": "microsoft/FluidFramework", "pass_to_pass": 151}
     patch_path = tmp_path / "candidate.patch"
-    patch_path.write_text(
-        "diff --git a/src.txt b/src.txt\n"
-        "--- a/src.txt\n"
-        "+++ b/src.txt\n"
-        "@@ -1,3 +1,3 @@\n"
-        " line1\n"
-        "-line2\n"
-        "+LINE2\n"
-        " line3\n",
-        encoding="utf-8",
-    )
+    patch_path.write_text("", encoding="utf-8")
     generation = {"patch_file": str(patch_path), "patch_sha256": BASE.sha256(patch_path)}
     output = tmp_path / "output"
 
@@ -1750,11 +1895,251 @@ def test_replay_tsjs_infra_retry_on_install_failure_persists_install_log(
 
     row = MODULE.replay_tsjs(
         task_id, "my-model", task, oracle, generation, legacy_root,
-        tmp_path / "work", output, 60,
+        tmp_path / "work", output, 60, asset_root=asset_root,
     )
     assert row["status"] == "infra_retry"
-    assert calls["count"] == 1  # test_command must never run after install fails
+    assert row["correctness_ok"] is None
+    # neither the build nor the Oracle command may run after a failed install
+    assert calls["count"] == 1
     assert row["log"] == (
         f"legacy/evidence/tsjs/{MODULE.model_component('my-model')}/{task_id}/install.log"
     )
     assert (output / row["log"]).is_file()
+
+
+def test_replay_tsjs_symlinks_retained_shared_node_tools_for_discourse(
+    tmp_path, monkeypatch
+):
+    # The retained historical Discourse workspace carries a
+    # node_modules -> _node_tools/node_modules symlink; without reproducing it
+    # the session Vitest config cannot resolve "vitest/config" and every
+    # candidate fails for infrastructure reasons.
+    legacy_root = tmp_path / "legacy"
+    start_sha = make_git_repo(legacy_root / "repos/discourse__discourse")
+    task_id = DISCOURSE_TASK_ID
+    task = strict_task(task_id, repo="discourse/discourse", language="TypeScript")
+    task["start_sha"] = start_sha
+    node_runtime = (
+        legacy_root / "strict_screen_20260726/oracle_recovery/tsjs/_runtimes"
+        / "node-v20.19.5-linux-x64/bin"
+    )
+    node_runtime.mkdir(parents=True)
+    (node_runtime / "node").write_text("#!/bin/sh\n", encoding="utf-8")
+    shared_tools = (
+        legacy_root
+        / "strict_screen_20260726/oracle_recovery/tsjs/_node_tools/node_modules"
+    )
+    shared_tools.mkdir(parents=True)
+    session_dir = (
+        legacy_root
+        / "strict_screen_20260726/oracle_recovery/tsjs"
+        / "20_discourse__discourse/session"
+    )
+    session_dir.mkdir(parents=True)
+    (session_dir / "vitest.config.js").write_text("", encoding="utf-8")
+    oracle = {
+        "repo": "discourse/discourse",
+        "historical_node": "20.19.5",
+        "recovery_artifact": "oracle_recovery/tsjs/20_discourse__discourse",
+    }
+    patch_path = tmp_path / "candidate.patch"
+    patch_path.write_text("", encoding="utf-8")
+    generation = {"patch_file": str(patch_path), "patch_sha256": BASE.sha256(patch_path)}
+
+    observed = {}
+
+    def fake_run_subprocess(command, *, cwd, log_path, env=None, timeout=1800):
+        link = Path(str(cwd)) / "node_modules"
+        observed["symlink_target"] = os.readlink(link) if link.is_symlink() else None
+        observed["session_copied"] = (Path(str(cwd)) / "session/vitest.config.js").is_file()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            "Test Files  1 passed (1)\nTests  2 passed (2)\n", encoding="utf-8"
+        )
+        return 0, 1.0, ""
+
+    monkeypatch.setattr(MODULE, "run_subprocess", fake_run_subprocess)
+    row = MODULE.replay_tsjs(
+        task_id, "my-model", task, oracle, generation, legacy_root,
+        tmp_path / "work", tmp_path / "output", 60,
+    )
+    assert observed["symlink_target"] == str(shared_tools)
+    assert observed["session_copied"] is True
+    assert row["status"] == "pass"
+    assert row["pass_to_pass_passed"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Recovered jvm/tsjs replay contracts (20260813 asset recovery)
+# ---------------------------------------------------------------------------
+
+
+def test_materialize_start_produces_a_self_contained_repository(tmp_path):
+    # The historical harness materialized the start with `git archive | tar`
+    # plus `git init`, not `git worktree`: a worktree's .git file points at an
+    # absolute path inside the retained clone that is not mounted into the
+    # Oracle container, which breaks repository-introspecting builds and would
+    # be scored as a model failure.
+    source = tmp_path / "source"
+    start_sha = make_git_repo(source)
+    destination = tmp_path / "workspace"
+    MODULE.materialize_start(source, start_sha, destination)
+
+    assert (destination / "src.txt").read_text() == "line1\nline2\nline3\n"
+    assert (destination / ".git").is_dir()  # a real repository, not a link file
+    worktrees = run("git", "-C", str(source), "worktree", "list")
+    assert str(destination) not in worktrees
+    # the fresh repository is independent of the retained clone
+    assert run("git", "-C", str(destination), "rev-parse", "HEAD").strip() != start_sha
+
+
+def test_jvm_docker_command_is_network_isolated_and_mounts_task_scratch(tmp_path):
+    # Scored replays must be a pure function of the pinned assets, and the
+    # Oracle commands write /task/start.exec, so /task has to exist and be
+    # mounted or the JaCoCo agent aborts the whole test JVM.
+    task_id = WEB3SIGNER_TASK_ID
+    cache_home = tmp_path / "strict_screen_20260726/oracle_recovery/java/cache/home"
+    cache_home.mkdir(parents=True)
+    oracle = {
+        "repo": "Consensys/web3signer",
+        "command": "gradle test",
+        "environment": {
+            "container": "oracle-java-tools:17",
+            "cache": "strict_screen_20260726/oracle_recovery/java/cache/home",
+        },
+    }
+    command = MODULE.jvm_docker_command(
+        oracle, task_id, tmp_path, None, tmp_path / "ws", tmp_path / "task",
+        "gradle test", True,
+    )
+    joined = " ".join(command)
+    assert f"{tmp_path / 'task'}:/task" in joined
+    assert "GRADLE_USER_HOME=/cachehome/gradle-task-8" in joined
+    # web3signer's own harness downloads HashiCorp Vault, so it keeps a network
+    # namespace; the isolation default is asserted through Skript below.
+    assert "--add-host" in joined
+    assert "CI=true" not in joined  # Solr turns error-prone -Werror on under CI
+
+    skript = MODULE.jvm_docker_command(
+        {
+            "repo": "SkriptLang/Skript",
+            "command": "gradle test",
+            "environment": {
+                "container": "oracle-java-tools:17",
+                "cache": "strict_screen_20260726/oracle_recovery/java/cache/home",
+            },
+        },
+        "github__SkriptLang__Skript__pull_7136__comment_1835154932__complexity",
+        tmp_path, None, tmp_path / "ws", tmp_path / "task", "gradle test", True,
+    )
+    assert "--network none" in " ".join(skript)
+
+
+def test_install_pinned_gradle_wrapper_verifies_the_repositorys_own_digest(tmp_path):
+    workspace = tmp_path / "workspace/gradle/wrapper"
+    workspace.mkdir(parents=True)
+    cache_home = tmp_path / "cache/home"
+    (cache_home.parent / "gradle-wrapper").mkdir(parents=True)
+    payload = b"wrapper-jar-bytes"
+    import hashlib as _hashlib
+
+    digest = _hashlib.sha256(payload).hexdigest()
+    (cache_home.parent / "gradle-wrapper" / f"{digest}.jar").write_bytes(payload)
+    (workspace / "gradle-wrapper.jar.sha256").write_text(digest, encoding="utf-8")
+
+    installed = MODULE.install_pinned_gradle_wrapper(
+        tmp_path / "workspace", tmp_path, None, cache_home
+    )
+    assert installed == digest
+    assert (workspace / "gradle-wrapper.jar").read_bytes() == payload
+
+    # A digest the pinned store cannot satisfy must install nothing at all
+    # rather than supply arbitrary bytes.
+    (workspace / "gradle-wrapper.jar").unlink()
+    (workspace / "gradle-wrapper.jar.sha256").write_text("0" * 64, encoding="utf-8")
+    assert (
+        MODULE.install_pinned_gradle_wrapper(
+            tmp_path / "workspace", tmp_path, None, cache_home
+        )
+        is None
+    )
+    assert not (workspace / "gradle-wrapper.jar").exists()
+
+
+def test_jvm_test_count_reads_the_builds_own_junit_reports(tmp_path):
+    workspace = tmp_path / "ws"
+    reports = workspace / "build/test-results/test"
+    reports.mkdir(parents=True)
+    (reports / "TEST-a.xml").write_text(
+        '<testsuite tests="3" failures="1" errors="0"/>', encoding="utf-8"
+    )
+    (reports / "TEST-b.xml").write_text(
+        '<testsuites><testsuite tests="2" failures="0" errors="1"/></testsuites>',
+        encoding="utf-8",
+    )
+    assert MODULE.jvm_test_count(workspace, ("build/test-results/**/*.xml",)) == (5, 2)
+    # a glob that matches nothing must report zero, never "unknown"
+    assert MODULE.jvm_test_count(workspace, ("other/**/*.xml",)) == (0, 0)
+
+
+def test_every_scoped_task_has_exactly_one_recovered_lane_manifest():
+    # Guards against a task drifting into a lane whose replay recipe was never
+    # recovered for it, which would otherwise be discovered only mid-replay.
+    for task_id, lane in MODULE.EXPECTED_LANE.items():
+        if lane == "jvm":
+            assert task_id in MODULE.JVM_MANIFEST, task_id
+            assert task_id not in MODULE.TSJS_MANIFEST, task_id
+        elif lane == "tsjs":
+            assert task_id not in MODULE.JVM_MANIFEST, task_id
+    # angular/components is deliberately absent: its recovery artifacts are
+    # gone, so it must stay a preflight blocker rather than gain a guessed
+    # contract.
+    assert (
+        "github__angular__components__pull_24601__comment_830247812__complexity"
+        not in MODULE.TSJS_MANIFEST
+    )
+    assert set(MODULE.TASK_IDS) == set(MODULE.EXPECTED_LANE)
+
+
+def test_tsjs_node_version_falls_back_to_the_recovered_manifest():
+    # FluidFramework's published Oracle carries no historical_node at all; the
+    # pinned runtime is recovered from the pre-release record it names as its
+    # own source artifact.
+    fluid = (
+        "github__microsoft__FluidFramework__pull_27466__"
+        "comment_3350352130__complexity"
+    )
+    assert MODULE.tsjs_node_version(fluid, {}) == "22.22.2"
+
+
+def test_resolve_legacy_relative_prefers_retained_over_recovered(tmp_path):
+    legacy_root = tmp_path / "legacy"
+    asset_root = tmp_path / "assets"
+    relative = "strict_screen_20260726/oracle_recovery/java/cache/home"
+    (asset_root / relative).mkdir(parents=True)
+    assert MODULE.resolve_legacy_relative(relative, legacy_root, asset_root) == (
+        asset_root / relative
+    )
+    (legacy_root / relative).mkdir(parents=True)
+    assert MODULE.resolve_legacy_relative(relative, legacy_root, asset_root) == (
+        legacy_root / relative
+    )
+
+
+def test_replay_contract_fingerprint_changes_with_asset_root(tmp_path):
+    task_id = WEB3SIGNER_TASK_ID
+    oracle = {
+        "repo": "Consensys/web3signer",
+        "command": "gradle test",
+        "environment": {
+            "container": "oracle-java-tools:17",
+            "cache": "strict_screen_20260726/oracle_recovery/java/cache/home",
+        },
+    }
+    without = MODULE.replay_contract_fingerprint(
+        task_id, "jvm", oracle, tmp_path, [], None
+    )
+    with_assets = MODULE.replay_contract_fingerprint(
+        task_id, "jvm", oracle, tmp_path, [], tmp_path / "assets"
+    )
+    assert without != with_assets
