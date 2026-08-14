@@ -540,17 +540,27 @@ python3 scripts/run_open_model_correctness.py finalize \
   --output <output> --allow-incomplete
 ```
 
-As of this writing, a read-only `preflight` pass against the retained
-session root reports 7 of the 14 tasks ready (ClickHouse, dpnp, memilio,
-rippled, singularity-eos, discourse, opossum-tool/OpossumUI) and 7 blocked:
-Desbordante (harness recipe was never proven historically -- every
+As originally written (2026-08-11), a read-only `preflight` pass against the
+retained session root reported 7 of the 14 tasks ready (ClickHouse, dpnp,
+memilio, rippled, singularity-eos, discourse, opossum-tool/OpossumUI) and 7
+blocked: Desbordante (harness recipe was never proven historically -- every
 historical candidate patch failed to apply through it), the 4 remaining JVM
 tasks plus web3signer's `-javaagent`/`-I` flags (missing recorded Gradle
 cache home and `/oracle-cache` assets under
 `oracle_recovery/java/cache/`), and FuelLabs/fuel-tx (missing recorded
 cargo cache under `oracle_recovery/rust/cache/cargo`). These are reported,
 not invented; recovering the missing cache directories (or the Desbordante
-proof) would move those tasks to "ready" without any code change.
+proof) moves those tasks to "ready" without any code change.
+
+The native/rust half of that list has since been recovered (including the
+Desbordante proof and the rust CARGO_HOME) -- see 7.1.2. The historical
+native/rust start workspaces have themselves been deleted from the retained
+session root since then, so those tasks are now replayed exclusively through
+the recovered-asset contracts described there; the JVM/TS-JS tasks are
+unaffected by this section's scope. `--task-id` scope also now spans the four
+native/rust published-legacy tasks that were never part of the 20260728
+reserve (apache/tsfile, grpc/grpc, python/cpython, otter-sec/anchor), which
+are blocked unless `--assets-root` supplies a verified contract for them.
 
 The real preflight was written on 2026-08-11 with all 14 exact IDs and the
 same 7-ready/7-blocked split. Replay is active for the 11 completed models.
@@ -580,6 +590,262 @@ apply/failure handling, git worktree materialization, blocker detection per
 lane, drift detection against the 14-task manifest, resume/skip behavior,
 and candidate-missing rows that normalize cleanly through the real
 `normalized_record()`.
+
+#### 7.1.2 Native/Rust recovered-asset bundle (11 of the 40)
+
+The 20260728 adapter above could only replay a native/rust task while the
+historical harness assets still existed. They no longer do: every
+`.../native-real/tasks/<case>/start` workspace subtree was deleted, the rust
+Oracle's recorded `oracle_recovery/rust/cache/cargo` CARGO_HOME never
+survived, and four in-scope tasks (apache/tsfile, grpc/grpc, python/cpython,
+otter-sec/anchor) were recovered in a session whose artifacts are not retained
+on this machine at all.
+
+`scripts/recover_legacy_native_rust.py` rebuilds that missing half and records
+it as a self-describing bundle:
+
+```text
+<assets-root>/
+  recovery-manifest.json   # one verified replay contract per task
+  SHA256SUMS               # every authored/retained small file
+  workspaces/<case>/start  # exact-start checkout (git HEAD == task start_sha)
+  harness/<case>/          # re-authored harness + derived source-only golden
+  caches/{cargo,cargo-anchor,conan}   # reconstructed pinned build caches
+  proofs/<case>.json       # recorded start/golden proof runs
+  logs/                    # full build/run logs for every proof
+```
+
+Exact-start workspaces are re-materialized from retained full repo objects
+(`git clone --shared` + `checkout --detach <start_sha>`), then made
+self-contained by packing the HEAD snapshot locally and dropping the
+`objects/info/alternates` link -- otherwise a build that shells out to `git`
+inside a container (rippled's `GIT_COMMIT_HASH`) cannot read its own object
+store. Vendored dependency trees that were part of the historical workspace
+are restored from the retained per-case archives (singularity-eos'
+`utils/spiner` + `utils/variant`, Desbordante's `lib/easyloggingpp` +
+`lib/better-enums` from the recovery image's `/opt/deps`), and dpnp keeps the
+retained dpctl-0.19 `dependency-compatibility.patch` that the historical
+recovery applied identically to start and golden.
+
+`run_legacy_reserve_correctness.py` gained one flag, `--assets-root`
+(or `REVIEWBENCH_LEGACY_ASSETS`). A recovered contract supersedes the
+historical one for the tasks it covers, and **every input the replay actually
+mounts** is re-verified against live state on each preflight *and* again
+immediately before the Oracle runs:
+
+- the exact-start workspace must still be at the task `start_sha` **and**
+  match the manifest's recorded `workspace_state`: same modified tracked paths
+  (dpnp legitimately carries the retained dpctl-0.19 compatibility patch),
+  same untracked entries, same `git submodule status` lines, **and the same
+  full lstat+content digest of the entire copied tree with only `.git`
+  excluded**. That last field is what catches build residue git deliberately
+  hides -- a `.gitignore`d `build/`, `target/` or `*.o` left in the workspace
+  is invisible to `git status` yet is copied into every replay scratch -- so
+  ignored residuals, symlinks and empty directories all block. It is not
+  free: ClickHouse's 52 GB workspace digests 586,242 entries in ~2 min, which
+  is the deliberate price of a fail-closed provenance check;
+- every authored harness file, golden patch and harness-copy source must
+  still hash to its recorded SHA-256;
+- every mounted cache -- both `cache_mounts` (rippled's Conan cache) and the
+  rebuilt CARGO_HOMEs -- must be present *and* match its recorded tree digest,
+  and a CARGO_HOME missing `bin/cargo` is reported as incomplete;
+- **every other replay-mounted input** is bound the same way through
+  `mount_input_digests`: single mounted files (ClickHouse's `query.sql`,
+  dpnp's `behavior_test.py`), the whole workspace directory a `mount: "."`
+  recipe exposes next to `start/` (`oracle.cpp`, the retained source-only
+  patches, `checkpoint.json`), read-only harness directories and harness-copy
+  sources. The exact-start subtree is the only mounted input not in that map,
+  because it is verified through git `workspace_state`; a mount source that
+  the manifest never bound is itself a blocker;
+- all of those digests are **full-content SHA-256** over every regular file
+  (plus path, mode, size and symlink target), never path/size/mode alone, so a
+  same-size, same-mtime byte swap inside a cache, a harness file or a mounted
+  workspace sibling is detected and blocks. Hashing is parallelized (16
+  threads); the 7.8 GB Conan cache and the 166 MB CARGO_HOME together digest
+  in ~35 s per verification pass;
+- the traversal is an `lstat`-based enumeration of **every path entry**, not an
+  `os.walk` over files: regular files (bytes), symlinks to files *and to
+  directories* (link target, never followed), and real directories including
+  empty ones each contribute a record. `os.walk` reported neither symlinked
+  directories nor empty directories, which left them unbound -- and the real
+  rippled Conan cache contains both (e.g. `grpc/1.50.1/.../spm-core-include/
+  grpc` is a directory symlink, alongside dozens of empty directories), so
+  retargeting or deleting one used to be invisible. Both tools share one
+  implementation (`_tree_digest_impl`) and produce byte-identical digests;
+- the Docker image must still be loaded with the recorded image id;
+- the manifest must carry a successful start-tree proof run **and**, for any
+  contract that declares a source-only golden patch, a successful golden
+  proof run.
+
+Proof runs are themselves bound to a **cryptographic recipe fingerprint**
+covering the executed `command`/`golden_command`, shell, user, network, env,
+workdir, every mount and harness mount/copy, the Docker image name *and*
+loaded image id, the workspace state, every mounted cache's tree digest, the
+SHA-256 of every authored input, and the replay adapter's own
+`ADAPTER_CONTRACT_VERSION`. `cmd_manifest` and `proof_blockers()` only count
+proof runs stamped with the current fingerprint, and the adapter rejects a
+manifest entry whose recorded proof runs carry a different one, so editing a
+command, rebuilding an image or touching a harness byte turns previously
+recorded proofs into *stale evidence* rather than silently reusable ones.
+
+All lanes share that one implementation. The bounded `directory_identity`
+(500-file traversal cap, 64 KiB read cap per file) and `safe_file_digest`
+helpers that used to fingerprint the *historical* native/rust/JVM/TS-JS trees
+and caches are gone: a JVM Gradle cache home, a `/oracle-cache` jar, a TS/JS
+`node_modules` tree, a pinned Node runtime, a retained repo checkout and a
+recovered cache are now all bound by full lstat+content digests, so a change
+to the 900th file, a change past a file's first 64 KiB, a retargeted symlink
+or an added/removed empty directory can no longer slip through any lane's
+replay-contract fingerprint.
+
+Concurrency is fail-safe as well: `cmd_replay` holds a cross-process
+`execution_lock(lane, model, task)` from scratch creation through evidence
+persistence and cleanup, each invocation gets a unique scratch directory
+(`invocation_scratch`, PID + UUID suffixed), and evidence logs are published
+by copy-to-`.new`-then-`os.replace`. Two processes replaying the same pair
+therefore cannot delete each other's workspace mid-build, interleave a log, or
+leave a half-written artifact behind.
+
+Proofs never run against the canonical workspace: `cmd_smoke` materializes a
+disposable copy per variant (start and golden alike), applies the golden patch
+and the harness there, runs the container against the copy, purges it, and
+then re-reads the canonical `workspace_state` and records a blocker if the
+proofs changed it. `cmd_manifest` additionally refuses to promote a contract
+whose canonical workspace no longer matches the state its proofs attested.
+Mounted caches are likewise never exposed to a run that could write to them:
+both `cmd_smoke` and `replay_recovered` copy each cache into their disposable
+scratch and mount the copy read-write, and the adapter's cache digests are
+recomputed from disk on every call (no memoization) plus explicitly
+invalidated before each pre-execution check and after each replay, so a cache
+mutated by one replay cannot be waved through by the next check in the same
+process.
+
+A manifest that predates these fields cannot be verified and is therefore
+itself a blocker. All of it is folded into `recovered_asset_state()` and hence
+into each raw row's `replay_contract_fingerprint`, so a drifted workspace,
+mutated cache, retagged image or edited command invalidates previously
+recorded rows on resume -- and `cmd_replay` retracts any row whose task has
+become blocked. If drift is only discovered at replay time, `replay_recovered`
+returns an `infra_retry` row carrying the exact `asset_blockers` **before**
+touching the workspace, so a broken asset can never be recorded as a candidate
+failure. Live verification against the real bundle: injecting one stray file
+into a workspace, or one extra file into the mounted CARGO_HOME, flips the
+affected task to blocked (`recorded 8356 files ... live 8357 files`) and
+retracts its previously recorded row; removing the file restores ready.
+
+Two lane-level bugs were fixed while proving this end to end, both of which
+would silently mis-score a *passing* replay:
+
+- the rust lane ran its command through a **login** shell (`sh -lc`), which
+  re-sources `/etc/profile`, drops `$CARGO_HOME/bin` from `PATH` and fails
+  with `cargo: not found`; the historical evaluator used `/bin/sh -c`;
+- rust pass counting used the generic first-match counter, which reads only
+  the first test binary's `test result: ok. N passed` line -- 40 of fuel-tx's
+  77 recorded pass-to-pass tests -- and would have judged a fully passing run
+  as a failure. `rust_test_count()` now sums every target, like the
+  historical rust evaluator.
+
+Recovery status (proven by re-running each contract here, not assumed):
+
+| Task | Contract | Proof |
+| --- | --- | --- |
+| ClickHouse/ClickHouse #74193 | recovered | start: full 13,413-target clang-19 build, oracle query output byte-identical to the historical `start-runs.txt`; golden: retained `source-only.patch` rebuilds and passes (295 s) |
+| Desbordante/desbordante-core #154 | recovered | start: stdout SHA-256 `50d9c3cd...` byte-identical to the historical proven start run (previously blocked as "never proven end-to-end"); golden: the recorded object-archive recipe (`golden_command`) passes with identical behavioural output |
+| IntelPython/dpnp #2201 | recovered | start + golden: `dpnp.choose public behavior: 5 cases passed` |
+| SciCompMod/memilio #690 | recovered | start + golden: oracle binary builds and exits 0 |
+| XRPLF/rippled #5143 | recovered | start + golden: `2175 tests total, 0 failures` (matches the recorded 2175) |
+| lanl/singularity-eos #75 | recovered | start + golden: oracle binary builds and exits 0 (shared `-include typeinfo`, see below) |
+| apache/tsfile #823 | recovered (re-authored harness) | start (repeatably) + golden: `OracleAlignedBatch.DoubleValuesPreserveRowsAndValues` passes |
+| python/cpython #143314 | recovered (selected P2P tests) | start (x2) + golden: 2 unchanged `test_os` tests that drive `parse_envlist()` pass |
+| FuelLabs/fuel-tx #197 | recovered (rebuilt CARGO_HOME) | start + golden: 77 passed, offline (`--network=none`) after deleting `target/`, matching the recorded `pass_to_pass: 77` |
+| otter-sec/anchor #2488 | recovered (re-authored harness) | start + golden: both recorded tests pass, offline |
+| grpc/grpc #32970 | **blocked** | no retained replay contract at all (Oracle carries only counters/coverage from `legacy159_oracle_native_normalized.jsonl`), the retained `repos/grpc__grpc` checkout does not contain the task `start_sha`, and no pinned Bazel toolchain/output-base cache for the 2023 tree was retained |
+
+Every recovered contract declares the source-only golden it must satisfy (the
+retained per-case patch, or one derived strictly from the Oracle's own
+`golden_scope`/`scope_expansion` paths), and **a contract cannot be ready
+without a successful golden proof**: `cmd_manifest` requires a passing start
+*and* golden run, and `cmd_smoke` records a golden patch that fails to apply
+as an explicit `stage: "apply"` failure run (with its log) instead of skipping
+the variant, which keeps the contract out of the ready set. Two goldens needed
+recorded, documented recipes rather than the start-side command:
+Desbordante's golden removes the `Desbordante_lib` target and references
+unrelated-branch headers, so its `golden_command` reproduces the historical
+"build the real production objects, archive, link with -std=c++20" recipe;
+singularity-eos' reference golden introduces `typeid(CRTP)` without including
+`<typeinfo>` (upstream's target commit does not include it either), so
+`-include typeinfo` is added to the *shared* command -- applying it only to
+the golden would unfairly fail any candidate that mirrors the reference fix.
+
+Re-authored harnesses are real behavioral tests, never source-shape checks:
+the tsfile oracle writes six aligned fixed-width `DOUBLE` rows through the
+public writer API and reads them back through the public reader/result-set
+path, and the anchor oracle drives the public async client against an
+in-process loopback JSON-RPC server (a compile-time `IntoProgram` trait
+absorbs the start-vs-golden `Program` / `Result<Program>` public API
+difference without inspecting source text or branching on candidate symbols).
+Both pass on start *and* on the golden derived strictly from the Oracle's own
+`golden_scope`/`scope_expansion` paths, as a PASS_TO_PASS oracle requires.
+
+Commands:
+
+```bash
+# Rebuild/refresh the bundle manifest + checksums (fails closed per task):
+python3 scripts/recover_legacy_native_rust.py manifest \
+  --assets-root <assets-root> --legacy-root <retained-session-root>
+
+# Re-prove one contract (start tree, plus golden where recovered):
+python3 scripts/recover_legacy_native_rust.py smoke \
+  --assets-root <assets-root> --case 22-rippled --golden
+
+# Preflight/replay through the existing adapter, now asset-aware:
+python3 scripts/run_legacy_reserve_correctness.py preflight \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --legacy-root <retained-session-root> --assets-root <assets-root> \
+  --output <output> --allow-blocked
+
+python3 scripts/run_legacy_reserve_correctness.py replay \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --legacy-root <retained-session-root> --assets-root <assets-root> \
+  --output <output> --model '<model>' --work-root <scratch>
+```
+
+The bundle produced on 2026-08-14 lives at
+`/data/v-peiyangliu/reviewbench-openmodels/legacy-recovery-assets/native-rust`
+(`recovery-manifest.json` SHA-256
+`95deeeef08b1aa5e67e37da8f1943283182f4b626978c3142232b07009e8d1e6`,
+`SHA256SUMS` SHA-256
+`7698777c71fbf62ac21cbc2d3de83eadfe91fea7a36cad8991cef525cbebf477`). The
+Conan cache alone now binds 142,680 entries -- 128,802 files, 13,853
+directories and 25 symlinks -- where the previous file-only traversal bound
+128,802.
+Live checks against that bundle: a same-size byte swap in ClickHouse's mounted
+`query.sql`; a same-size byte swap inside a `.crate` file in the mounted
+CARGO_HOME; retargeting the `grpc/1.50.1/.../spm-core-include/grpc` *directory
+symlink* in the Conan cache; and adding a single empty directory to it -- each
+blocks the affected task ("has drifted from its recorded content digest"),
+and restoring the original state returns each to ready. A `.gitignore`d
+`build/residual.o` dropped into the memilio workspace -- which `git status`
+reports as nothing at all, because that repo's 278-line `.gitignore` hides it
+-- also blocks (10/11 -> 9/11 ready) and clears when removed. Two concurrent
+`replay` invocations of the same (lane, model, task) each executed exactly
+once, published an intact evidence log with no `.new` residue, and left no
+scratch behind.
+Every contract's start and golden proof in that bundle was executed on a
+disposable copy, and a post-proof replay confirms the canonical CARGO_HOME
+(8,343 files) and workspaces are byte-identical afterwards.
+
+A real preflight over the full release with the bundle reports 10 of the 11
+native/rust published-legacy tasks ready (grpc alone blocked), and a real
+replay of a staged model produced genuine behavioral verdicts -- passes for
+singularity-eos and cpython, and *model* failures (broken candidate patches:
+a template-arity error in memilio, unbalanced delimiters in fuel-tx and
+anchor) that are recorded as `fail`, never as infrastructure noise. Scratch
+copies, including root-owned container build state, are removed through a
+throwaway cleanup container (`purge_scratch`); shared caches are never
+deleted.
 
 ### 7.2 Current five-model correctness replay
 
