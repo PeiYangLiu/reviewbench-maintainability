@@ -690,46 +690,122 @@ python3 scripts/run_legacy_gopy_scripted_correctness.py restore-caches \
   --asset-root <legacy-recovery-assets>/gopy-scripted
 ```
 
-Status as of 2026-08-13: preflight reports **4 of 19 ready**
-(aws/eks-anywhere#2274, pingcap/tidb#68028, unikraft/kraftkit#2007,
-scikit-learn#18359) and 15 blocked. A real replay of the staged
-`MiniMaxAI/MiniMax-M2.1` candidates over the four ready tasks produced three
-`pass` rows (tidb 162/162, scikit-learn 55/55, kraftkit 1/1) and one genuine
-behavioral `fail` (eks-anywhere: the candidate broke compilation of
-`pkg/providers/tinkerbell/create.go`, so 0/23 PASS_TO_PASS tests ran).
+##### Engineered Oracles for the lost harnesses
 
-The 15 blocked tasks split into three root causes, all recorded per task in
-the contract file:
+A lost historical harness is treated as an engineering task, not a terminal
+blocker. For every task whose session Oracle/harness did not survive, a **new**
+strict Oracle was derived from the authoritative task instruction and review
+comment, the exact-start source, the accepted source-only golden delta, and the
+repository's own public tests, and then proven against the current hard-Oracle
+standard by `validate-oracle`:
 
-1. **Lost session Oracle / harness** (11): alchemiscale#421, Pyomo#3698,
-   chazari-x/yandex-pr-diplom#1, codecov/shared#90, labscript-suite/lyse#119,
-   open-formulieren/open-forms#3125, opentelemetry-go-contrib#6172,
-   ozontech/seq-ui#44, postman17/metrics#13, redis/redis-py#3350,
-   runfinch/finch-core#780. Their pinned toolchains (Docker images, module
-   cache volumes) survive, but the session-authored behavioral test or shell
-   harness that *was* the Oracle lived under the deleted `increment5-recovery`
-   / `recovery/wave2-*` trees. Re-authoring them would create a new Oracle,
-   not replay the published one.
-2. **Lost toolchain/runtime** (3): hashicorp/nomad#16383 (Node 16.20 +
-   Chromium 120 Ember environment, never pinned by digest),
-   scala-js#4707 (project-pinned sbt 1.5.8 launcher absent from the retained
-   JVM cache, so replay would require an unpinned network resolution),
-   scala-js#4988 (session-authored `FunctionBuilderOracleTest`, absent from
-   the repository at `start_sha`).
-3. **No recorded execution recipe** (1): Agoric/agoric-sdk#8072 -- both the
-   published Oracle and its unsanitized source artifact (`oracle_next_go.jsonl`)
-   carry only coverage/PASS_TO_PASS evidence and no command, environment or
-   selector at all.
+* **exact-start baseline pass** -- the Oracle passes on the untouched start
+  revision, three runs in a row;
+* **source-only golden pass** -- it still passes after the maintainer's own
+  accepted production delta is applied, so it is not coupled to the start
+  implementation (a recorded `coupled_test_file_overlay`, `golden_patch_asset`,
+  paired `golden_session_tests` or `golden_recipe_overrides` may be part of the
+  golden definition, and each is pinned explicitly in the contract);
+* **nonempty PASS_TO_PASS** -- every judged test is named in the contract;
+* **changed-old production coverage** -- at least one production line the
+  accepted change removed or rewrote is executed on the start revision,
+  measured with a real tool (`go test -coverprofile`, `coverage.py`,
+  `sys.settrace`, or bash xtrace line tracing), never inferred from source
+  shape;
+* **repeated stability** and a fully offline final command.
+
+Every engineered Oracle drives public API/observable behavior only. Two earlier
+drafts were rejected and rebuilt for violating that rule (one tested an
+unexported Go helper, one used `unsafe.Pointer` to reach a struct field, and a
+third implemented the production class's private extension hooks). One draft
+was rejected for reading the historical image's baked source copy instead of
+the mounted workspace, which would have made it blind to the code under test.
+
+Three additional recipe kinds carry these Oracles:
+`python_docker_session_oracle` (pytest in a version-pinned image),
+`shell_docker_session_oracle` (a black-box harness driving a production script
+through controlled fake executables, with bash xtrace line coverage), and
+`sbt_docker_session_oracle` (the project's own sbt build against a packaged,
+hash-verified ivy/coursier closure).
+
+Status as of 2026-08-14: **18 of 19 tasks are replay-ready** (preflight) and
+**17 of 19 meet the full hard-Oracle standard** under `validate-oracle`:
+
+| Task | Oracle | PASS_TO_PASS | Validation |
+|---|---|---:|---|
+| aws/eks-anywhere#2274 | repository suite (historical) | 23 | start 3/3 re-measured; golden attested from the published record |
+| pingcap/tidb#68028 | repository suite (historical) | 162 | start 3/3 re-measured; golden attested from the published record |
+| unikraft/kraftkit#2007 | retained session Oracle | 1 | start 3/3 re-measured; target-commit golden attested from the retained run log |
+| scikit-learn#18359 | in-image historical harness | 55 | historical harness re-executed end to end (start x3 + golden x3) |
+| Agoric/agoric-sdk#8072 | 17 repository tests (engineered selector) | 17 | start 3/3 + golden 3/3 + coverage |
+| opentelemetry-go-contrib#6172 | engineered session Oracle | 1 | start 3/3 + golden 3/3 + coverage |
+| ozontech/seq-ui#44 | engineered session Oracle | 1 | start 3/3 + golden 3/3 + coverage |
+| postman17/metrics#13 | engineered session Oracle | 1 | start 3/3 + golden 3/3 + coverage |
+| redis/redis-py#3350 | engineered session Oracle | 3 | start 3/3 + golden 3/3 + coverage |
+| codecov/shared#90 | engineered session Oracle | 7 | start 3/3 + golden 3/3 + coverage |
+| labscript-suite/lyse#119 | engineered session Oracle | 3 | start 3/3 + golden 3/3 + coverage |
+| open-formulieren/open-forms#3125 | engineered session Oracle | 3 | start 3/3 + golden 3/3 + `sys.settrace` coverage |
+| OpenFreeEnergy/alchemiscale#421 | engineered session Oracle | 2 | start 3/3 + golden 3/3 + coverage |
+| Pyomo/pyomo#3698 | engineered session Oracle | 1 | start 3/3 + golden 3/3 + coverage |
+| runfinch/finch-core#780 | engineered shell harness | 7 | start 3/3 + golden 3/3 + bash xtrace coverage |
+| scala-js#4707 | repository OptimizerTest suite | 10 | start 3/3 + golden 3/3 + attested JaCoCo coverage |
+| scala-js#4988 | engineered session Oracle | 1 | start 3/3 + golden 3/3 + attested JaCoCo coverage |
+| hashicorp/nomad#16383 | engineered Ember/QUnit harness | 3 | start 3/3 + golden 3/3; **changed-old coverage unmeasured** |
+| chazari-x/yandex-pr-diplom#1 | -- | -- | **blocked** (see below) |
+
+Toolchain recovery for the two lanes that had none: Scala.js now runs the
+project's own pinned sbt (1.5.8 resolved from Maven Central for #4707, 1.9.0
+retained for #4988) against a warmed ivy/coursier closure that is packaged as a
+hash-recorded tarball and mounted read-only, so every run is offline; Nomad runs
+Node 16.20.0 (verified against the official `SHASUMS256.txt`) with a
+`--frozen-lockfile` dependency tree packaged as `node_modules.tar.gz`, plus a
+distro-pinned headless Chromium.
+
+The one remaining blocker is **chazari-x/yandex-pr-diplom#1**, and it is a
+property of the accepted change rather than a missing asset: two independent
+public-surface designs were built and both are provably impossible. Including
+the accepted deletion of `internal/app/handlers/handlers.go` makes the golden
+compile, but the exported handler constructor diverges
+(`NewController(config, db)` at start vs `NewController(config, db, chan
+worker.OrderStr)` at golden, where the `worker` package does not exist at
+start), so no single handler-level test compiles on both revisions; and at the
+database level the accepted change turns a zero-valued `DataBase.Err` struct
+into always-set package sentinels, so the *observable* behavior for a
+Luhn-invalid order differs between the revisions (HTTP 202/nil vs
+`ErrBadOrderNumber`). The only cross-revision test found calls the unexported
+`checkOrderNumber`, which is exactly the private-helper binding the standard
+forbids. Full evidence, including the compile errors, is under
+`authoring/yandex-1/` in the asset root and quoted in the contract's blocker.
+
+Commands for the validation gate:
+
+```bash
+python3 scripts/run_legacy_gopy_scripted_correctness.py validate-oracle \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --legacy-root <retained-session-root> \
+  --asset-root  <legacy-recovery-assets>/gopy-scripted \
+  --output <evidence-dir> --runs 3            # add --task-id to scope it
+```
+
+It writes `<evidence-dir>/oracle-validation/<task>/validation.json` (per-run
+results, the changed-old anchor set, the measured coverage intersection) plus a
+`validation-summary.json`, and exits non-zero unless every scoped Oracle meets
+the standard.
 
 `tests/test_run_legacy_gopy_scripted_correctness.py` covers this adapter with
 synthetic fixtures only (no real builds or containers): contract schema and
 scope-drift validation against the published release, PASS_TO_PASS judging
 over `go test -json` streams (including build failures and vanished tests),
-JUnit parsing, per-recipe blocker detection (missing image, retagged image,
-missing cache volume, start SHA absent from the checkout, tampered session
-Oracle, drifted in-image workspace), reappeared-asset detection for blocked
-entries, provenance/staleness and row retraction, lock-safe raw-row merging,
-and CLI fail-closed behavior.
+JUnit/pytest node-ID matching, per-recipe blocker detection (missing image,
+retagged image, missing cache volume, start SHA absent from the checkout,
+tampered session Oracle, drifted in-image workspace), reappeared-asset
+detection for blocked entries, provenance/staleness and row retraction,
+lock-safe raw-row merging, CLI fail-closed behavior, and the engineered-Oracle
+machinery: session-asset installation, workspace/workdir resolution, declared
+host mounts, coverage parsing for `go_cover`/`py_cover`/`py_settrace`/
+`bash_xtrace`, digest-verified `attested` coverage, changed-old anchor
+computation from a real git history, and the recorded coupled-test overlay.
 
 ### 7.2 Current five-model correctness replay
 

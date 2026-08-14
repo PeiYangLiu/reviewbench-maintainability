@@ -148,8 +148,14 @@ def test_shipped_contract_recovered_entries_declare_pinned_assets():
         recipe = entry["recipe"]
         assert recipe["image"], task_id
         assert recipe["kind"] in MODULE.RECIPE_KINDS
-        if recipe["kind"] == "go_docker_session_oracle":
-            assert len(recipe["session_test"]["sha256"]) == 64
+        if recipe["kind"] in {
+            "go_docker_session_oracle",
+            "python_docker_session_oracle",
+            "shell_docker_session_oracle",
+        }:
+            for asset in MODULE.session_assets(recipe):
+                assert len(asset["sha256"]) == 64, task_id
+                assert asset["destination"], task_id
         if recipe["kind"] == "python_image_pytest":
             assert len(recipe["workspace_anchor"]["sha256"]) == 64
             assert recipe["expected_passed"] > 0
@@ -1066,3 +1072,207 @@ def test_candidate_missing_and_apply_error_rows_normalize_cleanly():
     )
     assert normalized["status"] == "apply_error"
     assert normalized["correctness_ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# Engineered-Oracle recipe kinds and the hard-Oracle validation gate
+# ---------------------------------------------------------------------------
+
+
+def test_session_assets_collects_every_pinned_oracle_source():
+    recipe = {
+        "session_test": {"asset": "a", "sha256": "0", "destination": "x"},
+        "session_tests": [{"asset": "b", "sha256": "1", "destination": "y"}],
+        "harness": [{"asset": "c", "sha256": "2", "destination": "z"}],
+    }
+    assert [item["asset"] for item in MODULE.session_assets(recipe)] == ["a", "b", "c"]
+
+
+def test_install_session_assets_copies_and_marks_executable(tmp_path):
+    asset_root = tmp_path / "assets"
+    (asset_root / "slug").mkdir(parents=True)
+    (asset_root / "slug/oracle.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    recipe = {
+        "harness": [{
+            "asset": "slug/oracle.sh",
+            "sha256": "x",
+            "destination": "oracle/oracle.sh",
+            "executable": True,
+        }]
+    }
+    MODULE.install_session_assets(recipe, asset_root, workspace)
+    installed = workspace / "oracle/oracle.sh"
+    assert installed.is_file()
+    assert installed.stat().st_mode & 0o111
+
+
+def test_workspace_workdir_honours_module_and_project_root():
+    assert MODULE.workspace_workdir({"workspace_mount": "/work"}) == "/work"
+    assert MODULE.workspace_workdir(
+        {"workspace_mount": "/work", "module_dir": "pkg/parser"}
+    ) == "/work/pkg/parser"
+    assert MODULE.workspace_workdir(
+        {"workspace_mount": "/app", "project_root": "ui"}
+    ) == "/app/ui"
+
+
+def test_oracle_mounts_include_declared_host_mounts():
+    recipe = {
+        "workspace_mount": "/work",
+        "host_mounts": [{"host": "/cache/home", "container": "/root", "mode": "ro"}],
+    }
+    mounts = MODULE.oracle_mounts(recipe, Path("/ws"), Path("/reports"))
+    assert "/ws:/work" in mounts
+    assert "/reports:/reports" in mounts
+    assert "/cache/home:/root:ro" in mounts
+
+
+def test_pytest_oracle_command_wraps_in_coverage_when_requested():
+    recipe = {"test_path": "t/test_x.py", "pytest_args": ["-q"],
+              "coverage": {"kind": "py_cover", "source": "pkg"},
+              "expected_tests": ["t/test_x.py::test_a"]}
+    plain, expected = MODULE.pytest_oracle_command(
+        recipe, junit_out="/reports/r.xml", coverage_out=None
+    )
+    assert plain[:4] == ["python", "-m", "pytest", "-q"]
+    assert expected == ["t/test_x.py::test_a"]
+    covered, _ = MODULE.pytest_oracle_command(
+        recipe, junit_out="/reports/r.xml", coverage_out="/reports/c.json"
+    )
+    assert covered[:5] == ["python", "-m", "coverage", "run", "--branch"]
+    assert "--source=pkg" in covered
+
+
+def test_junit_test_ids_matches_pytest_node_ids(tmp_path):
+    report = tmp_path / "r.xml"
+    report.write_text(
+        '<testsuites><testsuite>'
+        '<testcase classname="tests_oracle.test_oracle.TestX" name="test_a"/>'
+        '<testcase classname="tests_oracle.test_oracle" name="test_b"/>'
+        "</testsuite></testsuites>",
+        encoding="utf-8",
+    )
+    ids = MODULE.junit_test_ids(report)
+    assert ids["tests_oracle/test_oracle.py::TestX::test_a"] == "pass"
+    assert ids["tests_oracle/test_oracle.py::test_b"] == "pass"
+
+
+def test_changed_old_lines_reports_removed_and_rewritten_lines(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run("git", "init", "-q", cwd=repo)
+    run("git", "-C", str(repo), "config", "user.email", "a@example.com")
+    run("git", "-C", str(repo), "config", "user.name", "a")
+    (repo / "prod.py").write_text("a = 1\nb = 2\nc = 3\n", encoding="utf-8")
+    run("git", "-C", str(repo), "add", "-A")
+    run("git", "-C", str(repo), "commit", "-q", "-m", "start")
+    start = run("git", "-C", str(repo), "rev-parse", "HEAD").strip()
+    (repo / "prod.py").write_text("a = 1\nb = 20\nc = 3\n", encoding="utf-8")
+    run("git", "-C", str(repo), "commit", "-qam", "target")
+    target = run("git", "-C", str(repo), "rev-parse", "HEAD").strip()
+    assert MODULE.changed_old_lines(repo, start, target, ["prod.py"]) == {"prod.py": [2]}
+
+
+def test_go_cover_hits_parses_executed_ranges(tmp_path):
+    profile = tmp_path / "coverage.out"
+    profile.write_text(
+        "mode: set\n"
+        "example.com/m/pkg/file.go:10.20,12.3 2 1\n"
+        "example.com/m/pkg/file.go:20.2,21.4 1 0\n",
+        encoding="utf-8",
+    )
+    assert MODULE.go_cover_hits(profile, ["pkg/file.go"]) == {"pkg/file.go": [10, 11, 12]}
+
+
+def test_py_cover_and_settrace_hits(tmp_path):
+    cov = tmp_path / "coverage.json"
+    cov.write_text(
+        json.dumps({"files": {"/work/pkg/mod.py": {"executed_lines": [3, 4]}}}),
+        encoding="utf-8",
+    )
+    assert MODULE.py_cover_hits(cov, ["pkg/mod.py"]) == {"pkg/mod.py": [3, 4]}
+    trace = tmp_path / "settrace.json"
+    trace.write_text(json.dumps({"/runner/src/pkg/mod.py": [7, 9]}), encoding="utf-8")
+    assert MODULE.settrace_hits(trace, ["src/pkg/mod.py"]) == {"src/pkg/mod.py": [7, 9]}
+
+
+def test_bash_xtrace_hits_parses_ps4_file_line_records(tmp_path):
+    trace = tmp_path / "xtrace.log"
+    trace.write_text(
+        "+/work/deps/mkosi/build.sh:44:docker buildx ls\n"
+        "++/work/deps/mkosi/build.sh:46:docker buildx create\n"
+        "+/other.sh:3:true\n",
+        encoding="utf-8",
+    )
+    assert MODULE.bash_xtrace_hits(trace, ["deps/mkosi/build.sh"]) == {
+        "deps/mkosi/build.sh": [44, 46]
+    }
+
+
+def test_attested_coverage_requires_a_matching_evidence_digest(tmp_path):
+    evidence = tmp_path / "hits.json"
+    payload = {"path": "src/x.scala", "covered_changed_old_lines": [10, 11]}
+    evidence.write_text(json.dumps(payload), encoding="utf-8")
+    digest = MODULE.sha256_file(evidence)
+    recipe = {"coverage": {"kind": "attested", "evidence": "hits.json",
+                           "evidence_sha256": digest}}
+    assert MODULE.attested_coverage_hits(recipe, tmp_path) == {"src/x.scala": [10, 11]}
+    tampered = {"coverage": {"kind": "attested", "evidence": "hits.json",
+                             "evidence_sha256": "0" * 64}}
+    assert MODULE.attested_coverage_hits(tampered, tmp_path) == {}
+
+
+def test_source_only_golden_paths_include_recorded_coupled_overlay():
+    entry = {
+        "oracle_validation": {
+            "golden_source_paths": ["pkg/prod.go"],
+            "coupled_test_file_overlay": {
+                "path": "pkg/prod_test.go",
+                "compile_error": "does not implement interface",
+            },
+        }
+    }
+    assert MODULE.source_only_golden_paths(entry, {}) == [
+        "pkg/prod.go",
+        "pkg/prod_test.go",
+    ]
+
+
+def test_source_only_golden_paths_fall_back_to_the_oracle_source_changed():
+    assert MODULE.source_only_golden_paths({}, {"source_changed": ["a.py"]}) == ["a.py"]
+
+
+def test_apply_source_only_golden_rejects_an_empty_delta(tmp_path):
+    repo = tmp_path / "repo"
+    sha = make_git_repo(repo)
+    ok, detail = MODULE.apply_source_only_golden(
+        repo, tmp_path, sha, sha, ["main.go"], tmp_path / "apply.log"
+    )
+    assert ok is False
+    assert "empty" in detail
+    ok, detail = MODULE.apply_source_only_golden(
+        repo, tmp_path, sha, sha, [], tmp_path / "apply.log"
+    )
+    assert ok is False
+    assert "no source-only golden paths" in detail
+
+
+def test_shipped_contract_recovered_entries_declare_a_validation_mode():
+    contract = MODULE.load_contract(CONTRACT_PATH)
+    for task_id, entry in contract["tasks"].items():
+        if entry["status"] != "recovered":
+            continue
+        validation = entry.get("oracle_validation") or {}
+        assert validation.get("golden_source_paths"), task_id
+        assert validation.get("mode"), task_id
+        coverage = entry["recipe"].get("coverage") or {}
+        assert coverage.get("kind"), task_id
+        if coverage["kind"] == "none":
+            # A recovered entry without measured changed-old coverage must say
+            # so explicitly; it can never be silently presented as compliant.
+            assert coverage.get("status") in {
+                "unmeasured", "historically_measured"
+            }, task_id
+            assert coverage.get("reason"), task_id
