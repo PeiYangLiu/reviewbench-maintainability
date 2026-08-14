@@ -76,10 +76,15 @@ def build_pinned_jvm_cache(
         (cache_root / token).write_bytes(payload)
         digests[token] = _hashlib.sha256(payload).hexdigest()
     monkeypatch.setattr(MODULE, "ORACLE_CACHE_ASSET_SHA256", digests)
+    MODULE._TREE_DIGEST_CACHE.clear()
+    directory_digests = dict(MODULE.ORACLE_CACHE_DIR_SHA256)
     for name in directories:
         directory = cache_root / name
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "marker").write_text("x", encoding="utf-8")
+        directory_digests[name] = MODULE.full_tree_digest(directory)
+    monkeypatch.setattr(MODULE, "ORACLE_CACHE_DIR_SHA256", directory_digests)
+    MODULE._TREE_DIGEST_CACHE.clear()
     return cache_root
 
 
@@ -3350,3 +3355,199 @@ def test_replay_jvm_reports_infra_when_a_pinned_asset_drifts_during_the_run(
     assert "gradle-task-8" in row["seeded_cache_home_entries"] or (
         row["seeded_cache_home_entries"] == []
     )
+
+
+# ---------------------------------------------------------------------------
+# Required /oracle-cache directories are whole-tree validated (approval blocker)
+# ---------------------------------------------------------------------------
+
+
+def _big_mirror(cache_root, monkeypatch, file_count=750, filler=200_000):
+    """Build an m2-mirror large enough to defeat bounded sampling.
+
+    ``directory_identity`` samples at most 500 files and hashes only each
+    file's first 64 KiB, so a mirror with more files than that -- and files
+    bigger than that prefix -- is exactly the shape a sampling check cannot
+    protect. Every file here is padded past the prefix and the tree is padded
+    past the file cap.
+    """
+    mirror = cache_root / "m2-mirror"
+    shutil.rmtree(mirror, ignore_errors=True)
+    for index in range(file_count):
+        artifact = mirror / f"group{index // 50}" / f"artifact-{index:04d}.jar"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(b"P" * filler + f"|{index}".encode("utf-8"))
+    MODULE._TREE_DIGEST_CACHE.clear()
+    digests = dict(MODULE.ORACLE_CACHE_DIR_SHA256)
+    digests["m2-mirror"] = MODULE.full_tree_digest(mirror)
+    monkeypatch.setattr(MODULE, "ORACLE_CACHE_DIR_SHA256", digests)
+    MODULE._TREE_DIGEST_CACHE.clear()
+    return mirror
+
+
+def test_preflight_blocks_a_large_mirror_tampered_beyond_the_sampling_cap(
+    tmp_path, monkeypatch
+):
+    # >500 files: the tampered artifact is deliberately one of the *last* files
+    # in sorted order, well past the bounded sampler's 500-file cap.
+    cache_root, oracle = _ready_web3signer_root(tmp_path, monkeypatch)
+    mirror = _big_mirror(cache_root, monkeypatch)
+    assert sum(1 for _ in mirror.rglob("*") if _.is_file()) > 500
+    assert MODULE.jvm_blockers(WEB3SIGNER_TASK_ID, oracle, tmp_path) == []
+
+    sampled_before = MODULE.directory_identity(mirror)
+
+    late = sorted(mirror.rglob("*.jar"))[-1]
+    original = late.read_bytes()
+    # bounded sampling would have compared only the first 64 KiB, and only for
+    # the first 500 files -- this changes neither.
+    tampered = bytearray(original)
+    tampered[-1] = (tampered[-1] + 1) % 256
+    late.write_bytes(bytes(tampered))
+    assert late.stat().st_size == len(original)
+
+    # Proof the old bounded check was insufficient: it cannot see this at all.
+    assert MODULE.directory_identity(mirror) == sampled_before
+
+    MODULE._TREE_DIGEST_CACHE.clear()
+    blockers = MODULE.jvm_blockers(WEB3SIGNER_TASK_ID, oracle, tmp_path)
+    assert any(
+        "pinned cache_dir" in blocker and "content digest" in blocker
+        for blocker in blockers
+    ), blockers
+
+
+def test_preflight_blocks_a_same_size_tamper_past_the_sampled_prefix(
+    tmp_path, monkeypatch
+):
+    # Same file count, same file size, same first 64 KiB: only a complete
+    # content digest can tell these trees apart.
+    cache_root, oracle = _ready_web3signer_root(tmp_path, monkeypatch)
+    mirror = _big_mirror(cache_root, monkeypatch, file_count=520, filler=150_000)
+    assert MODULE.jvm_blockers(WEB3SIGNER_TASK_ID, oracle, tmp_path) == []
+
+    victim = sorted(mirror.rglob("*.jar"))[-3]
+    before = victim.read_bytes()
+    prefix = before[:65536]
+    payload = bytearray(before)
+    payload[100_000] = (payload[100_000] + 7) % 256
+    sampled_before = MODULE.directory_identity(mirror)
+    victim.write_bytes(bytes(payload))
+    assert victim.stat().st_size == len(before)
+    assert victim.read_bytes()[:65536] == prefix  # sampled prefix is unchanged
+    # Proof the old bounded check was insufficient.
+    assert MODULE.directory_identity(mirror) == sampled_before
+
+    MODULE._TREE_DIGEST_CACHE.clear()
+    blockers = MODULE.jvm_blockers(WEB3SIGNER_TASK_ID, oracle, tmp_path)
+    assert any("pinned cache_dir" in blocker for blocker in blockers), blockers
+
+
+def test_preflight_blocks_a_removed_artifact_inside_a_large_mirror(
+    tmp_path, monkeypatch
+):
+    cache_root, oracle = _ready_web3signer_root(tmp_path, monkeypatch)
+    mirror = _big_mirror(cache_root, monkeypatch)
+    sorted(mirror.rglob("*.jar"))[-2].unlink()
+    MODULE._TREE_DIGEST_CACHE.clear()
+    blockers = MODULE.jvm_blockers(WEB3SIGNER_TASK_ID, oracle, tmp_path)
+    assert any("pinned cache_dir" in blocker for blocker in blockers), blockers
+
+
+def test_preflight_blocks_an_unpinned_required_cache_directory(tmp_path, monkeypatch):
+    cache_root, oracle = _ready_web3signer_root(tmp_path, monkeypatch)
+    monkeypatch.setattr(MODULE, "ORACLE_CACHE_DIR_SHA256", {})
+    blockers = MODULE.jvm_blockers(WEB3SIGNER_TASK_ID, oracle, tmp_path)
+    assert any("unpinned cache_dir m2-mirror" in blocker for blocker in blockers)
+
+
+def test_asset_state_binds_required_cache_directories_by_full_tree_digest(
+    tmp_path, monkeypatch
+):
+    cache_root, oracle = _ready_web3signer_root(tmp_path, monkeypatch)
+    mirror = _big_mirror(cache_root, monkeypatch)
+    task = strict_task(WEB3SIGNER_TASK_ID, repo="Consensys/web3signer")
+    generation = {"patch_sha256": "abc", "apply_ok": True}
+    row = MODULE.row_provenance_fields(
+        task, oracle, WEB3SIGNER_TASK_ID, "jvm", generation, tmp_path, []
+    )
+    before = MODULE.asset_state(WEB3SIGNER_TASK_ID, "jvm", oracle, tmp_path)
+    entry = before["pinned_directories"]["cache_dir:m2-mirror"]
+    assert entry["observed_sha256"] == entry["expected_sha256"]
+    # the fingerprint must not be a bounded sample any more
+    assert isinstance(entry["observed_sha256"], str)
+
+    late = sorted(mirror.rglob("*.jar"))[-1]
+    payload = bytearray(late.read_bytes())
+    payload[-1] = (payload[-1] + 3) % 256
+    late.write_bytes(bytes(payload))
+    MODULE._TREE_DIGEST_CACHE.clear()
+
+    after = MODULE.asset_state(WEB3SIGNER_TASK_ID, "jvm", oracle, tmp_path)
+    assert after["pinned_directories"] != before["pinned_directories"]
+    assert MODULE.row_is_stale(
+        {**row, "patch_sha256": "abc"}, task, oracle, WEB3SIGNER_TASK_ID,
+        "jvm", generation, tmp_path, [],
+    )
+
+
+def test_replay_jvm_reports_infra_when_a_required_cache_dir_drifts_mid_run(
+    tmp_path, monkeypatch
+):
+    # Mid-run drift of a required /oracle-cache directory must produce no
+    # verdict at all -- it is infrastructure, not a candidate failure.
+    legacy_root = tmp_path / "legacy"
+    cache_root = build_pinned_jvm_cache(legacy_root, monkeypatch)
+    pin_web3signer_prefetch(cache_root, monkeypatch)
+    mirror = _big_mirror(cache_root, monkeypatch, file_count=600, filler=80_000)
+    start_sha = make_git_repo(legacy_root / "repos/org__repo")
+    task = strict_task(WEB3SIGNER_TASK_ID, repo="org/repo")
+    oracle = {
+        "repo": "org/repo",
+        "start_sha": start_sha,
+        "command": "gradle test -I /oracle-cache/oracle.init.gradle",
+        "pass_to_pass": 6,
+        "environment": {
+            "container": "oracle-java-tools:17",
+            "cache": "strict_screen_20260726/oracle_recovery/java/cache/home",
+        },
+    }
+    patch_path = tmp_path / "candidate.patch"
+    patch_path.write_text("", encoding="utf-8")
+    generation = {"patch_file": str(patch_path), "patch_sha256": BASE.sha256(patch_path)}
+    work_root = tmp_path / "work"
+    workspace = (
+        work_root / "jvm" / MODULE.model_component("my-model")
+        / WEB3SIGNER_TASK_ID / "workspace"
+    )
+
+    def fake_run_subprocess(command, *, cwd, log_path, env=None, timeout=1800):
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("BUILD SUCCESSFUL\n", encoding="utf-8")
+        report = workspace / "acceptance-tests/build/test-results/test/TEST-x.xml"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(
+            '<testsuite tests="6" failures="0" errors="0"/>', encoding="utf-8"
+        )
+        # a late, same-size artifact changes under the run
+        late = sorted(mirror.rglob("*.jar"))[-1]
+        payload = bytearray(late.read_bytes())
+        payload[-1] = (payload[-1] + 5) % 256
+        late.write_bytes(bytes(payload))
+        return 0, 2.0, ""
+
+    monkeypatch.setattr(MODULE, "run_subprocess", fake_run_subprocess)
+    row = MODULE.replay_jvm(
+        WEB3SIGNER_TASK_ID, "my-model", task, oracle, generation, legacy_root,
+        work_root, tmp_path / "output", 60,
+    )
+    assert row["status"] == "infra_retry"
+    assert row["candidate_result"] == "infra_retry"
+    assert row["correctness_ok"] is None
+    assert row["pinned_assets_drifted_during_run"] == [str(mirror)]
+
+
+def test_every_required_cache_dir_is_pinned_by_a_whole_tree_digest():
+    for task_id, manifest in MODULE.JVM_MANIFEST.items():
+        for name in manifest.get("required_cache_dirs") or ():
+            assert name in MODULE.ORACLE_CACHE_DIR_SHA256, (task_id, name)

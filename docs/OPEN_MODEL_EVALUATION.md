@@ -528,7 +528,14 @@ Design:
   archive, and the pinned Gradle wrapper jar must exist **and hash to its
   pinned SHA-256** (full content, not a bounded prefix); a token with no pinned
   digest is itself a blocker. The cache directories the reconstructed
-  `oracle.init.gradle` declares (`m2-mirror`) must exist and be non-empty. On
+  `oracle.init.gradle` declares (`m2-mirror`) are validated the same way, by
+  **whole-tree** content: `ORACLE_CACHE_DIR_SHA256` pins a `full_tree_digest()`
+  over every file's relative path, mode/symlink target and complete bytes.
+  Bounded `directory_identity()` sampling is deliberately *not* used for them --
+  it hashes at most 500 files and only each file's first 64 KiB, so a mirror of
+  thousands of artifacts could hide a removed, replaced or same-size late-file
+  tamper, and resolution silently picking up different bytes would be scored as
+  a candidate failure. An unpinned required directory is itself a blocker. On
   the TS/JS side validation binds the **whole resolved runtime payload**, not a
   launcher shim: `tsjs_required_trees()` requires each task's pinned dependency
   tree, pinned Node runtime and (for the pnpm-workspace contract) pinned pnpm
@@ -574,9 +581,11 @@ Design:
   `/workspace` and `/task`. Dependency trees are provisioned with
   `copy_tree()`, a real or copy-on-write copy -- never `cp -al`, whose shared
   inodes would let an in-place rewrite reach straight back into the pinned
-  source. After every run the pinned assets and pinned trees are re-digested
-  defensively; drift is impossible by construction, so if it is ever observed
-  the row becomes `infra_retry` (`pinned_assets_drifted_during_run` /
+  source. After every run the pinned assets, the required
+  `/oracle-cache` directories and the pinned TS/JS trees are all re-digested
+  defensively with the same whole-content functions preflight uses; drift is
+  impossible by construction, so if it is ever observed the row becomes
+  `infra_retry` (`pinned_assets_drifted_during_run` /
   `pinned_trees_drifted_during_run`) instead of a candidate verdict.
 - **No live network fallback for a missing pinned asset.** A pinned asset that
   is absent or mismatched stops the replay before the Oracle command runs and
@@ -725,7 +734,12 @@ invalidates already-recorded rows, and that `replay_jvm` refuses to run the
 Oracle command at all. A dedicated case builds a dependency tree containing
 *only* the launcher shim and its `package.json` and proves it is rejected, and
 others prove that a single stray file inside a pinned dependency tree, Node
-runtime or pnpm store blocks. Immutability cases assert the container argv
+runtime or pnpm store blocks. Whole-tree cases build an `m2-mirror` of more than 500
+files, each padded past 64 KiB, and prove that a same-size tamper in the last
+file, a same-size tamper past the sampled prefix, and a removed artifact each
+block -- asserting in the same test that `directory_identity()` is blind to
+them -- and that mid-run drift of a required directory yields `infra_retry`
+with no verdict. Immutability cases assert the container argv
 mounts `/oracle-cache` as `:ro` and never mounts the pinned cache home at all,
 that seeding copies only the task's own Gradle partition into independent
 inodes, that an in-place rewrite (and a write through a `.bin` symlink) in a

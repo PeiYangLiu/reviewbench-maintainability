@@ -352,6 +352,20 @@ TSJS_NODE_OVERRIDES = {
 # Oracle command can reference. A token the recovery has no pinned digest for
 # is a preflight blocker: an unpinned blob could silently change the replayed
 # behavior, and "the file happens to exist" is not provenance.
+# Pinned *whole-tree* SHA-256 of every reconstructed ``/oracle-cache``
+# directory a published JVM Oracle depends on. These are validated with
+# ``full_tree_digest`` -- every file's relative path, mode/symlink target and
+# complete content -- never with the bounded, sampling ``directory_identity``:
+# a mirror of thousands of artifacts would otherwise let a tampered or removed
+# artifact past both the 500-file sampling cap and the 64 KiB per-file prefix,
+# and a resolution that silently picked up different bytes would be scored as a
+# candidate failure.
+ORACLE_CACHE_DIR_SHA256: dict[str, str] = {
+    "m2-mirror": (
+        "b3841ddfe930e260368943d1c63bd8be147df8bfd59af2cabcfa146349ce39b2"
+    ),
+}
+
 ORACLE_CACHE_ASSET_SHA256: dict[str, str] = {
     "jacocoagent.jar": (
         "47e700ccb0fdb9e27c5241353f8161938f4e53c3561dd35e063c5fe88dc3349b"
@@ -1164,6 +1178,8 @@ def jvm_required_assets(
                 "kind": "cache_dir",
                 "path": cache_root / name,
                 "relative": name,
+                "sha256": ORACLE_CACHE_DIR_SHA256.get(name),
+                "exclude": (),
             }
         )
     return files, directories
@@ -1966,6 +1982,20 @@ def jvm_blockers(
                     "declares it as the first repository so a network-isolated "
                     "replay can resolve retired coordinates)"
                 )
+                continue
+            if entry["sha256"] is None:
+                blockers.append(
+                    f"unpinned {entry['kind']} {entry['relative']}: the "
+                    "recovery has no pinned whole-tree SHA-256 for it, so its "
+                    "content cannot be validated"
+                )
+                continue
+            digest = full_tree_digest(path, entry["exclude"])
+            if digest != entry["sha256"]:
+                blockers.append(
+                    f"pinned {entry['kind']} {path} has content digest "
+                    f"{digest}, expected {entry['sha256']}"
+                )
     else:
         blockers.append("Oracle is missing environment.cache")
     if manifest.get("session_tests"):
@@ -2205,8 +2235,15 @@ def asset_state(
             }
             for entry in required_files
         }
+        # Bound by *complete* tree content, not by bounded sampling, and by the
+        # same function preflight and the post-run revalidation use.
         pinned_directories = {
-            f"{entry['kind']}:{entry['relative']}": directory_identity(entry["path"])
+            f"{entry['kind']}:{entry['relative']}": {
+                "expected_sha256": entry["sha256"],
+                "observed_sha256": full_tree_digest(
+                    entry["path"], entry["exclude"]
+                ),
+            }
             for entry in required_dirs
         }
         session_tests = None
@@ -3092,13 +3129,24 @@ def replay_jvm(
             # not, something impossible happened and the row is infrastructure,
             # never a candidate verdict.
             _FULL_DIGEST_CACHE.clear()
+            _TREE_DIGEST_CACHE.clear()
+            required_files_now, required_dirs_now = jvm_required_assets(
+                task_id, oracle, legacy_root, asset_root
+            )
             drifted_assets = [
                 str(entry["path"])
-                for entry in jvm_required_assets(
-                    task_id, oracle, legacy_root, asset_root
-                )[0]
+                for entry in required_files_now
                 if entry["sha256"] is not None
                 and full_file_digest(entry["path"]) != entry["sha256"]
+            ]
+            # Required /oracle-cache directories are revalidated the same way:
+            # whole-tree content, every file, after the run.
+            drifted_assets += [
+                str(entry["path"])
+                for entry in required_dirs_now
+                if entry["sha256"] is not None
+                and full_tree_digest(entry["path"], entry["exclude"])
+                != entry["sha256"]
             ]
             executed, failures = jvm_test_count(
                 workspace_scratch, manifest["test_results_globs"]
