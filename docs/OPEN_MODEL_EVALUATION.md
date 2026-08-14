@@ -468,17 +468,18 @@ replay contracts are recovered into the seven-lane format. For development
 only, `prepare` and `run` accept `--allow-partial-modern`; such an artifact is
 explicitly marked partial and cannot produce a complete manifest.
 
-#### 7.1.1 Reserve-20260728 replay adapter (14 of the 40)
+#### 7.1.1 Reserve-20260728 replay adapter (17 of the 40)
 
 `scripts/run_legacy_reserve_correctness.py` closes part of this gap for the
-14 (of the 40) published-hard tasks whose Oracle was recovered under
-`data/releases/reserves/20260728/` and that still have a genuine, previously
-proven (or at least fully self-contained) legacy harness on the retained
-session root: native 6 (ClickHouse, Desbordante, IntelPython/dpnp,
-SciCompMod/memilio, XRPLF/rippled, lanl/singularity-eos), JVM 5
-(Consensys/web3signer, SkriptLang/Skript, apache/solr, hibernate-orm,
-reposense/RepoSense), Rust 1 (FuelLabs/fuel-tx), TS/JS 2
-(discourse/discourse, opossum-tool/OpossumUI).
+17 (of the 40) published-hard tasks whose Oracle was recovered under
+`data/releases/reserves/20260728/` (or the older increment5/legacy159
+recoveries) and that still have a genuine, previously proven (or fully
+recoverable) legacy harness: native 6 (ClickHouse, Desbordante,
+IntelPython/dpnp, SciCompMod/memilio, XRPLF/rippled, lanl/singularity-eos),
+JVM 6 (Consensys/web3signer, SkriptLang/Skript, apache/solr, hibernate-orm,
+reposense/RepoSense, sniffy/sniffy), Rust 1 (FuelLabs/fuel-tx), TS/JS 4
+(discourse/discourse, opossum-tool/OpossumUI, microsoft/FluidFramework,
+angular/components).
 
 It reuses the existing `run_open_model_correctness.py` extension point
 (`source_kind == "published_legacy"`, lane inferred by `legacy_lane()`) and
@@ -495,23 +496,188 @@ Design:
   patch there and re-running the exact (for 5 of 6 native tasks: previously
   *proven*, recorded in the historical `native.jsonl`) Docker command; the
   retained checkout itself is never mutated.
-- JVM + TS/JS replay a fresh `git worktree` of the retained
-  `repos/<org>__<repo>` clone at the Oracle's exact `start_sha`, apply the
-  staged patch there, and run the Oracle's own self-contained
-  `command`/`test_command` fields with the historical toolchain (pinned
-  Docker image or Node runtime).
-- Any task whose required Docker image, retained repo checkout, Gradle/cargo
-  cache, or Node runtime is missing is reported as a **preflight blocker**
-  and is left out of the raw output entirely -- it is never scored as a
-  pass/fail. `finalize --allow-incomplete` will show it under
-  `missing_pairs` until the asset is recovered.
+- JVM + TS/JS materialize the exact start commit the way the historical
+  harness did (`git archive | tar` plus `git init` and one empty commit --
+  **not** a `git worktree`, whose `.git` file points at an absolute path
+  inside the retained clone that is not mounted into the Oracle container and
+  therefore breaks repository-introspecting builds), apply the staged patch
+  there, and run the Oracle's own `command`/`test_command` with the historical
+  toolchain against **pinned, hashed durable assets** under `--asset-root`.
+- Scored JVM/TS-JS replays run with **no network** (`docker run
+  --network none`, `pnpm --offline`). Network access is only ever used to
+  *warm* the pinned durable assets, never to score. The single documented
+  exception is sniffy, whose behavior anchor *is* network behavior (Sniffy
+  monitors sockets and NIO channels on loopback); it keeps a network
+  namespace but pins Maven into offline mode (`MAVEN_ARGS=-o`), so
+  dependency resolution is still cache-only. Every row records
+  `offline_replay` and `container_network`.
+- `JVM_MANIFEST`/`TSJS_MANIFEST` carry the parts of the historical execution
+  recipe that were never published with the Oracle records and had to be
+  recovered from the retained harness and run logs: the exact per-task Gradle
+  cache partition (`/cachehome/gradle-task-<index>`), the session-authored
+  `oracle.*` behavior tests, RepoSense's pre-repeat priming command (its
+  published command carries `-x compileTestJava`, which only works in a
+  workspace an earlier run already compiled), the Discourse `node_modules`
+  symlink into the retained shared Node tools, the proven OpossumUI
+  `react-scripts` invocation, and the FluidFramework pnpm/mocha recipe.
+- **Every pinned asset is required, hash-validated and fingerprinted.**
+  `jvm_required_assets()` is the single source of truth that both
+  `jvm_blockers()` (fail closed) and `asset_state()` (replay fingerprint) read,
+  so an asset can never be mandatory for one and invisible to the other. Each
+  `/oracle-cache` blob the recorded command references, each prefetched
+  archive, and the pinned Gradle wrapper jar must exist **and hash to its
+  pinned SHA-256** (full content, not a bounded prefix); a token with no pinned
+  digest is itself a blocker. The cache directories the reconstructed
+  `oracle.init.gradle` declares (`m2-mirror`) are validated the same way, by
+  **whole-tree** content: `ORACLE_CACHE_DIR_SHA256` pins a `full_tree_digest()`
+  over every file's relative path, mode/symlink target and complete bytes.
+  Bounded `directory_identity()` sampling is deliberately *not* used for them --
+  it hashes at most 500 files and only each file's first 64 KiB, so a mirror of
+  thousands of artifacts could hide a removed, replaced or same-size late-file
+  tamper, and resolution silently picking up different bytes would be scored as
+  a candidate failure. An unpinned required directory is itself a blocker. On
+  the TS/JS side validation binds the **whole resolved runtime payload**, not a
+  launcher shim: `tsjs_required_trees()` requires each task's pinned dependency
+  tree, pinned Node runtime and (for the pnpm-workspace contract) pinned pnpm
+  store to digest to exactly the value recorded in the manifest --
+  `full_tree_digest()` reads every regular file in full and binds each entry's
+  relative path, size, executable bit and symlink target. On top of that,
+  `tsjs_required_executables()` resolves the *concrete entrypoints that
+  execute*: `vitest/vitest.mjs`, `vitest/dist/cli.js`, `vitest/dist/config.js`,
+  `@vitest/coverage-v8/dist/{index,provider}.js`,
+  `react-scripts/bin/react-scripts.js`, `react-scripts/scripts/test.js`,
+  `jest-cli/bin/jest.js`, and the corepack modules the bare `pnpm`/`corepack`
+  symlinks dispatch to. A tree containing only a shim and a `package.json`
+  therefore **blocks**, and so does any tree with a single added, removed or
+  edited file anywhere inside it. Only declared *runtime scratch* is excluded
+  from a tree digest (Vitest's own `.vite` cache, pnpm's `v10/index` and
+  `v10/projects` bookkeeping), because a tool legitimately rewrites those while
+  running and including them would make the pin self-invalidating after the
+  first replay; the Discourse contract additionally copies the
+  retained shared Node tools instead of symlinking them, so a replay can never
+  write back into the retained tree at all. `write_manifest.py` recomputes
+  every pinned tree digest and fails if it disagrees with the digest the
+  adapter manifests enforce, so durable-asset drift is caught at manifest
+  generation rather than shipped. All of these are bound by full content digest
+  into the replay fingerprint, so removing or tampering with any one
+  invalidates previously recorded rows on resume instead of being resumed past.
+- **A declared `prime_command` is mandatory.** RepoSense's published command
+  carries `-x compileTestJava` and therefore finds no test classes at all in a
+  workspace nothing has compiled yet, so the recorded pre-repeat command must
+  run first. Its exit code, duration and error are captured into the row's
+  `prime_result`; a nonzero exit, a timeout or a spawn error yields
+  `infra_retry` with the prime log persisted as the row's evidence and
+  `scored_command_executed: false` -- the scored command is never invoked, so
+  the resulting "no tests found" build failure can never be scored as a model
+  failure.
+- **One complete identity function feeds all provenance.**
+  `full_tree_digest()` is a full `lstat` traversal that binds every regular
+  file by its whole SHA-256 plus size and executable bit, every symlink (to a
+  file *or* a directory) by its literal target without following it, every
+  directory by its path so an added, removed or emptied directory is visible,
+  and any other node by kind; `full_entry_digest()` does the same for a single
+  entry. There is no file-count cap and no per-file byte cap. The bounded,
+  sampling, symlink-blind `directory_identity()`/`safe_file_digest()` helpers
+  are **quarantined out of every replay fingerprint** on every lane -- native,
+  rust, jvm and tsjs -- and a static guard test asserts they appear nowhere in
+  `asset_state()`, `replay_contract_fingerprint()`, `row_provenance_fields()`
+  or any of the required-asset resolvers.
+- **Pinned assets are never mounted writable.** `/oracle-cache` -- the
+  immutable jars, `oracle.init.gradle`, the `file://` m2-mirror, the pinned
+  Gradle wrapper store and the prefetched archives -- is bind-mounted `:ro`,
+  and the pinned Gradle/Maven cache home is not mounted at all. Gradle and
+  Maven genuinely need a writable cache home, so `seed_jvm_cache_home()` copies
+  just the entries the task needs (`.m2`, `.cache`, `.config` and *its own*
+  `gradle-task-<index>` partition) into per-replay scratch and only that copy
+  is mounted read-write; the only other writable mounts are the disposable
+  `/workspace` and `/task`. The rust lane follows the same contract: the
+  retained cargo cache is exposed only at `/cargo-cache-pinned:ro` while
+  `CARGO_HOME=/cargo-cache` points at a per-replay seeded copy, and a seeding
+  failure is an `infra_retry` before anything runs. Dependency trees are provisioned with
+  `copy_tree()`, a real or copy-on-write copy -- never `cp -al`, whose shared
+  inodes would let an in-place rewrite reach straight back into the pinned
+  source. After every run the pinned assets, the required
+  `/oracle-cache` directories and the pinned TS/JS trees are all re-digested
+  defensively with the same whole-content functions preflight uses; drift is
+  impossible by construction, so if it is ever observed the row becomes
+  `infra_retry` (`pinned_assets_drifted_during_run` /
+  `pinned_trees_drifted_during_run`) instead of a candidate verdict.
+- **No live network fallback for a missing pinned asset.** A pinned asset that
+  is absent or mismatched stops the replay before the Oracle command runs and
+  is recorded as `infra_retry` with a `pinned_asset_faults` list -- never as a
+  candidate failure, and never quietly skipped so the build can fetch a
+  substitute. This holds for the two Oracles that keep a network namespace as
+  well; in addition, every prefetched archive is re-hashed *after* the run, and
+  a build that replaced it with a fresh download yields `infra_retry` rather
+  than a score.
+- Any task whose required Docker image, retained repo checkout, cache home,
+  session harness, pinned dependency snapshot, pinned executable or Node
+  runtime is missing is reported as a **preflight blocker** and is left out of
+  the raw output entirely -- it is never scored as a pass/fail. `finalize
+  --allow-incomplete` will show it under `missing_pairs` until the asset is
+  recovered.
+
+##### Recovered durable assets
+
+Assets the retained session root no longer carries were reconstructed under a
+dedicated, hashed asset root and are resolved through `--asset-root` at the
+*same recorded relative path*, so the retained root always wins when it still
+has an asset:
+
+```text
+/data/v-peiyangliu/reviewbench-openmodels/legacy-recovery-assets/jvm-tsjs
+  manifest.json, SHA256SUMS
+  strict_screen_20260726/oracle_recovery/java/cache/
+    oracle.init.gradle      reconstructed (see below)
+    jacocoagent.jar, jacococli.jar
+    home/                   pinned Gradle/Maven cache home
+    m2-mirror/              file:// mirror of the pinned cache, so the
+                            JCenter-only 2021/2022 build-classpath artifacts
+                            stay resolvable with no network
+    gradle-wrapper/         pinned wrapper jars, keyed and verified by the
+                            repository's own gradle-wrapper.jar.sha256
+  tsjs/node_modules/opossum-tool__OpossumUI   pinned dependency snapshot
+  tsjs/yarn-cache, tsjs/pnpm-store            pinned package-manager stores
+  tsjs/_runtimes/node-v22.22.2-linux-x64      pinned Node runtime
+  SHA256TREES             whole-payload digests of every pinned dependency
+                          tree, Node runtime and package store, cross-checked
+                          by write_manifest.py against the digests the adapter
+                          manifests enforce (drift fails manifest generation)
+```
+
+`oracle.init.gradle` -- required by four of the JVM Oracle commands and lost
+with the session -- is a *deterministic reconstruction*, not a guess. Each of
+its behaviors is forced by retained evidence: `execute.py` attaches JaCoCo to
+Gradle Oracles only through this script, yet the pure-Gradle task directories
+still contain a populated `start.exec`; Skript's frozen golden log runs a
+`:oracleSessionTest` task that does not exist in its own `build.gradle` (whose
+`test` task is `test { exclude '**/*' }`); and the directly retained successor
+of the file (`hard_oracle_20260804/jvm/cache/tools/oracle-gradle.init.gradle`)
+disables project-configured JaCoCo. It also refuses to attach the agent when
+the Oracle command already exports it through `JAVA_TOOL_OPTIONS`, because
+double-attaching aborts every test JVM with a `LinkageError`.
+
+##### Contract verification against frozen evidence
+
+`verify-contracts` replays every recovered JVM/TS-JS Oracle at its exact
+*unpatched* start, through the same code path scoring uses (an empty candidate
+patch), and requires the frozen `pass_to_pass`/signature evidence to be
+reproduced before a task is treated as runner-ready:
+
+```bash
+python3 scripts/run_legacy_reserve_correctness.py verify-contracts \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --legacy-root <retained-session-root> \
+  --asset-root <recovery-asset-root> \
+  --output <output>
+```
 
 Commands:
 
 ```bash
 # 1) Stage patches for an arbitrary model across the full 414-task release
-#    (allow the 40 published-legacy tasks, including our 14, to stay
-#    unresolved for now):
+#    (allow the 40 published-legacy tasks to stay unresolved for now):
 python3 scripts/run_open_model_correctness.py prepare \
   --tasks data/releases/hard/20260808/tasks.jsonl \
   --oracles data/releases/hard/20260808/oracles.jsonl \
@@ -519,11 +685,12 @@ python3 scripts/run_open_model_correctness.py prepare \
   --model '<model>=<generation_results.jsonl>' \
   --allow-partial-modern
 
-# 2) Fail-closed preflight of the 14 reserve tasks (no execution):
+# 2) Fail-closed preflight (no execution):
 python3 scripts/run_legacy_reserve_correctness.py preflight \
   --tasks data/releases/hard/20260808/tasks.jsonl \
   --oracles data/releases/hard/20260808/oracles.jsonl \
   --legacy-root <retained-session-root> \
+  --asset-root <recovery-asset-root> \
   --output <output> --allow-blocked
 
 # 3) Replay only what preflight reports ready, for the staged model:
@@ -531,6 +698,7 @@ python3 scripts/run_legacy_reserve_correctness.py replay \
   --tasks data/releases/hard/20260808/tasks.jsonl \
   --oracles data/releases/hard/20260808/oracles.jsonl \
   --legacy-root <retained-session-root> \
+  --asset-root <recovery-asset-root> \
   --output <output> --model '<model>'
 
 # 4) Finalize as usual (missing/blocked pairs remain visible, not fabricated):
@@ -560,22 +728,23 @@ the recovered-asset contracts described there; the JVM/TS-JS tasks are
 unaffected by this section's scope. `--task-id` scope also now spans the four
 native/rust published-legacy tasks that were never part of the 20260728
 reserve (apache/tsfile, grpc/grpc, python/cpython, otter-sec/anchor), which
-are blocked unless `--assets-root` supplies a verified contract for them.
+are blocked unless `--asset-root native-rust=<path>` supplies a verified
+contract for them.
 
-The real preflight was written on 2026-08-11 with all 14 exact IDs and the
-same 7-ready/7-blocked split. Replay is active for the 11 completed models.
-Rows are written concurrently under per-lane locks, bind the current task,
-Oracle, model patch, Docker image and retained source-tree fingerprints, and
-store only output-bundled evidence. Candidate-missing rows remain explicit;
-blocked tasks produce no correctness verdict.
+Status after the 2026-08-13 JVM/TS-JS recovery: preflight reports 9 of the
+10 JVM/TS-JS published-legacy tasks ready (all 6 JVM plus discourse,
+OpossumUI and FluidFramework). The one remaining blocker is
+angular/components: its increment5 recovery directory
+(`increment5-recovery/ts-js/angular-components-24601`), which held the
+session-authored `oracles/oracle.ts` its `esbuild session oracle; c8 node
+oracle-angular-start.js` command executes, is not present under any retained
+root. There is no executable Oracle to replay and one will not be invented, so
+it stays a hard preflight blocker rather than a contract that would score every
+candidate as a failure.
 
-The 11-model replay is now complete for all seven ready tasks. It produced
-79 normalized rows: 33 pass, 38 fail, and 8 candidate-missing. The count is
-two above 7 x 11 because two models also had candidate-missing rows on blocked
-JVM tasks; no blocked task received a correctness verdict. The partial manifest
-still lists the other 4,475 task-model pairs as missing because this artifact
-intentionally contains only the recovered legacy slice. The complete raw
-evidence bundle is stored at:
+The historical 11-model replay artifact (7 ready tasks at the time, 79
+normalized rows: 33 pass, 38 fail, 8 candidate-missing) is unchanged and
+remains stored at:
 
 ```text
 /home/v-peiyangliu/conversationhub/liupeiyang/code_quality/
@@ -584,12 +753,56 @@ evidence bundle is stored at:
 SHA-256 8cfa350847d4a86a612b4be4f278ac7c6b4fe64a5f453439a81f4f059598acfd
 ```
 
+> **Cherry-pick note.** The native/rust legacy paths are also being reworked on
+> the sibling `legacy-recover-native-rust` branch. The changes here are kept
+> deliberately narrow -- the shared generic digest helpers
+> (`full_tree_digest`/`full_entry_digest` and the quarantine of the bounded
+> helpers) plus the reserve JVM and Rust replay paths -- but
+> `replay_rust()`'s mount list and `asset_state()`'s native/rust branches are
+> the most likely cherry-pick conflicts. Resolve them by keeping *both* the
+> generic helper swap (bounded -> full digests) and whichever lane-specific
+> recipe that branch lands, since the two are orthogonal.
+
 `tests/test_run_legacy_reserve_correctness.py` covers this adapter with
 tiny synthetic fixtures only (no real builds/containers): patch
-apply/failure handling, git worktree materialization, blocker detection per
-lane, drift detection against the 14-task manifest, resume/skip behavior,
-and candidate-missing rows that normalize cleanly through the real
-`normalized_record()`.
+apply/failure handling, exact-start materialization, blocker detection per
+lane, fail-closed behavior for tasks without a recovered manifest,
+asset-root resolution, the Discourse shared-node-tools symlink, refusal to
+pass a green run that executed no tests, drift detection against the
+task-ID manifest, resume/skip behavior, and candidate-missing rows that
+normalize cleanly through the real `normalized_record()`. It also removes or
+tampers with each pinned asset and each required executable in turn --
+`/oracle-cache` blobs, the prefetched archive, the pinned wrapper jar, the
+`m2-mirror` directory, `.bin/vitest`, `.bin/react-scripts`, their concrete
+entrypoints, the corepack dispatch targets and the pinned `pnpm` shim,
+including same-length in-place content swaps and a cleared executable bit --
+and asserts that preflight blocks, that
+`asset_state()`/`replay_contract_fingerprint()` change, that `row_is_stale()`
+invalidates already-recorded rows, and that `replay_jvm` refuses to run the
+Oracle command at all. A dedicated case builds a dependency tree containing
+*only* the launcher shim and its `package.json` and proves it is rejected, and
+others prove that a single stray file inside a pinned dependency tree, Node
+runtime or pnpm store blocks. Digest cases prove the complete identity function catches every
+mutation bounded sampling misses -- a tail edit past 64 KiB, an edit beyond the
+500-file cap, a same-size swap, a symlink retargeted between byte-identical
+files, a removed empty directory and a retargeted directory symlink -- each
+asserting in the same test that `directory_identity()` is unchanged, and a
+parametrised case checks every lane's `asset_state()` reports only complete
+digests. Whole-tree cases build an `m2-mirror` of more than 500
+files, each padded past 64 KiB, and prove that a same-size tamper in the last
+file, a same-size tamper past the sampled prefix, and a removed artifact each
+block -- asserting in the same test that `directory_identity()` is blind to
+them -- and that mid-run drift of a required directory yields `infra_retry`
+with no verdict. Immutability cases assert the container argv
+mounts `/oracle-cache` as `:ro` and never mounts the pinned cache home at all,
+that seeding copies only the task's own Gradle partition into independent
+inodes, that an in-place rewrite (and a write through a `.bin` symlink) in a
+provisioned copy leaves the pinned source byte-identical, and that simulated
+"impossible" drift of a pinned asset or tree during a run yields `infra_retry`
+rather than a verdict. The mandatory-prime cases cover a nonzero exit,
+a timeout, a spawn error and an error string with a zero exit, each asserting
+`infra_retry`, a persisted prime log, `scored_command_executed: false` and
+that the scored command was never invoked.
 
 #### 7.1.2 Native/Rust recovered-asset bundle (11 of the 40)
 
@@ -627,11 +840,13 @@ are restored from the retained per-case archives (singularity-eos'
 retained dpctl-0.19 `dependency-compatibility.patch` that the historical
 recovery applied identically to start and golden.
 
-`run_legacy_reserve_correctness.py` gained one flag, `--assets-root`
-(or `REVIEWBENCH_LEGACY_ASSETS`). A recovered contract supersedes the
-historical one for the tasks it covers, and **every input the replay actually
-mounts** is re-verified against live state on each preflight *and* again
-immediately before the Oracle runs:
+`run_legacy_reserve_correctness.py` consumes this bundle through
+`--asset-root native-rust=<assets-root>` (see 7.1.3; the bare
+`--asset-root <path>`, the deprecated `--assets-root` spelling and
+`REVIEWBENCH_LEGACY_ASSETS` all still work). A recovered contract supersedes
+the historical one for the tasks it covers, and **every input the replay
+actually mounts** is re-verified against live state on each preflight *and*
+again immediately before the Oracle runs:
 
 - the exact-start workspace must still be at the task `start_sha` **and**
   match the manifest's recorded `workspace_state`: same modified tracked paths
@@ -802,13 +1017,15 @@ python3 scripts/recover_legacy_native_rust.py smoke \
 python3 scripts/run_legacy_reserve_correctness.py preflight \
   --tasks data/releases/hard/20260808/tasks.jsonl \
   --oracles data/releases/hard/20260808/oracles.jsonl \
-  --legacy-root <retained-session-root> --assets-root <assets-root> \
+  --legacy-root <retained-session-root> \
+  --asset-root native-rust=<assets-root> \
   --output <output> --allow-blocked
 
 python3 scripts/run_legacy_reserve_correctness.py replay \
   --tasks data/releases/hard/20260808/tasks.jsonl \
   --oracles data/releases/hard/20260808/oracles.jsonl \
-  --legacy-root <retained-session-root> --assets-root <assets-root> \
+  --legacy-root <retained-session-root> \
+  --asset-root native-rust=<assets-root> \
   --output <output> --model '<model>' --work-root <scratch>
 ```
 
@@ -846,6 +1063,109 @@ anchor) that are recorded as `fail`, never as infrastructure noise. Scratch
 copies, including root-owned container build state, are removed through a
 throwaway cleanup container (`purge_scratch`); shared caches are never
 deleted.
+
+#### 7.1.3 Combined JVM/TS-JS + Native/Rust integration
+
+The JVM/TS-JS recovery (7.1.1) and the native/rust recovery (7.1.2) were
+developed separately and produced two *different kinds* of durable asset root.
+They are consumed together by one adapter, so `--asset-root` is repeatable and
+each value is either `LABEL=PATH` or a bare `PATH` classified by the manifest
+it actually holds (never by its directory name):
+
+| label | marker | schema | role |
+|---|---|---|---|
+| `jvm-tsjs` | `manifest.json` | `reviewbench-legacy-recovery-assets/v1` | pinned assets the retained session root no longer carries; recorded Oracle paths resolve there only when the retained root lacks them |
+| `native-rust` | `recovery-manifest.json` | `reviewbench-legacy-native-rust-recovery/v1` | whole recovered replay contracts that supersede the historical ones for the tasks they cover |
+
+A bare path that matches neither or both manifests is a hard error rather than
+a guess, and the same label may not be given two different roots. Backward
+compatibility is preserved: a single bare `--asset-root <path>`, the
+deprecated `--assets-root` spelling and `REVIEWBENCH_LEGACY_ASSETS` (which may
+itself list both roots, `os.pathsep`-separated) all still work, and passing no
+root at all reproduces the original historical-only behavior.
+
+```bash
+python3 scripts/run_legacy_reserve_correctness.py preflight \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --legacy-root <retained-session-root> \
+  --asset-root jvm-tsjs=<.../legacy-recovery-assets/jvm-tsjs> \
+  --asset-root native-rust=<.../legacy-recovery-assets/native-rust> \
+  --output <output> --allow-blocked
+```
+
+**Digest surface.** Every bounded/sampling helper (`directory_identity`,
+`safe_file_digest`, `_bounded_file_digest`, the 500-file and 64 KiB caps) has
+been deleted from the adapter outright, not merely quarantined. Exactly two
+complete identity functions remain, and both bind every path entry -- regular
+files by their whole content, symlinks by their literal target without ever
+following them, and directories including empty ones:
+
+- `content_tree_digest`/`file_input_digest` for the **live, writable** mounts a
+  recovered native/rust contract exposes. Never memoized, because the process
+  under test writes into them.
+- `full_tree_digest`/`full_entry_digest`/`full_file_digest` for the **pinned,
+  read-only** jvm/tsjs payloads whose digests are frozen in the manifests.
+  These do memoize, so `invalidate_cache_digests()` clears *every* memo in the
+  module and is called at the start of each preflight and before each
+  post-run drift check -- otherwise a drift check could answer from a pre-run
+  memo, since the tree memo key deliberately carries no mtime.
+
+**Preserved semantics.** The merge is a strict superset. From the native/rust
+side: ignored-build-residue detection over the full copied-tree identity,
+recipe-bound start+golden proofs on disposable copies, per-`(lane, model,
+task)` execution `flock`, per-invocation unique scratch, atomic evidence
+publication and no memoized live digests. From the JVM/TS-JS side: pinned
+file/tree/directory hashes, exact executable and runtime payload validation,
+an immutable `/oracle-cache:ro` mount, a per-replay seeded writable JVM cache
+home, non-hardlinked TS/JS copies, the mandatory RepoSense prime that reports
+`infra_retry` on failure, and post-run drift checks. Both lane groups' replay
+paths now go through the shared execution lock and unique scratch, so a
+combined run of jvm and native replays proceeds in parallel without sharing
+scratch or interleaving evidence.
+
+`ADAPTER_CONTRACT_VERSION` is bumped to a single merged value
+(`v6-2026-08-14-integrated-legacy-asset-recovery`). This is deliberately
+neither branch's value: rows recorded under either predecessor contract must
+be re-run rather than silently reused. Because the native/rust recipe
+fingerprint folds in that constant, every recorded proof run became stale, and
+the adapter blocks a recovered contract that carries *any* proof from a
+superseded fingerprint. All 10 recovered contracts were therefore re-proved
+end to end on disposable copies with
+`recover_legacy_native_rust.py smoke --golden --reset` -- 20 runs (start and
+golden for each), all exit code 0 -- before the bundle manifest was
+regenerated. This is the tool's documented recipe-change workflow, not a
+rewrite of frozen results: the superseded runs' full build/run logs remain
+under `<assets-root>/logs/`.
+
+Both manifest writers were then re-run twice and are zero-drift: the jvm/tsjs
+`SHA256SUMS` and `SHA256TREES` are byte-identical across runs and
+`manifest.json` differs only in `created_at`, and the same holds for the
+native/rust `SHA256SUMS` and `recovery-manifest.json`. The jvm/tsjs writer's
+pinned-tree cross-check (12 pinned trees and files) was additionally re-run
+against the *merged* adapter's `full_tree_digest`/`full_file_digest` with zero
+mismatches.
+
+**Combined status.** A real preflight over the full release with both roots
+reports **19 of the 21** unique JVM+TS-JS+native+rust published-legacy tasks
+ready -- all 6 jvm, 3 of 4 tsjs, 8 of 9 native and both rust -- including all
+14 original reserve-20260728 tasks. The two blockers are unchanged and remain
+hard, fail-closed blockers rather than fabricated contracts:
+
+- `angular/components` -- its increment5 recovery directory, which held the
+  session-authored `oracles/oracle.ts` its command executes, is not present
+  under any retained or recovered root;
+- `grpc/grpc` -- the release Oracle carries only normalized results with no
+  command, image or harness, the retained checkout does not contain the task
+  `start_sha`, and no pinned Bazel toolchain/output-base cache was retained.
+
+Real combined runs against both roots, on the merged branch:
+
+| command | scope | result |
+|---|---|---|
+| `preflight` | full release, both roots | 19 ready / 2 blocked of 21; 6/6 jvm, 3/4 tsjs, 8/9 native, 2/2 rust; 14/14 reserve-20260728 |
+| `verify-contracts` | solr, OpossumUI, FluidFramework, angular | solr 215/215, OpossumUI 2/2, FluidFramework 152/152 reproduced at their unpatched starts; angular blocked |
+| `replay` (one invocation) | singularity-eos (native), anchor (rust), OpossumUI (tsjs), angular | native `pass`, rust `fail` (broken candidate patch, not infra), tsjs `pass` with `pinned_trees_drifted_during_run: []`; angular blocked; no scratch left behind |
 
 ### 7.2 Current five-model correctness replay
 
