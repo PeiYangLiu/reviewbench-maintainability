@@ -13,12 +13,12 @@ artifact，再运行 correctness 和 maintainability；以后 rubric 改变时�
 | AMLT environment | local conda `amlt10` |
 | AMLT version | 10.14.0 |
 | Project | `reviewbench-maintainability` |
-| Active experiments | `reviewbench-kimi25-hard414-v13` |
+| Active experiments | `reviewbench-kimi25-hard414-v14` |
 | Service | Singularity |
 | Target | `msrresrchbasicvc` |
 | Workspace | `Workspace_NLC` |
 | Project storage | `conversationhub / amulet` |
-| Code snapshots | `projects/reviewbench-maintainability/amlt-code/85ab05f9c45c04ffd8afd982ff3ab522` (original Qwen/cross-family), `projects/reviewbench-maintainability/amlt-code/69e75bceda6918fcd787b1aa5df0c56c` (bounded Coder retry), `projects/reviewbench-maintainability/amlt-code/12a6350df2840e14ee678e219a2d726f` (bounded Kimi remainder), `projects/reviewbench-maintainability/amlt-code/b5d63f4abb99530320a2cfe95b5e735e` (restart-resilient Kimi remainder) |
+| Code snapshots | `projects/reviewbench-maintainability/amlt-code/85ab05f9c45c04ffd8afd982ff3ab522` (original Qwen/cross-family), `projects/reviewbench-maintainability/amlt-code/69e75bceda6918fcd787b1aa5df0c56c` (bounded Coder retry), `projects/reviewbench-maintainability/amlt-code/12a6350df2840e14ee678e219a2d726f` (bounded Kimi remainder), `projects/reviewbench-maintainability/amlt-code/b5d63f4abb99530320a2cfe95b5e735e` (restart-resilient Kimi remainder), `projects/reviewbench-maintainability/amlt-code/65700978cc7e62973c570a5908af83be` (four-way Kimi shards) |
 | Task set | `data/releases/hard/20260808/tasks.jsonl` |
 | Tasks | 414 |
 | Protocol | `agentic-line-edit/v1`, maximum 32 rounds |
@@ -248,7 +248,7 @@ Generation checkpoint at `2026-08-13T04:27Z`:
 | Devstral-2-123B | 387 | 27 | canonical after targeted retry |
 | GPT-OSS-120B | 413 | 1 | complete |
 | MiniMax-M2.1 | 378 | 36 | canonical after targeted retry |
-| Kimi-K2.5 | 18 | 1 failed + 395 pending | v13 running |
+| Kimi-K2.5 | 34 | 3 failed + 377 pending | v14: four shards queued |
 
 Qwen3.6-27B v5 completed all 235 bounded-remainder IDs with 184 generated and
 51 failed records. Its partial v4 input has 179 generated and 55 failed records;
@@ -272,9 +272,9 @@ workspace. H200 submissions were rejected before job creation by amlt10's
 base-image accelerator metadata. Kimi v11 therefore retains 32K on H100 using
 a 1200 MiB FP8 KV cache and concurrency two. Its eight preserved v11 successes
 plus the preserved v12 checkpoints give 16 generated, one failed, and 397
-unprocessed IDs. The restart-resilient v13 job has since added two new unique
-generated records, bringing the current union to 18 generated, one failed, and
-395 unprocessed IDs.
+unprocessed IDs. The restart-resilient v13 job completed a durable 20-row
+checkpoint with 18 generated and two failed records. The frozen union is now
+34 generated, three failed, and 377 unprocessed IDs.
 
 The Kimi v12 Singularity container restarted and re-executed the command at
 `2026-08-13T03:39Z`. Its local `$AMLT_DIRSYNC_DIR` was empty, so the live JSONL
@@ -299,6 +299,11 @@ results:    projects/reviewbench-maintainability/amlt-results/
             7213379617.71709-d7c6bb44-2a39-4e1c-9371-c41034ce2500
 IDs SHA-256 53d6a1fb9271c4e7912d334dce942144c3ccdc19ca62853165d784739e8ffdd1
 ```
+
+The exact 377-ID complement is now split round-robin into four disjoint
+95/94/94/94-task jobs in `reviewbench-kimi25-hard414-v14`. All four jobs were
+accepted on `msrresrchbasicvc`; v13 was then stopped. Each shard retains the
+same Blob-backed restart recovery.
 
 ### 6.1 Completed-model failure audit
 

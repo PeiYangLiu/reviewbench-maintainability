@@ -35,8 +35,9 @@ task 不进入分母。完整 `/414` 榜单仍需恢复历史资产。
 | 11 | Devstral-2-123B | 381 | 355 | 346 | 135 | 45 | **25/381** | 23 |
 | 12 | Qwen3-Coder-Next-FP8 | 381 | 300 | 294 | 69 | 30 | **15/381** | 19 |
 
-Kimi K2.5 独立运行中，当前冻结并集为 22 generated / 3 failed / 389
-unprocessed，不影响以上模型评分或发布。
+Kimi K2.5 独立运行中，当前冻结并集为 34 generated / 3 failed / 377
+unprocessed。剩余任务已拆成 4 个 restart-resilient H100 shard，不影响以上模型
+评分或发布。
 
 ## 冻结 `/414` 历史基线
 

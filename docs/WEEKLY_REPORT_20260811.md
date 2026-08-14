@@ -129,7 +129,7 @@ AND maintainability_pass
 
 | Model | 当前有效 generated | 剩余 | 状态 |
 |---|---:|---:|---|
-| Kimi K2.5 | **18 unique** | 1 failed + 395 unprocessed | v13 running |
+| Kimi K2.5 | **34 unique** | 3 failed + 377 unprocessed | v14 四分片 queued |
 
 Qwen27 已于 `2026-08-12T11:25:39Z` 完成 bounded remainder：
 
@@ -151,8 +151,10 @@ Kimi v11 和 v12 的去重 checkpoint 已冻结为 16 generated / 1 failed。v12
 容器重启后 live JSONL 从 9 条回退到 5 条并重复旧 ID，因此已终止。v13 使用
 精确 397-ID remainder，并在启动时从 Blob `$AMLT_OUTPUT_DIR` 恢复
 generation/patch/trace，再进入现有 `--resume`，避免下次容器重启重采样成功项。
-v13 已新增 2 条 unique generated，当前并集为 18 generated / 1 failed /
-395 unprocessed。Kimi 不阻塞其他模型发布 partial Final Resolved。
+v13 最终冻结 20 rows（18 generated / 2 failed），当前跨 v11-v13 的并集为
+34 generated / 3 failed / 377 unprocessed。剩余 377 IDs 已按 task order
+round-robin 拆成 95/94/94/94 四个互斥 v14 job，均支持 Blob checkpoint 恢复。
+Kimi 不阻塞其他模型发布 partial Final Resolved。
 
 ---
 
@@ -574,7 +576,7 @@ SHA-256 39405ecdb694b3653a7ed549ebafc65d6a0592f79f3e2dc153f806724b4d8f7e
 
 1. 恢复 Qwen27 的 19 条 correctness infra 和 36 条 blocked legacy；partial
    结果不等待这些恢复。
-2. Kimi 剩余 395 个 ID 独立运行，不作为其他模型评分或发布的依赖。
+2. Kimi 剩余 377 个 ID 由四个独立 shard 运行，不作为其他模型评分或发布的依赖。
 3. 恢复 open-five Rust 的 19 条 infra，并完成正在运行的 Native lane。
 4. 恢复 hosted C# 的 6 条、JVM 的 35 条 infra，并完成 Rust、Native。
 5. 恢复 Gemini Rust 的 3 条 infra，并合并已完成的 IREE overlay。
