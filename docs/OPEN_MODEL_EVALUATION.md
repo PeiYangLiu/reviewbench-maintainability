@@ -650,6 +650,31 @@ immediately before the Oracle runs:
   contract that declares a source-only golden patch, a successful golden
   proof run.
 
+Proof runs are themselves bound to a **cryptographic recipe fingerprint**
+covering the executed `command`/`golden_command`, shell, user, network, env,
+workdir, every mount and harness mount/copy, the Docker image name *and*
+loaded image id, the workspace state, every mounted cache's tree digest, the
+SHA-256 of every authored input, and the replay adapter's own
+`ADAPTER_CONTRACT_VERSION`. `cmd_manifest` and `proof_blockers()` only count
+proof runs stamped with the current fingerprint, and the adapter rejects a
+manifest entry whose recorded proof runs carry a different one, so editing a
+command, rebuilding an image or touching a harness byte turns previously
+recorded proofs into *stale evidence* rather than silently reusable ones.
+
+Proofs never run against the canonical workspace: `cmd_smoke` materializes a
+disposable copy per variant (start and golden alike), applies the golden patch
+and the harness there, runs the container against the copy, purges it, and
+then re-reads the canonical `workspace_state` and records a blocker if the
+proofs changed it. `cmd_manifest` additionally refuses to promote a contract
+whose canonical workspace no longer matches the state its proofs attested.
+Mounted caches are likewise never exposed to a run that could write to them:
+both `cmd_smoke` and `replay_recovered` copy each cache into their disposable
+scratch and mount the copy read-write, and the adapter's cache digests are
+recomputed from disk on every call (no memoization) plus explicitly
+invalidated before each pre-execution check and after each replay, so a cache
+mutated by one replay cannot be waved through by the next check in the same
+process.
+
 A manifest that predates these fields cannot be verified and is therefore
 itself a blocker. All of it is folded into `recovered_asset_state()` and hence
 into each raw row's `replay_contract_fingerprint`, so a drifted workspace,
@@ -745,9 +770,12 @@ python3 scripts/run_legacy_reserve_correctness.py replay \
 The bundle produced on 2026-08-14 lives at
 `/data/v-peiyangliu/reviewbench-openmodels/legacy-recovery-assets/native-rust`
 (`recovery-manifest.json` SHA-256
-`7a650c7c4a286a1ee70de1fff70806a93ee7df580cb3328ce265cc0eb77b5161`,
+`fee00ceff616da7a0fa970a9b9d9337760aa0a99ea6422f46c8c221801193f7d`,
 `SHA256SUMS` SHA-256
-`e4b677abfa802fee217cd415f5174c47c69307d7364b417f561995251f61db21`).
+`cb8c50c5f1dd4a62099dcd660cd4d5c5bd00cbb0971707616093ee2fe7a209aa`).
+Every contract's start and golden proof in that bundle was executed on a
+disposable copy, and a post-proof replay confirms the canonical CARGO_HOME
+(8,343 files) and workspaces are byte-identical afterwards.
 
 A real preflight over the full release with the bundle reports 10 of the 11
 native/rust published-legacy tasks ready (grpc alone blocked), and a real

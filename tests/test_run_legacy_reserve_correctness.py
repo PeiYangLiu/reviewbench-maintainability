@@ -1823,7 +1823,11 @@ def build_recovered_assets(tmp_path, task_id=TSFILE_ID, **overrides):
         "golden_patch": None,
         "pass_to_pass_tests": [],
         "hashed_files": [{"path": "harness/case/oracle_test.cc", "sha256": harness_sha}],
-        "proof_runs": [{"variant": "start", "run": 1, "exit_code": 0}],
+        "recipe_fingerprint": "fp-v1",
+        "proof_runs": [
+            {"variant": "start", "run": 1, "exit_code": 0,
+             "recipe_fingerprint": "fp-v1"}
+        ],
         "golden_command": None,
         "blockers": [],
     }
@@ -2171,7 +2175,8 @@ def test_recovered_contract_requires_a_golden_proof_when_golden_declared(
         assets,
         golden_patch="harness/case/golden.patch",
         hashed_files=[],
-        proof_runs=[{"variant": "start", "run": 1, "exit_code": 0}],
+        proof_runs=[{"variant": "start", "run": 1, "exit_code": 0,
+                     "recipe_fingerprint": "fp-v1"}],
     )
     blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
     assert any("no successful golden proof run" in b for b in blockers)
@@ -2179,8 +2184,10 @@ def test_recovered_contract_requires_a_golden_proof_when_golden_declared(
     _ready_entry(
         assets,
         proof_runs=[
-            {"variant": "start", "run": 1, "exit_code": 0},
-            {"variant": "golden", "run": 1, "exit_code": 1, "stage": "apply"},
+            {"variant": "start", "run": 1, "exit_code": 0,
+             "recipe_fingerprint": "fp-v1"},
+            {"variant": "golden", "run": 1, "exit_code": 1, "stage": "apply",
+             "recipe_fingerprint": "fp-v1"},
         ],
     )
     assert any(
@@ -2191,8 +2198,10 @@ def test_recovered_contract_requires_a_golden_proof_when_golden_declared(
     _ready_entry(
         assets,
         proof_runs=[
-            {"variant": "start", "run": 1, "exit_code": 0},
-            {"variant": "golden", "run": 1, "exit_code": 0},
+            {"variant": "start", "run": 1, "exit_code": 0,
+             "recipe_fingerprint": "fp-v1"},
+            {"variant": "golden", "run": 1, "exit_code": 0,
+             "recipe_fingerprint": "fp-v1"},
         ],
     )
     assert MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha") == []
@@ -2275,4 +2284,136 @@ def test_workspace_drift_invalidates_previously_recorded_rows(tmp_path, monkeypa
     assert blockers
     assert MODULE.row_is_stale(
         row, task, oracle, TSFILE_ID, "native", generation, tmp_path, blockers
+    )
+
+
+# ---------------------------------------------------------------------------
+# Writable shared caches: no stale digest may survive a replay
+# ---------------------------------------------------------------------------
+
+
+def test_replay_mutating_a_cache_invalidates_the_next_blocker_check(
+    tmp_path, monkeypatch
+):
+    """A cache mutated during one replay must block the next check in the
+    same process, and must invalidate the recorded row."""
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+    cache = assets / "caches/demo"
+    task = strict_task(TSFILE_ID)
+    oracle = strict_oracle(TSFILE_ID)
+    generation = {"patch_sha256": "abc", "apply_ok": True,
+                  "patch_file": str(tmp_path / "candidate.patch")}
+    Path(generation["patch_file"]).write_text(
+        "diff --git a/src.txt b/src.txt\n--- a/src.txt\n+++ b/src.txt\n"
+        "@@ -1,3 +1,3 @@\n line1\n-line2\n+patched\n line3\n",
+        encoding="utf-8",
+    )
+    assert MODULE.task_blockers(TSFILE_ID, "native", oracle, tmp_path, "sha") == []
+    row_before = {"patch_sha256": "abc"}
+    row_before.update(
+        MODULE.row_provenance_fields(
+            task, oracle, TSFILE_ID, "native", generation, tmp_path, []
+        )
+    )
+
+    def mutating_run(command, *, cwd, log_path, env=None, timeout=1800):
+        # emulate a build writing into whatever cache path was mounted
+        mounted = [
+            part.split(":")[0] for part in command
+            if isinstance(part, str) and ":/cache" in part
+        ]
+        assert mounted, "no cache was mounted"
+        (Path(mounted[0]) / "written-by-build.lock").write_text("x\n", encoding="utf-8")
+        # ... and simulate the worst case: the canonical cache is touched too
+        (cache / "leaked-by-build.lock").write_text("x\n", encoding="utf-8")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("ok\n", encoding="utf-8")
+        return 0, 1.0, ""
+
+    monkeypatch.setattr(MODULE, "run_subprocess", mutating_run)
+    monkeypatch.setattr(MODULE, "purge_scratch", lambda scratch: None)
+    row = MODULE.replay_recovered(
+        TSFILE_ID, "my-model", task, oracle, generation,
+        tmp_path / "legacy", tmp_path / "work", tmp_path / "output", 900, "native",
+    )
+    assert row["status"] == "pass"
+
+    # same process, next check: the mutation must be seen immediately
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", oracle, tmp_path, "sha")
+    assert any("has drifted" in b for b in blockers)
+    # ... and the row recorded before the mutation must now be stale
+    assert MODULE.row_is_stale(
+        row_before, task, oracle, TSFILE_ID, "native", generation, tmp_path, blockers
+    )
+
+
+def test_replay_mounts_a_disposable_cache_copy_not_the_canonical_cache(
+    tmp_path, monkeypatch
+):
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+    cache = assets / "caches/demo"
+    captured = {}
+
+    def capture(command, *, cwd, log_path, env=None, timeout=1800):
+        captured["mounts"] = [
+            part for part in command if isinstance(part, str) and ":/cache" in part
+        ]
+        (Path(captured["mounts"][0].split(":")[0]) / "build.lock").write_text(
+            "x\n", encoding="utf-8"
+        )
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("ok\n", encoding="utf-8")
+        return 0, 1.0, ""
+
+    patch_path = tmp_path / "candidate.patch"
+    patch_path.write_text(
+        "diff --git a/src.txt b/src.txt\n--- a/src.txt\n+++ b/src.txt\n"
+        "@@ -1,3 +1,3 @@\n line1\n-line2\n+patched\n line3\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(MODULE, "run_subprocess", capture)
+    monkeypatch.setattr(MODULE, "purge_scratch", lambda scratch: None)
+    MODULE.replay_recovered(
+        TSFILE_ID, "my-model", strict_task(TSFILE_ID), strict_oracle(TSFILE_ID),
+        {"patch_file": str(patch_path), "patch_sha256": "abc", "apply_ok": True},
+        tmp_path / "legacy", tmp_path / "work", tmp_path / "output", 900, "native",
+    )
+    assert captured["mounts"], "cache was not mounted"
+    assert not captured["mounts"][0].startswith(f"{cache}:")
+    # the canonical cache is untouched, so its digest still matches the manifest
+    assert not (cache / "build.lock").exists()
+    assert MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha") == []
+
+
+def test_cache_tree_digest_is_never_memoized(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "a").write_text("a\n", encoding="utf-8")
+    first = MODULE.cache_tree_digest(cache)
+    (cache / "b").write_text("b\n", encoding="utf-8")
+    second = MODULE.cache_tree_digest(cache)
+    assert first != second
+    assert second["file_count"] == 2
+
+
+def test_stale_proof_fingerprint_blocks_the_contract(tmp_path, monkeypatch):
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    _ready_entry(
+        assets,
+        proof_runs=[
+            {"variant": "start", "run": 1, "exit_code": 0,
+             "recipe_fingerprint": "fp-OLD"}
+        ],
+    )
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("different recipe fingerprint" in b for b in blockers)
+    _ready_entry(assets, recipe_fingerprint=None)
+    assert any(
+        "does not record a recipe_fingerprint" in b
+        for b in MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
     )

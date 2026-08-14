@@ -105,18 +105,36 @@ def build_assets(tmp_path, monkeypatch, *, image_id="sha256:abc"):
     return task_id, recipe, assets, head
 
 
-def proof_runs(*variants):
+def proof_runs(*variants, fingerprint=None):
     return [
-        {"variant": variant, "run": 1, "exit_code": 0, "stage": "execute"}
+        {
+            "variant": variant, "run": 1, "exit_code": 0, "stage": "execute",
+            "recipe_fingerprint": fingerprint,
+        }
         for variant in variants
     ]
 
 
-def write_proof(assets, recipe, task_id, runs):
+def current_fingerprint(task_id, recipe, assets):
+    return MODULE.recipe_fingerprint(task_id, recipe, assets)
+
+
+def write_proof(assets, recipe, task_id, runs, *, workspace_state=None):
     proof = assets / "proofs" / f"{recipe['case']}.json"
     proof.parent.mkdir(parents=True, exist_ok=True)
+    if workspace_state is None:
+        workspace_state = MODULE.workspace_state(
+            assets / recipe["workspace"] / recipe["patch_subdir"]
+        )
     proof.write_text(
-        json.dumps({"id": task_id, "case": recipe["case"], "runs": runs}),
+        json.dumps(
+            {
+                "id": task_id,
+                "case": recipe["case"],
+                "runs": runs,
+                "canonical_workspace_state": workspace_state,
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -182,8 +200,9 @@ def test_manifest_marks_unproven_contracts_blocked_and_writes_checksums(
     assert grpc["status"] == "blocked" and grpc["recovered"] is False
     assert (assets / MODULE.CHECKSUM_NAME).is_file()
 
+    fingerprint = current_fingerprint(task_id, recipe, assets)
     # a start-only proof is NOT enough for a contract that declares a golden
-    write_proof(assets, recipe, task_id, proof_runs("start"))
+    write_proof(assets, recipe, task_id, proof_runs("start", fingerprint=fingerprint))
     assert MODULE.cmd_manifest(args) == 0
     manifest = json.loads((assets / MODULE.MANIFEST_NAME).read_text())
     entries = {row["id"]: row for row in manifest["tasks"]}
@@ -196,9 +215,10 @@ def test_manifest_marks_unproven_contracts_blocked_and_writes_checksums(
     # a recorded *failing* golden run is still not enough
     write_proof(
         assets, recipe, task_id,
-        proof_runs("start") + [
+        proof_runs("start", fingerprint=fingerprint) + [
             {"variant": "golden", "run": 1, "exit_code": 1, "stage": "apply",
-             "error": "golden patch failed to apply"}
+             "error": "golden patch failed to apply",
+             "recipe_fingerprint": fingerprint}
         ],
     )
     assert MODULE.cmd_manifest(args) == 0
@@ -209,7 +229,10 @@ def test_manifest_marks_unproven_contracts_blocked_and_writes_checksums(
     assert entries[task_id]["status"] == "blocked"
 
     # start + golden -> ready
-    write_proof(assets, recipe, task_id, proof_runs("start", "golden"))
+    write_proof(
+        assets, recipe, task_id,
+        proof_runs("start", "golden", fingerprint=fingerprint),
+    )
     assert MODULE.cmd_manifest(args) == 0
     manifest = json.loads((assets / MODULE.MANIFEST_NAME).read_text())
     entries = {row["id"]: row for row in manifest["tasks"]}
@@ -222,7 +245,13 @@ def test_manifest_is_consumable_by_the_replay_adapter(tmp_path, monkeypatch):
     """The bundle this script writes must be exactly what the adapter reads."""
     task_id, recipe, assets, head = build_assets(tmp_path, monkeypatch)
     monkeypatch.setitem(MODULE.RECIPES, task_id, recipe)
-    write_proof(assets, recipe, task_id, proof_runs("start", "golden"))
+    write_proof(
+        assets, recipe, task_id,
+        proof_runs(
+            "start", "golden",
+            fingerprint=current_fingerprint(task_id, recipe, assets),
+        ),
+    )
     args = MODULE.parse_args(
         ["manifest", "--assets-root", str(assets), "--legacy-root", str(tmp_path)]
     )
@@ -419,3 +448,232 @@ def test_contract_blockers_detect_missing_harness_and_cache_inputs(
     assert any("missing harness copy source" in text for text in blockers)
     assert any("missing reconstructed CARGO_HOME" in text for text in blockers)
     assert any("missing recovered golden patch" in text for text in blockers)
+
+
+# ---------------------------------------------------------------------------
+# smoke must never mutate the canonical workspace
+# ---------------------------------------------------------------------------
+
+
+def _fake_docker(monkeypatch, side_effect=None, returncode=0):
+    """Stub ``docker run`` while letting git/patch/cp calls through."""
+    real_run = MODULE.subprocess.run
+    calls = []
+
+    def fake_run(argv, *args, **kwargs):
+        if argv and argv[0] == "docker":
+            calls.append(argv)
+            if side_effect is not None:
+                side_effect(argv)
+
+            class Result:
+                pass
+            Result.returncode = returncode
+            return Result()
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(MODULE.subprocess, "run", fake_run)
+    return calls
+
+
+def test_smoke_runs_on_disposable_copies_and_leaves_canonical_untouched(
+    tmp_path, monkeypatch
+):
+    task_id, recipe, assets, _ = build_assets(tmp_path, monkeypatch)
+    monkeypatch.setitem(MODULE.RECIPES, task_id, recipe)
+    canonical = assets / recipe["workspace"]
+    start = canonical / recipe["patch_subdir"]
+    # golden patch must apply to this tree so the golden variant really runs
+    (assets / recipe["golden_patch"]).write_text(
+        "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n"
+        "@@ -1 +1 @@\n-x\n+golden\n",
+        encoding="utf-8",
+    )
+    before = MODULE.workspace_state(start)
+
+    mounted = []
+
+    def build_output(argv):
+        # emulate a container writing build output into whatever was mounted
+        target = Path(argv[argv.index("-v") + 1].split(":")[0])
+        mounted.append(target)
+        (target / "build-artifact.o").write_text("obj\n", encoding="utf-8")
+
+    _fake_docker(monkeypatch, side_effect=build_output)
+    args = MODULE.parse_args(
+        [
+            "smoke", "--assets-root", str(assets), "--case", recipe["case"],
+            "--golden", "--reset", "--scratch-root", str(tmp_path / "scratch"),
+        ]
+    )
+    assert MODULE.cmd_smoke(args) == 0
+
+    # 1) nothing was mounted from the canonical workspace
+    assert mounted, "docker was never invoked"
+    for target in mounted:
+        assert canonical not in target.parents and target != canonical
+    # 2) the canonical workspace is byte-for-byte unchanged
+    assert MODULE.workspace_state(start) == before
+    assert not (start / "build-artifact.o").exists()
+    assert not (start / "file.txt").read_text().startswith("golden")
+    # 3) the proof attests the canonical state and both variants ran on copies
+    proof = json.loads((assets / "proofs" / f"{recipe['case']}.json").read_text())
+    assert proof["status"] == "ready"
+    assert proof["canonical_workspace_state"] == before
+    assert {row["variant"] for row in proof["runs"]} == {"start", "golden"}
+    assert all(row["workspace"] == "disposable-copy" for row in proof["runs"])
+    # 4) disposable scratch is cleaned up
+    assert not (tmp_path / "scratch").exists()
+
+
+def test_smoke_records_canonical_mutation_as_a_blocker(tmp_path, monkeypatch):
+    task_id, recipe, assets, _ = build_assets(tmp_path, monkeypatch)
+    monkeypatch.setitem(MODULE.RECIPES, task_id, recipe)
+    start = assets / recipe["workspace"] / recipe["patch_subdir"]
+
+    def leak(argv):
+        # a recipe that (wrongly) writes into the canonical workspace
+        (start / "leaked.o").write_text("leak\n", encoding="utf-8")
+
+    _fake_docker(monkeypatch, side_effect=leak)
+    args = MODULE.parse_args(
+        [
+            "smoke", "--assets-root", str(assets), "--case", recipe["case"],
+            "--reset", "--scratch-root", str(tmp_path / "scratch"),
+        ]
+    )
+    assert MODULE.cmd_smoke(args) == 1
+    proof = json.loads((assets / "proofs" / f"{recipe['case']}.json").read_text())
+    assert proof["status"] == "blocked"
+    assert any("canonical workspace was mutated" in b for b in proof["blockers"])
+
+
+def test_manifest_rejects_proofs_whose_canonical_workspace_since_changed(
+    tmp_path, monkeypatch
+):
+    task_id, recipe, assets, _ = build_assets(tmp_path, monkeypatch)
+    monkeypatch.setitem(MODULE.RECIPES, task_id, recipe)
+    fingerprint = current_fingerprint(task_id, recipe, assets)
+    write_proof(
+        assets, recipe, task_id, proof_runs("start", "golden", fingerprint=fingerprint)
+    )
+    args = MODULE.parse_args(
+        ["manifest", "--assets-root", str(assets), "--legacy-root", str(tmp_path)]
+    )
+    MODULE.cmd_manifest(args)
+    entries = {
+        row["id"]: row
+        for row in json.loads((assets / MODULE.MANIFEST_NAME).read_text())["tasks"]
+    }
+    assert entries[task_id]["status"] == "ready"
+
+    # a stray artifact appearing in the canonical workspace after the proofs
+    (assets / recipe["workspace"] / recipe["patch_subdir"] / "stray.o").write_text(
+        "x\n", encoding="utf-8"
+    )
+    MODULE.cmd_manifest(args)
+    entries = {
+        row["id"]: row
+        for row in json.loads((assets / MODULE.MANIFEST_NAME).read_text())["tasks"]
+    }
+    assert entries[task_id]["status"] == "blocked"
+    assert any(
+        "canonical workspace differs" in text or "stale" in text
+        for text in entries[task_id]["blockers"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# recipe fingerprint binds proofs to the exact recipe/inputs
+# ---------------------------------------------------------------------------
+
+
+def test_recipe_fingerprint_changes_with_command_image_and_inputs(
+    tmp_path, monkeypatch
+):
+    task_id, recipe, assets, _ = build_assets(tmp_path, monkeypatch)
+    base = current_fingerprint(task_id, recipe, assets)
+
+    changed = dict(recipe, command=recipe["command"] + " # tweak")
+    assert current_fingerprint(task_id, changed, assets) != base
+
+    changed = dict(recipe, golden_command="something else")
+    assert current_fingerprint(task_id, changed, assets) != base
+
+    changed = dict(recipe, shell=["/bin/sh", "-c"])
+    assert current_fingerprint(task_id, changed, assets) != base
+
+    changed = dict(recipe, mount={"start": "/elsewhere"})
+    assert current_fingerprint(task_id, changed, assets) != base
+
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:other")
+    assert current_fingerprint(task_id, recipe, assets) != base
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:abc")
+    assert current_fingerprint(task_id, recipe, assets) == base
+
+    # golden patch bytes are an input
+    (assets / recipe["golden_patch"]).write_text("changed\n", encoding="utf-8")
+    assert current_fingerprint(task_id, recipe, assets) != base
+
+
+def test_manifest_rejects_proofs_recorded_under_a_different_recipe(
+    tmp_path, monkeypatch
+):
+    task_id, recipe, assets, _ = build_assets(tmp_path, monkeypatch)
+    monkeypatch.setitem(MODULE.RECIPES, task_id, recipe)
+    fingerprint = current_fingerprint(task_id, recipe, assets)
+    write_proof(
+        assets, recipe, task_id, proof_runs("start", "golden", fingerprint=fingerprint)
+    )
+    args = MODULE.parse_args(
+        ["manifest", "--assets-root", str(assets), "--legacy-root", str(tmp_path)]
+    )
+    MODULE.cmd_manifest(args)
+    entries = {
+        row["id"]: row
+        for row in json.loads((assets / MODULE.MANIFEST_NAME).read_text())["tasks"]
+    }
+    assert entries[task_id]["status"] == "ready"
+    assert entries[task_id]["recipe_fingerprint"] == fingerprint
+
+    # change the executed command -> the recorded proofs are stale evidence
+    monkeypatch.setitem(
+        MODULE.RECIPES, task_id, dict(recipe, command=recipe["command"] + " --now")
+    )
+    MODULE.cmd_manifest(args)
+    entries = {
+        row["id"]: row
+        for row in json.loads((assets / MODULE.MANIFEST_NAME).read_text())["tasks"]
+    }
+    assert entries[task_id]["status"] == "blocked"
+    assert any("stale" in text for text in entries[task_id]["blockers"])
+
+
+def test_proof_blockers_ignore_runs_from_another_fingerprint():
+    recipe = {"golden_patch": "x.patch"}
+    runs = [
+        {"variant": "start", "exit_code": 0, "recipe_fingerprint": "old"},
+        {"variant": "golden", "exit_code": 0, "recipe_fingerprint": "old"},
+    ]
+    assert MODULE.proof_blockers(recipe, runs) == []
+    blockers = MODULE.proof_blockers(recipe, runs, "new")
+    assert any("stale" in text for text in blockers)
+    assert MODULE.proof_status(recipe, runs, "new") != "ready"
+
+
+def test_docker_argv_cache_overlay_never_mounts_the_canonical_cache(tmp_path):
+    task_id = "github__FuelLabs__fuel-tx__pull_197__comment_1003742605__complexity"
+    recipe = MODULE.RECIPES[task_id]
+    assets = tmp_path / "assets"
+    cargo = assets / recipe["cargo_cache"]
+    (cargo / "bin").mkdir(parents=True)
+    (cargo / "bin/cargo").write_text("#!/bin/sh\n", encoding="utf-8")
+    overlay = tmp_path / "overlay"
+    argv = MODULE.docker_argv(
+        task_id, recipe, assets, assets / recipe["workspace"],
+        cache_overlay_root=overlay,
+    )
+    joined = " ".join(argv)
+    assert f"{cargo}:/cargo-cache" not in joined
+    assert f"{overlay / recipe['cargo_cache']}:/cargo-cache" in joined
+    assert (overlay / recipe["cargo_cache"] / "bin/cargo").is_file()

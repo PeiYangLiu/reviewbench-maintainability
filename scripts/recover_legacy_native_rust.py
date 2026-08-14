@@ -816,8 +816,15 @@ def docker_argv(
     assets_root: Path,
     workspace: Path,
     command: str | None = None,
+    cache_overlay_root: Path | None = None,
 ) -> list[str]:
-    """Exact ``docker run`` argv for one recovered contract."""
+    """Exact ``docker run`` argv for one recovered contract.
+
+    ``cache_overlay_root`` materializes a disposable, writable copy of every
+    mounted cache under that root and mounts the copies instead of the
+    canonical caches, so a run can never mutate a cache that the manifest
+    binds by tree digest (cargo and conan both write into their cache homes).
+    """
     argv = ["docker", "run", "--rm"]
     if recipe.get("network"):
         argv += [f"--network={recipe['network']}"]
@@ -827,12 +834,21 @@ def docker_argv(
         source = workspace if host == "." else workspace / host
         suffix = ":ro" if host in recipe.get("readonly_mounts", []) else ""
         argv += ["-v", f"{source}:{container}{suffix}"]
+    def cache_source(relative: str) -> Path:
+        canonical = assets_root / relative
+        if cache_overlay_root is None:
+            return canonical
+        overlay = cache_overlay_root / relative
+        if not overlay.exists():
+            copy_tree(canonical, overlay)
+        return overlay
+
     for host, container in recipe.get("cache_mounts", {}).items():
-        argv += ["-v", f"{assets_root / host}:{container}"]
+        argv += ["-v", f"{cache_source(host)}:{container}"]
     for mount in recipe.get("harness_mounts", []):
         argv += ["-v", f"{assets_root / mount['host']}:{mount['container']}:ro"]
     if recipe.get("cargo_cache"):
-        argv += ["-v", f"{assets_root / recipe['cargo_cache']}:/cargo-cache"]
+        argv += ["-v", f"{cache_source(recipe['cargo_cache'])}:/cargo-cache"]
         argv += ["-e", "CARGO_HOME=/cargo-cache"]
     for key, value in recipe.get("env", {}).items():
         argv += ["-e", f"{key}={value}"]
@@ -878,13 +894,35 @@ def cmd_manifest(args: argparse.Namespace) -> int:
         recipe = RECIPES[task_id]
         workspace = assets_root / recipe["workspace"]
         blockers = contract_blockers(task_id, recipe, assets_root)
+        live_workspace_state = workspace_state(workspace / recipe["patch_subdir"])
+        cache_digests = mounted_cache_digests(recipe, assets_root)
+        fingerprint = recipe_fingerprint(
+            task_id, recipe, assets_root,
+            workspace_state_value=live_workspace_state,
+            cache_digests=cache_digests,
+        )
         proof = proofs.get(task_id, {})
         proof_runs = proof.get("runs", [])
         blockers.extend(
             f"{text} (run `recover_legacy_native_rust.py smoke"
             f"{' --golden' if recipe.get('golden_patch') else ''}` first)"
-            for text in proof_blockers(recipe, proof_runs)
+            for text in proof_blockers(recipe, proof_runs, fingerprint)
         )
+        blockers.extend(proof.get("blockers", []))
+        # The canonical workspace must be exactly what the proofs attested:
+        # a proof that mutated it (build output, stray artifacts) can never
+        # be turned into a manifest entry.
+        recorded_state = proof.get("canonical_workspace_state")
+        if proof_runs and recorded_state is None:
+            blockers.append(
+                "proof file does not record canonical_workspace_state; "
+                "re-run smoke so the canonical workspace can be attested"
+            )
+        elif recorded_state is not None and recorded_state != live_workspace_state:
+            blockers.append(
+                "canonical workspace differs from the state its proofs "
+                "attested (proof runs must not mutate it)"
+            )
         hashed: list[dict[str, str]] = []
         extra_hashed = list(recipe.get("harness_files", []))
         if recipe.get("golden_patch"):
@@ -908,8 +946,9 @@ def cmd_manifest(args: argparse.Namespace) -> int:
             "case": recipe["case"],
             "start_sha": recipe["start_sha"],
             "workspace": recipe["workspace"],
-            "workspace_state": workspace_state(workspace / recipe["patch_subdir"]),
-            "mounted_cache_digests": mounted_cache_digests(recipe, assets_root),
+            "workspace_state": live_workspace_state,
+            "mounted_cache_digests": cache_digests,
+            "recipe_fingerprint": fingerprint,
             "patch_subdir": recipe["patch_subdir"],
             "docker_image": recipe["docker_image"],
             "docker_image_id": docker_image_id(recipe["docker_image"]),
@@ -995,6 +1034,102 @@ def cmd_manifest(args: argparse.Namespace) -> int:
     return 0
 
 
+def adapter_contract_version() -> str:
+    """``ADAPTER_CONTRACT_VERSION`` of the replay adapter this bundle feeds.
+
+    Bound into every recipe fingerprint so a change to the adapter's own
+    replay semantics invalidates recorded proofs, exactly as it already
+    invalidates recorded raw rows.
+    """
+    path = Path(__file__).resolve().parent / "run_legacy_reserve_correctness.py"
+    for line in path.read_text().splitlines():
+        if line.startswith("ADAPTER_CONTRACT_VERSION"):
+            return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return "unknown"
+
+
+def recipe_fingerprint(
+    task_id: str,
+    recipe: dict[str, Any],
+    assets_root: Path,
+    *,
+    workspace_state_value: dict[str, Any] | None = None,
+    cache_digests: dict[str, Any] | None = None,
+) -> str:
+    """Cryptographic identity of everything a proof run depends on.
+
+    Covers the executed recipe (``command``/``golden_command``, shell, user,
+    network, env, workdir, every mount and harness mount/copy), the image
+    identity (name *and* loaded image id), the exact-start workspace state,
+    the tree digests of every mounted cache, the SHA-256 of every authored
+    input (harness sources, golden patch, image recipe) and the replay
+    adapter's contract version.
+
+    A proof run is stamped with this value, so any later change to the
+    recipe, image, workspace, cache or harness bytes makes previously
+    recorded proofs *stale* rather than silently reusable.
+    """
+    workspace = assets_root / recipe["workspace"]
+    if workspace_state_value is None:
+        workspace_state_value = workspace_state(workspace / recipe["patch_subdir"])
+    if cache_digests is None:
+        cache_digests = mounted_cache_digests(recipe, assets_root)
+    inputs: dict[str, str | None] = {}
+    for relative in sorted(
+        set(recipe.get("harness_files", []))
+        | {copy["host"] for copy in recipe.get("harness_copies", [])}
+        | ({recipe["golden_patch"]} if recipe.get("golden_patch") else set())
+        | (
+            {recipe["provenance"]["image_recipe"]}
+            if recipe.get("provenance", {}).get("image_recipe") else set()
+        )
+    ):
+        path = assets_root / relative
+        inputs[relative] = sha256_file(path) if path.is_file() else None
+    for mount in recipe.get("harness_mounts", []):
+        digest = tree_digest(assets_root / mount["host"], use_cache=False)
+        inputs[f"mount:{mount['host']}"] = digest["digest"] if digest else None
+    payload = {
+        "task_id": task_id,
+        "adapter_contract_version": adapter_contract_version(),
+        "recipe": {
+            key: recipe.get(key)
+            for key in (
+                "command", "golden_command", "shell", "user", "network", "env",
+                "mount", "readonly_mounts", "cache_mounts", "cargo_cache",
+                "harness_mounts", "harness_copies", "workdir", "workspace",
+                "patch_subdir", "start_sha", "docker_image", "golden_patch",
+            )
+        },
+        "docker_image_id": docker_image_id(recipe["docker_image"]),
+        "workspace_state": workspace_state_value,
+        "cache_digests": cache_digests,
+        "inputs": inputs,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def copy_tree(source: Path, destination: Path) -> None:
+    """Materialize a disposable copy of ``source`` at ``destination``.
+
+    Uses ``cp -a`` (with reflinks when the filesystem supports them) because
+    the recovered workspaces reach tens of gigabytes; falls back to
+    ``shutil.copytree`` if ``cp`` is unavailable.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if shutil.which("cp"):
+        result = subprocess.run(
+            ["cp", "-a", "--reflink=auto", f"{source}/.", str(destination)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        if result.returncode == 0:
+            return
+        raise RuntimeError(f"copy of {source} failed: {result.stdout[-2000:]}")
+    shutil.copytree(source, destination, symlinks=True)
+
+
 def purge_directory(path: Path) -> None:
     """Delete a disposable tree that may contain root-owned container state."""
     if not path.exists():
@@ -1007,15 +1142,40 @@ def purge_directory(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
-def proof_blockers(recipe: dict[str, Any], runs: list[dict[str, Any]]) -> list[str]:
+def proof_blockers(
+    recipe: dict[str, Any],
+    runs: list[dict[str, Any]],
+    fingerprint: str | None = None,
+) -> list[str]:
     """Why a contract's recorded proof runs are insufficient.
 
     A start-tree proof alone is never enough for a contract that declares a
     source-only golden: the Oracle is PASS_TO_PASS, so the golden must be
     shown to apply *and* to pass. Any recorded failing run (apply or execute)
     also keeps the contract out of the ready set.
+
+    When ``fingerprint`` (the contract's current ``recipe_fingerprint``) is
+    supplied, only proof runs stamped with that exact fingerprint count: a
+    proof recorded before the command, golden command, image, workspace,
+    mounted cache, harness bytes or adapter contract version changed is
+    *stale evidence* and must not keep a contract in the ready set.
     """
     blockers: list[str] = []
+    if fingerprint is not None:
+        fresh = [row for row in runs if row.get("recipe_fingerprint") == fingerprint]
+        if runs and not fresh:
+            recorded = sorted(
+                {
+                    str(row.get("recipe_fingerprint"))[:12]
+                    for row in runs
+                }
+            )
+            blockers.append(
+                "all recorded proof runs are stale: they were produced under "
+                f"recipe fingerprint(s) {recorded}, current is "
+                f"{fingerprint[:12]}"
+            )
+        runs = fresh
     if not any(
         row.get("variant") == "start" and row.get("exit_code") == 0 for row in runs
     ):
@@ -1035,8 +1195,12 @@ def proof_blockers(recipe: dict[str, Any], runs: list[dict[str, Any]]) -> list[s
     return blockers
 
 
-def proof_status(recipe: dict[str, Any], runs: list[dict[str, Any]]) -> str:
-    if proof_blockers(recipe, runs):
+def proof_status(
+    recipe: dict[str, Any],
+    runs: list[dict[str, Any]],
+    fingerprint: str | None = None,
+) -> str:
+    if proof_blockers(recipe, runs, fingerprint):
         return "failed" if runs else "blocked"
     return "ready"
 
@@ -1052,14 +1216,27 @@ def _apply_patch(tree: Path, patch: Path) -> tuple[bool, str]:
 
 
 def cmd_smoke(args: argparse.Namespace) -> int:
-    """Replay a recovered contract on the pristine start tree (and, with
-    ``--golden``, on a disposable copy carrying the recovered source-only
-    golden patch). This is the proof that "ready" is real."""
+    """Prove a recovered contract by running it on **disposable copies**.
+
+    Both the start and the golden variant execute against a throwaway copy of
+    the canonical workspace, never against the canonical workspace itself: a
+    proof run compiles, links and writes build output as root inside the
+    container, and any of that leaking into the canonical tree would change
+    its ``workspace_state`` (and therefore what every later replay copies and
+    what the manifest attests). After each case the canonical workspace state
+    is re-read and compared with the snapshot taken before the proofs; a
+    mismatch is recorded as a blocker instead of being written into the
+    manifest.
+    """
     assets_root = Path(args.assets_root).resolve()
     proof_dir = assets_root / "proofs"
     proof_dir.mkdir(parents=True, exist_ok=True)
     log_dir = assets_root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
+    scratch_root = (
+        Path(args.scratch_root).resolve() if args.scratch_root
+        else assets_root / "_smoke-scratch"
+    )
 
     selected = [
         (task_id, recipe)
@@ -1073,7 +1250,12 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     overall = 0
     for task_id, recipe in selected:
         workspace = assets_root / recipe["workspace"]
+        start_tree = workspace / recipe["patch_subdir"]
+        before_state = workspace_state(start_tree)
         blockers = contract_blockers(task_id, recipe, assets_root)
+        fingerprint = recipe_fingerprint(
+            task_id, recipe, assets_root, workspace_state_value=before_state
+        )
         proof_path = proof_dir / f"{recipe['case']}.json"
         existing = {}
         if proof_path.is_file():
@@ -1084,28 +1266,55 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         runs: list[dict[str, Any]] = [] if args.reset else list(
             existing.get("runs", [])
         )
-        if blockers:
+
+        def write_proof(extra_blockers: list[str]) -> dict[str, Any]:
             payload = {
                 "id": task_id,
                 "case": recipe["case"],
-                "status": "blocked",
-                "blockers": blockers,
+                "recipe_fingerprint": fingerprint,
+                "canonical_workspace_state": before_state,
+                "status": (
+                    "blocked" if extra_blockers
+                    else proof_status(recipe, runs, fingerprint)
+                ),
+                "blockers": extra_blockers or proof_blockers(
+                    recipe, runs, fingerprint
+                ),
                 "runs": runs,
             }
             proof_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-            print(json.dumps(payload, indent=2))
+            return payload
+
+        if blockers:
+            print(json.dumps(write_proof(blockers), indent=2))
             overall = 1
             continue
 
-        variants = ["start"] + (["golden"] if args.golden and recipe.get("golden_patch") else [])
+        variants = ["start"] + (
+            ["golden"] if args.golden and recipe.get("golden_patch") else []
+        )
         for variant in variants:
-            if variant == "start":
-                target = workspace
-                cleanup = None
-            else:
-                target = workspace.parent / f"{recipe['case']}-golden-smoke"
-                shutil.rmtree(target, ignore_errors=True)
-                shutil.copytree(workspace, target, symlinks=True)
+            target = scratch_root / f"{recipe['case']}-{variant}"
+            purge_directory(target)
+            try:
+                copy_tree(workspace, target)
+            except (OSError, RuntimeError) as error:
+                runs.append(
+                    {
+                        "variant": variant,
+                        "run": 1 + sum(
+                            1 for r in runs if r.get("variant") == variant
+                        ),
+                        "exit_code": 1,
+                        "stage": "materialize",
+                        "error": f"disposable copy failed: {error}"[:2000],
+                        "duration_seconds": 0.0,
+                        "recipe_fingerprint": fingerprint,
+                    }
+                )
+                overall = 1
+                continue
+            if variant == "golden":
                 ok, detail = _apply_patch(
                     target / recipe["patch_subdir"],
                     assets_root / recipe["golden_patch"],
@@ -1129,23 +1338,27 @@ def cmd_smoke(args: argparse.Namespace) -> int:
                             "duration_seconds": 0.0,
                             "log": str(log_path),
                             "command": f"apply {recipe['golden_patch']}",
+                            "recipe_fingerprint": fingerprint,
                         }
                     )
                     print(f"{recipe['case']}: golden patch failed to apply:\n{detail}")
                     overall = 1
                     purge_directory(target)
                     continue
-                cleanup = target
             for copy in recipe.get("harness_copies", []):
                 destination = target / recipe["patch_subdir"] / copy["workspace_path"]
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(assets_root / copy["host"], destination)
+            # Mounted caches are copied too: a proof must not be able to
+            # mutate a canonical cache that later replays and blocker checks
+            # bind by digest.
+            cache_overlay = target / "_caches"
             argv = docker_argv(
                 task_id, recipe, assets_root, target,
                 command=(
-                    recipe.get("golden_command")
-                    if variant == "golden" else None
+                    recipe.get("golden_command") if variant == "golden" else None
                 ),
+                cache_overlay_root=cache_overlay,
             )
             log_path = log_dir / f"{recipe['case']}-smoke-{variant}.log"
             started = time.time()
@@ -1162,23 +1375,30 @@ def cmd_smoke(args: argparse.Namespace) -> int:
                 "duration_seconds": round(time.time() - started, 1),
                 "log": str(log_path),
                 "command": " ".join(argv),
+                "recipe_fingerprint": fingerprint,
+                "workspace": "disposable-copy",
             }
             if completed.returncode != 0:
                 row["error"] = f"{variant} proof run exited {completed.returncode}"
-            runs.append(row)
-            if completed.returncode != 0:
                 overall = 1
-            if cleanup is not None:
-                purge_directory(cleanup)
+            runs.append(row)
+            purge_directory(target)
             print(json.dumps({"case": recipe["case"], **row}))
-        payload = {
-            "id": task_id,
-            "case": recipe["case"],
-            "status": proof_status(recipe, runs),
-            "blockers": proof_blockers(recipe, runs),
-            "runs": runs,
-        }
-        proof_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+        after_state = workspace_state(start_tree)
+        side_effects: list[str] = []
+        if after_state != before_state:
+            side_effects.append(
+                "canonical workspace was mutated by the proof runs: "
+                f"{recipe['case']} state changed "
+                f"(tracked/untracked/submodule diff); proofs must run on "
+                "disposable copies only"
+            )
+            overall = 1
+        payload = write_proof(side_effects)
+        if payload["status"] != "ready":
+            overall = max(overall, 1)
+    purge_directory(scratch_root)
     return overall
 
 
@@ -1204,6 +1424,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "carries proof runs produced by a superseded command).",
     )
     smoke.add_argument("--timeout", type=int, default=14400)
+    smoke.add_argument(
+        "--scratch-root",
+        help="Where disposable proof copies are materialized "
+        "(default: <assets-root>/_smoke-scratch). Never the canonical "
+        "workspace, which proof runs must never mutate.",
+    )
     smoke.set_defaults(func=cmd_smoke)
 
     return parser.parse_args(argv)

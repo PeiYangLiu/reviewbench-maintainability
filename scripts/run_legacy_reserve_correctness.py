@@ -400,23 +400,31 @@ def workspace_git_state(start: Path) -> dict[str, Any]:
     }
 
 
+# Deliberately *not* memoized. A mounted cache is a live, writable directory
+# (cargo and conan both write into their cache homes), so any process-lifetime
+# memo could hand a later blocker check a digest that predates a mutation --
+# precisely the window in which a drifted cache would be waved through. Every
+# call re-walks the tree; the walk costs well under a second per gigabyte and
+# runs at most twice per (task, model) replay.
 _CACHE_TREE_DIGESTS: dict[str, dict[str, Any] | None] = {}
 
 
+def invalidate_cache_digests() -> None:
+    """Drop any cached cache-digest state (see ``cache_tree_digest``)."""
+    _CACHE_TREE_DIGESTS.clear()
+
+
 def cache_tree_digest(path: Path) -> dict[str, Any] | None:
-    """Complete structural digest of a mounted cache directory.
+    """Complete, freshly computed structural digest of a mounted cache.
 
     Identical algorithm to ``recover_legacy_native_rust.tree_digest``: every
     file's path, size, mode and symlink target, with no sampling and no
     truncation, so a swapped/truncated/partially-restored cache cannot slip
     through the bounded sampling the historical ``directory_identity`` used.
-    Memoized per process because the same cache is checked for several tasks.
+    The result is *never* memoized across calls: mounted caches are writable,
+    so a stale memo would defeat the very check this exists for.
     """
-    key = str(path)
-    if key in _CACHE_TREE_DIGESTS:
-        return _CACHE_TREE_DIGESTS[key]
     if not path.is_dir():
-        _CACHE_TREE_DIGESTS[key] = None
         return None
     entries: list[tuple[str, int, int, str]] = []
     for root, dirnames, filenames in os.walk(path):
@@ -436,14 +444,12 @@ def cache_tree_digest(path: Path) -> dict[str, Any] | None:
                 except OSError:
                     target = "unreadable"
             entries.append((relative, stat.st_size, stat.st_mode, target))
-    value = {
+    return {
         "file_count": len(entries),
         "digest": hashlib.sha256(
             json.dumps(sorted(entries), sort_keys=True).encode("utf-8")
         ).hexdigest(),
     }
-    _CACHE_TREE_DIGESTS[key] = value
-    return value
 
 
 def recovered_blockers(task_id: str, entry: dict[str, Any]) -> list[str]:
@@ -566,6 +572,29 @@ def recovered_blockers(task_id: str, entry: dict[str, Any]) -> list[str]:
         if not (root / copy["host"]).is_file():
             blockers.append(f"missing harness copy source: {root / copy['host']}")
     proof_runs = entry.get("proof_runs", [])
+    recorded_fingerprint = entry.get("recipe_fingerprint")
+    if recorded_fingerprint is None:
+        blockers.append(
+            "recovered contract manifest does not record a "
+            "recipe_fingerprint; regenerate it with "
+            "scripts/recover_legacy_native_rust.py manifest"
+        )
+    else:
+        stale = [
+            run_row for run_row in proof_runs
+            if run_row.get("recipe_fingerprint") != recorded_fingerprint
+        ]
+        if stale:
+            blockers.append(
+                f"{len(stale)} recorded proof run(s) were produced under a "
+                "different recipe fingerprint than the manifest entry "
+                "(command/image/mount/workspace/cache/harness drift); re-run "
+                "scripts/recover_legacy_native_rust.py smoke --golden"
+            )
+        proof_runs = [
+            run_row for run_row in proof_runs
+            if run_row.get("recipe_fingerprint") == recorded_fingerprint
+        ]
     if not any(
         run_row.get("variant") == "start" and run_row.get("exit_code") == 0
         for run_row in proof_runs
@@ -604,8 +633,10 @@ def recovered_asset_state(entry: dict[str, Any]) -> dict[str, Any]:
         # content hashes of every authored harness/patch input
         "hashed_files": entry.get("hashed_files", []),
         "command": entry.get("command"),
+        "golden_command": entry.get("golden_command"),
         "shell": entry.get("shell"),
         "mount": entry.get("mount"),
+        "recipe_fingerprint": entry.get("recipe_fingerprint"),
         "harness_mounts": entry.get("harness_mounts"),
         "harness_copies": entry.get("harness_copies"),
         # every cache directory the replay mounts, digested in full
@@ -1846,13 +1877,36 @@ def rust_test_count(text: str) -> int:
     )
 
 
+def copy_cache_overlay(source: Path, destination: Path) -> Path:
+    """Disposable writable copy of a mounted cache directory."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if shutil.which("cp"):
+        result = subprocess.run(
+            ["cp", "-a", "--reflink=auto", f"{source}/.", str(destination)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"cache copy of {source} failed: {result.stdout[-2000:]}"
+            )
+        return destination
+    shutil.copytree(source, destination, symlinks=True)
+    return destination
+
+
 def recovered_docker_argv(
     entry: dict[str, Any],
     assets_root: Path,
     workspace: Path,
+    cache_overlay_root: Path | None = None,
 ) -> list[str]:
     """Exact ``docker run`` argv for a recovered contract, built from the
-    manifest fields (never from a hardcoded per-task string)."""
+    manifest fields (never from a hardcoded per-task string).
+
+    With ``cache_overlay_root``, every mounted cache is first copied there and
+    the copy is mounted read-write, leaving the canonical (digest-bound)
+    caches untouched.
+    """
     argv = ["docker", "run", "--rm"]
     if entry.get("network"):
         argv.append(f"--network={entry['network']}")
@@ -1862,13 +1916,22 @@ def recovered_docker_argv(
         source = workspace if host == "." else workspace / host
         suffix = ":ro" if host in (entry.get("readonly_mounts") or []) else ""
         argv += ["-v", f"{source}:{container}{suffix}"]
+    def cache_source(relative: str) -> Path:
+        canonical = assets_root / relative
+        if cache_overlay_root is None:
+            return canonical
+        overlay = cache_overlay_root / relative
+        if not overlay.exists():
+            copy_cache_overlay(canonical, overlay)
+        return overlay
+
     for host, container in (entry.get("cache_mounts") or {}).items():
-        argv += ["-v", f"{assets_root / host}:{container}"]
+        argv += ["-v", f"{cache_source(host)}:{container}"]
     for mount in entry.get("harness_mounts") or []:
         argv += ["-v", f"{assets_root / mount['host']}:{mount['container']}:ro"]
     if entry.get("cargo_cache"):
         argv += [
-            "-v", f"{assets_root / entry['cargo_cache']}:/cargo-cache",
+            "-v", f"{cache_source(entry['cargo_cache'])}:/cargo-cache",
             "-e", "CARGO_HOME=/cargo-cache",
         ]
     for key, value in (entry.get("env") or {}).items():
@@ -1926,7 +1989,10 @@ def replay_recovered(
     # Re-verify every mounted input immediately before doing any work, not
     # just at preflight: a workspace or cache that went missing, drifted or
     # was tampered with between preflight and here must surface as
-    # infrastructure, never as a candidate failure.
+    # infrastructure, never as a candidate failure. Any digest state computed
+    # earlier in this process is dropped first, so a cache mutated by an
+    # earlier replay in the same process cannot be waved through.
+    invalidate_cache_digests()
     live_blockers = recovered_blockers(task_id, entry)
     if live_blockers:
         row = {
@@ -2015,7 +2081,35 @@ def replay_recovered(
     changed = patch_changed_paths(patch_text)
     scope_ok = scope_is_safe(changed)
 
-    argv = recovered_docker_argv(entry, assets_root, workspace_scratch)
+    # Mounted caches are copied into the disposable scratch and the *copies*
+    # are mounted: cargo/conan write into their cache homes, and mutating the
+    # canonical cache would both break the manifest's digest binding and let
+    # one replay silently change the inputs of the next.
+    cache_overlay = scratch / "caches"
+    try:
+        argv = recovered_docker_argv(
+            entry, assets_root, workspace_scratch,
+            cache_overlay_root=cache_overlay,
+        )
+    except (OSError, RuntimeError, shutil.Error) as error:
+        purge_scratch(scratch)
+        row = {
+            "id": task_id,
+            "model": model,
+            "lane": lane,
+            "source_kind": "published_legacy",
+            "start_sha": entry["start_sha"],
+            "patch_sha256": generation.get("patch_sha256"),
+            "status": INFRA_RETRY,
+            "candidate_result": INFRA_RETRY,
+            "correctness_ok": None,
+            "patch_apply": None,
+            "scope_ok": None,
+            "replay_contract": "recovered",
+            "error": f"could not materialize disposable cache copy: {error!r}"[:4000],
+        }
+        row.update(provenance)
+        return row
     log_path = scratch / "run.log"
     exit_code, duration, error = run_subprocess(
         argv, cwd=None, log_path=log_path, timeout=timeout
@@ -2030,6 +2124,9 @@ def replay_recovered(
         correctness_ok = exit_code == 0
     evidence = persist_evidence(output, lane, model, task_id, scratch)
     purge_scratch(scratch)
+    # The next blocker check in this process must re-read every cache from
+    # disk rather than reuse anything computed around this run.
+    invalidate_cache_digests()
     row = {
         "id": task_id,
         "model": model,
