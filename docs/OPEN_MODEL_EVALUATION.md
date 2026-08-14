@@ -6,6 +6,11 @@
 artifact，再运行 correctness 和 maintainability；以后 rubric 改变时直接重判，
 不重新运行 GPU inference。
 
+> **最新评分更新（2026-08-15）：** 已恢复 34/40 published-legacy
+> contracts，并重放 12 个模型。统一 408-task leaderboard 见
+> [`LATEST_MODEL_PARTIAL_LEADERBOARD_20260815.md`](LATEST_MODEL_PARTIAL_LEADERBOARD_20260815.md)。
+> 本文后续 381/378 数字保留为恢复前历史 checkpoint。
+
 ## 1. AMLT experiment
 
 | Field | Value |

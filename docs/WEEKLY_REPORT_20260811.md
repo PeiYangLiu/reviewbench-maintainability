@@ -6,6 +6,11 @@
 > 本文记录当前仍在运行的最新模型实验。所有未完成数字均明确标为
 > preliminary；在 inference、correctness 和 legacy replay 全部闭合前，不发布
 > 新模型 Final Resolved `/414` 排名。
+>
+> **后续更新（2026-08-15）：** 34/40 legacy contracts 已恢复并完成 12 模型
+> 重放；当前统一 408-task partial leaderboard 见
+> `docs/LATEST_MODEL_PARTIAL_LEADERBOARD_20260815.md`。本文中的 381/378 分数为
+> 恢复前 checkpoint。
 
 ## 一、本周结论
 
