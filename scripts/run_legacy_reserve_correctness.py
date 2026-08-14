@@ -502,7 +502,7 @@ def jvm_cache(oracle: dict[str, Any], task_id: str) -> str:
 #   did (the symlink is still present in the retained tree), which is what makes
 #   the session Vitest config resolve ``vitest/config``.
 # * ``pinned`` -- a durable, hashed ``node_modules`` snapshot under the recovery
-#   asset root, hardlink-copied per replay.
+#   asset root, copied (copy-on-write where supported) per replay, never hardlinked.
 #
 # ``test_command`` is the *executed* historical command recovered from the
 # retained run logs, which for OpossumUI differs from the (stale) published
@@ -1487,24 +1487,67 @@ def materialize_start(repo_source: Path, start_sha: str, dest: Path) -> None:
     )
 
 
-def link_tree(source: Path, dest: Path) -> None:
-    """Hardlink-copy a pinned dependency tree into a disposable workspace.
+def copy_tree(source: Path, dest: Path) -> None:
+    """Materialize a private, writable copy of a pinned tree.
 
-    Used for the pinned ``node_modules`` snapshots under the recovery asset
-    root: the replay gets a private, writable directory tree without copying
-    (or re-resolving) hundreds of megabytes per (task, model) pair, and the
-    pinned asset itself is never mutated.
+    Deliberately **not** a hardlink farm. ``cp -al`` shares inodes with the
+    pinned source, so any tool that rewrites a file in place -- rather than
+    replacing it -- writes straight through into the pinned asset and silently
+    corrupts frozen evidence for every later replay. ``--reflink=auto`` takes a
+    copy-on-write clone where the filesystem supports it and falls back to a
+    real byte copy where it does not (ext4); either way the destination has its
+    own inodes and no write can reach the source.
     """
     shutil.rmtree(dest, ignore_errors=True)
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.mkdir(parents=True, exist_ok=True)
     result = subprocess.run(
-        ["cp", "-al", f"{source}/.", str(dest)],
+        ["cp", "-a", "--reflink=auto", f"{source}/.", str(dest)],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
     if result.returncode != 0:
         shutil.copytree(source, dest, symlinks=True, dirs_exist_ok=True)
+
+
+# Entries of the pinned Gradle/Maven cache home that are seeded into a
+# per-replay writable scratch. Only the current task's own Gradle partition is
+# copied; the other tasks' partitions are irrelevant to it and copying them
+# would multiply the seeding cost for nothing.
+JVM_CACHE_HOME_SHARED_ENTRIES = (".m2", ".cache", ".config")
+
+
+def seed_jvm_cache_home(
+    cache_home: Path, cache_index: str, destination: Path
+) -> tuple[list[str], list[str]]:
+    """Seed a disposable writable ``HOME``/``GRADLE_USER_HOME`` for one replay.
+
+    Gradle and Maven genuinely need to write into their cache home (lock files,
+    the wrapper distribution's own bookkeeping, journal and metadata updates),
+    so it cannot be mounted read-only -- but the *pinned* cache home must never
+    be the thing they write to, or the durable asset drifts out from under its
+    own pinned digest. The pinned home is therefore copied into per-replay
+    scratch and only that copy is mounted read-write; every immutable asset
+    (jars, the init script, the file:// mirror, prefetched archives, the
+    wrapper jar store) stays in the read-only ``/oracle-cache`` mount.
+
+    Returns ``(seeded, faults)``.
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    seeded: list[str] = []
+    faults: list[str] = []
+    wanted = list(JVM_CACHE_HOME_SHARED_ENTRIES) + [f"gradle-task-{cache_index}"]
+    for name in wanted:
+        source = cache_home / name
+        if not source.is_dir():
+            continue
+        try:
+            copy_tree(source, destination / name)
+        except OSError as error:  # pragma: no cover - defensive
+            faults.append(f"could not seed cache-home entry {name}: {error!r}")
+            continue
+        seeded.append(name)
+    return seeded, faults
 
 
 def node_runtime_bin(
@@ -2715,6 +2758,7 @@ def jvm_docker_command(
     task_dir: Path,
     shell_command: str,
     offline: bool,
+    cache_home_scratch: Path | None = None,
 ) -> list[str]:
     """Build the historical JVM Oracle container invocation.
 
@@ -2733,6 +2777,10 @@ def jvm_docker_command(
         jvm_cache(oracle, task_id), legacy_root, asset_root
     )
     cache_root = cache_home.parent
+    # The pinned cache home is *never* the thing the build writes to; a
+    # disposable, already-seeded copy is. Callers always pass one -- the
+    # fallback only exists so the pinned home can still be located.
+    writable_home = cache_home_scratch if cache_home_scratch is not None else cache_home
     # The container passwd file encodes the *current* uid/gid, so it is host
     # state rather than a pinned artifact: it is written into the disposable
     # per-replay scratch instead of the pinned asset root, which therefore
@@ -2770,10 +2818,17 @@ def jvm_docker_command(
         if mirror:
             command += ["-e", f"ORACLE_JCENTER_MIRROR={mirror}"]
     command += [
+        # /workspace and /task are disposable per-replay scratch, so they are
+        # the only writable bind mounts besides the seeded cache home.
         "-v", f"{workspace}:/workspace",
         "-v", f"{task_dir}:/task",
-        "-v", f"{cache_root}:/oracle-cache",
-        "-v", f"{cache_home}:/cachehome",
+        # Every immutable, digest-pinned asset the recorded command references
+        # -- jacocoagent.jar, oracle.init.gradle, the file:// m2-mirror, the
+        # pinned Gradle wrapper store and the prefetched archives -- is mounted
+        # strictly read-only, so no build can mutate a durable asset out from
+        # under its own pinned digest.
+        "-v", f"{cache_root}:/oracle-cache:ro",
+        "-v", f"{writable_home}:/cachehome",
         "-v", f"{passwd}:/etc/passwd:ro",
         "-w", "/workspace",
         jvm_container(oracle, task_id),
@@ -2842,10 +2897,14 @@ def replay_jvm(
     repo = oracle["repo"]
     repo_source = repo_checkout_dir(legacy_root, repo)
     start_sha = oracle.get("start_sha") or task["start_sha"]
-    cache_root = jvm_cache_root(oracle, task_id, legacy_root, asset_root)
+    cache_home = resolve_legacy_relative(
+        jvm_cache(oracle, task_id), legacy_root, asset_root
+    )
+    cache_root = cache_home.parent
     scratch = work_root / "jvm" / model_component(model) / task_id
     workspace_scratch = scratch / "workspace"
     task_scratch = scratch / "task"
+    cache_home_scratch = scratch / "cachehome"
     provenance = row_provenance_fields(
         task, oracle, task_id, "jvm", generation, legacy_root, [], asset_root
     )
@@ -2886,6 +2945,14 @@ def replay_jvm(
             prefetched.append(
                 {"workspace_path": entry["workspace_path"], "sha256": digest}
             )
+
+        # Seed the disposable writable HOME/GRADLE_USER_HOME from the pinned
+        # cache home. The pinned home itself is never mounted, so a build
+        # cannot write into a durable asset even by accident.
+        seeded_cache_entries, seed_faults = seed_jvm_cache_home(
+            cache_home, manifest["cache_index"], cache_home_scratch
+        )
+        asset_faults.extend(seed_faults)
 
         wrapper_sha256 = None
         if manifest.get("needs_gradle_wrapper_jar"):
@@ -2962,6 +3029,7 @@ def replay_jvm(
                     jvm_docker_command(
                         oracle, task_id, legacy_root, asset_root,
                         workspace_scratch, task_scratch, prime_command, offline,
+                        cache_home_scratch,
                     ),
                     cwd=None,
                     log_path=scratch / "prime.log",
@@ -3002,6 +3070,7 @@ def replay_jvm(
                 jvm_docker_command(
                     oracle, task_id, legacy_root, asset_root,
                     workspace_scratch, task_scratch, str(oracle["command"]), offline,
+                    cache_home_scratch,
                 ),
                 cwd=None,
                 log_path=log_path,
@@ -3016,6 +3085,20 @@ def replay_jvm(
                 for entry in prefetched
                 if full_file_digest(workspace_scratch / entry["workspace_path"])
                 != entry["sha256"]
+            ]
+            # Defensive post-run re-validation of the durable assets
+            # themselves. /oracle-cache is mounted read-only and the cache home
+            # is a disposable copy, so this must always hold; if it ever does
+            # not, something impossible happened and the row is infrastructure,
+            # never a candidate verdict.
+            _FULL_DIGEST_CACHE.clear()
+            drifted_assets = [
+                str(entry["path"])
+                for entry in jvm_required_assets(
+                    task_id, oracle, legacy_root, asset_root
+                )[0]
+                if entry["sha256"] is not None
+                and full_file_digest(entry["path"]) != entry["sha256"]
             ]
             executed, failures = jvm_test_count(
                 workspace_scratch, manifest["test_results_globs"]
@@ -3033,9 +3116,10 @@ def replay_jvm(
                 and failures == 0
                 and executed >= expected
                 and not tampered
+                and not drifted_assets
             )
             status = "pass" if correctness_ok else "fail"
-            if tampered:
+            if tampered or drifted_assets:
                 # A replaced pinned input is an infrastructure fault, never a
                 # candidate failure.
                 status = INFRA_RETRY
@@ -3048,7 +3132,9 @@ def replay_jvm(
                 "patch_sha256": generation.get("patch_sha256"),
                 "status": status,
                 "candidate_result": status,
-                "correctness_ok": None if tampered else correctness_ok,
+                "correctness_ok": (
+                    None if (tampered or drifted_assets) else correctness_ok
+                ),
                 "patch_apply": True,
                 "scope_ok": scope_ok,
                 "changed_lines": len(changed),
@@ -3065,6 +3151,9 @@ def replay_jvm(
                 "pinned_gradle_wrapper_sha256": wrapper_sha256,
                 "prefetched_assets": prefetched,
                 "prefetched_assets_replaced_during_run": tampered,
+                "pinned_assets_drifted_during_run": drifted_assets,
+                "seeded_cache_home_entries": seeded_cache_entries,
+                "pinned_cache_root_mounted_readonly": True,
                 "prime_result": prime_result,
                 "scored_command_executed": True,
             }
@@ -3114,19 +3203,21 @@ def provision_tsjs_dependencies(
         # every candidate fails for infrastructure reasons. A symlink would let
         # the runner write its scratch cache straight back into the retained
         # tree, mutating frozen evidence and invalidating its pinned digest for
-        # every later replay, so the tree is hardlink-copied instead --
-        # identical module resolution, zero writes to the retained asset -- and
-        # the runner's own cache directory is pruned from the copy so it is
-        # recreated fresh rather than modified through a shared inode.
+        # every later replay, so the tree is copied into the workspace instead
+        # -- identical module resolution, zero writes to the retained asset.
+        # The copy is a real (or copy-on-write) copy, never a hardlink farm: a
+        # shared inode would let an in-place rewrite reach straight back into
+        # the pinned source. The runner's own cache directory is additionally
+        # pruned from the copy so it is recreated rather than reused.
         source = oracle_recovery_root(legacy_root) / "tsjs/_node_tools/node_modules"
-        link_tree(source, destination)
+        copy_tree(source, destination)
         for scratch_name in manifest.get("dependency_tree_exclusions") or ():
             shutil.rmtree(destination / scratch_name, ignore_errors=True)
-        return True, "hardlink-copied retained shared node tools"
+        return True, "copied retained shared node tools"
     if provisioning == "pinned":
         assert asset_root is not None
-        link_tree(asset_root / manifest["pinned_node_modules"], destination)
-        return True, "hardlink-copied pinned node_modules snapshot"
+        copy_tree(asset_root / manifest["pinned_node_modules"], destination)
+        return True, "copied pinned node_modules snapshot"
     if provisioning == "pnpm_workspace":
         assert asset_root is not None
         store = asset_root / "tsjs/pnpm-store"
@@ -3277,6 +3368,19 @@ def replay_tsjs(
                     env=env,
                     timeout=timeout,
                 )
+                # Defensive post-run re-validation: the pinned payload trees
+                # are copied, never shared by inode or symlink, so a replay
+                # cannot reach them -- if one drifted anyway, the row is
+                # infrastructure rather than a candidate verdict.
+                _TREE_DIGEST_CACHE.clear()
+                drifted_trees = [
+                    entry["label"]
+                    for entry in tsjs_required_trees(
+                        task_id, oracle, manifest, legacy_root, asset_root
+                    )
+                    if full_tree_digest(entry["path"], entry["exclude"])
+                    != entry["sha256"]
+                ]
                 text = run_log.read_text(errors="replace") if run_log.is_file() else ""
                 passed = test_count(
                     text,
@@ -3289,8 +3393,14 @@ def replay_tsjs(
                     r"\x1b\[[0-9;]*[A-Za-z]", "", text
                 )
                 correctness_ok = (
-                    exit_code == 0 and passed >= expected and signature_ok
+                    exit_code == 0
+                    and passed >= expected
+                    and signature_ok
+                    and not drifted_trees
                 )
+                status = "pass" if correctness_ok else "fail"
+                if drifted_trees:
+                    status = INFRA_RETRY
                 result = {
                     "id": task_id,
                     "model": model,
@@ -3298,9 +3408,9 @@ def replay_tsjs(
                     "source_kind": "published_legacy",
                     "start_sha": task["start_sha"],
                     "patch_sha256": generation.get("patch_sha256"),
-                    "status": "pass" if correctness_ok else "fail",
-                    "candidate_result": "pass" if correctness_ok else "fail",
-                    "correctness_ok": correctness_ok,
+                    "status": status,
+                    "candidate_result": status,
+                    "correctness_ok": None if drifted_trees else correctness_ok,
                     "patch_apply": True,
                     "scope_ok": scope_ok,
                     "changed_lines": len(changed),
@@ -3311,6 +3421,7 @@ def replay_tsjs(
                     "pass_to_pass_passed": passed,
                     "failed_tests": [] if correctness_ok else ["tsjs-test"],
                     "dependency_provisioning": provision_detail,
+                    "pinned_trees_drifted_during_run": drifted_trees,
                 }
     finally:
         # Defensive: never follow a symlink out of the disposable workspace

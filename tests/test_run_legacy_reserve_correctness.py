@@ -1857,7 +1857,13 @@ def test_replay_tsjs_runs_install_and_test_and_persists_evidence(tmp_path, monke
         legacy_root
         / "strict_screen_20260726/oracle_recovery/tsjs/_node_tools/node_modules"
     )
-    shared_tools.mkdir(parents=True)
+    write_discourse_node_tools(shared_tools)
+    pin_tsjs_trees(
+        task_id,
+        monkeypatch,
+        dependency_tree_sha256=shared_tools,
+        runtime_tree_sha256=node_runtime.parent,
+    )
     session_dir = (
         legacy_root
         / "strict_screen_20260726/oracle_recovery/tsjs"
@@ -2014,6 +2020,13 @@ def test_replay_tsjs_provisions_retained_shared_node_tools_without_mutating_them
         "historical_node": "20.19.5",
         "recovery_artifact": "oracle_recovery/tsjs/20_discourse__discourse",
     }
+    pin_tsjs_trees(
+        task_id,
+        monkeypatch,
+        dependency_tree_sha256=shared_tools,
+        runtime_tree_sha256=node_runtime.parent,
+    )
+    pinned_source_digest = MODULE.full_tree_digest(shared_tools, (".vite",))
     patch_path = tmp_path / "candidate.patch"
     patch_path.write_text("", encoding="utf-8")
     generation = {"patch_file": str(patch_path), "patch_sha256": BASE.sha256(patch_path)}
@@ -2050,11 +2063,13 @@ def test_replay_tsjs_provisions_retained_shared_node_tools_without_mutating_them
     assert observed["session_copied"] is True
     assert row["status"] == "pass"
     assert row["pass_to_pass_passed"] == 2
-    assert row["dependency_provisioning"] == (
-        "hardlink-copied retained shared node tools"
-    )
+    assert row["dependency_provisioning"] == "copied retained shared node tools"
+    assert row["pinned_trees_drifted_during_run"] == []
     # the retained tree's scratch cache was not rewritten through a shared inode
     assert (shared_tools / ".vite/vitest/results.json").read_text() == "{}"
+    # and the pinned payload is byte-identical after the replay
+    MODULE._TREE_DIGEST_CACHE.clear()
+    assert MODULE.full_tree_digest(shared_tools, (".vite",)) == pinned_source_digest
 
 
 
@@ -2519,7 +2534,10 @@ def pin_tsjs_trees(task_id, monkeypatch, **roots):
     for key, root in roots.items():
         if root is None:
             continue
-        entry[key] = MODULE.full_tree_digest(root)
+        # Pin with the *same* runtime-scratch exclusions validation applies,
+        # or the fixture would pin a digest the adapter can never reproduce.
+        exclusions = tuple(entry.get(key.replace("_sha256", "_exclusions")) or ())
+        entry[key] = MODULE.full_tree_digest(root, exclusions)
     monkeypatch.setattr(
         MODULE, "TSJS_MANIFEST", {**MODULE.TSJS_MANIFEST, task_id: entry}
     )
@@ -3067,3 +3085,268 @@ def test_every_tsjs_task_pins_its_runtime_and_dependency_payload():
             assert manifest.get("dependency_tree_sha256"), task_id
         else:
             assert manifest.get("store_tree_sha256"), task_id
+
+
+# ---------------------------------------------------------------------------
+# Pinned-asset immutability (merge-review blockers)
+# ---------------------------------------------------------------------------
+
+
+def test_jvm_docker_command_mounts_the_pinned_oracle_cache_read_only(tmp_path):
+    # /oracle-cache holds the immutable, digest-pinned jars, init script,
+    # file:// mirror, wrapper store and prefetched archives; nothing the build
+    # does may be able to write to them.
+    cache_home = tmp_path / "strict_screen_20260726/oracle_recovery/java/cache/home"
+    cache_home.mkdir(parents=True)
+    oracle = {
+        "repo": "Consensys/web3signer",
+        "command": "gradle test",
+        "environment": {
+            "container": "oracle-java-tools:17",
+            "cache": "strict_screen_20260726/oracle_recovery/java/cache/home",
+        },
+    }
+    scratch_home = tmp_path / "scratch/cachehome"
+    command = MODULE.jvm_docker_command(
+        oracle, WEB3SIGNER_TASK_ID, tmp_path, None, tmp_path / "ws",
+        tmp_path / "task", "gradle test", True, scratch_home,
+    )
+    mounts = [command[i + 1] for i, arg in enumerate(command) if arg == "-v"]
+    cache_root = cache_home.parent
+
+    # the pinned asset root is mounted, and mounted read-only
+    assert f"{cache_root}:/oracle-cache:ro" in mounts
+    assert f"{cache_root}:/oracle-cache" not in mounts
+    # the pinned cache home is never mounted at all; the seeded scratch is
+    assert f"{scratch_home}:/cachehome" in mounts
+    assert not any(str(cache_home) in mount for mount in mounts)
+    # /etc/passwd is read-only too
+    assert any(mount.endswith("/etc/passwd:ro") for mount in mounts)
+    # only disposable scratch is writable
+    writable = [mount for mount in mounts if not mount.endswith(":ro")]
+    assert sorted(writable) == sorted(
+        [
+            f"{tmp_path / 'ws'}:/workspace",
+            f"{tmp_path / 'task'}:/task",
+            f"{scratch_home}:/cachehome",
+        ]
+    )
+
+
+def test_seed_jvm_cache_home_copies_only_the_tasks_own_partition(tmp_path):
+    cache_home = tmp_path / "home"
+    for name in (".m2", ".cache", ".config", "gradle-task-8", "gradle-task-31"):
+        (cache_home / name).mkdir(parents=True)
+        (cache_home / name / "payload").write_text(name, encoding="utf-8")
+    destination = tmp_path / "scratch"
+
+    seeded, faults = MODULE.seed_jvm_cache_home(cache_home, "8", destination)
+    assert faults == []
+    assert sorted(seeded) == [".cache", ".config", ".m2", "gradle-task-8"]
+    assert not (destination / "gradle-task-31").exists()
+
+    # the seeded copy is independent: writing to it cannot reach the pinned home
+    target = destination / "gradle-task-8/payload"
+    assert os.stat(target).st_ino != os.stat(cache_home / "gradle-task-8/payload").st_ino
+    target.write_text("mutated by the build", encoding="utf-8")
+    assert (cache_home / "gradle-task-8/payload").read_text() == "gradle-task-8"
+
+
+def test_copy_tree_isolates_the_destination_from_the_pinned_source(tmp_path):
+    # Regression for the hardlink-farm hole: `cp -al` shares inodes, so an
+    # in-place rewrite in the destination reaches straight into the pinned
+    # source. copy_tree must guarantee that cannot happen.
+    source = tmp_path / "pinned"
+    (source / "pkg/dist").mkdir(parents=True)
+    (source / "pkg/dist/index.js").write_text("original\n", encoding="utf-8")
+    (source / ".bin").mkdir()
+    (source / ".bin/tool").symlink_to("../pkg/dist/index.js")
+    (source / "pkg/dist/index.js").chmod(0o644)
+    MODULE._TREE_DIGEST_CACHE.clear()
+    before = MODULE.full_tree_digest(source)
+
+    destination = tmp_path / "workspace/node_modules"
+    MODULE.copy_tree(source, destination)
+
+    copied = destination / "pkg/dist/index.js"
+    assert copied.read_text() == "original\n"
+    # separate inodes -- not a hardlink farm
+    assert os.stat(copied).st_ino != os.stat(source / "pkg/dist/index.js").st_ino
+    # symlinks are preserved as symlinks, and resolve inside the copy
+    assert (destination / ".bin/tool").is_symlink()
+    assert (destination / ".bin/tool").resolve() == copied.resolve()
+
+    # in-place rewrite of the destination (open for write, not replace)
+    with open(copied, "r+", encoding="utf-8") as handle:
+        handle.seek(0)
+        handle.write("TAMPERED")
+    # writing through the symlink in the copy must also stay inside the copy
+    with open(destination / ".bin/tool", "a", encoding="utf-8") as handle:
+        handle.write("more\n")
+
+    assert (source / "pkg/dist/index.js").read_text() == "original\n"
+    MODULE._TREE_DIGEST_CACHE.clear()
+    assert MODULE.full_tree_digest(source) == before
+
+
+def test_replay_tsjs_cannot_mutate_the_pinned_dependency_tree(tmp_path, monkeypatch):
+    # End to end: a runner that rewrites files inside its node_modules -- in
+    # place, and through a .bin symlink -- must leave the pinned tree byte
+    # identical, and the row must confirm no pinned tree drifted.
+    legacy_root = tmp_path / "legacy"
+    start_sha = make_git_repo(legacy_root / "repos/discourse__discourse")
+    task = strict_task(DISCOURSE_TASK_ID, repo="discourse/discourse")
+    task["start_sha"] = start_sha
+    runtime = (
+        legacy_root / "strict_screen_20260726/oracle_recovery/tsjs/_runtimes"
+        / "node-v20.19.5-linux-x64/bin"
+    )
+    runtime.mkdir(parents=True)
+    (runtime / "node").write_text("#!/bin/sh\n", encoding="utf-8")
+    (runtime / "node").chmod(0o755)
+    tools = (
+        legacy_root
+        / "strict_screen_20260726/oracle_recovery/tsjs/_node_tools/node_modules"
+    )
+    write_discourse_node_tools(tools)
+    session = (
+        legacy_root / "strict_screen_20260726/oracle_recovery/tsjs"
+        / "20_discourse__discourse/session"
+    )
+    session.mkdir(parents=True)
+    (session / "vitest.config.js").write_text("", encoding="utf-8")
+    oracle = {
+        "repo": "discourse/discourse",
+        "historical_node": "20.19.5",
+        "recovery_artifact": "oracle_recovery/tsjs/20_discourse__discourse",
+    }
+    pin_tsjs_trees(
+        DISCOURSE_TASK_ID,
+        monkeypatch,
+        dependency_tree_sha256=tools,
+        runtime_tree_sha256=runtime.parent,
+    )
+    MODULE._TREE_DIGEST_CACHE.clear()
+    pinned_before = MODULE.full_tree_digest(tools, (".vite",))
+    shim_before = (tools / ".bin/vitest").read_text()
+    payload_before = (tools / "vitest/dist/config.js").read_text()
+
+    patch_path = tmp_path / "candidate.patch"
+    patch_path.write_text("", encoding="utf-8")
+    generation = {"patch_file": str(patch_path), "patch_sha256": BASE.sha256(patch_path)}
+
+    def fake_run_subprocess(command, *, cwd, log_path, env=None, timeout=1800):
+        root = Path(str(cwd)) / "node_modules"
+        # in-place rewrite of a payload file inside the workspace copy
+        with open(root / "vitest/dist/config.js", "r+", encoding="utf-8") as handle:
+            handle.seek(0)
+            handle.write("/*RUNNER*/")
+        # and an append through the launcher shim
+        with open(root / ".bin/vitest", "a", encoding="utf-8") as handle:
+            handle.write("# runner\n")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            "Test Files  1 passed (1)\nTests  2 passed (2)\n", encoding="utf-8"
+        )
+        return 0, 1.0, ""
+
+    monkeypatch.setattr(MODULE, "run_subprocess", fake_run_subprocess)
+    row = MODULE.replay_tsjs(
+        DISCOURSE_TASK_ID, "my-model", task, oracle, generation, legacy_root,
+        tmp_path / "work", tmp_path / "output", 60,
+    )
+    assert row["status"] == "pass"
+    assert row["pinned_trees_drifted_during_run"] == []
+    # the pinned source is untouched, byte for byte
+    assert (tools / ".bin/vitest").read_text() == shim_before
+    assert (tools / "vitest/dist/config.js").read_text() == payload_before
+    MODULE._TREE_DIGEST_CACHE.clear()
+    assert MODULE.full_tree_digest(tools, (".vite",)) == pinned_before
+
+
+def test_replay_tsjs_reports_infra_when_a_pinned_tree_drifts_during_the_run(
+    tmp_path, monkeypatch
+):
+    # Impossible-by-construction drift must still fail closed as infrastructure
+    # rather than produce a candidate verdict.
+    legacy_root, start_sha, oracle, tools, _ = _ready_discourse_root(
+        tmp_path, monkeypatch
+    )
+    task = strict_task(DISCOURSE_TASK_ID, repo="discourse/discourse")
+    task["start_sha"] = start_sha
+    patch_path = tmp_path / "candidate.patch"
+    patch_path.write_text("", encoding="utf-8")
+    generation = {"patch_file": str(patch_path), "patch_sha256": BASE.sha256(patch_path)}
+
+    def fake_run_subprocess(command, *, cwd, log_path, env=None, timeout=1800):
+        # simulate the impossible: something reaches the pinned source
+        (tools / "vitest/dist/config.js").write_text("drifted\n", encoding="utf-8")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            "Test Files  1 passed (1)\nTests  2 passed (2)\n", encoding="utf-8"
+        )
+        return 0, 1.0, ""
+
+    monkeypatch.setattr(MODULE, "run_subprocess", fake_run_subprocess)
+    row = MODULE.replay_tsjs(
+        DISCOURSE_TASK_ID, "my-model", task, oracle, generation, legacy_root,
+        tmp_path / "work", tmp_path / "output", 60,
+    )
+    assert row["status"] == "infra_retry"
+    assert row["correctness_ok"] is None
+    assert row["pinned_trees_drifted_during_run"] == ["pinned dependency tree"]
+
+
+def test_replay_jvm_reports_infra_when_a_pinned_asset_drifts_during_the_run(
+    tmp_path, monkeypatch
+):
+    legacy_root = tmp_path / "legacy"
+    cache_root = build_pinned_jvm_cache(legacy_root, monkeypatch)
+    pin_web3signer_prefetch(cache_root, monkeypatch)
+    start_sha = make_git_repo(legacy_root / "repos/org__repo")
+    task = strict_task(WEB3SIGNER_TASK_ID, repo="org/repo")
+    oracle = {
+        "repo": "org/repo",
+        "start_sha": start_sha,
+        "command": "gradle test -I /oracle-cache/oracle.init.gradle",
+        "pass_to_pass": 6,
+        "environment": {
+            "container": "oracle-java-tools:17",
+            "cache": "strict_screen_20260726/oracle_recovery/java/cache/home",
+        },
+    }
+    patch_path = tmp_path / "candidate.patch"
+    patch_path.write_text("", encoding="utf-8")
+    generation = {"patch_file": str(patch_path), "patch_sha256": BASE.sha256(patch_path)}
+    work_root = tmp_path / "work"
+    workspace = (
+        work_root / "jvm" / MODULE.model_component("my-model")
+        / WEB3SIGNER_TASK_ID / "workspace"
+    )
+
+    def fake_run_subprocess(command, *, cwd, log_path, env=None, timeout=1800):
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("BUILD SUCCESSFUL\n", encoding="utf-8")
+        report = workspace / "acceptance-tests/build/test-results/test/TEST-x.xml"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(
+            '<testsuite tests="6" failures="0" errors="0"/>', encoding="utf-8"
+        )
+        # simulate the impossible: a durable asset changed under the run
+        (cache_root / "oracle.init.gradle").write_text("drifted\n", encoding="utf-8")
+        return 0, 2.0, ""
+
+    monkeypatch.setattr(MODULE, "run_subprocess", fake_run_subprocess)
+    row = MODULE.replay_jvm(
+        WEB3SIGNER_TASK_ID, "my-model", task, oracle, generation, legacy_root,
+        work_root, tmp_path / "output", 60,
+    )
+    assert row["status"] == "infra_retry"
+    assert row["correctness_ok"] is None
+    assert row["pinned_assets_drifted_during_run"] == [
+        str(cache_root / "oracle.init.gradle")
+    ]
+    assert row["pinned_cache_root_mounted_readonly"] is True
+    assert "gradle-task-8" in row["seeded_cache_home_entries"] or (
+        row["seeded_cache_home_entries"] == []
+    )

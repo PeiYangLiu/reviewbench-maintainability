@@ -546,7 +546,7 @@ Design:
   from a tree digest (Vitest's own `.vite` cache, pnpm's `v10/index` and
   `v10/projects` bookkeeping), because a tool legitimately rewrites those while
   running and including them would make the pin self-invalidating after the
-  first replay; the Discourse contract additionally hardlink-copies the
+  first replay; the Discourse contract additionally copies the
   retained shared Node tools instead of symlinking them, so a replay can never
   write back into the retained tree at all. `write_manifest.py` recomputes
   every pinned tree digest and fails if it disagrees with the digest the
@@ -563,6 +563,21 @@ Design:
   `scored_command_executed: false` -- the scored command is never invoked, so
   the resulting "no tests found" build failure can never be scored as a model
   failure.
+- **Pinned assets are never mounted writable.** `/oracle-cache` -- the
+  immutable jars, `oracle.init.gradle`, the `file://` m2-mirror, the pinned
+  Gradle wrapper store and the prefetched archives -- is bind-mounted `:ro`,
+  and the pinned Gradle/Maven cache home is not mounted at all. Gradle and
+  Maven genuinely need a writable cache home, so `seed_jvm_cache_home()` copies
+  just the entries the task needs (`.m2`, `.cache`, `.config` and *its own*
+  `gradle-task-<index>` partition) into per-replay scratch and only that copy
+  is mounted read-write; the only other writable mounts are the disposable
+  `/workspace` and `/task`. Dependency trees are provisioned with
+  `copy_tree()`, a real or copy-on-write copy -- never `cp -al`, whose shared
+  inodes would let an in-place rewrite reach straight back into the pinned
+  source. After every run the pinned assets and pinned trees are re-digested
+  defensively; drift is impossible by construction, so if it is ever observed
+  the row becomes `infra_retry` (`pinned_assets_drifted_during_run` /
+  `pinned_trees_drifted_during_run`) instead of a candidate verdict.
 - **No live network fallback for a missing pinned asset.** A pinned asset that
   is absent or mismatched stops the replay before the Oracle command runs and
   is recorded as `infra_retry` with a `pinned_asset_faults` list -- never as a
@@ -710,7 +725,13 @@ invalidates already-recorded rows, and that `replay_jvm` refuses to run the
 Oracle command at all. A dedicated case builds a dependency tree containing
 *only* the launcher shim and its `package.json` and proves it is rejected, and
 others prove that a single stray file inside a pinned dependency tree, Node
-runtime or pnpm store blocks. The mandatory-prime cases cover a nonzero exit,
+runtime or pnpm store blocks. Immutability cases assert the container argv
+mounts `/oracle-cache` as `:ro` and never mounts the pinned cache home at all,
+that seeding copies only the task's own Gradle partition into independent
+inodes, that an in-place rewrite (and a write through a `.bin` symlink) in a
+provisioned copy leaves the pinned source byte-identical, and that simulated
+"impossible" drift of a pinned asset or tree during a run yields `infra_retry`
+rather than a verdict. The mandatory-prime cases cover a nonzero exit,
 a timeout, a spawn error and an error string with a zero exit, each asserting
 `infra_retry`, a persisted prime log, `scored_command_executed: false` and
 that the scored command was never invoked.
