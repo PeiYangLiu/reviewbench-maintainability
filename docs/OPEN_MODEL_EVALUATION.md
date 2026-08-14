@@ -728,54 +728,81 @@ through controlled fake executables, with bash xtrace line coverage), and
 `sbt_docker_session_oracle` (the project's own sbt build against a packaged,
 hash-verified ivy/coursier closure).
 
-Status as of 2026-08-14: **18 of 19 tasks are replay-ready** (preflight) and
-**17 of 19 meet the full hard-Oracle standard** under `validate-oracle`:
+Status as of 2026-08-14: **17 of 19 tasks are replay-ready and every one of
+them is proven by real execution.** `validate-oracle` has no attestation-only
+path: each Oracle is executed now -- exact start x3 and golden x3 -- and judged
+on its own output, PASS_TO_PASS set and measured changed-old production
+coverage. The four originally-published Oracles are re-executed the same way
+(the scikit-learn image's own harness is re-run end to end, including its
+golden patch application and its coverage report).
 
-| Task | Oracle | PASS_TO_PASS | Validation |
-|---|---|---:|---|
-| aws/eks-anywhere#2274 | repository suite (historical) | 23 | start 3/3 re-measured; golden attested from the published record |
-| pingcap/tidb#68028 | repository suite (historical) | 162 | start 3/3 re-measured; golden attested from the published record |
-| unikraft/kraftkit#2007 | retained session Oracle | 1 | start 3/3 re-measured; target-commit golden attested from the retained run log |
-| scikit-learn#18359 | in-image historical harness | 55 | historical harness re-executed end to end (start x3 + golden x3) |
-| Agoric/agoric-sdk#8072 | 17 repository tests (engineered selector) | 17 | start 3/3 + golden 3/3 + coverage |
-| opentelemetry-go-contrib#6172 | engineered session Oracle | 1 | start 3/3 + golden 3/3 + coverage |
-| ozontech/seq-ui#44 | engineered session Oracle | 1 | start 3/3 + golden 3/3 + coverage |
-| postman17/metrics#13 | engineered session Oracle | 1 | start 3/3 + golden 3/3 + coverage |
-| redis/redis-py#3350 | engineered session Oracle | 3 | start 3/3 + golden 3/3 + coverage |
-| codecov/shared#90 | engineered session Oracle | 7 | start 3/3 + golden 3/3 + coverage |
-| labscript-suite/lyse#119 | engineered session Oracle | 3 | start 3/3 + golden 3/3 + coverage |
-| open-formulieren/open-forms#3125 | engineered session Oracle | 3 | start 3/3 + golden 3/3 + `sys.settrace` coverage |
-| OpenFreeEnergy/alchemiscale#421 | engineered session Oracle | 2 | start 3/3 + golden 3/3 + coverage |
-| Pyomo/pyomo#3698 | engineered session Oracle | 1 | start 3/3 + golden 3/3 + coverage |
-| runfinch/finch-core#780 | engineered shell harness | 7 | start 3/3 + golden 3/3 + bash xtrace coverage |
-| scala-js#4707 | repository OptimizerTest suite | 10 | start 3/3 + golden 3/3 + attested JaCoCo coverage |
-| scala-js#4988 | engineered session Oracle | 1 | start 3/3 + golden 3/3 + attested JaCoCo coverage |
-| hashicorp/nomad#16383 | engineered Ember/QUnit harness | 3 | start 3/3 + golden 3/3; **changed-old coverage unmeasured** |
-| chazari-x/yandex-pr-diplom#1 | -- | -- | **blocked** (see below) |
+| Task | Oracle | P2P | Golden mode | Coverage tool |
+|---|---|---:|---|---|
+| aws/eks-anywhere#2274 | repository suite | 23 | source-only (+5 deleted production paths) | go cover |
+| pingcap/tidb#68028 | repository suite | 162 | source-only (published 407-path set) | go cover (golden phase, as published) |
+| unikraft/kraftkit#2007 | retained session Oracle | 1 | target-commit + paired golden test + golden toolchain | go cover |
+| scikit-learn#18359 | in-image harness re-executed | 55 | in-image golden patch | coverage.py (in-image) |
+| Agoric/agoric-sdk#8072 | 17 repository tests | 17 | source-only + coupled test overlay | go cover |
+| opentelemetry-go-contrib#6172 | engineered session Oracle | 1 | source-only | go cover |
+| ozontech/seq-ui#44 | engineered session Oracle | 1 | source-only | go cover |
+| postman17/metrics#13 | engineered session Oracle | 1 | source-only | go cover |
+| redis/redis-py#3350 | engineered session Oracle | 3 | source-only | coverage.py |
+| codecov/shared#90 | engineered session Oracle | 7 | source-only | coverage.py |
+| labscript-suite/lyse#119 | engineered session Oracle | 3 | source-only | coverage.py |
+| open-formulieren/open-forms#3125 | engineered session Oracle | 3 | source-only | `sys.settrace` |
+| OpenFreeEnergy/alchemiscale#421 | engineered session Oracle | 2 | source-only | coverage.py |
+| Pyomo/pyomo#3698 | engineered session Oracle | 1 | source-only | coverage.py |
+| runfinch/finch-core#780 | engineered shell harness | 7 | source-only | bash xtrace |
+| scala-js#4707 | repository OptimizerTest | 10 | recorded golden patch | JaCoCo (attested, digest-verified) |
+| scala-js#4988 | engineered session Oracle | 1 | source-only | JaCoCo (attested, digest-verified) |
 
-Toolchain recovery for the two lanes that had none: Scala.js now runs the
-project's own pinned sbt (1.5.8 resolved from Maven Central for #4707, 1.9.0
-retained for #4988) against a warmed ivy/coursier closure that is packaged as a
-hash-recorded tarball and mounted read-only, so every run is offline; Nomad runs
-Node 16.20.0 (verified against the official `SHASUMS256.txt`) with a
-`--frozen-lockfile` dependency tree packaged as `node_modules.tar.gz`, plus a
-distro-pinned headless Chromium.
+Two tasks are **blocked and non-scoring**:
 
-The one remaining blocker is **chazari-x/yandex-pr-diplom#1**, and it is a
-property of the accepted change rather than a missing asset: two independent
-public-surface designs were built and both are provably impossible. Including
-the accepted deletion of `internal/app/handlers/handlers.go` makes the golden
-compile, but the exported handler constructor diverges
-(`NewController(config, db)` at start vs `NewController(config, db, chan
-worker.OrderStr)` at golden, where the `worker` package does not exist at
-start), so no single handler-level test compiles on both revisions; and at the
-database level the accepted change turns a zero-valued `DataBase.Err` struct
-into always-set package sentinels, so the *observable* behavior for a
-Luhn-invalid order differs between the revisions (HTTP 202/nil vs
-`ErrBadOrderNumber`). The only cross-revision test found calls the unexported
-`checkOrderNumber`, which is exactly the private-helper binding the standard
-forbids. Full evidence, including the compile errors, is under
-`authoring/yandex-1/` in the asset root and quoted in the contract's blocker.
+* **hashicorp/nomad#16383** -- an Ember/QUnit Oracle was engineered and is
+  behaviourally strict (real headless-Chromium DOM assertions, 3/3 on start and
+  3/3 on the source-only golden, fully offline, Node 16.20.0 pinned by the
+  official `SHASUMS256.txt` with a `--frozen-lockfile` dependency tree), but
+  **changed-old production line coverage cannot be measured**: neither
+  `ember-cli-code-coverage` nor any `istanbul` package exists in the
+  repository's `yarn.lock` at `start_sha`, and adding one is an unpinned
+  build-time dependency that changes the Ember build. The engineered recipe is
+  retained in the contract under `engineered_oracle_not_scoring` so the work is
+  not lost, but the task is not replay-ready and is excluded from the ready
+  count.
+* **chazari-x/yandex-pr-diplom#1** -- the accepted change is public-API-breaking
+  in both directions (see below).
+
+##### Asset integrity is a single source of truth
+
+`asset_inventory()` enumerates *every* execution-relevant asset of a recovered
+entry -- each pinned Oracle source (`session_test`, `session_tests`, `harness`,
+golden-side variants), the recorded golden patch, every declared `host_mounts`
+tree, every packaged cache archive, every Docker image and cache volume, the
+attested-coverage evidence file, and the retained repository checkout. Nothing
+may be read that does not appear there. From that one list:
+
+* **Preflight** requires a full, symlink-aware content digest for every file
+  and tree (a symlink is hashed as its target string and never followed) and an
+  exact match against the contract; an asset with *no* recorded digest is a
+  blocker in its own right, so nothing can execute unpinned. `--rehash`
+  bypasses the per-file digest cache and re-reads every byte.
+* **The replay-contract fingerprint** binds the observed digest of all of them,
+  so replacing any asset in place invalidates previously-recorded rows.
+* **Replay** re-verifies the inventory immediately before executing, copies
+  every writable mount into a per-run scratch tree so pinned sources are never
+  mutated in place, and re-verifies the immutable sources afterwards. A missing,
+  tampered or drifted asset produces a non-scoring `infra_retry` row -- never a
+  model pass or fail.
+
+`pin-assets` records the current digest of every declared asset into the
+contract as a deliberate, auditable action.
+
+`restore-caches` rebuilds a missing Go module cache volume only from an archive
+that is (a) listed in `SHA256SUMS`, (b) byte-identical to that entry, and (c)
+byte-identical to the contract-pinned digest. Extraction uses Python's
+`tarfile` with path-traversal and link safety; no container image (pinned or
+otherwise) and no network is involved, and an existing volume is never
+overwritten.
 
 Commands for the validation gate:
 
@@ -791,7 +818,20 @@ python3 scripts/run_legacy_gopy_scripted_correctness.py validate-oracle \
 It writes `<evidence-dir>/oracle-validation/<task>/validation.json` (per-run
 results, the changed-old anchor set, the measured coverage intersection) plus a
 `validation-summary.json`, and exits non-zero unless every scoped Oracle meets
-the standard.
+the standard. There is no mode that reports success without executing: an
+Oracle whose golden side cannot be run is a failure, not an attestation.
+
+Two further subcommands support the asset contract:
+
+```bash
+# record the current digest of every declared asset (deliberate re-pinning)
+python3 scripts/run_legacy_gopy_scripted_correctness.py pin-assets \
+  --tasks ... --oracles ... --legacy-root ... --asset-root ...
+
+# rebuild a lost module-cache volume from its SHA256SUMS-listed archive
+python3 scripts/run_legacy_gopy_scripted_correctness.py restore-caches \
+  --asset-root <legacy-recovery-assets>/gopy-scripted [--dry-run]
+```
 
 `tests/test_run_legacy_gopy_scripted_correctness.py` covers this adapter with
 synthetic fixtures only (no real builds or containers): contract schema and

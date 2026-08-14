@@ -57,7 +57,7 @@ def base_contract(**overrides):
     entry = {
         "lane": "gopy",
         "repo": "owner/repo",
-        "start_sha": "start",
+        "start_sha": overrides.pop("start_sha", "start"),
         "status": "recovered",
         "recipe": {
             "kind": "go_docker_p2p",
@@ -468,7 +468,8 @@ def test_recovered_blockers_pass_when_every_asset_resolves(tmp_path, monkeypatch
         images={"golang:1.25-bookworm": "sha256:aaa"},
         volumes={"vol-mod", "vol-build"},
     )
-    contract = base_contract()
+    MODULE.load_digest_cache(tmp_path)
+    contract = base_contract(start_sha=sha)
     blockers = MODULE.recovered_blockers(
         "task-1",
         contract["tasks"]["task-1"],
@@ -883,6 +884,18 @@ def test_replay_rejects_an_unsafe_model_id(tmp_path, capsys):
     assert "unsafe model ID" in capsys.readouterr().err
 
 
+def preflight_contract(tmp_path):
+    """A shipped-shape contract rewritten to reference only tmp_path assets."""
+    contract = json.loads(CONTRACT_PATH.read_text())
+    for entry in contract["tasks"].values():
+        recipe = entry.get("recipe") or {}
+        for mount in recipe.get("host_mounts") or []:
+            mount["host"] = "${ASSET_ROOT}/absent-mount"
+    path = tmp_path / "scoped-contract.json"
+    path.write_text(json.dumps(contract), encoding="utf-8")
+    return path
+
+
 def test_preflight_fails_closed_without_assets(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(MODULE, "docker_available", lambda: False)
     monkeypatch.setattr(MODULE, "docker_image_id", lambda image: None)
@@ -896,6 +909,7 @@ def test_preflight_fails_closed_without_assets(tmp_path, capsys, monkeypatch):
             "--oracles", str(RELEASE_ORACLES),
             "--legacy-root", str(tmp_path),
             "--asset-root", str(tmp_path),
+            "--contract", str(preflight_contract(tmp_path)),
             "--output", str(tmp_path / "out"),
         ]
     )
@@ -923,36 +937,12 @@ def test_preflight_allow_blocked_exits_zero(tmp_path, monkeypatch, capsys):
             "--oracles", str(RELEASE_ORACLES),
             "--legacy-root", str(tmp_path),
             "--asset-root", str(tmp_path),
+            "--contract", str(preflight_contract(tmp_path)),
             "--allow-blocked",
         ]
     )
     assert code == 0
     capsys.readouterr()
-
-
-def test_restore_caches_refuses_an_archive_with_a_wrong_digest(
-    tmp_path, monkeypatch, capsys
-):
-    contract = base_contract()
-    contract["tasks"]["task-1"]["recipe"]["gomodcache_archive"] = "caches/mod.tar.gz"
-    contract_path = tmp_path / "contract.json"
-    contract_path.write_text(json.dumps(contract), encoding="utf-8")
-    archive = tmp_path / "caches/mod.tar.gz"
-    archive.parent.mkdir(parents=True)
-    archive.write_bytes(b"not-a-real-cache")
-    (tmp_path / "SHA256SUMS").write_text(
-        f"{'0' * 64}  caches/mod.tar.gz\n", encoding="utf-8"
-    )
-    monkeypatch.setattr(MODULE, "docker_volume_present", lambda volume: False)
-    code = MODULE.main(
-        [
-            "restore-caches",
-            "--asset-root", str(tmp_path),
-            "--contract", str(contract_path),
-        ]
-    )
-    assert code == 2
-    assert "not the recorded" in capsys.readouterr().err
 
 
 def test_restore_caches_skips_a_volume_that_already_exists(
@@ -1276,3 +1266,407 @@ def test_shipped_contract_recovered_entries_declare_a_validation_mode():
                 "unmeasured", "historically_measured"
             }, task_id
             assert coverage.get("reason"), task_id
+
+
+# ---------------------------------------------------------------------------
+# Single source of truth for execution-relevant assets
+# ---------------------------------------------------------------------------
+
+
+def asset_contract(tmp_path, **recipe_overrides):
+    """A contract entry whose every asset exists under ``tmp_path``."""
+    (tmp_path / "assets/slug").mkdir(parents=True, exist_ok=True)
+    oracle_file = tmp_path / "assets/slug/oracle_test.go"
+    oracle_file.write_text("package pkg\n", encoding="utf-8")
+    mount = tmp_path / "mounts/home"
+    (mount / "sub").mkdir(parents=True, exist_ok=True)
+    (mount / "sub/file.txt").write_text("cache\n", encoding="utf-8")
+    contract = base_contract()
+    recipe = contract["tasks"]["task-1"]["recipe"]
+    recipe["session_tests"] = [{
+        "asset": "assets/slug/oracle_test.go",
+        "sha256": MODULE.path_digest(oracle_file),
+        "destination": "pkg/oracle_test.go",
+    }]
+    recipe["host_mounts"] = [{
+        "host": "${ASSET_ROOT}/mounts/home",
+        "container": "/root",
+        "mode": "ro",
+        "sha256": MODULE.path_digest(mount),
+    }]
+    recipe.update(recipe_overrides)
+    return contract, oracle_file, mount
+
+
+def test_asset_inventory_covers_every_execution_input(tmp_path):
+    MODULE.load_digest_cache(tmp_path)
+    contract, _, _ = asset_contract(tmp_path)
+    entry = contract["tasks"]["task-1"]
+    entry["oracle_validation"] = {
+        "golden_source_paths": ["pkg/prod.go"],
+        "mode": "start_and_source_only_golden",
+        "golden_session_tests": [{
+            "asset": "assets/slug/oracle_test.go", "sha256": "x",
+            "destination": "pkg/oracle_test.go",
+        }],
+        "golden_patch_asset": "assets/slug/golden.patch",
+        "golden_patch_sha256": "y",
+    }
+    inventory = MODULE.asset_inventory(
+        entry, asset_root=tmp_path, legacy_root=tmp_path
+    )
+    roles = {record["role"] for record in inventory}
+    assert {
+        "golden_patch", "host_mount", "docker_image", "gomodcache_volume",
+        "gobuildcache_volume", "repo_checkout",
+    } <= roles
+    # the Oracle source is present exactly once even though the golden phase
+    # declares the same file (the inventory is deduplicated by location)
+    assert roles & {"oracle_source", "golden_oracle_source"}
+    locations = [record["location"] for record in inventory]
+    assert len(locations) == len(set(locations))
+
+
+def test_asset_inventory_is_empty_for_a_blocked_entry(tmp_path):
+    entry = {"status": "blocked", "blockers": [{"kind": "x", "detail": "y"}]}
+    assert MODULE.asset_inventory(
+        entry, asset_root=tmp_path, legacy_root=tmp_path
+    ) == []
+
+
+def test_verify_assets_rejects_an_unpinned_asset(tmp_path, monkeypatch):
+    MODULE.load_digest_cache(tmp_path)
+    stub_docker(monkeypatch, images={"golang:1.25-bookworm": "sha256:aaa"},
+                volumes={"vol-mod", "vol-build"})
+    contract, oracle_file, _ = asset_contract(tmp_path)
+    contract["tasks"]["task-1"]["recipe"]["session_tests"][0].pop("sha256")
+    inventory = MODULE.asset_inventory(
+        contract["tasks"]["task-1"], asset_root=tmp_path, legacy_root=tmp_path
+    )
+    _, problems = MODULE.verify_assets(inventory)
+    assert any("no recorded SHA-256" in problem for problem in problems)
+
+
+def test_verify_assets_detects_a_tampered_mount_tree(tmp_path, monkeypatch):
+    MODULE.load_digest_cache(tmp_path)
+    stub_docker(monkeypatch, images={"golang:1.25-bookworm": "sha256:aaa"},
+                volumes={"vol-mod", "vol-build"})
+    contract, _, mount = asset_contract(tmp_path)
+    entry = contract["tasks"]["task-1"]
+    _, clean = MODULE.verify_assets(
+        MODULE.asset_inventory(entry, asset_root=tmp_path, legacy_root=tmp_path)
+    )
+    assert not [p for p in clean if "host_mount" in p]
+    (mount / "sub/file.txt").write_text("tampered\n", encoding="utf-8")
+    MODULE.load_digest_cache(tmp_path)
+    _, problems = MODULE.verify_assets(
+        MODULE.asset_inventory(entry, asset_root=tmp_path, legacy_root=tmp_path),
+        rehash=True,
+    )
+    assert any("host_mount asset" in problem and "not the recorded" in problem
+               for problem in problems)
+
+
+def test_verify_assets_detects_a_missing_oracle_source(tmp_path, monkeypatch):
+    MODULE.load_digest_cache(tmp_path)
+    stub_docker(monkeypatch, images={"golang:1.25-bookworm": "sha256:aaa"},
+                volumes={"vol-mod", "vol-build"})
+    contract, oracle_file, _ = asset_contract(tmp_path)
+    oracle_file.unlink()
+    _, problems = MODULE.verify_assets(
+        MODULE.asset_inventory(
+            contract["tasks"]["task-1"], asset_root=tmp_path, legacy_root=tmp_path
+        )
+    )
+    assert any("missing oracle_source asset" in problem for problem in problems)
+
+
+def test_tree_digest_is_symlink_aware_and_content_sensitive(tmp_path):
+    MODULE.load_digest_cache(tmp_path)
+    tree = tmp_path / "tree"
+    (tree / "d").mkdir(parents=True)
+    (tree / "d/a.txt").write_text("a\n", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    link = tree / "link"
+    link.symlink_to(outside)
+    first = MODULE.tree_content_digest(tree)
+    # Re-pointing the symlink changes the digest even though the *target*
+    # content is identical, and the target is never followed.
+    link.unlink()
+    link.symlink_to(tmp_path / "other.txt")
+    assert MODULE.tree_content_digest(tree) != first
+    # Content changes are detected.
+    link.unlink()
+    link.symlink_to(outside)
+    assert MODULE.tree_content_digest(tree) == first
+    (tree / "d/a.txt").write_text("b\n", encoding="utf-8")
+    assert MODULE.tree_content_digest(tree, rehash=True) != first
+
+
+def test_file_digest_of_a_symlink_never_follows_it(tmp_path):
+    MODULE.load_digest_cache(tmp_path)
+    target = tmp_path / "t.txt"
+    target.write_text("payload\n", encoding="utf-8")
+    link = tmp_path / "l"
+    link.symlink_to(target)
+    assert MODULE.file_content_digest(link).startswith("symlink:")
+    assert MODULE.file_content_digest(link) != MODULE.file_content_digest(target)
+
+
+def test_asset_state_binds_every_asset_into_the_fingerprint(tmp_path, monkeypatch):
+    MODULE.load_digest_cache(tmp_path)
+    stub_docker(monkeypatch, images={"golang:1.25-bookworm": "sha256:aaa"},
+                volumes={"vol-mod", "vol-build"})
+    contract, oracle_file, mount = asset_contract(tmp_path)
+    entry = contract["tasks"]["task-1"]
+    before = MODULE.replay_contract_fingerprint(
+        "task-1", entry, tmp_path, tmp_path, []
+    )
+    (mount / "sub/file.txt").write_text("changed\n", encoding="utf-8")
+    MODULE.load_digest_cache(tmp_path)
+    after = MODULE.replay_contract_fingerprint(
+        "task-1", entry, tmp_path, tmp_path, []
+    )
+    assert before != after
+
+
+def test_isolate_mutable_mounts_copies_only_writable_trees(tmp_path):
+    source_ro = tmp_path / "ro"
+    source_ro.mkdir()
+    (source_ro / "f").write_text("ro\n", encoding="utf-8")
+    source_rw = tmp_path / "rw"
+    source_rw.mkdir()
+    (source_rw / "f").write_text("rw\n", encoding="utf-8")
+    recipe = {"host_mounts": [
+        {"host": str(source_ro), "container": "/ro"},
+        {"host": str(source_rw), "container": "/rw", "mutable": True},
+    ]}
+    scratch = tmp_path / "scratch"
+    isolated = MODULE.isolate_mutable_mounts(
+        recipe, scratch, asset_root=tmp_path, legacy_root=tmp_path
+    )
+    mounts = isolated["host_mounts"]
+    assert mounts[0]["host"] == str(source_ro)
+    assert mounts[0]["mode"] == "ro"
+    assert mounts[1]["host"] != str(source_rw)
+    assert Path(mounts[1]["host"], "f").read_text(encoding="utf-8") == "rw\n"
+    # Writing through the isolated copy leaves the pinned source untouched.
+    Path(mounts[1]["host"], "f").write_text("mutated\n", encoding="utf-8")
+    assert (source_rw / "f").read_text(encoding="utf-8") == "rw\n"
+
+
+def test_immutable_asset_digests_skips_mutable_mounts(tmp_path, monkeypatch):
+    MODULE.load_digest_cache(tmp_path)
+    stub_docker(monkeypatch, images={"golang:1.25-bookworm": "sha256:aaa"},
+                volumes={"vol-mod", "vol-build"})
+    contract, _, mount = asset_contract(tmp_path)
+    entry = contract["tasks"]["task-1"]
+    entry["recipe"]["host_mounts"][0]["mutable"] = True
+    digests = MODULE.immutable_asset_digests(
+        entry, asset_root=tmp_path, legacy_root=tmp_path
+    )
+    assert not any(str(mount) in key for key in digests)
+
+
+def test_infra_row_never_carries_a_correctness_verdict():
+    row = MODULE.infra_row("t", "m", "gopy", "sha", {"patch_sha256": "p"}, "boom")
+    assert row["status"] == MODULE.INFRA_RETRY
+    assert row["correctness_ok"] is None
+    normalized = BASE.normalized_record(
+        "gopy", row, raw_source="x", source_kind="published_legacy",
+        oracle=strict_oracle(), generation={"apply_ok": True, "patch_sha256": "p"},
+    )
+    assert normalized["status"] == "infra_retry"
+    assert normalized["retryable"] is True
+
+
+# ---------------------------------------------------------------------------
+# validate-oracle must never auto-pass a historical mode
+# ---------------------------------------------------------------------------
+
+
+def test_no_contract_entry_claims_a_non_executing_validation_mode():
+    contract = MODULE.load_contract(CONTRACT_PATH)
+    banned = {
+        "historical_harness",
+        "historical_published",
+        "historical_target_commit_golden",
+        "attested_external_validation",
+    }
+    for task_id, entry in contract["tasks"].items():
+        if entry["status"] != "recovered":
+            continue
+        mode = (entry.get("oracle_validation") or {}).get("mode")
+        assert mode not in banned, f"{task_id} claims non-executing mode {mode}"
+
+
+def test_validate_source_module_has_no_auto_pass_branch():
+    source = (SCRIPTS_DIR / "run_legacy_gopy_scripted_correctness.py").read_text()
+    assert '"attested": True' not in source
+    assert "oracle_ok\": True," not in source.replace(" ", "")
+
+
+def test_anchor_lines_for_matches_module_relative_coverage_paths():
+    anchors = {"pkg/parser/ast/misc.go": [10, 11]}
+    assert MODULE.anchor_lines_for(anchors, "ast/misc.go") == [10, 11]
+    assert MODULE.anchor_lines_for(anchors, "pkg/parser/ast/misc.go") == [10, 11]
+    assert MODULE.anchor_lines_for(anchors, "other.go") == []
+
+
+def test_every_recovered_entry_declares_measured_coverage():
+    contract = MODULE.load_contract(CONTRACT_PATH)
+    for task_id, entry in contract["tasks"].items():
+        if entry["status"] != "recovered":
+            continue
+        coverage = entry["recipe"].get("coverage") or {}
+        assert coverage.get("kind") in {
+            "go_cover", "py_cover", "py_settrace", "bash_xtrace", "attested"
+        }, f"{task_id} has unmeasured coverage kind {coverage.get('kind')}"
+
+
+def test_nomad_is_blocked_and_non_scoring():
+    contract = MODULE.load_contract(CONTRACT_PATH)
+    entry = contract["tasks"][
+        "github__hashicorp__nomad__pull_16383__comment_1137745682__modularity"
+    ]
+    assert entry["status"] == "blocked"
+    assert entry["blockers"][0]["kind"] == "unmeasurable_changed_old_coverage"
+    # the engineered Oracle is retained, but not as an executable recipe
+    assert "recipe" not in entry
+    assert entry["engineered_oracle_not_scoring"]["kind"]
+
+
+# ---------------------------------------------------------------------------
+# restore-caches safety
+# ---------------------------------------------------------------------------
+
+
+def restore_fixture(tmp_path, *, listed=True, digest_ok=True):
+    import tarfile as _tarfile
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    (payload / "mod.txt").write_text("module\n", encoding="utf-8")
+    (tmp_path / "caches").mkdir()
+    archive = tmp_path / "caches/mod.tar.gz"
+    with _tarfile.open(archive, "w:gz") as bundle:
+        bundle.add(payload / "mod.txt", arcname="mod.txt")
+    contract = base_contract()
+    contract["tasks"]["task-1"]["recipe"]["gomodcache_archive"] = "caches/mod.tar.gz"
+    contract_path = tmp_path / "contract.json"
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+    digest = MODULE.path_digest(archive, rehash=True)
+    lines = []
+    if listed:
+        lines.append(f"{digest if digest_ok else '0' * 64}  caches/mod.tar.gz\n")
+    (tmp_path / "SHA256SUMS").write_text("".join(lines), encoding="utf-8")
+    return contract_path, archive, digest
+
+
+def test_restore_caches_requires_sha256sums_membership(tmp_path, monkeypatch, capsys):
+    contract_path, _, _ = restore_fixture(tmp_path, listed=False)
+    monkeypatch.setattr(MODULE, "docker_volume_present", lambda volume: False)
+    code = MODULE.main([
+        "restore-caches", "--asset-root", str(tmp_path),
+        "--contract", str(contract_path),
+    ])
+    assert code == 2
+    assert "not listed in" in capsys.readouterr().err
+
+
+def test_restore_caches_rejects_a_tampered_archive(tmp_path, monkeypatch, capsys):
+    contract_path, _, _ = restore_fixture(tmp_path, digest_ok=False)
+    monkeypatch.setattr(MODULE, "docker_volume_present", lambda volume: False)
+    code = MODULE.main([
+        "restore-caches", "--asset-root", str(tmp_path),
+        "--contract", str(contract_path),
+    ])
+    assert code == 2
+    assert "not the SHA256SUMS entry" in capsys.readouterr().err
+
+
+def test_restore_caches_rejects_a_contract_digest_mismatch(tmp_path, monkeypatch, capsys):
+    contract_path, _, digest = restore_fixture(tmp_path)
+    contract = json.loads(contract_path.read_text())
+    contract["tasks"]["task-1"]["recipe"]["gomodcache_archive_sha256"] = "1" * 64
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+    monkeypatch.setattr(MODULE, "docker_volume_present", lambda volume: False)
+    code = MODULE.main([
+        "restore-caches", "--asset-root", str(tmp_path),
+        "--contract", str(contract_path),
+    ])
+    assert code == 2
+    assert "not the contract-pinned" in capsys.readouterr().err
+
+
+def test_restore_caches_missing_archive_is_reported(tmp_path, monkeypatch, capsys):
+    contract_path, archive, digest = restore_fixture(tmp_path)
+    archive.unlink()
+    monkeypatch.setattr(MODULE, "docker_volume_present", lambda volume: False)
+    code = MODULE.main([
+        "restore-caches", "--asset-root", str(tmp_path),
+        "--contract", str(contract_path),
+    ])
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "missing packaged cache archive" in err or "not listed in" in err
+
+
+def test_restore_caches_dry_run_needs_no_docker_and_no_network(tmp_path, monkeypatch, capsys):
+    contract_path, _, digest = restore_fixture(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_volume_present", lambda volume: False)
+    monkeypatch.setattr(MODULE, "docker_available", lambda: False)
+
+    def _forbidden(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("restore-caches must not shell out in dry-run")
+
+    monkeypatch.setattr(MODULE.subprocess, "run", _forbidden)
+    code = MODULE.main([
+        "restore-caches", "--asset-root", str(tmp_path),
+        "--contract", str(contract_path), "--dry-run",
+    ])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["actions"][0]["action"] == "would_restore"
+    assert payload["actions"][0]["sha256"] == digest
+
+
+def test_safe_extract_tar_rejects_path_traversal(tmp_path):
+    import tarfile as _tarfile
+    archive = tmp_path / "evil.tar"
+    payload = tmp_path / "f.txt"
+    payload.write_text("x\n", encoding="utf-8")
+    with _tarfile.open(archive, "w") as bundle:
+        bundle.add(payload, arcname="../escape.txt")
+    with pytest.raises(ValueError, match="unsafe member path"):
+        MODULE.safe_extract_tar(archive, tmp_path / "dest")
+
+
+def test_safe_extract_tar_rejects_absolute_and_escaping_symlinks(tmp_path):
+    import tarfile as _tarfile
+    archive = tmp_path / "evil2.tar"
+    with _tarfile.open(archive, "w") as bundle:
+        info = _tarfile.TarInfo("link")
+        info.type = _tarfile.SYMTYPE
+        info.linkname = "/etc/passwd"
+        bundle.addfile(info)
+    with pytest.raises(ValueError, match="unsafe link target"):
+        MODULE.safe_extract_tar(archive, tmp_path / "dest2")
+
+
+def test_safe_extract_tar_extracts_a_clean_archive(tmp_path):
+    import tarfile as _tarfile
+    payload = tmp_path / "ok.txt"
+    payload.write_text("fine\n", encoding="utf-8")
+    archive = tmp_path / "ok.tar"
+    with _tarfile.open(archive, "w") as bundle:
+        bundle.add(payload, arcname="pkg/ok.txt")
+    destination = tmp_path / "dest3"
+    assert MODULE.safe_extract_tar(archive, destination) == 1
+    assert (destination / "pkg/ok.txt").read_text(encoding="utf-8") == "fine\n"
+
+
+def test_restore_caches_uses_no_unpinned_container_image():
+    source = (SCRIPTS_DIR / "run_legacy_gopy_scripted_correctness.py").read_text()
+    assert '"alpine"' not in source
+    assert "alpine" not in source
