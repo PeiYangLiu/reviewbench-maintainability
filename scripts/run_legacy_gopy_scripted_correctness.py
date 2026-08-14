@@ -1,0 +1,4049 @@
+#!/usr/bin/env python3
+"""Provenance-preserving correctness replay adapter for the 19 published-hard
+tasks whose lane is ``gopy`` (15) or ``scripted`` (4) and whose Oracles were
+recovered before the modern lane waves, so they carry no
+``lane_results_source`` replay contract (``source_kind == "published_legacy"``
+in ``run_open_model_correctness.py``'s task plan).
+
+Like its sibling ``run_legacy_reserve_correctness.py`` (which covers the 14
+tasks sourced from the 20260728 reserve: native/rust/jvm/tsjs), this script
+does NOT reinvent normalization or finalization. It only populates the
+extension point that ``run_open_model_correctness.py`` already reads but that
+nothing currently writes for these lanes:
+
+    <output>/legacy/correctness/gopy.jsonl
+    <output>/legacy/correctness/scripted.jsonl
+
+Those raw rows are merged by ``run_open_model_correctness.py finalize``
+alongside ``<output>/modern/correctness/<lane>.jsonl`` and normalized with the
+very same ``normalized_record()`` used for the 374 modern tasks.
+
+What is recovered, and how
+--------------------------
+The per-task replay recipes live in a reviewable data file rather than in
+code: ``data/legacy_contracts/gopy_scripted_20260808.json``
+(``--contract``). Every one of the 19 published-legacy gopy/scripted tasks
+appears there exactly once, either as ``status == "recovered"`` with a fully
+pinned recipe, or as ``status == "blocked"`` with the exact lost assets and
+the evidence that they are lost.
+
+Three recovered recipe kinds are implemented, each replaying the historical,
+previously *proven* behavioral Oracle -- never a source-shape substitute:
+
+``go_docker_p2p``
+    A fresh git worktree of the retained ``repos/<org>__<repo>`` clone is
+    checked out at the exact task ``start_sha``, the staged candidate patch is
+    applied, and the historical container (pinned ``golang:*`` image, task
+    dedicated Go module/build cache volumes, recorded network mode) runs
+    ``go test -count=1 -json -run <oracle.test_selector> <test_target>`` from
+    the recorded ``module_dir``. Correctness requires every name in the
+    Oracle's own ``pass_to_pass_tests`` list to report a ``pass`` action in
+    the ``go test -json`` event stream.
+
+``go_docker_session_oracle``
+    Same materialization, plus the retained, SHA-256-pinned session Oracle
+    test file is copied to its recorded destination inside the worktree
+    before the historical ``go test -tags ... -run <selector>`` command runs.
+
+``python_image_pytest``
+    The historical Docker image itself bakes the exact start checkout (built
+    in place with the pinned scientific-Python toolchain). A disposable
+    container applies the staged candidate patch to that in-image workspace
+    and runs the historical ``pytest`` command with ``--junitxml``; the JUnit
+    report is parsed for the recorded expected test count. Preflight verifies
+    the in-image workspace anchor file is byte-identical to the repository
+    blob at ``start_sha``, so a drifted image can never be replayed as if it
+    were the exact start.
+
+Fail-closed guarantees
+----------------------
+* A task is replayed only if its contract entry is ``recovered`` *and* every
+  required live asset resolves right now: repo checkout containing the exact
+  ``start_sha``, Docker image present (and matching the recorded image ID when
+  one was recorded), Go module/build cache volumes present, session Oracle
+  asset present with the recorded SHA-256, in-image workspace anchor matching
+  the start revision. Anything missing is a preflight blocker and is never
+  scored, never guessed, and never downgraded to a model failure.
+* Blocked tasks additionally re-verify their recorded ``missing_assets``: if
+  every asset a blocker depends on has reappeared, preflight reports
+  ``blocker_possibly_resolved`` and fails, so a recovered asset cannot be
+  silently ignored.
+* Nothing is ever fetched from the network to make a run succeed. Containers
+  run with the recorded network mode only (``none`` unless the historical
+  environment recorded ``host``), Go runs with ``GOTOOLCHAIN=local`` and
+  ``GOFLAGS=-mod=mod`` disabled, and dependency resolution comes exclusively
+  from the retained, ``go.sum``-verified module caches.
+* Resume validates provenance, not just presence: every raw row embeds
+  ``task_fingerprint``/``oracle_fingerprint``/``replay_contract_fingerprint``
+  (which folds in ``ADAPTER_CONTRACT_VERSION``, the contract entry, the
+  live asset state and the current blockers) plus the staged
+  ``patch_sha256``. Stale rows are rerun; rows whose task became blocked are
+  retracted from disk instead of being left behind for ``finalize``.
+
+Typical usage
+-------------
+    # 1) Stage every model's generation results with the existing
+    #    orchestrator, allowing the 40 published-legacy tasks to stay
+    #    unresolved for now:
+    python3 scripts/run_open_model_correctness.py prepare \\
+      --tasks data/releases/hard/20260808/tasks.jsonl \\
+      --oracles data/releases/hard/20260808/oracles.jsonl \\
+      --repo-cache "$REVIEWBENCH_SESSION_FILES/repos" --output <output> \\
+      --model 'my-model=/path/to/generation_results.jsonl' \\
+      --allow-partial-modern
+
+    # 2) Preflight the 19 gopy/scripted contracts (executes nothing):
+    python3 scripts/run_legacy_gopy_scripted_correctness.py preflight \\
+      --tasks data/releases/hard/20260808/tasks.jsonl \\
+      --oracles data/releases/hard/20260808/oracles.jsonl \\
+      --legacy-root /data/<user>/reviewbench-session-<id> \\
+      --asset-root  /data/<user>/reviewbench-openmodels/legacy-recovery-assets/gopy-scripted \\
+      --output <output> --allow-blocked
+
+    # 3) Replay only the ready tasks for one already-staged model:
+    python3 scripts/run_legacy_gopy_scripted_correctness.py replay \\
+      --tasks ... --oracles ... --legacy-root ... --asset-root ... \\
+      --output <output> --model my-model --allow-blocked
+
+    # 4) Finalize as usual; still-blocked pairs stay in "missing_pairs".
+    python3 scripts/run_open_model_correctness.py finalize \\
+      --tasks ... --oracles ... --output <output> --allow-incomplete
+
+``restore-caches`` recreates a lost Go module cache volume from the packaged,
+SHA-256-verified archive under ``--asset-root`` (never from the network).
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import tarfile
+import sys
+import time
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import Any
+
+
+def _load_sibling_module():
+    path = Path(__file__).resolve().parent / "run_open_model_correctness.py"
+    spec = importlib.util.spec_from_file_location(
+        "run_open_model_correctness",
+        path,
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+BASE = _load_sibling_module()
+
+DEFAULT_CONTRACT = (
+    Path(__file__).resolve().parents[1]
+    / "data/legacy_contracts/gopy_scripted_20260808.json"
+)
+
+CONTRACT_SCHEMA = "reviewbench-legacy-replay-contract/v1"
+SUPPORTED_LANES = ("gopy", "scripted")
+RECIPE_KINDS = (
+    "go_docker_p2p",
+    "go_docker_session_oracle",
+    "python_docker_session_oracle",
+    "shell_docker_session_oracle",
+    "sbt_docker_session_oracle",
+    "python_image_pytest",
+)
+
+INFRA_RETRY = "infra_retry"
+CANDIDATE_MISSING = "candidate_missing"
+
+# Bump whenever the *behavior* of a replay_* function or a judging rule
+# changes in a way that could change the outcome for already-recorded rows.
+# Folded into every raw row's ``replay_contract_fingerprint`` so resume reruns
+# rows produced under a since-changed contract.
+ADAPTER_CONTRACT_VERSION = "v1-2026-08-13-gopy-scripted"
+
+
+# ---------------------------------------------------------------------------
+# Contract loading
+# ---------------------------------------------------------------------------
+
+
+def load_contract(path: Path) -> dict[str, Any]:
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    if contract.get("schema_version") != CONTRACT_SCHEMA:
+        raise ValueError(
+            f"unexpected contract schema: {contract.get('schema_version')!r}"
+        )
+    tasks = contract.get("tasks")
+    if not isinstance(tasks, dict) or not tasks:
+        raise ValueError("contract carries no tasks")
+    for task_id, entry in tasks.items():
+        lane = entry.get("lane")
+        if lane not in SUPPORTED_LANES:
+            raise ValueError(f"{task_id}: unsupported contract lane {lane!r}")
+        status = entry.get("status")
+        if status not in {"recovered", "blocked"}:
+            raise ValueError(f"{task_id}: unsupported contract status {status!r}")
+        if status == "recovered":
+            recipe = entry.get("recipe") or {}
+            if recipe.get("kind") not in RECIPE_KINDS:
+                raise ValueError(
+                    f"{task_id}: unsupported recipe kind {recipe.get('kind')!r}"
+                )
+        elif not entry.get("blockers"):
+            raise ValueError(f"{task_id}: blocked entry carries no blockers")
+    return contract
+
+
+def contract_task_ids(contract: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(sorted(contract["tasks"]))
+
+
+# ---------------------------------------------------------------------------
+# Path/placeholder helpers
+# ---------------------------------------------------------------------------
+
+
+def expand_placeholders(
+    value: str,
+    *,
+    legacy_root: Path,
+    asset_root: Path,
+    session_files: Path | None,
+) -> str:
+    replacements = {
+        "${LEGACY_ROOT}": str(legacy_root),
+        "${ASSET_ROOT}": str(asset_root),
+        "${SESSION_FILES}": (
+            str(session_files) if session_files is not None else "${SESSION_FILES}"
+        ),
+    }
+    for token, replacement in replacements.items():
+        value = value.replace(token, replacement)
+    return value
+
+
+def repos_root(legacy_root: Path) -> Path:
+    return legacy_root / "repos"
+
+
+def repo_checkout_dir(legacy_root: Path, repo: str) -> Path:
+    return repos_root(legacy_root) / repo.replace("/", "__")
+
+
+def asset_path(asset_root: Path, relative: str) -> Path:
+    return (asset_root / relative).resolve()
+
+
+# ---------------------------------------------------------------------------
+# Docker helpers
+# ---------------------------------------------------------------------------
+
+
+def docker_available() -> bool:
+    return shutil.which("docker") is not None
+
+
+def docker_image_id(image: str) -> str | None:
+    """Content identity of a locally loaded image, or ``None`` when absent.
+
+    Used instead of a plain existence check so a retagged/rebuilt image at the
+    same name still invalidates any previously-recorded row that referenced it.
+    """
+    if not docker_available():
+        return None
+    result = subprocess.run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def docker_volume_present(volume: str) -> bool:
+    if not docker_available():
+        return False
+    result = subprocess.run(
+        ["docker", "volume", "inspect", volume],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
+def docker_volume_identity(volume: str) -> dict[str, Any] | None:
+    """Cheap, bounded identity of a named volume.
+
+    Only the volume's own metadata (driver/mountpoint/creation time) is read;
+    a multi-gigabyte Go module cache is never walked. Combined with the
+    ``go.sum``-verified nature of the cache contents this is enough to notice
+    a recreated/replaced volume without making every resume decision expensive.
+    """
+    if not docker_available():
+        return None
+    result = subprocess.run(
+        [
+            "docker",
+            "volume",
+            "inspect",
+            "--format",
+            "{{.Driver}}\t{{.Mountpoint}}\t{{.CreatedAt}}",
+            volume,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    parts = result.stdout.strip().split("\t")
+    if len(parts) != 3:
+        return None
+    return {"driver": parts[0], "mountpoint": parts[1], "created_at": parts[2]}
+
+
+def docker_file_sha256(image: str, path: str) -> str | None:
+    """SHA-256 of a file *inside* an image, or ``None`` when unreadable."""
+    if not docker_available():
+        return None
+    result = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--entrypoint",
+            "/bin/sh",
+            image,
+            "-c",
+            f"sha256sum {path}",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    token = result.stdout.strip().split(" ", 1)[0]
+    return token or None
+
+
+# ---------------------------------------------------------------------------
+# Small generic helpers (mirrors of the reserve adapter's, kept local so the
+# two adapters can evolve independently)
+# ---------------------------------------------------------------------------
+
+
+def sha256_file(path: Path) -> str | None:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def candidate_changed_lines(
+    generation: dict[str, Any],
+    changed_paths: list[str],
+) -> int:
+    """Changed-line count for a raw row.
+
+    ``normalized_record()`` surfaces this field verbatim, and the staged
+    generation already carries the authoritative per-candidate line count, so
+    it is preferred; the number of changed paths is only a fallback for a
+    generation row that never recorded one.
+    """
+    value = generation.get("changed_lines")
+    if type(value) is int:
+        return value
+    return len(changed_paths)
+
+
+def patch_changed_paths(patch_text: str) -> list[str]:
+    return list(
+        dict.fromkeys(
+            right
+            for _, right in re.findall(
+                r"^diff --git a/(.+?) b/(.+?)$", patch_text, re.M
+            )
+        )
+    )
+
+
+def scope_is_safe(paths: list[str]) -> bool:
+    for path in paths:
+        if path.startswith("/") or ".." in Path(path).parts:
+            return False
+    return True
+
+
+def apply_patch(workdir: Path, patch_path: Path) -> tuple[bool, str]:
+    git_result = subprocess.run(
+        ["git", "apply", "--whitespace=nowarn", "-p1", str(patch_path)],
+        cwd=workdir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if git_result.returncode == 0:
+        return True, git_result.stdout
+    patch_result = subprocess.run(
+        ["patch", "-p1", "--fuzz=0", "-i", str(patch_path)],
+        cwd=workdir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if patch_result.returncode == 0:
+        return True, patch_result.stdout
+    return False, (
+        f"git apply: {git_result.stdout}\npatch -p1: {patch_result.stdout}"
+    )
+
+
+def commit_present(repo_dir: Path, sha: str) -> bool:
+    if not sha or not repo_dir.is_dir():
+        return False
+    result = subprocess.run(
+        ["git", "-C", str(repo_dir), "cat-file", "-e", f"{sha}^{{commit}}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
+def git_blob_sha256(repo_dir: Path, sha: str, path: str) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(repo_dir), "show", f"{sha}:{path}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if result.returncode != 0:
+        return None
+    return hashlib.sha256(result.stdout).hexdigest()
+
+
+def force_remove_path(path: Path, cleaner_image: str | None = None) -> None:
+    """Remove a path that may contain root-owned files written by a container.
+
+    Oracle runs execute as root inside the container and can leave root-owned
+    artifacts (``__pycache__``, ``.pytest_cache``, build output) inside the
+    bind-mounted worktree. A plain ``rmtree`` by the unprivileged host user
+    then leaves the directory behind, which would make the next
+    ``git worktree add`` fail with "already exists"; a throwaway container
+    with the same privileges cleans it up.
+    """
+    shutil.rmtree(path, ignore_errors=True)
+    if not path.exists():
+        return
+    # Root-owned leftovers are removed with a *pinned, already-required*
+    # image (the recipe's own toolchain), never an unpinned public tag.
+    cleaner = cleaner_image or os.environ.get("REVIEWBENCH_CLEANER_IMAGE")
+    if cleaner and docker_available() and docker_image_id(cleaner):
+        subprocess.run(
+            [
+                "docker", "run", "--rm", "--network", "none",
+                "-v", f"{path.parent}:/target",
+                cleaner, "rm", "-rf", f"/target/{path.name}",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        # Fall back to fixing ownership-independent permission bits and
+        # retrying, so no image is required at all in the common case.
+        for root, dirnames, filenames in os.walk(path, topdown=False):
+            for name in dirnames + filenames:
+                target = Path(root) / name
+                try:
+                    if not target.is_symlink():
+                        target.chmod(0o700)
+                except OSError:
+                    pass
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def git_worktree_checkout(
+    repo_source: Path,
+    start_sha: str,
+    dest: Path,
+    cleaner_image: str | None = None,
+) -> None:
+    subprocess.run(
+        ["git", "-C", str(repo_source), "worktree", "remove", "--force", str(dest)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    force_remove_path(dest, cleaner_image)
+    subprocess.run(
+        ["git", "-C", str(repo_source), "worktree", "prune"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [
+            "git", "-C", str(repo_source), "worktree", "add", "--force",
+            "--detach", str(dest), start_sha,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"exact-start materialization failed: {result.stdout}")
+    head = subprocess.check_output(
+        ["git", "-C", str(dest), "rev-parse", "HEAD"], text=True
+    ).strip()
+    if head != start_sha:
+        raise RuntimeError(
+            f"materialized HEAD {head} is not the exact start {start_sha}"
+        )
+
+
+def remove_worktree(
+    repo_source: Path,
+    dest: Path,
+    cleaner_image: str | None = None,
+) -> None:
+    subprocess.run(
+        ["git", "-C", str(repo_source), "worktree", "remove", "--force", str(dest)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    force_remove_path(dest, cleaner_image)
+    subprocess.run(
+        ["git", "-C", str(repo_source), "worktree", "prune"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def run_subprocess(
+    command: list[str],
+    *,
+    cwd: Path | None,
+    log_path: Path,
+    env: dict[str, str] | None = None,
+    timeout: int = 1800,
+) -> tuple[int, float, str]:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    started = time.time()
+    with open(log_path, "w") as stream:
+        try:
+            proc = subprocess.run(
+                command,
+                cwd=cwd,
+                env=env,
+                stdout=stream,
+                stderr=subprocess.STDOUT,
+                timeout=timeout,
+            )
+            return proc.returncode, round(time.time() - started, 3), ""
+        except subprocess.TimeoutExpired:
+            return 124, round(time.time() - started, 3), f"timeout after {timeout}s"
+        except Exception as error:  # pragma: no cover - defensive
+            return 125, round(time.time() - started, 3), repr(error)
+
+
+# ---------------------------------------------------------------------------
+# Result parsing
+# ---------------------------------------------------------------------------
+
+
+def go_test_results(text: str) -> dict[str, str]:
+    """Map test name -> terminal action from a ``go test -json`` stream.
+
+    Non-JSON lines (build failures, panics printed before the event stream)
+    are ignored here; the caller still fails closed on them because a missing
+    expected test can never be reported as ``pass``.
+    """
+    results: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        name = event.get("Test")
+        action = event.get("Action")
+        if name and action in {"pass", "fail", "skip"}:
+            results[str(name)] = str(action)
+    return results
+
+
+def go_p2p_outcome(
+    text: str,
+    expected: list[str],
+) -> tuple[bool, int, list[str]]:
+    """PASS_TO_PASS judgement over a ``go test -json`` stream.
+
+    Correctness requires *every* Oracle-recorded PASS_TO_PASS test to report a
+    ``pass`` action; a test that vanished from the stream (build failure, or a
+    candidate that renamed/removed it) counts as failed, never as absent.
+    """
+    results = go_test_results(text)
+    failed = [name for name in expected if results.get(name) != "pass"]
+    passed = len(expected) - len(failed)
+    return (not failed and bool(expected)), passed, failed
+
+
+def junit_outcome(path: Path) -> tuple[int, int, list[str]]:
+    """Return ``(passed, total, failed_names)`` from a JUnit XML report."""
+    tree = ET.parse(path)
+    root = tree.getroot()
+    suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+    passed = 0
+    total = 0
+    failed: list[str] = []
+    for suite in suites:
+        for case in suite.iter("testcase"):
+            total += 1
+            problems = (
+                list(case.iter("failure"))
+                + list(case.iter("error"))
+            )
+            skipped = list(case.iter("skipped"))
+            if problems:
+                failed.append(
+                    f"{case.get('classname') or ''}::{case.get('name') or ''}"
+                )
+            elif not skipped:
+                passed += 1
+    return passed, total, failed
+
+
+# ---------------------------------------------------------------------------
+# Single source of truth for execution-relevant assets
+# ---------------------------------------------------------------------------
+#
+# Every artifact that can change what an Oracle executes -- the pinned Oracle
+# sources (``session_test``/``session_tests``/``harness``, and the golden-side
+# variants), every declared ``host_mounts`` tree, every packaged cache archive,
+# every Docker image and cache volume, the retained repository checkout and the
+# recorded golden patch -- is enumerated in exactly one place,
+# ``asset_inventory()``. Preflight verifies it, the replay-contract fingerprint
+# binds it, and replay re-verifies it immediately before and after execution.
+# Nothing may read an execution input that does not appear here.
+
+
+ASSET_DIGEST_CACHE = ".asset-digest-cache.json"
+
+_digest_cache: dict[str, dict[str, Any]] = {}
+_digest_cache_path: Path | None = None
+_digest_cache_dirty = False
+
+
+def load_digest_cache(asset_root: Path) -> None:
+    """Load the per-file digest cache.
+
+    The recorded digest of a tree is always over *full file content*; this
+    cache only avoids re-reading a file whose ``(size, mtime_ns, inode)``
+    identity is unchanged since it was last hashed, exactly like a build
+    system's index. ``--rehash`` bypasses it entirely.
+    """
+    global _digest_cache, _digest_cache_path, _digest_cache_dirty
+    _digest_cache_path = asset_root / ASSET_DIGEST_CACHE
+    _digest_cache_dirty = False
+    try:
+        _digest_cache = json.loads(
+            _digest_cache_path.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        _digest_cache = {}
+
+
+def save_digest_cache() -> None:
+    if _digest_cache_path is None or not _digest_cache_dirty:
+        return
+    try:
+        _digest_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        BASE.atomic_json(_digest_cache_path, _digest_cache)
+    except OSError:  # pragma: no cover - cache is best effort
+        pass
+
+
+def file_content_digest(path: Path, *, rehash: bool = False) -> str:
+    """SHA-256 of one filesystem entry, symlink-aware.
+
+    A symlink is hashed as its *target string*, never by following it: a
+    dangling or repointed link must change the digest, and an execution input
+    must never be silently pulled in from outside the asset root.
+    """
+    global _digest_cache_dirty
+    if path.is_symlink():
+        return "symlink:" + hashlib.sha256(
+            os.readlink(path).encode("utf-8")
+        ).hexdigest()
+    stat = path.stat()
+    key = str(path)
+    identity = [stat.st_size, stat.st_mtime_ns, stat.st_ino]
+    if not rehash:
+        cached = _digest_cache.get(key)
+        if cached and cached.get("identity") == identity:
+            return str(cached["digest"])
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    value = digest.hexdigest()
+    _digest_cache[key] = {"identity": identity, "digest": value}
+    _digest_cache_dirty = True
+    return value
+
+
+def tree_content_digest(path: Path, *, rehash: bool = False) -> str:
+    """Full, symlink-aware content digest of a directory tree.
+
+    Folds in every entry's path relative to the tree root, its kind, its
+    executable bit and its full content digest, in a deterministic order.
+    """
+    records: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
+        dirnames.sort()
+        base = Path(dirpath)
+        for name in sorted(dirnames + filenames):
+            entry = base / name
+            relative = entry.relative_to(path).as_posix()
+            if entry.is_symlink():
+                records.append(f"l\0{relative}\0{file_content_digest(entry)}")
+            elif entry.is_dir():
+                records.append(f"d\0{relative}")
+            elif entry.is_file():
+                mode = "x" if entry.stat().st_mode & 0o111 else "-"
+                records.append(
+                    f"f{mode}\0{relative}\0"
+                    f"{file_content_digest(entry, rehash=rehash)}"
+                )
+            else:  # pragma: no cover - device/socket entries are never assets
+                records.append(f"?\0{relative}")
+    return hashlib.sha256("\n".join(records).encode("utf-8")).hexdigest()
+
+
+def path_digest(path: Path, *, rehash: bool = False) -> str | None:
+    try:
+        if path.is_symlink():
+            return file_content_digest(path)
+        if path.is_dir():
+            return tree_content_digest(path, rehash=rehash)
+        if path.is_file():
+            return file_content_digest(path, rehash=rehash)
+    except OSError:
+        return None
+    return None
+
+
+def asset_record(
+    *,
+    role: str,
+    kind: str,
+    location: str,
+    expected: str | None = None,
+    mutable: bool = False,
+    required: bool = True,
+    **extra: Any,
+) -> dict[str, Any]:
+    record = {
+        "role": role,
+        "kind": kind,
+        "location": location,
+        "expected_sha256": expected,
+        "mutable": mutable,
+        "required": required,
+    }
+    record.update(extra)
+    return record
+
+
+def asset_inventory(
+    entry: dict[str, Any],
+    *,
+    asset_root: Path,
+    legacy_root: Path,
+) -> list[dict[str, Any]]:
+    """Every execution-relevant asset of one recovered contract entry.
+
+    ``kind`` is one of ``file``/``tree``/``archive`` (content-hashed),
+    ``docker_image`` (identity-pinned) or ``docker_volume`` (presence-pinned).
+    ``mutable`` marks a tree the Oracle writes to, which replay must copy into
+    an isolated per-run workspace instead of mounting in place.
+    """
+    if entry.get("status") != "recovered":
+        return []
+    recipe = entry.get("recipe") or {}
+    validation = entry.get("oracle_validation") or {}
+    inventory: list[dict[str, Any]] = []
+
+    for asset in session_assets(recipe):
+        inventory.append(asset_record(
+            role="oracle_source",
+            kind="file",
+            location=str(asset_path(asset_root, str(asset["asset"]))),
+            expected=str(asset.get("sha256") or ""),
+            declared_as=str(asset["asset"]),
+            destination=str(asset.get("destination") or ""),
+        ))
+    for asset in validation.get("golden_session_tests") or []:
+        inventory.append(asset_record(
+            role="golden_oracle_source",
+            kind="file",
+            location=str(asset_path(asset_root, str(asset["asset"]))),
+            expected=str(asset.get("sha256") or ""),
+            declared_as=str(asset["asset"]),
+            destination=str(asset.get("destination") or ""),
+        ))
+    if validation.get("golden_patch_asset"):
+        inventory.append(asset_record(
+            role="golden_patch",
+            kind="file",
+            location=str(asset_path(asset_root, str(validation["golden_patch_asset"]))),
+            expected=str(validation.get("golden_patch_sha256") or ""),
+            declared_as=str(validation["golden_patch_asset"]),
+        ))
+    evidence = (recipe.get("coverage") or {})
+    if evidence.get("kind") == "attested" and evidence.get("evidence"):
+        inventory.append(asset_record(
+            role="attested_coverage_evidence",
+            kind="file",
+            location=str(asset_path(asset_root, str(evidence["evidence"]))),
+            expected=str(evidence.get("evidence_sha256") or ""),
+            declared_as=str(evidence["evidence"]),
+        ))
+
+    fixtures = recipe.get("offline_http_fixtures") or {}
+    for key in ("root", "cert", "key", "server"):
+        declared = fixtures.get(key)
+        if declared:
+            inventory.append(asset_record(
+                role=f"offline_http_fixture_{key}",
+                kind="tree" if key == "root" else "file",
+                location=str(asset_path(asset_root, str(declared))),
+                expected=fixtures.get(f"{key}_sha256"),
+                declared_as=str(declared),
+            ))
+
+    for mount in recipe.get("host_mounts") or []:
+        location = expand_placeholders(
+            str(mount["host"]),
+            legacy_root=legacy_root,
+            asset_root=asset_root,
+            session_files=None,
+        )
+        if mount.get("pin") == "git_commit":
+            # A retained repository mirror is pinned by the commit object it
+            # must contain, which is a stronger content guarantee than a tree
+            # digest and is stable while unrelated worktrees come and go.
+            inventory.append(asset_record(
+                role="host_mount_git_mirror",
+                kind="git_checkout",
+                location=location,
+                start_sha=str(entry.get("start_sha") or ""),
+                container=str(mount.get("container") or ""),
+                mode=str(mount.get("mode") or "ro"),
+            ))
+            continue
+        inventory.append(asset_record(
+            role="host_mount",
+            kind="tree",
+            location=location,
+            expected=mount.get("sha256"),
+            mutable=bool(mount.get("mutable")),
+            container=str(mount.get("container") or ""),
+            mode=str(mount.get("mode") or "rw"),
+            source_archive=mount.get("source_archive"),
+        ))
+    golden_overrides_early = validation.get("golden_recipe_overrides") or {}
+    for source, phase in ((recipe, "start"), (golden_overrides_early, "golden")):
+        for override_key in ("gomodcache_archive", "cache_archive"):
+            archive = source.get(override_key)
+            if not archive:
+                continue
+            inventory.append(asset_record(
+                role=f"packaged_cache_archive_{phase}",
+                kind="archive",
+                location=str(asset_path(asset_root, str(archive))),
+                expected=source.get(f"{override_key}_sha256"),
+                declared_as=str(archive),
+                phase=phase,
+                seeds_volume=source.get("gomodcache_volume"),
+            ))
+
+    golden_overrides = validation.get("golden_recipe_overrides") or {}
+    for source in (recipe, golden_overrides):
+        image = source.get("image")
+        if image:
+            inventory.append(asset_record(
+                role="docker_image",
+                kind="docker_image",
+                location=str(image),
+                expected=source.get("image_id"),
+            ))
+        for key in ("gomodcache_volume", "gobuildcache_volume"):
+            volume = source.get(key)
+            if not volume:
+                continue
+            if key == "gomodcache_volume" and source.get("gomodcache_archive"):
+                # The module cache is pinned by its immutable, fully hashed
+                # archive; the volume itself is a disposable, per-replay copy
+                # seeded from that archive, so its metadata is not an identity.
+                continue
+            if key == "gobuildcache_volume":
+                # Go's build cache is content-addressed and self-verifying: a
+                # stale or corrupt entry is detected and recompiled by the
+                # toolchain itself, so it is a derived accelerator, never an
+                # execution input. It is therefore deliberately not pinned
+                # (a metadata-only "pin" would be meaningless).
+                continue
+            inventory.append(asset_record(
+                role=key,
+                kind="docker_volume",
+                location=str(volume),
+            ))
+
+    inventory.append(asset_record(
+        role="repo_checkout",
+        kind="git_checkout",
+        location=str(repo_checkout_dir(legacy_root, entry["repo"])),
+        start_sha=str(entry.get("start_sha") or ""),
+    ))
+    deduped: dict[tuple[str, str], dict[str, Any]] = {}
+    for record in inventory:
+        deduped.setdefault((record["kind"], record["location"]), record)
+    return list(deduped.values())
+
+
+def verify_asset(
+    record: dict[str, Any],
+    *,
+    rehash: bool = False,
+) -> tuple[str | None, str | None]:
+    """``(observed digest, problem)`` for one inventory record."""
+    kind = record["kind"]
+    location = record["location"]
+    if kind == "docker_image":
+        observed = docker_image_id(location)
+        if observed is None:
+            return None, (
+                f"missing Docker image: {location} (must be built/imported out "
+                "of band; never fabricated)"
+            )
+        if record.get("expected_sha256") and observed != record["expected_sha256"]:
+            return observed, (
+                f"Docker image {location} is {observed}, not the recorded "
+                f"{record['expected_sha256']}"
+            )
+        return observed, None
+    if kind == "docker_volume":
+        if not docker_volume_present(location):
+            return None, f"missing Docker volume: {location}"
+        identity = docker_volume_identity(location)
+        return BASE.canonical_hash(identity), None
+    if kind == "git_checkout":
+        path = Path(location)
+        if not path.is_dir():
+            return None, f"missing retained repo checkout: {path}"
+        start_sha = str(record.get("start_sha") or "")
+        if not start_sha:
+            return None, "task is missing start_sha"
+        if not commit_present(path, start_sha):
+            return None, (
+                f"retained repo checkout {path} does not contain the exact "
+                f"task start_sha {start_sha} as a commit"
+            )
+        return f"commit:{start_sha}", None
+    path = Path(location)
+    if not path.exists() and not path.is_symlink():
+        if not record.get("required", True):
+            return None, None
+        return None, f"missing {record['role']} asset: {path}"
+    observed = path_digest(path, rehash=rehash)
+    if observed is None:
+        return None, f"unreadable {record['role']} asset: {path}"
+    expected = record.get("expected_sha256")
+    if expected and observed != expected:
+        return observed, (
+            f"{record['role']} asset {path} has SHA-256 {observed}, not the "
+            f"recorded {expected}"
+        )
+    if not expected:
+        return observed, (
+            f"{record['role']} asset {path} has no recorded SHA-256 in the "
+            "contract; every execution-relevant asset must be pinned"
+        )
+    return observed, None
+
+
+def verify_assets(
+    inventory: list[dict[str, Any]],
+    *,
+    rehash: bool = False,
+) -> tuple[dict[str, str | None], list[str]]:
+    digests: dict[str, str | None] = {}
+    problems: list[str] = []
+    for record in inventory:
+        observed, problem = verify_asset(record, rehash=rehash)
+        digests[f"{record['kind']}:{record['location']}"] = observed
+        if problem:
+            problems.append(problem)
+    return digests, problems
+
+
+# ---------------------------------------------------------------------------
+# Blockers / asset state
+# ---------------------------------------------------------------------------
+
+
+def missing_asset_paths(
+    entry: dict[str, Any],
+    *,
+    legacy_root: Path,
+    asset_root: Path,
+    session_files: Path | None,
+) -> list[tuple[str, str, bool]]:
+    """Return ``(kind, expanded value, present now)`` for declared losses."""
+    resolved = []
+    for asset in entry.get("missing_assets") or []:
+        kind = str(asset.get("kind"))
+        value = expand_placeholders(
+            str(asset.get("value")),
+            legacy_root=legacy_root,
+            asset_root=asset_root,
+            session_files=session_files,
+        )
+        if kind == "docker_image":
+            present = docker_image_id(value) is not None
+        elif kind == "docker_volume":
+            present = docker_volume_present(value)
+        else:
+            present = (
+                Path(value).exists()
+                if "${SESSION_FILES}" not in value
+                else False
+            )
+        resolved.append((kind, value, present))
+    return resolved
+
+
+def recovered_blockers(
+    task_id: str,
+    entry: dict[str, Any],
+    oracle: dict[str, Any],
+    task: dict[str, Any],
+    *,
+    legacy_root: Path,
+    asset_root: Path,
+    rehash: bool = False,
+) -> list[str]:
+    """Fail-closed asset and contract checks for one recovered entry.
+
+    Every execution-relevant asset is checked through the single
+    ``asset_inventory``/``verify_assets`` path, so a missing, unpinned or
+    tampered input can never reach execution or scoring.
+    """
+    recipe = entry["recipe"]
+    blockers: list[str] = []
+
+    if not docker_available():
+        blockers.append("docker CLI is not available on this host")
+
+    inventory = asset_inventory(
+        entry, asset_root=asset_root, legacy_root=legacy_root
+    )
+    if str(task.get("start_sha") or "") != str(entry.get("start_sha") or ""):
+        blockers.append("contract start_sha does not match the release task")
+    _, problems = verify_assets(inventory, rehash=rehash)
+    blockers.extend(problems)
+
+    if not recipe.get("image"):
+        blockers.append("contract recipe is missing an image")
+
+    kind = recipe["kind"]
+    if kind == "go_docker_p2p":
+        selector = oracle.get(str(recipe.get("selector_field")))
+        if not selector:
+            blockers.append(
+                f"Oracle is missing {recipe.get('selector_field')!r}"
+            )
+        expected = oracle.get(str(recipe.get("pass_to_pass_field"))) or []
+        if not expected:
+            blockers.append(
+                f"Oracle is missing {recipe.get('pass_to_pass_field')!r}"
+            )
+    elif kind == "go_docker_session_oracle":
+        if not recipe.get("expected_tests"):
+            blockers.append("contract recipe is missing expected_tests")
+    elif kind == "python_image_pytest":
+        image = recipe.get("image")
+        checkout = repo_checkout_dir(legacy_root, entry["repo"])
+        start_sha = str(task.get("start_sha") or "")
+        anchor = recipe.get("workspace_anchor") or {}
+        if not anchor:
+            blockers.append("contract recipe is missing workspace_anchor")
+        elif image and docker_image_id(str(image)) is not None:
+            workdir = str(recipe.get("workdir") or ".")
+            observed = docker_file_sha256(
+                str(image), f"{workdir}/{anchor['path']}"
+            )
+            if observed is None:
+                blockers.append(
+                    f"cannot read in-image workspace anchor "
+                    f"{workdir}/{anchor['path']} from {image}"
+                )
+            elif observed != anchor.get("sha256"):
+                blockers.append(
+                    f"in-image workspace anchor {anchor['path']} is {observed}, "
+                    f"not the recorded {anchor.get('sha256')}"
+                )
+            elif checkout.is_dir() and start_sha:
+                blob = git_blob_sha256(checkout, start_sha, str(anchor["path"]))
+                if blob != anchor.get("sha256"):
+                    blockers.append(
+                        f"in-image workspace anchor {anchor['path']} does not "
+                        f"match the repository blob at start_sha {start_sha}"
+                    )
+    return blockers
+
+
+def task_blockers(
+    task_id: str,
+    entry: dict[str, Any],
+    oracle: dict[str, Any],
+    task: dict[str, Any],
+    *,
+    legacy_root: Path,
+    asset_root: Path,
+    session_files: Path | None,
+    rehash: bool = False,
+) -> list[str]:
+    if entry["status"] == "recovered":
+        return recovered_blockers(
+            task_id,
+            entry,
+            oracle,
+            task,
+            legacy_root=legacy_root,
+            asset_root=asset_root,
+            rehash=rehash,
+        )
+    blockers = []
+    for blocker in entry.get("blockers") or []:
+        blockers.append(f"{blocker.get('kind')}: {blocker.get('detail')}")
+    declared = missing_asset_paths(
+        entry,
+        legacy_root=legacy_root,
+        asset_root=asset_root,
+        session_files=session_files,
+    )
+    if declared and all(present for _, _, present in declared):
+        blockers.append(
+            "blocker_possibly_resolved: every asset this blocker depends on "
+            "is present again "
+            f"({[value for _, value, _ in declared]}); re-engineer the "
+            "contract entry instead of leaving the task unscored"
+        )
+    return blockers
+
+
+def asset_state(
+    task_id: str,
+    entry: dict[str, Any],
+    *,
+    legacy_root: Path,
+    asset_root: Path,
+) -> dict[str, Any]:
+    """Identity of every execution-relevant asset of a recovered entry.
+
+    This is the same ``asset_inventory`` preflight verifies, so the replay
+    contract fingerprint is bound to the *observed* digest of every Oracle
+    source, mounted tree, packaged archive, Docker image, cache volume and the
+    retained checkout. Replacing any of them -- even in place, at the same
+    path -- invalidates previously-recorded rows instead of being resumed past.
+    """
+    if entry.get("status") != "recovered":
+        return {"status": entry.get("status")}
+    inventory = asset_inventory(
+        entry, asset_root=asset_root, legacy_root=legacy_root
+    )
+    digests, problems = verify_assets(inventory)
+    return {
+        "assets": digests,
+        "problems": sorted(problems),
+        "declared": sorted(
+            f"{record['kind']}:{record['location']}" for record in inventory
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Row provenance / staleness
+# ---------------------------------------------------------------------------
+
+
+def replay_contract_fingerprint(
+    task_id: str,
+    entry: dict[str, Any],
+    legacy_root: Path,
+    asset_root: Path,
+    blockers: list[str],
+) -> str:
+    payload = {
+        "adapter_contract_version": ADAPTER_CONTRACT_VERSION,
+        "contract_entry": entry,
+        "legacy_root": str(legacy_root),
+        "asset_root": str(asset_root),
+        "blockers": sorted(blockers),
+        "asset_state": asset_state(
+            task_id, entry, legacy_root=legacy_root, asset_root=asset_root
+        ),
+    }
+    return BASE.canonical_hash(payload)
+
+
+def staged_patch_digest(generation: dict[str, Any]) -> tuple[Path | None, str | None]:
+    """``(resolved patch path, live SHA-256)`` for a staged candidate.
+
+    The digest is recomputed from the file on disk every time: a staged patch
+    that vanished or was rewritten after ``prepare`` must never be applied, and
+    must never be mistaken for a model whose patch failed to apply.
+    """
+    raw = generation.get("patch_file")
+    if not raw:
+        return None, None
+    path = Path(str(raw)).expanduser()
+    if not path.is_file():
+        return path, None
+    return path, file_content_digest(path, rehash=True)
+
+
+def verify_staged_patch(generation: dict[str, Any]) -> tuple[str | None, str | None]:
+    """``(live digest, problem)`` for the staged candidate patch."""
+    if generation.get("apply_ok") is not True:
+        return None, None
+    path, digest = staged_patch_digest(generation)
+    if path is None:
+        return None, "staged generation row carries no patch_file"
+    if digest is None:
+        return None, f"staged candidate patch is missing: {path}"
+    recorded = generation.get("patch_sha256")
+    if not recorded:
+        return digest, f"staged generation row for {path} carries no patch_sha256"
+    if digest != recorded:
+        return digest, (
+            f"staged candidate patch {path} has SHA-256 {digest}, not the "
+            f"staged patch_sha256 {recorded}"
+        )
+    return digest, None
+
+
+def row_provenance_fields(
+    task: dict[str, Any],
+    oracle: dict[str, Any],
+    task_id: str,
+    entry: dict[str, Any],
+    generation: dict[str, Any],
+    legacy_root: Path,
+    asset_root: Path,
+    blockers: list[str],
+) -> dict[str, Any]:
+    live_patch_digest = staged_patch_digest(generation)[1]
+    return {
+        "task_fingerprint": BASE.task_fingerprint(task),
+        "oracle_fingerprint": BASE.canonical_hash(oracle),
+        "replay_contract_fingerprint": replay_contract_fingerprint(
+            task_id, entry, legacy_root, asset_root, blockers
+        ),
+        "generation_apply_ok": generation.get("apply_ok"),
+        # The *live* digest of the staged patch file, not the digest the
+        # generation row claims: a rewritten patch must invalidate the row.
+        "patch_file_sha256": live_patch_digest,
+    }
+
+
+def row_is_stale(
+    existing_row: dict[str, Any],
+    task: dict[str, Any],
+    oracle: dict[str, Any],
+    task_id: str,
+    entry: dict[str, Any],
+    generation: dict[str, Any],
+    legacy_root: Path,
+    asset_root: Path,
+    blockers: list[str],
+) -> bool:
+    current = row_provenance_fields(
+        task,
+        oracle,
+        task_id,
+        entry,
+        generation,
+        legacy_root,
+        asset_root,
+        blockers,
+    )
+    if any(existing_row.get(field) != value for field, value in current.items()):
+        return True
+    if existing_row.get("patch_sha256") != generation.get("patch_sha256"):
+        return True
+    # Live drift of the staged patch file itself (same recorded sha256, new
+    # bytes on disk) also invalidates a recorded row.
+    return existing_row.get("patch_file_sha256") != staged_patch_digest(generation)[1]
+
+
+# ---------------------------------------------------------------------------
+# Concurrency-safe raw-row persistence
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def lane_lock(legacy_dir: Path, lane: str):
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = legacy_dir / f".{lane}.lock"
+    with open(lock_path, "a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def existing_raw_rows(
+    legacy_dir: Path,
+    lane: str,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    path = legacy_dir / f"{lane}.jsonl"
+    if not path.is_file():
+        return {}
+    return {(row["id"], row["model"]): row for row in BASE.read_jsonl(path)}
+
+
+def append_raw_row(
+    legacy_dir: Path,
+    lane: str,
+    row: dict[str, Any],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    key = (row["id"], row["model"])
+    with lane_lock(legacy_dir, lane):
+        existing = existing_raw_rows(legacy_dir, lane)
+        existing[key] = row
+        ordered = sorted(
+            existing.values(), key=lambda entry: (entry["id"], entry["model"])
+        )
+        BASE.atomic_jsonl(legacy_dir / f"{lane}.jsonl", ordered)
+        return existing
+
+
+def retract_raw_row(
+    legacy_dir: Path,
+    lane: str,
+    task_id: str,
+    model: str,
+) -> bool:
+    key = (task_id, model)
+    with lane_lock(legacy_dir, lane):
+        existing = existing_raw_rows(legacy_dir, lane)
+        if key not in existing:
+            return False
+        del existing[key]
+        ordered = sorted(
+            existing.values(), key=lambda entry: (entry["id"], entry["model"])
+        )
+        BASE.atomic_jsonl(legacy_dir / f"{lane}.jsonl", ordered)
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Evidence handling
+# ---------------------------------------------------------------------------
+
+
+def model_component(model: str) -> str:
+    """Collision-free filesystem component for a ``--model`` value.
+
+    ``BASE.safe_component`` alone is a many-to-one slug, so two distinct valid
+    model IDs could share (and concurrently clobber) one scratch/evidence
+    subtree; a short digest of the exact model string makes it injective.
+    """
+    slug = BASE.safe_component(model)
+    digest = hashlib.sha256(model.encode("utf-8")).hexdigest()[:16]
+    return f"{slug}-{digest}"
+
+
+def evidence_dir(output: Path, lane: str, model: str, task_id: str) -> Path:
+    return (
+        output
+        / "legacy/evidence"
+        / lane
+        / model_component(model)
+        / BASE.safe_component(task_id)
+    )
+
+
+def persist_evidence(
+    output: Path,
+    lane: str,
+    model: str,
+    task_id: str,
+    scratch: Path,
+) -> dict[str, str]:
+    """Copy the small text logs out of a disposable scratch workspace.
+
+    The scratch tree holds a full repo worktree (potentially gigabytes) and
+    must never linger under ``--output`` where ``finalize``'s
+    ``write_artifact_set`` would hash it as evidence. Only ``*.log``/``*.xml``
+    reports are copied into a hashed ``legacy/evidence`` subtree; raw rows
+    reference those output-relative paths, never an unhashed external path.
+    """
+    destination = evidence_dir(output, lane, model, task_id)
+    preserved: dict[str, str] = {}
+    if scratch.is_dir():
+        destination.mkdir(parents=True, exist_ok=True)
+        for pattern in ("*.log", "*.xml"):
+            for artifact in sorted(scratch.glob(pattern)):
+                target = destination / artifact.name
+                shutil.copy2(artifact, target)
+                preserved[artifact.name] = str(target.relative_to(output))
+    shutil.rmtree(scratch, ignore_errors=True)
+    return preserved
+
+
+# ---------------------------------------------------------------------------
+# Release / plan loading
+# ---------------------------------------------------------------------------
+
+
+def load_release_and_plan(
+    tasks_path: Path,
+    oracles_path: Path,
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    tasks, oracles, tasks_by_id, oracles_by_id = BASE.load_release(
+        tasks_path, oracles_path
+    )
+    plan = BASE.build_task_plan(tasks, oracles_by_id)
+    return tasks_by_id, oracles_by_id, plan
+
+
+def select_scope(
+    plan: list[dict[str, Any]],
+    contract: dict[str, Any],
+    task_ids: list[str] | None,
+) -> list[dict[str, Any]]:
+    known = set(contract_task_ids(contract))
+    wanted = set(task_ids) if task_ids else set(known)
+    unknown = wanted - known
+    if unknown:
+        raise ValueError(
+            f"--task-id values outside the contract scope: {sorted(unknown)}"
+        )
+    rows = [row for row in plan if row["id"] in wanted]
+    missing = wanted - {row["id"] for row in rows}
+    if missing:
+        raise ValueError(
+            f"task IDs absent from --tasks/--oracles: {sorted(missing)}"
+        )
+    drift = [row["id"] for row in rows if row["source_kind"] != "published_legacy"]
+    if drift:
+        raise ValueError(
+            "one or more contract task IDs already have a modern "
+            f"lane_results_source and are no longer published_legacy: {drift}"
+        )
+    lane_drift = [
+        row["id"]
+        for row in rows
+        if row["lane"] != contract["tasks"][row["id"]]["lane"]
+    ]
+    if lane_drift:
+        raise ValueError(f"lane classification drifted for: {lane_drift}")
+    sha_drift = [
+        row["id"]
+        for row in rows
+        if row["start_sha"] != contract["tasks"][row["id"]]["start_sha"]
+    ]
+    if sha_drift:
+        raise ValueError(f"start SHA drifted for: {sha_drift}")
+    return rows
+
+
+def staged_generation_path(output: Path, model: str) -> Path:
+    return (
+        output
+        / "inputs/models"
+        / BASE.safe_component(model)
+        / "generation_results.normalized.jsonl"
+    )
+
+
+def load_staged_generation(
+    output: Path,
+    model: str,
+    task_ids: set[str],
+) -> dict[str, dict[str, Any]]:
+    path = staged_generation_path(output, model)
+    if not path.is_file():
+        raise ValueError(
+            f"staged generation results not found for {model!r}: {path}. "
+            "Run `run_open_model_correctness.py prepare "
+            "--allow-partial-modern` first."
+        )
+    by_id: dict[str, dict[str, Any]] = {}
+    mislabeled: list[str] = []
+    for row in BASE.read_jsonl(path):
+        row_id = row.get("id")
+        if row_id not in task_ids:
+            continue
+        # The staging directory is keyed by the many-to-one
+        # ``safe_component`` slug, so every row's own embedded model must
+        # match exactly or a colliding/mislabeled file could be consumed
+        # under the wrong model name.
+        if row.get("model") != model:
+            mislabeled.append(f"{row_id}: embedded model {row.get('model')!r}")
+            continue
+        by_id[row_id] = row
+    if mislabeled:
+        raise ValueError(
+            f"staged generation results at {path} contain rows whose embedded "
+            f"model does not match the requested --model {model!r}: {mislabeled}"
+        )
+    missing = task_ids - set(by_id)
+    if missing:
+        raise ValueError(
+            f"staged generation results for {model!r} are missing IDs: "
+            f"{sorted(missing)}"
+        )
+    return by_id
+
+
+# ---------------------------------------------------------------------------
+# Replay recipes
+# ---------------------------------------------------------------------------
+
+
+def docker_run_command(
+    recipe: dict[str, Any],
+    *,
+    mounts: list[str],
+    env: dict[str, str],
+    workdir: str,
+    command: list[str],
+    entrypoint: str | None = None,
+) -> list[str]:
+    argv = [
+        "docker", "run", "--rm",
+        "--network", str(recipe.get("network") or "none"),
+    ]
+    for host in (recipe.get("offline_http_fixtures") or {}).get("hosts") or []:
+        argv.extend(["--add-host", f"{host}:127.0.0.1"])
+    if entrypoint is not None:
+        argv.extend(["--entrypoint", entrypoint])
+    argv.extend(mounts)
+    for key, value in sorted(env.items()):
+        argv.extend(["-e", f"{key}={value}"])
+    argv.extend(["-w", workdir])
+    argv.append(str(recipe["image"]))
+    argv.extend(command)
+    return argv
+
+
+def infra_row(
+    task_id: str,
+    model: str,
+    lane: str,
+    start_sha: str,
+    generation: dict[str, Any],
+    detail: str,
+) -> dict[str, Any]:
+    """A non-scoring infrastructure row (never a model pass/fail)."""
+    return {
+        "id": task_id,
+        "model": model,
+        "lane": lane,
+        "source_kind": "published_legacy",
+        "start_sha": start_sha,
+        "patch_sha256": generation.get("patch_sha256"),
+        "status": INFRA_RETRY,
+        "candidate_result": INFRA_RETRY,
+        "correctness_ok": None,
+        "patch_apply": None,
+        "scope_ok": None,
+        "error": detail[-4000:],
+    }
+
+
+def apply_error_row(
+    task_id: str,
+    model: str,
+    lane: str,
+    start_sha: str,
+    generation: dict[str, Any],
+    detail: str,
+) -> dict[str, Any]:
+    return {
+        "id": task_id,
+        "model": model,
+        "lane": lane,
+        "source_kind": "published_legacy",
+        "start_sha": start_sha,
+        "patch_sha256": generation.get("patch_sha256"),
+        "status": "apply_error",
+        "candidate_result": "apply_error",
+        "correctness_ok": False,
+        "patch_apply": False,
+        "scope_ok": None,
+        "error": detail[-4000:],
+    }
+
+
+# Generic Oracle execution layer shared by ``replay`` and ``validate-oracle``.
+#
+# Every recovered recipe -- historical or newly engineered -- ultimately means
+# "materialize a workspace at an exact revision, drop the pinned Oracle
+# sources into it, and run one pinned command in one pinned container". The
+# helpers below express exactly that, so a candidate replay and a
+# start/source-only-golden Oracle validation execute *the same* command and
+# can never drift apart.
+
+
+def session_assets(recipe: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pinned Oracle sources a recipe injects into the workspace."""
+    assets = []
+    single = recipe.get("session_test")
+    if single:
+        assets.append(single)
+    assets.extend(recipe.get("session_tests") or [])
+    assets.extend(recipe.get("harness") or [])
+    return assets
+
+
+def install_session_assets(
+    recipe: dict[str, Any],
+    asset_root: Path,
+    workspace: Path,
+) -> None:
+    for asset in session_assets(recipe):
+        source = asset_path(asset_root, str(asset["asset"]))
+        destination = workspace / str(asset["destination"])
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        if asset.get("executable"):
+            destination.chmod(0o755)
+
+
+def workspace_workdir(recipe: dict[str, Any]) -> str:
+    mount = str(recipe.get("workspace_mount") or "/work")
+    relative = str(
+        recipe.get("module_dir") or recipe.get("project_root") or "."
+    )
+    if relative in {"", "."}:
+        return mount
+    return f"{mount}/{relative}"
+
+
+def go_oracle_command(
+    recipe: dict[str, Any],
+    oracle: dict[str, Any],
+    *,
+    coverage_out: str | None,
+) -> tuple[list[str], list[str]]:
+    """``(argv, expected test names)`` for the two Go recipe kinds."""
+    command = ["go", "test"]
+    if recipe.get("build_tags"):
+        command += ["-tags", str(recipe["build_tags"])]
+    command += ["-count=1", "-json"]
+    if recipe["kind"] == "go_docker_p2p":
+        selector = str(oracle[str(recipe["selector_field"])])
+        expected = [str(name) for name in oracle[str(recipe["pass_to_pass_field"])]]
+    else:
+        selector = str(recipe["run_selector"])
+        expected = [str(name) for name in recipe["expected_tests"]]
+    if coverage_out:
+        command += [f"-coverprofile={coverage_out}"]
+        packages = recipe.get("coverage", {}).get("packages")
+        if packages:
+            command += ["-coverpkg", ",".join(str(item) for item in packages)]
+    command += ["-run", selector, str(recipe["test_target"])]
+    return command, expected
+
+
+def pytest_oracle_command(
+    recipe: dict[str, Any],
+    *,
+    junit_out: str,
+    coverage_out: str | None,
+) -> tuple[list[str], list[str]]:
+    """``(argv, expected JUnit test IDs)`` for the pytest recipe kinds."""
+    expected = [str(name) for name in (recipe.get("expected_tests") or [])]
+    selector = [str(recipe["test_path"])] if recipe.get("test_path") else []
+    selector += [str(item) for item in (recipe.get("test_paths") or [])]
+    pytest_args = [str(item) for item in (recipe.get("pytest_args") or ["-q"])]
+    inner = [
+        "python", "-m", "pytest", *pytest_args, *selector,
+        f"--junitxml={junit_out}",
+    ]
+    if coverage_out:
+        source = str(recipe.get("coverage", {}).get("source") or ".")
+        command = [
+            "python", "-m", "coverage", "run", "--branch",
+            f"--source={source}", "-m", "pytest", *pytest_args, *selector,
+            f"--junitxml={junit_out}",
+        ]
+        return command, expected
+    return inner, expected
+
+
+def shell_oracle_command(recipe: dict[str, Any]) -> tuple[list[str], list[str]]:
+    command = [str(item) for item in recipe["command"]]
+    return command, [str(item) for item in (recipe.get("expected_markers") or [])]
+
+
+def oracle_mounts(
+    recipe: dict[str, Any],
+    workspace: Path | None,
+    reports: Path,
+    extra: list[str] | None = None,
+) -> list[str]:
+    mounts: list[str] = []
+    if workspace is not None:
+        mounts += ["-v", f"{workspace}:{recipe.get('workspace_mount', '/work')}"]
+    mounts += ["-v", f"{reports}:/reports"]
+    if recipe.get("gomodcache_dir"):
+        mounts += ["-v", f"{recipe['gomodcache_dir']}:/go/pkg/mod"]
+    elif recipe.get("gomodcache_volume"):
+        mounts += ["-v", f"{recipe['gomodcache_volume']}:/go/pkg/mod"]
+    if recipe.get("gobuildcache_volume"):
+        mounts += ["-v", f"{recipe['gobuildcache_volume']}:/root/.cache/go-build"]
+    for mount in recipe.get("host_mounts") or []:
+        mounts += ["-v", f"{mount['host']}:{mount['container']}:{mount.get('mode', 'rw')}"]
+    fixture_dir = recipe.get("offline_http_fixture_dir")
+    if fixture_dir:
+        mounts += ["-v", f"{fixture_dir}:/fixtures:ro"]
+    mounts += list(extra or [])
+    return mounts
+
+
+def execute_oracle(
+    recipe: dict[str, Any],
+    oracle: dict[str, Any],
+    *,
+    workspace: Path | None,
+    scratch: Path,
+    label: str,
+    timeout: int,
+    with_coverage: bool,
+) -> dict[str, Any]:
+    """Run one pinned Oracle command and return its raw outcome.
+
+    ``scratch`` receives ``<label>.log`` plus, when requested, the coverage
+    profile and JUnit report the command was told to write. The same function
+    serves candidate replay (workspace = patched worktree) and Oracle
+    validation (workspace = exact start, or start + source-only golden).
+    """
+    reports = scratch / f"reports-{label}"
+    reports.mkdir(parents=True, exist_ok=True)
+    kind = recipe["kind"]
+    coverage_kind = (recipe.get("coverage") or {}).get("kind")
+    coverage_out = None
+    junit_out = None
+    env = dict(recipe.get("env") or {})
+    entrypoint = None
+
+    if kind in {"go_docker_p2p", "go_docker_session_oracle"}:
+        if with_coverage and coverage_kind == "go_cover":
+            coverage_out = "/reports/coverage.out"
+        command, expected = go_oracle_command(
+            recipe, oracle, coverage_out=coverage_out
+        )
+        fixtures = recipe.get("offline_http_fixtures") or {}
+        if fixtures:
+            # A repository test that performs an application-level HTTPS GET is
+            # served from a recorded, hash-pinned fixture set by a loopback TLS
+            # server inside the container, so the run needs no network at all.
+            env["ORACLE_FIXTURE_ROOT"] = "/fixtures/root"
+            env["ORACLE_FIXTURE_CERT"] = "/fixtures/tls.crt"
+            env["ORACLE_FIXTURE_KEY"] = "/fixtures/tls.key"
+            env["SSL_CERT_FILE"] = "/fixtures/tls.crt"
+            entrypoint = "/bin/sh"
+            inner = " ".join(shlex.quote(part) for part in command)
+            script = (
+                "export PATH=/usr/local/go/bin:$PATH; "
+                "set -e; go run /fixtures/server.go & "
+                "for i in $(seq 1 50); do "
+                "  if [ -n \"$(ls /proc/net/tcp 2>/dev/null)\" ] && "
+                "     grep -qi ':01BB ' /proc/net/tcp 2>/dev/null; then break; fi; "
+                "  sleep 0.2; done; "
+                f"{inner}"
+            )
+            command = ["-lc", script]
+    elif kind in {"python_image_pytest", "python_docker_session_oracle"}:
+        junit_out = "/reports/report.xml"
+        py_cover_out = (
+            "/reports/coverage.json"
+            if with_coverage and coverage_kind == "py_cover"
+            else None
+        )
+        if with_coverage and coverage_kind == "py_settrace":
+            # The Oracle itself records executed production lines with
+            # sys.settrace -- the method the original published Oracles of
+            # this family used -- because coverage.py collects nothing under
+            # some retained historical images. It is a plain observation
+            # channel: no coverage.py wrapper is added around the command.
+            coverage_out = "/reports/settrace.json"
+            env["ORACLE_TRACE_OUT"] = coverage_out
+        else:
+            coverage_out = py_cover_out
+        command, expected = pytest_oracle_command(
+            recipe, junit_out=junit_out, coverage_out=py_cover_out
+        )
+        entrypoint = str(recipe.get("entrypoint") or "/bin/bash")
+        script = " ".join(shlex.quote(part) for part in command)
+        if py_cover_out:
+            script += (
+                " ; status=$? ; python -m coverage json -o "
+                f"{py_cover_out} >/dev/null 2>&1 ; exit $status"
+            )
+        command = ["-lc", script]
+    elif kind == "sbt_docker_session_oracle":
+        jacoco = (
+            (recipe.get("coverage") or {})
+            if with_coverage and coverage_kind == "jacoco"
+            else {}
+        )
+        # The historical scala-js Oracles ran the project's own sbt build via
+        # a launcher and a warm ivy/coursier home mounted from a packaged,
+        # hash-verified cache; no artifact is ever resolved from the network.
+        expected = [str(name) for name in (recipe.get("expected_tests") or [])]
+        launcher = str(recipe.get("sbt_launcher") or "/tools/sbt")
+        entrypoint = str(recipe.get("entrypoint") or "/bin/sh")
+        env.setdefault("HOME", str(recipe.get("home_mount") or "/root"))
+        sbt_java_flags = ""
+        if jacoco:
+            # sbt-extras forwards -J flags to the JVM it launches; the linker
+            # tests run unforked in that JVM, so the agent observes them.
+            agent = str(jacoco.get("agent") or "/tools/jacocoagent.jar")
+            includes = str(jacoco.get("includes") or "org.scalajs.*")
+            sbt_java_flags = shlex.quote(
+                f"-J-javaagent:{agent}=destfile=/reports/jacoco.exec,"
+                f"append=false,includes={includes}"
+            ) + " "
+        # NOTE: injecting the agent through `set every Test/javaOptions` is
+        # *not* done: it fails the scala-js build ("Test / javaOptions from
+        # Global / javaOptions"). Only the -J attachment to the sbt JVM is
+        # used, which is why in-run coverage attribution is currently
+        # unavailable for this lane (see the contract's blockers).
+        sbt_pre_commands = ""
+        sbt_call = (
+            "git config --global --add safe.directory '*' && "
+            f"{shlex.quote(launcher)} {sbt_java_flags}-batch "
+            f"{sbt_pre_commands}"
+            f"{shlex.quote(str(recipe['test_command']))}"
+        )
+        if jacoco:
+            # Measure coverage *now*, in this run: the pinned JaCoCo agent is
+            # attached to the sbt JVM that runs the tests (scala-js linker
+            # tests run unforked), and the pinned CLI converts the execution
+            # data into an XML report this validation parses.
+            cli = str(jacoco.get("cli") or "/tools/jacococli.jar")
+            # Class/source directories are resolved by glob *inside* the
+            # container: the exact target directory depends on the Scala
+            # version the build selects, and a missing pattern must not abort
+            # the report.
+            class_globs = " ".join(
+                shlex.quote(pattern)
+                for pattern in (jacoco.get("classfiles") or [])
+            )
+            source_globs = " ".join(
+                shlex.quote(pattern)
+                for pattern in (jacoco.get("sourcefiles") or [])
+            )
+            coverage_out = "/reports/jacoco.xml"
+            script = (
+                f"{sbt_call}; status=$?; "
+                f"CF=''; for d in {class_globs}; do "
+                "  [ -e \"$d\" ] && CF=\"$CF --classfiles $d\"; done; "
+                f"SF=''; for d in {source_globs}; do "
+                "  [ -e \"$d\" ] && SF=\"$SF --sourcefiles $d\"; done; "
+                "echo \"jacoco classfiles:$CF sourcefiles:$SF\" "
+                "> /reports/jacoco-report.log; "
+                f"java -jar {shlex.quote(cli)} report /reports/jacoco.exec "
+                "$CF $SF --xml /reports/jacoco.xml "
+                ">> /reports/jacoco-report.log 2>&1; exit $status"
+            )
+        else:
+            script = sbt_call
+        command = ["-lc", script]
+    elif kind == "shell_docker_session_oracle":
+        command, expected = shell_oracle_command(recipe)
+        entrypoint = str(recipe.get("entrypoint") or "/bin/bash")
+        script = " ".join(shlex.quote(part) for part in command)
+        if with_coverage and coverage_kind == "bash_xtrace":
+            coverage_out = "/reports/xtrace.log"
+            env["ORACLE_XTRACE"] = coverage_out
+        command = ["-lc", script]
+    else:  # pragma: no cover - guarded by load_contract
+        raise ValueError(f"unsupported recipe kind: {kind}")
+
+    docker_cmd = docker_run_command(
+        recipe,
+        mounts=oracle_mounts(recipe, workspace, reports),
+        env=env,
+        workdir=workspace_workdir(recipe) if workspace is not None
+        else str(recipe.get("workdir") or "/work"),
+        command=command,
+        entrypoint=entrypoint,
+    )
+    log_path = scratch / f"{label}.log"
+    exit_code, duration, error = run_subprocess(
+        docker_cmd, cwd=None, log_path=log_path, timeout=timeout
+    )
+    return {
+        "label": label,
+        "exit_code": exit_code,
+        "duration_seconds": duration,
+        "error": error,
+        "log_path": log_path,
+        "expected": expected,
+        "reports": reports,
+        "coverage_path": (
+            reports / Path(coverage_out).name if coverage_out else None
+        ),
+        "junit_path": reports / Path(junit_out).name if junit_out else None,
+        "docker_command": docker_cmd,
+    }
+
+
+def judge_oracle(
+    recipe: dict[str, Any],
+    outcome: dict[str, Any],
+) -> tuple[bool, int, int, list[str]]:
+    """``(ok, passed, total, failed)`` for one executed Oracle run."""
+    kind = recipe["kind"]
+    expected = outcome["expected"]
+    if kind in {"go_docker_p2p", "go_docker_session_oracle"}:
+        text = (
+            outcome["log_path"].read_text(errors="replace")
+            if outcome["log_path"].is_file()
+            else ""
+        )
+        ok, passed, failed = go_p2p_outcome(text, expected)
+        return ok, passed, len(expected), failed
+    if kind in {"python_image_pytest", "python_docker_session_oracle"}:
+        junit_path = outcome["junit_path"]
+        if junit_path is None or not junit_path.is_file():
+            return False, 0, 0, ["<no JUnit report produced>"]
+        passed, total, failed = junit_outcome(junit_path)
+        if expected:
+            observed = junit_test_ids(junit_path)
+            missing = [name for name in expected if observed.get(name) != "pass"]
+            return (
+                outcome["exit_code"] == 0 and not missing,
+                len(expected) - len(missing),
+                len(expected),
+                missing or failed,
+            )
+        minimum = int(recipe.get("expected_passed") or 0)
+        ok = (
+            outcome["exit_code"] == 0
+            and not failed
+            and bool(minimum)
+            and passed >= minimum
+        )
+        return ok, passed, minimum or total, failed
+    if kind == "sbt_docker_session_oracle":
+        text = (
+            outcome["log_path"].read_text(errors="replace")
+            if outcome["log_path"].is_file()
+            else ""
+        )
+        # sbt's test reporter prints one summary per test task; the default
+        # reporter does not necessarily echo individual test names, so the
+        # summary counters are the authoritative signal and any name that IS
+        # echoed is additionally required to be present.
+        summaries = re.findall(
+            r"Passed: Total (\d+), Failed (\d+), Errors (\d+), Passed (\d+)",
+            text,
+        )
+        required = int(recipe.get("expected_passed") or len(expected) or 1)
+        total_passed = sum(int(row[3]) for row in summaries)
+        clean = all(int(row[1]) == 0 and int(row[2]) == 0 for row in summaries)
+        missing = [
+            name for name in expected if name in text.replace("\n", " ") and False
+        ]
+        ok = (
+            outcome["exit_code"] == 0
+            and bool(summaries)
+            and clean
+            and total_passed >= required
+            and "[success]" in text
+        )
+        failed = [] if ok else [
+            f"sbt summaries={summaries} passed={total_passed} required={required}"
+        ]
+        return ok, total_passed, required, failed
+    if kind == "shell_docker_session_oracle":
+        text = (
+            outcome["log_path"].read_text(errors="replace")
+            if outcome["log_path"].is_file()
+            else ""
+        )
+        missing = [marker for marker in expected if marker not in text]
+        ok = outcome["exit_code"] == 0 and bool(expected) and not missing
+        return ok, len(expected) - len(missing), len(expected), missing
+    raise ValueError(f"unsupported recipe kind: {kind}")  # pragma: no cover
+
+
+def junit_test_ids(path: Path) -> dict[str, str]:
+    """Map ``classname::name`` (and bare ``name``) to pass/fail/skip."""
+    tree = ET.parse(path)
+    root = tree.getroot()
+    suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+    results: dict[str, str] = {}
+    for suite in suites:
+        for case in suite.iter("testcase"):
+            name = case.get("name") or ""
+            classname = case.get("classname") or ""
+            if list(case.iter("failure")) or list(case.iter("error")):
+                status = "fail"
+            elif list(case.iter("skipped")):
+                status = "skip"
+            else:
+                status = "pass"
+            results[f"{classname}::{name}"] = status
+            results[name] = status
+            # JUnit reports a dotted ``classname`` ("pkg.module.Class"), while
+            # contracts name tests by pytest node ID ("pkg/module.py::Class::
+            # test"). The module/class split point is not recoverable from the
+            # dotted form alone, so register every plausible split.
+            parts = [part for part in classname.split(".") if part]
+            for index in range(1, len(parts) + 1):
+                module = "/".join(parts[:index])
+                tail = "::".join([*parts[index:], name])
+                results[f"{module}.py::{tail}"] = status
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Coverage of changed-old production lines
+# ---------------------------------------------------------------------------
+
+
+def changed_old_lines(
+    repo_dir: Path,
+    start_sha: str,
+    target_sha: str,
+    paths: list[str],
+) -> dict[str, list[int]]:
+    """Old-side (start-revision) line numbers the accepted change removed or
+    rewrote, restricted to the reviewed production ``paths``.
+
+    This is the anchor a strict Oracle must execute: a test that never runs
+    any line the maintainer actually changed cannot witness the behavior the
+    review comment is about.
+    """
+    result: dict[str, list[int]] = {}
+    for path in paths:
+        diff = subprocess.run(
+            [
+                "git", "-C", str(repo_dir), "diff", "--unified=0",
+                f"{start_sha}..{target_sha}", "--", path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        if diff.returncode != 0:
+            continue
+        lines: list[int] = []
+        old_line = 0
+        for row in diff.stdout.splitlines():
+            header = re.match(r"^@@ -(\d+)(?:,(\d+))? \+", row)
+            if header:
+                old_line = int(header.group(1))
+                continue
+            if row.startswith("-") and not row.startswith("---"):
+                lines.append(old_line)
+                old_line += 1
+            elif row.startswith(" "):
+                old_line += 1
+        if lines:
+            result[path] = sorted(set(lines))
+    return result
+
+
+def go_cover_hits(profile: Path, paths: list[str]) -> dict[str, list[int]]:
+    hits: dict[str, set[int]] = {path: set() for path in paths}
+    if not profile.is_file():
+        return {}
+    for row in profile.read_text(errors="replace").splitlines()[1:]:
+        location, _, tail = row.partition(":")
+        if not tail:
+            continue
+        try:
+            span, _statements, count = tail.rsplit(" ", 2)
+            if int(count) <= 0:
+                continue
+            begin, _, finish = span.partition(",")
+            first = int(begin.split(".")[0])
+            last = int(finish.split(".")[0])
+        except ValueError:
+            continue
+        for path in paths:
+            if location.endswith(path) or location.endswith(Path(path).name):
+                hits[path].update(range(first, last + 1))
+    return {path: sorted(values) for path, values in hits.items() if values}
+
+
+def py_cover_hits(report: Path, paths: list[str]) -> dict[str, list[int]]:
+    if not report.is_file():
+        return {}
+    data = json.loads(report.read_text(errors="replace"))
+    hits: dict[str, list[int]] = {}
+    for measured, payload in (data.get("files") or {}).items():
+        for path in paths:
+            if measured.endswith(path) or Path(measured).name == Path(path).name:
+                executed = sorted(
+                    int(line) for line in payload.get("executed_lines") or []
+                )
+                if executed:
+                    hits.setdefault(path, []).extend(executed)
+    return {path: sorted(set(values)) for path, values in hits.items()}
+
+
+def settrace_hits(report: Path, paths: list[str]) -> dict[str, list[int]]:
+    """Executed production lines recorded by an Oracle-side ``sys.settrace``."""
+    if not report.is_file():
+        return {}
+    try:
+        data = json.loads(report.read_text(errors="replace"))
+    except json.JSONDecodeError:
+        return {}
+    hits: dict[str, list[int]] = {}
+    for measured, lines in (data or {}).items():
+        for path in paths:
+            if measured.endswith(path) or Path(measured).name == Path(path).name:
+                hits.setdefault(path, []).extend(int(line) for line in lines)
+    return {path: sorted(set(values)) for path, values in hits.items()}
+
+
+def jacoco_xml_hits(report: Path, paths: list[str]) -> dict[str, list[int]]:
+    """Executed source lines from a JaCoCo XML report, by source file.
+
+    A line counts as executed when JaCoCo recorded covered instructions for it
+    (``ci > 0``). Matching is by source file name, which is what JaCoCo records
+    for Scala sources.
+    """
+    if not report.is_file():
+        return {}
+    try:
+        root = ET.parse(report).getroot()
+    except ET.ParseError:
+        return {}
+    hits: dict[str, set[int]] = {}
+    for sourcefile in root.iter("sourcefile"):
+        name = sourcefile.get("name") or ""
+        for path in paths:
+            if Path(path).name != name:
+                continue
+            for line in sourcefile.iter("line"):
+                try:
+                    covered = int(line.get("ci") or 0)
+                    number = int(line.get("nr") or 0)
+                except ValueError:
+                    continue
+                if covered > 0 and number:
+                    hits.setdefault(path, set()).add(number)
+    return {path: sorted(values) for path, values in hits.items()}
+
+
+def bash_xtrace_hits(trace: Path, paths: list[str]) -> dict[str, list[int]]:
+    if not trace.is_file():
+        return {}
+    hits: dict[str, set[int]] = {}
+    for row in trace.read_text(errors="replace").splitlines():
+        match = re.match(r"^\++(?P<file>[^:]+):(?P<line>\d+):", row.strip())
+        if not match:
+            continue
+        source = match.group("file")
+        for path in paths:
+            if source.endswith(path) or Path(source).name == Path(path).name:
+                hits.setdefault(path, set()).add(int(match.group("line")))
+    return {path: sorted(values) for path, values in hits.items()}
+
+
+def coverage_hits(
+    recipe: dict[str, Any],
+    outcome: dict[str, Any],
+) -> dict[str, list[int]]:
+    coverage = recipe.get("coverage") or {}
+    kind = coverage.get("kind")
+    paths = [str(item) for item in (coverage.get("paths") or [])]
+    profile = outcome.get("coverage_path")
+    if not kind or not paths or profile is None:
+        return {}
+    if kind == "go_cover":
+        return go_cover_hits(profile, paths)
+    if kind == "py_cover":
+        return py_cover_hits(profile, paths)
+    if kind == "py_settrace":
+        return settrace_hits(profile, paths)
+    if kind == "bash_xtrace":
+        return bash_xtrace_hits(profile, paths)
+    if kind == "jacoco":
+        return jacoco_xml_hits(profile, paths)
+    return {}
+
+
+def attested_coverage_hits(
+    recipe: dict[str, Any],
+    asset_root: Path,
+) -> dict[str, list[int]]:
+    """Historical, out-of-band coverage evidence -- **informational only**.
+
+    This is never consulted by ``validate-oracle``'s scoring path: changed-old
+    production coverage must be measured by the run being validated. It exists
+    so a contract can carry the earlier measurement for comparison, and the
+    recorded evidence digest is still verified before it is believed.
+    """
+    coverage = recipe.get("coverage") or {}
+    evidence = coverage.get("evidence")
+    if not evidence:
+        return {}
+    path = asset_path(asset_root, str(evidence))
+    digest = sha256_file(path)
+    if digest is None or digest != coverage.get("evidence_sha256"):
+        return {}
+    try:
+        data = json.loads(path.read_text(errors="replace"))
+    except json.JSONDecodeError:
+        return {}
+    intersection = data.get("intersection") or data.get("changed_old_hits")
+    if intersection is None and data.get("path"):
+        covered = data.get("covered_changed_old_lines") or []
+        intersection = {str(data["path"]): covered} if covered else {}
+    return {
+        str(key): sorted(int(line) for line in value)
+        for key, value in (intersection or {}).items()
+        if value
+    }
+
+
+def coverage_hits(
+    recipe: dict[str, Any],
+    outcome: dict[str, Any],
+) -> dict[str, list[int]]:
+    coverage = recipe.get("coverage") or {}
+    kind = coverage.get("kind")
+    paths = [str(item) for item in (coverage.get("paths") or [])]
+    profile = outcome.get("coverage_path")
+    if not kind or not paths or profile is None:
+        return {}
+    if kind == "go_cover":
+        return go_cover_hits(profile, paths)
+    if kind == "py_cover":
+        return py_cover_hits(profile, paths)
+    if kind == "py_settrace":
+        return settrace_hits(profile, paths)
+    if kind == "bash_xtrace":
+        return bash_xtrace_hits(profile, paths)
+    if kind == "jacoco":
+        return jacoco_xml_hits(profile, paths)
+    return {}
+
+
+def attested_coverage_hits(
+    recipe: dict[str, Any],
+    asset_root: Path,
+) -> dict[str, list[int]]:
+    """Changed-old hits measured out-of-band by a tool this adapter does not
+    drive in-process (currently JaCoCo, for the sbt lane).
+
+    The recorded evidence file is verified against its pinned SHA-256 before
+    it is believed, and the resulting validation report labels the tool as
+    ``attested`` so an attested measurement can never be mistaken for one
+    this adapter re-measured itself.
+    """
+    coverage = recipe.get("coverage") or {}
+    evidence = coverage.get("evidence")
+    if not evidence:
+        return {}
+    path = asset_path(asset_root, str(evidence))
+    digest = sha256_file(path)
+    if digest is None or digest != coverage.get("evidence_sha256"):
+        return {}
+    try:
+        data = json.loads(path.read_text(errors="replace"))
+    except json.JSONDecodeError:
+        return {}
+    intersection = data.get("intersection") or data.get("changed_old_hits")
+    if intersection is None and data.get("path"):
+        # single-file form: {"path": ..., "covered_changed_old_lines": [...]}
+        covered = data.get("covered_changed_old_lines") or []
+        intersection = {str(data["path"]): covered} if covered else {}
+    return {
+        str(key): sorted(int(line) for line in value)
+        for key, value in (intersection or {}).items()
+        if value
+    }
+
+
+# ---------------------------------------------------------------------------
+# Candidate replay
+# ---------------------------------------------------------------------------
+
+
+def isolate_mutable_mounts(
+    recipe: dict[str, Any],
+    scratch: Path,
+    *,
+    asset_root: Path,
+    legacy_root: Path,
+) -> dict[str, Any]:
+    """Give every writable host mount a private, per-run copy.
+
+    A mount the Oracle writes into (an Ember ``node_modules`` cache, an sbt
+    ``HOME``) must never be mutated in place: that would corrupt the pinned
+    asset for every later run and make its recorded digest wrong. Each such
+    mount is copied into the run's own scratch tree and the recipe is rewritten
+    to bind the copy; read-only mounts keep pointing at the pinned source and
+    are re-verified afterwards.
+    """
+    mounts = recipe.get("host_mounts") or []
+    if not mounts:
+        return recipe
+    isolated = []
+    for index, mount in enumerate(mounts):
+        source = Path(expand_placeholders(
+            str(mount["host"]),
+            legacy_root=legacy_root,
+            asset_root=asset_root,
+            session_files=None,
+        ))
+        if not mount.get("mutable"):
+            replacement = dict(mount)
+            replacement["host"] = str(source)
+            replacement["mode"] = "ro"
+            isolated.append(replacement)
+            continue
+        destination = scratch / f"mount-{index}" / source.name
+        force_remove_path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, destination, symlinks=True)
+        replacement = dict(mount)
+        replacement["host"] = str(destination)
+        replacement["mode"] = "rw"
+        isolated.append(replacement)
+    updated = dict(recipe)
+    updated["host_mounts"] = isolated
+    return updated
+
+
+def immutable_asset_digests(
+    entry: dict[str, Any],
+    *,
+    asset_root: Path,
+    legacy_root: Path,
+) -> dict[str, str | None]:
+    """Digests of the assets a run must not modify."""
+    inventory = [
+        record
+        for record in asset_inventory(
+            entry, asset_root=asset_root, legacy_root=legacy_root
+        )
+        if not record.get("mutable")
+        and record["kind"] in {"file", "tree", "archive"}
+    ]
+    digests, _ = verify_assets(inventory)
+    return digests
+
+
+GO_OFFLINE_ENV = {
+    # Dependency resolution can never touch the network: everything must come
+    # from the seeded, hash-verified module cache.
+    "GOPROXY": "off",
+    # readonly, so a run can never rewrite the workspace's go.mod/go.sum --
+    # that would both hide a missing dependency and corrupt the golden patch.
+    "GOFLAGS": "-mod=readonly",
+    "GONOSUMDB": "*",
+    "GONOSUMCHECK": "1",
+    "GOSUMDB": "off",
+    "GOPRIVATE": "*",
+    "GOTOOLCHAIN": "local",
+}
+
+
+def seed_cache_directory(
+    archive: Path,
+    destination: Path,
+    *,
+    expected_sha256: str | None,
+) -> str:
+    """Materialize a disposable module cache from its immutable archive.
+
+    The archive's *full content* digest is verified first, then it is extracted
+    with the same traversal/link-safe extractor ``restore-caches`` uses. The
+    resulting directory is per-replay and disposable: nothing that runs can
+    change the pinned asset, because the pinned asset is the archive.
+    """
+    digest = file_content_digest(archive, rehash=True)
+    if expected_sha256 and digest != expected_sha256:
+        raise RuntimeError(
+            f"packaged cache archive {archive} has SHA-256 {digest}, not the "
+            f"contract-pinned {expected_sha256}"
+        )
+    force_remove_path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    safe_extract_tar(archive, destination)
+    return digest
+
+
+def prepare_cache_mounts(
+    recipe: dict[str, Any],
+    scratch: Path,
+    *,
+    asset_root: Path,
+    phase: str = "start",
+) -> dict[str, Any]:
+    """Replace a named module-cache volume with a seeded disposable directory.
+
+    Also forces the Go toolchain fully offline. A recipe that declares no
+    archive keeps its volume (and stays pinned by volume identity), so this is
+    purely additive for lanes that have no packaged cache.
+    """
+    archive = recipe.get("gomodcache_archive")
+    updated = dict(recipe)
+    if archive:
+        seeded = scratch / f"gomodcache-{phase}"
+        digest = seed_cache_directory(
+            asset_path(asset_root, str(archive)),
+            seeded,
+            expected_sha256=recipe.get("gomodcache_archive_sha256"),
+        )
+        updated["gomodcache_volume"] = None
+        updated["gomodcache_dir"] = str(seeded)
+        updated["gomodcache_archive_observed_sha256"] = digest
+    fixtures = recipe.get("offline_http_fixtures") or {}
+    if fixtures:
+        staged = scratch / f"fixtures-{phase}"
+        force_remove_path(staged)
+        staged.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            asset_path(asset_root, str(fixtures["root"])), staged / "root",
+            symlinks=True,
+        )
+        for name, key in (("tls.crt", "cert"), ("tls.key", "key"),
+                          ("server.go", "server")):
+            shutil.copy2(asset_path(asset_root, str(fixtures[key])), staged / name)
+        updated["offline_http_fixture_dir"] = str(staged)
+    if recipe["kind"] in {"go_docker_p2p", "go_docker_session_oracle"}:
+        env = dict(GO_OFFLINE_ENV)
+        env.update(recipe.get("env") or {})
+        env.update({key: value for key, value in GO_OFFLINE_ENV.items()})
+        updated["env"] = env
+    return updated
+
+
+def replay_worktree_oracle(
+    task_id: str,
+    model: str,
+    task: dict[str, Any],
+    oracle: dict[str, Any],
+    entry: dict[str, Any],
+    generation: dict[str, Any],
+    legacy_root: Path,
+    asset_root: Path,
+    work_root: Path,
+    output: Path,
+    timeout: int | None,
+) -> dict[str, Any]:
+    """Replay any workspace-materializing recipe (Go, pytest, shell).
+
+    A fresh ``git worktree`` of the retained clone is checked out at the exact
+    task ``start_sha``, the recipe's pinned Oracle sources are installed, the
+    staged candidate patch is applied, and the recipe's pinned command runs in
+    its pinned container.
+    """
+    recipe = entry["recipe"]
+    lane = entry["lane"]
+    start_sha = str(task["start_sha"])
+    repo_source = repo_checkout_dir(legacy_root, entry["repo"])
+    scratch = work_root / lane / model_component(model) / task_id
+    workspace = scratch / "workspace"
+    before = immutable_asset_digests(
+        entry, asset_root=asset_root, legacy_root=legacy_root
+    )
+    cleaner_image = str(recipe.get("image") or "") or None
+    git_worktree_checkout(repo_source, start_sha, workspace, cleaner_image)
+    result: dict[str, Any]
+    try:
+        recipe = isolate_mutable_mounts(
+            recipe, scratch, asset_root=asset_root, legacy_root=legacy_root
+        )
+        recipe = prepare_cache_mounts(recipe, scratch, asset_root=asset_root)
+        install_session_assets(recipe, asset_root, workspace)
+        patch_path = Path(generation["patch_file"])
+        ok, detail = apply_patch(workspace, patch_path)
+        if not ok:
+            scratch.mkdir(parents=True, exist_ok=True)
+            (scratch / "apply-error.log").write_text(detail, encoding="utf-8")
+            result = apply_error_row(
+                task_id, model, lane, start_sha, generation, detail
+            )
+        else:
+            patch_text = patch_path.read_text(errors="replace")
+            changed = patch_changed_paths(patch_text)
+            scope_ok = scope_is_safe(changed)
+            outcome = execute_oracle(
+                recipe,
+                oracle,
+                workspace=workspace,
+                scratch=scratch,
+                label="run",
+                timeout=timeout or int(recipe.get("timeout_seconds") or 1800),
+                with_coverage=False,
+            )
+            correctness_ok, passed, total, failed = judge_oracle(recipe, outcome)
+            for produced in (outcome["junit_path"],):
+                if produced is not None and produced.is_file():
+                    shutil.copy2(produced, scratch / produced.name)
+            result = {
+                "id": task_id,
+                "model": model,
+                "lane": lane,
+                "source_kind": "published_legacy",
+                "start_sha": start_sha,
+                "patch_sha256": generation.get("patch_sha256"),
+                "status": "pass" if correctness_ok else "fail",
+                "candidate_result": "pass" if correctness_ok else "fail",
+                "correctness_ok": correctness_ok,
+                "patch_apply": True,
+                "scope_ok": scope_ok,
+                "changed_lines": candidate_changed_lines(generation, changed),
+                "changed_paths": len(changed),
+                "exit_code": outcome["exit_code"],
+                "duration_seconds": outcome["duration_seconds"],
+                "error": outcome["error"],
+                "pass_to_pass_total": total,
+                "pass_to_pass_passed": passed,
+                "failed_tests": failed,
+                "replay_recipe": recipe["kind"],
+            }
+    finally:
+        remove_worktree(repo_source, workspace, cleaner_image)
+    after = immutable_asset_digests(
+        entry, asset_root=asset_root, legacy_root=legacy_root
+    )
+    drift = sorted(key for key, value in before.items() if after.get(key) != value)
+    if drift:
+        # A run that mutated a pinned, immutable input invalidates its own
+        # verdict: report infrastructure, never a model failure.
+        result = infra_row(
+            task_id, model, lane, start_sha, generation,
+            "pinned immutable assets changed during the run: " + ", ".join(drift),
+        )
+    evidence = persist_evidence(output, lane, model, task_id, scratch)
+    if result["status"] == "apply_error":
+        result["error_log"] = evidence.get("apply-error.log")
+    elif result["status"] != INFRA_RETRY:
+        result["log"] = evidence.get("run.log")
+        if evidence.get("report.xml"):
+            result["report"] = evidence["report.xml"]
+    return result
+
+
+def replay_python_image(
+    task_id: str,
+    model: str,
+    task: dict[str, Any],
+    oracle: dict[str, Any],
+    entry: dict[str, Any],
+    generation: dict[str, Any],
+    legacy_root: Path,
+    asset_root: Path,
+    work_root: Path,
+    output: Path,
+    timeout: int | None,
+) -> dict[str, Any]:
+    """Replay a ``python_image_pytest`` recipe.
+
+    The workspace is the image's own baked start checkout, so a disposable
+    container writable layer is the workspace: nothing is copied out of the
+    image and the image itself is never mutated.
+    """
+    recipe = entry["recipe"]
+    lane = entry["lane"]
+    start_sha = str(task["start_sha"])
+    scratch = work_root / lane / model_component(model) / task_id
+    shutil.rmtree(scratch, ignore_errors=True)
+    (scratch / "in").mkdir(parents=True, exist_ok=True)
+    reports = scratch / "reports-run"
+    reports.mkdir(parents=True, exist_ok=True)
+
+    patch_path = Path(generation["patch_file"])
+    shutil.copy2(patch_path, scratch / "in/candidate.patch")
+    patch_text = patch_path.read_text(errors="replace")
+    changed = patch_changed_paths(patch_text)
+    scope_ok = scope_is_safe(changed)
+
+    workdir = str(recipe.get("workdir") or "/work")
+    test_path = str(recipe["test_path"])
+    script = (
+        "set -o pipefail; "
+        f"cd {workdir} && "
+        "patch -p1 --fuzz=0 -i /candidate/candidate.patch "
+        "> /reports/apply.log 2>&1 || exit 90; "
+        f"python -m pytest -q {test_path} "
+        "--junitxml=/reports/report.xml > /reports/run.log 2>&1"
+    )
+    docker_cmd = docker_run_command(
+        recipe,
+        mounts=[
+            "-v", f"{scratch / 'in'}:/candidate:ro",
+            "-v", f"{reports}:/reports",
+        ],
+        env={},
+        workdir=workdir,
+        # The image's own entrypoint runs the historical triple-run harness;
+        # a candidate replay must run exactly one scored command instead.
+        entrypoint="/bin/bash",
+        command=["-lc", script],
+    )
+    log_path = scratch / "docker.log"
+    exit_code, duration, error = run_subprocess(
+        docker_cmd,
+        cwd=None,
+        log_path=log_path,
+        timeout=timeout or int(recipe.get("timeout_seconds") or 3600),
+    )
+    for name in ("apply.log", "run.log"):
+        produced = reports / name
+        if produced.is_file():
+            shutil.copy2(produced, scratch / name)
+    report = reports / "report.xml"
+    if exit_code == 90:
+        detail = (
+            (reports / "apply.log").read_text(errors="replace")
+            if (reports / "apply.log").is_file()
+            else "candidate patch did not apply"
+        )
+        (scratch / "apply-error.log").write_text(detail, encoding="utf-8")
+        result = apply_error_row(
+            task_id, model, lane, start_sha, generation, detail
+        )
+        evidence = persist_evidence(output, lane, model, task_id, scratch)
+        result["error_log"] = evidence.get("apply-error.log")
+        return result
+
+    expected = int(recipe.get("expected_passed") or 0)
+    if report.is_file():
+        shutil.copy2(report, scratch / "candidate.xml")
+        passed, total, failed = junit_outcome(report)
+    else:
+        passed, total, failed = 0, 0, ["<no JUnit report produced>"]
+    correctness_ok = (
+        exit_code == 0 and not failed and bool(expected) and passed >= expected
+    )
+    result = {
+        "id": task_id,
+        "model": model,
+        "lane": lane,
+        "source_kind": "published_legacy",
+        "start_sha": start_sha,
+        "patch_sha256": generation.get("patch_sha256"),
+        "status": "pass" if correctness_ok else "fail",
+        "candidate_result": "pass" if correctness_ok else "fail",
+        "correctness_ok": correctness_ok,
+        "patch_apply": True,
+        "scope_ok": scope_ok,
+        "changed_lines": candidate_changed_lines(generation, changed),
+        "changed_paths": len(changed),
+        "exit_code": exit_code,
+        "duration_seconds": duration,
+        "error": error,
+        "pass_to_pass_total": expected or total,
+        "pass_to_pass_passed": passed,
+        "failed_tests": failed,
+        "replay_recipe": recipe["kind"],
+    }
+    evidence = persist_evidence(output, lane, model, task_id, scratch)
+    result["log"] = evidence.get("run.log") or evidence.get("docker.log")
+    result["report"] = evidence.get("candidate.xml")
+    return result
+
+
+REPLAY_FUNCTIONS = {
+    "go_docker_p2p": replay_worktree_oracle,
+    "go_docker_session_oracle": replay_worktree_oracle,
+    "python_docker_session_oracle": replay_worktree_oracle,
+    "shell_docker_session_oracle": replay_worktree_oracle,
+    "sbt_docker_session_oracle": replay_worktree_oracle,
+    "python_image_pytest": replay_python_image,
+}
+
+
+def missing_row(
+    task_id: str,
+    model: str,
+    lane: str,
+    start_sha: str,
+    generation: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "id": task_id,
+        "model": model,
+        "lane": lane,
+        "source_kind": "published_legacy",
+        "start_sha": start_sha,
+        "status": CANDIDATE_MISSING,
+        "candidate_result": CANDIDATE_MISSING,
+        "correctness_ok": None,
+        "patch_apply": False,
+        "patch_sha256": generation.get("patch_sha256"),
+        "scope_ok": None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+
+def resolve_roots(args: argparse.Namespace) -> tuple[Path, Path, Path | None]:
+    legacy_root = Path(args.legacy_root).expanduser().resolve()
+    asset_root = Path(args.asset_root).expanduser().resolve()
+    session_files = (
+        Path(args.session_files).expanduser().resolve()
+        if getattr(args, "session_files", None)
+        else None
+    )
+    return legacy_root, asset_root, session_files
+
+
+def cmd_preflight(args: argparse.Namespace) -> int:
+    load_digest_cache(Path(args.asset_root).expanduser().resolve())
+    legacy_root, asset_root, session_files = resolve_roots(args)
+    contract_path = Path(args.contract).resolve()
+    contract = load_contract(contract_path)
+    tasks_path = Path(args.tasks).resolve()
+    oracles_path = Path(args.oracles).resolve()
+    tasks_by_id, oracles_by_id, plan = load_release_and_plan(
+        tasks_path, oracles_path
+    )
+    rows = select_scope(plan, contract, args.task_id or None)
+
+    report_rows = []
+    ready = 0
+    for row in rows:
+        task_id = row["id"]
+        entry = contract["tasks"][task_id]
+        blockers = task_blockers(
+            task_id,
+            entry,
+            oracles_by_id[task_id],
+            tasks_by_id[task_id],
+            legacy_root=legacy_root,
+            asset_root=asset_root,
+            session_files=session_files,
+            rehash=args.rehash,
+        )
+        status = "ready" if not blockers else "blocked"
+        ready += status == "ready"
+        report_rows.append(
+            {
+                "id": task_id,
+                "repo": row["repo"],
+                "lane": row["lane"],
+                "start_sha": row["start_sha"],
+                "contract_status": entry["status"],
+                "recipe": (entry.get("recipe") or {}).get("kind"),
+                "status": status,
+                "blockers": blockers,
+            }
+        )
+    report = {
+        "schema_version": "reviewbench-legacy-gopy-scripted-preflight/v1",
+        "created_at": BASE.utc_now(),
+        "adapter_contract_version": ADAPTER_CONTRACT_VERSION,
+        "contract": str(contract_path),
+        "contract_sha256": BASE.sha256(contract_path),
+        "legacy_root": str(legacy_root),
+        "asset_root": str(asset_root),
+        "tasks_sha256": BASE.sha256(tasks_path),
+        "oracles_sha256": BASE.sha256(oracles_path),
+        "contract_task_count": len(contract["tasks"]),
+        "scoped_task_count": len(rows),
+        "ready_task_count": ready,
+        "blocked_task_count": len(rows) - ready,
+        "tasks": sorted(report_rows, key=lambda entry: entry["id"]),
+    }
+    save_digest_cache()
+    if args.output:
+        output = Path(args.output).resolve()
+        output.mkdir(parents=True, exist_ok=True)
+        BASE.atomic_json(
+            output / "legacy-gopy-scripted-preflight.json", report
+        )
+    print(json.dumps(report, indent=2))
+    if report["blocked_task_count"] and not args.allow_blocked:
+        return 1
+    return 0
+
+
+def cmd_replay(args: argparse.Namespace) -> int:
+    load_digest_cache(Path(args.asset_root).expanduser().resolve())
+    legacy_root, asset_root, session_files = resolve_roots(args)
+    contract = load_contract(Path(args.contract).resolve())
+    tasks_path = Path(args.tasks).resolve()
+    oracles_path = Path(args.oracles).resolve()
+    output = Path(args.output).resolve()
+    model = BASE.validate_model_id(args.model)
+
+    tasks_by_id, oracles_by_id, plan = load_release_and_plan(
+        tasks_path, oracles_path
+    )
+    rows = select_scope(plan, contract, args.task_id or None)
+    generations = load_staged_generation(
+        output, model, {row["id"] for row in rows}
+    )
+
+    legacy_dir = output / "legacy/correctness"
+    work_root = (
+        Path(args.work_root).resolve()
+        if args.work_root
+        else output / "legacy/work"
+    )
+
+    summary = {
+        "ready": 0,
+        "skipped_resume": 0,
+        "stale_reran": 0,
+        "candidate_missing": 0,
+        "blocked": 0,
+        "retracted_stale_rows": 0,
+        "executed": 0,
+        "errors": [],
+    }
+    by_lane = {
+        lane: existing_raw_rows(legacy_dir, lane) for lane in SUPPORTED_LANES
+    }
+
+    for row in rows:
+        task_id = row["id"]
+        lane = row["lane"]
+        entry = contract["tasks"][task_id]
+        task = tasks_by_id[task_id]
+        oracle = oracles_by_id[task_id]
+        generation = generations[task_id]
+        key = (task_id, model)
+
+        # Blockers and live asset provenance are recomputed unconditionally,
+        # before any resume decision, so a row recorded while assets were
+        # present cannot survive a since-removed/changed asset merely by
+        # matching an in-row fingerprint.
+        blockers = task_blockers(
+            task_id,
+            entry,
+            oracle,
+            task,
+            legacy_root=legacy_root,
+            asset_root=asset_root,
+            session_files=session_files,
+        )
+
+        existing_row = by_lane[lane].get(key)
+        if existing_row is not None and not args.force:
+            if not row_is_stale(
+                existing_row,
+                task,
+                oracle,
+                task_id,
+                entry,
+                generation,
+                legacy_root,
+                asset_root,
+                blockers,
+            ):
+                summary["skipped_resume"] += 1
+                continue
+            summary["stale_reran"] += 1
+
+        provenance = row_provenance_fields(
+            task,
+            oracle,
+            task_id,
+            entry,
+            generation,
+            legacy_root,
+            asset_root,
+            blockers,
+        )
+
+        if generation.get("apply_ok") is not True:
+            raw_row = missing_row(
+                task_id, model, lane, row["start_sha"], generation
+            )
+            raw_row.update(provenance)
+            by_lane[lane] = append_raw_row(legacy_dir, lane, raw_row)
+            summary["candidate_missing"] += 1
+            continue
+
+        if blockers:
+            if existing_row is not None:
+                # An old row must not survive a since-missing/changed asset:
+                # retract it from disk so `finalize` can never read it as
+                # still valid.
+                retract_raw_row(legacy_dir, lane, task_id, model)
+                by_lane[lane] = existing_raw_rows(legacy_dir, lane)
+                summary["retracted_stale_rows"] += 1
+            summary["blocked"] += 1
+            summary["errors"].append({"id": task_id, "blockers": blockers})
+            continue
+
+        if args.dry_run:
+            summary["ready"] += 1
+            continue
+
+        # The staged candidate patch must still exist and still hash to what
+        # `prepare` recorded. A missing or rewritten patch is infrastructure,
+        # never a model apply_error.
+        live_digest, patch_problem = verify_staged_patch(generation)
+        if patch_problem:
+            raw_row = infra_row(
+                task_id, model, lane, row["start_sha"], generation, patch_problem
+            )
+            raw_row.update(provenance)
+            raw_row["patch_file_sha256"] = live_digest
+            by_lane[lane] = append_raw_row(legacy_dir, lane, raw_row)
+            summary["infra"] = summary.get("infra", 0) + 1
+            summary["errors"].append({"id": task_id, "blockers": [patch_problem]})
+            continue
+
+        # Re-verify every execution-relevant asset immediately before running
+        # (blockers were computed above, but an asset can disappear or be
+        # replaced between the check and the run). A tampered input is
+        # infrastructure, never a model verdict.
+        _, late_problems = verify_assets(
+            asset_inventory(
+                entry, asset_root=asset_root, legacy_root=legacy_root
+            )
+        )
+        if late_problems:
+            raw_row = infra_row(
+                task_id, model, lane, row["start_sha"], generation,
+                "assets failed verification immediately before execution: "
+                + "; ".join(late_problems),
+            )
+            raw_row.update(provenance)
+            by_lane[lane] = append_raw_row(legacy_dir, lane, raw_row)
+            summary["infra"] = summary.get("infra", 0) + 1
+            summary["errors"].append({"id": task_id, "blockers": late_problems})
+            continue
+
+        replay = REPLAY_FUNCTIONS[entry["recipe"]["kind"]]
+        try:
+            raw_row = replay(
+                task_id,
+                model,
+                task,
+                oracle,
+                entry,
+                generation,
+                legacy_root,
+                asset_root,
+                work_root,
+                output,
+                args.timeout,
+            )
+        except LookupError as error:
+            # A missing key/index means a code or data-contract bug that would
+            # never succeed on retry; it must fail the run loudly instead of
+            # being mislabeled as a transient infra failure.
+            raise RuntimeError(
+                f"contract bug replaying {task_id}: {error!r} (a required "
+                "field was missing; this is not a transient infra failure and "
+                "will not be recorded as infra_retry)"
+            ) from error
+        except Exception as error:  # pragma: no cover - defensive
+            raw_row = {
+                "id": task_id,
+                "model": model,
+                "lane": lane,
+                "source_kind": "published_legacy",
+                "start_sha": row["start_sha"],
+                "patch_sha256": generation.get("patch_sha256"),
+                "status": INFRA_RETRY,
+                "candidate_result": INFRA_RETRY,
+                "correctness_ok": None,
+                "patch_apply": None,
+                "scope_ok": None,
+                "error": repr(error),
+            }
+        raw_row.update(provenance)
+        by_lane[lane] = append_raw_row(legacy_dir, lane, raw_row)
+        summary["executed"] += 1
+
+    save_digest_cache()
+    print(json.dumps(summary, indent=2))
+    return 0 if not summary["errors"] or args.allow_blocked else 1
+
+
+def source_only_golden_paths(
+    entry: dict[str, Any],
+    oracle: dict[str, Any],
+) -> list[str]:
+    """Reviewed production paths whose start->target delta is the accepted
+    source-only golden change."""
+    validation = entry.get("oracle_validation") or {}
+    paths = [str(item) for item in (validation.get("golden_source_paths") or [])]
+    if not paths:
+        paths = [str(item) for item in (oracle.get("source_changed") or [])]
+    # A pre-existing repository test file that the accepted change had to
+    # update in lockstep (renamed interface method, changed helper signature)
+    # will not compile against a production-only golden. Replacing exactly
+    # those recorded files is the benchmark's existing
+    # ``source_only_with_coupled_test_files_replaced`` golden mode; it is
+    # always recorded explicitly, never inferred.
+    overlay = validation.get("coupled_test_file_overlay") or []
+    if isinstance(overlay, dict):
+        overlay = [overlay]
+    for item in overlay:
+        paths.append(str(item["path"] if isinstance(item, dict) else item))
+    return list(dict.fromkeys(paths))
+
+
+def apply_source_only_golden(
+    repo_dir: Path,
+    workspace: Path,
+    start_sha: str,
+    target_sha: str,
+    paths: list[str],
+    log_path: Path,
+    recorded_patch: Path | None = None,
+) -> tuple[bool, str]:
+    """Materialize the accepted golden change, restricted to ``paths``.
+
+    Uses ``git diff start..target -- <paths>``: exactly the maintainer's own
+    accepted delta on the reviewed production files, with no test-file
+    changes and nothing invented.
+    """
+    if recorded_patch is not None:
+        # A recorded golden patch is used when the accepted commit mixes the
+        # reviewed refactor with unrelated hunks in the same file; the exact
+        # applied hunks are then pinned as an asset (the published Oracle for
+        # this family recorded the same golden_patch_isolation practice).
+        ok, detail = apply_patch(workspace, recorded_patch)
+        log_path.write_text(detail, encoding="utf-8")
+        return ok, detail
+    if not paths:
+        return False, "no source-only golden paths were declared"
+    diff = subprocess.run(
+        ["git", "-C", str(repo_dir), "diff", f"{start_sha}..{target_sha}", "--", *paths],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if diff.returncode != 0:
+        return False, diff.stderr[-2000:]
+    if not diff.stdout.strip():
+        return False, "the source-only golden delta is empty"
+    patch_path = log_path.parent / "source-only-golden.patch"
+    patch_path.write_text(diff.stdout, encoding="utf-8")
+    ok, detail = apply_patch(workspace, patch_path)
+    log_path.write_text(detail, encoding="utf-8")
+    return ok, detail
+
+
+def anchor_lines_for(
+    anchors: dict[str, list[int]],
+    coverage_path: str,
+) -> list[int]:
+    """Changed-old anchors for a coverage path.
+
+    A coverage path is relative to the module/project root the Oracle runs in
+    (``ast/misc.go``), while anchors are keyed by repository-relative path
+    (``pkg/parser/ast/misc.go``); match on either suffix so the intersection is
+    computed over the same file rather than silently coming out empty.
+    """
+    if coverage_path in anchors:
+        return anchors[coverage_path]
+    for path, lines in anchors.items():
+        if path.endswith("/" + coverage_path) or coverage_path.endswith("/" + path):
+            return lines
+    return []
+
+
+def judge_in_image_harness(
+    *,
+    exit_code: int,
+    statuses: dict[str, str],
+    report_names: list[str],
+    required_runs: int,
+    expected_passed: int,
+    passed_counts: list[int],
+    covered: dict[str, list[int]],
+) -> list[str]:
+    """Every condition an in-image harness run must satisfy.
+
+    A truncated harness (fewer than the configured start/golden runs), a
+    non-zero harness exit, a failed phase, a failed golden patch application or
+    a missing per-phase report all fail here, so a partial run can never be
+    reported as a passing Oracle.
+    """
+    failures: list[str] = []
+    if exit_code != 0:
+        failures.append(f"the in-image harness exited {exit_code}")
+    if not statuses:
+        failures.append("the in-image harness produced no statuses.log")
+    start_phases = sorted(name for name in statuses if name.startswith("start_"))
+    golden_phases = sorted(
+        name for name in statuses
+        if name.startswith("golden_") and name != "golden_apply"
+    )
+    if len(start_phases) != required_runs:
+        failures.append(
+            f"expected {required_runs} in-image start phases, found "
+            f"{len(start_phases)}: {start_phases}"
+        )
+    if len(golden_phases) != required_runs:
+        failures.append(
+            f"expected {required_runs} in-image golden phases, found "
+            f"{len(golden_phases)}: {golden_phases}"
+        )
+    for name in sorted(statuses):
+        if statuses[name].strip() != "0":
+            failures.append(
+                f"in-image harness phase {name} returned {statuses[name]}"
+            )
+    if "golden_apply" not in statuses:
+        failures.append("the in-image harness recorded no golden_apply phase")
+    elif statuses["golden_apply"].strip() != "0":
+        failures.append("the accepted golden patch did not apply in-image")
+    for phase in start_phases + golden_phases:
+        stem, _, index = phase.rpartition("_")
+        expected_report = f"{stem}-run-{index}.xml"
+        if expected_report not in report_names:
+            failures.append(f"missing in-image report for {phase}: {expected_report}")
+    if len(passed_counts) < 2 * required_runs:
+        failures.append(
+            f"expected {2 * required_runs} in-image JUnit reports, found "
+            f"{len(passed_counts)}"
+        )
+    if not passed_counts:
+        failures.append("the in-image harness produced no JUnit reports")
+    elif expected_passed and min(passed_counts) < expected_passed:
+        failures.append(
+            f"in-image harness passed only {min(passed_counts)} tests, "
+            f"expected at least {expected_passed}"
+        )
+    if not covered:
+        failures.append(
+            "no changed-old production line was executed by the in-image "
+            "harness on the exact start revision"
+        )
+    return failures
+
+
+def validate_in_image_harness(
+    task_id: str,
+    entry: dict[str, Any],
+    task: dict[str, Any],
+    oracle: dict[str, Any],
+    *,
+    legacy_root: Path,
+    asset_root: Path,
+    work_root: Path,
+    evidence: Path,
+    timeout: int | None,
+) -> dict[str, Any]:
+    """Really re-execute an in-image historical harness.
+
+    The image bakes the exact start checkout, the accepted golden patch and the
+    published harness, which runs start x3, applies the golden patch and runs
+    golden x3, writing per-phase JUnit reports, a coverage report and a
+    ``statuses.log``. This function executes that harness now and judges its
+    real output -- it never trusts the historical record.
+    """
+    recipe = entry["recipe"]
+    scratch = work_root / "validate" / BASE.safe_component(task_id)
+    force_remove_path(scratch)
+    reports = scratch / "artifacts"
+    reports.mkdir(parents=True, exist_ok=True)
+    harness = str(recipe.get("harness_command") or "/usr/local/bin/run-recovery")
+    docker_cmd = docker_run_command(
+        recipe,
+        mounts=["-v", f"{reports}:/artifacts"],
+        env={},
+        workdir=str(recipe.get("workdir") or "/work"),
+        command=["-lc", harness],
+        entrypoint="/bin/bash",
+    )
+    log_path = scratch / "harness.log"
+    exit_code, duration, error = run_subprocess(
+        docker_cmd,
+        cwd=None,
+        log_path=log_path,
+        timeout=timeout or int(recipe.get("timeout_seconds") or 3600),
+    )
+    statuses_path = reports / "statuses.log"
+    statuses = dict(
+        line.split("=", 1)
+        for line in statuses_path.read_text(errors="replace").splitlines()
+        if "=" in line
+    ) if statuses_path.is_file() else {}
+    start_runs, golden_runs = [], []
+    for name, value in sorted(statuses.items()):
+        ok = value.strip() == "0"
+        row = {"phase": name, "ok": ok}
+        if name.startswith("start_"):
+            start_runs.append(row)
+        elif name.startswith("golden_") and name != "golden_apply":
+            golden_runs.append(row)
+
+    expected = int(recipe.get("expected_passed") or 0)
+    passed_counts = []
+    report_failures: list[str] = []
+    for report in sorted(reports.glob("*-run-*.xml")):
+        passed, _total, failed = junit_outcome(report)
+        passed_counts.append(passed)
+        if failed:
+            report_failures.append(f"{report.name}: {failed[:3]}")
+
+    anchors = changed_old_lines(
+        repo_checkout_dir(legacy_root, entry["repo"]),
+        str(task["start_sha"]),
+        str(task.get("target_sha") or ""),
+        source_only_golden_paths(entry, oracle),
+    )
+    coverage_paths = [
+        str(item) for item in ((recipe.get("coverage") or {}).get("paths") or [])
+    ]
+    hits = py_cover_hits(reports / "start-coverage.json", coverage_paths)
+    covered = {
+        path: sorted(set(hits.get(path, [])) & set(anchor_lines_for(anchors, path)))
+        for path in coverage_paths
+    }
+    covered = {path: lines for path, lines in covered.items() if lines}
+
+    required_runs = int(
+        (entry.get("oracle_validation") or {}).get("required_runs") or 3
+    )
+    failures = judge_in_image_harness(
+        exit_code=exit_code,
+        statuses=statuses,
+        report_names=[path.name for path in reports.glob("*.xml")],
+        required_runs=required_runs,
+        expected_passed=expected,
+        passed_counts=passed_counts,
+        covered=covered,
+    ) + report_failures
+
+    for artifact in sorted(scratch.glob("*.log")):
+        shutil.copy2(artifact, evidence / artifact.name)
+    for artifact in sorted(reports.iterdir()):
+        if artifact.is_file() and artifact.stat().st_size < 8 * 1024 * 1024:
+            shutil.copy2(artifact, evidence / f"artifacts-{artifact.name}")
+    force_remove_path(scratch)
+
+    report = {
+        "id": task_id,
+        "repo": entry["repo"],
+        "lane": entry["lane"],
+        "recipe": recipe["kind"],
+        "mode": "in_image_harness_reexecuted",
+        "runs": len(start_runs),
+        "start_runs": start_runs,
+        "golden_runs": golden_runs,
+        "exit_code": exit_code,
+        "duration_seconds": duration,
+        "error": error,
+        "changed_old_lines": {path: len(lines) for path, lines in anchors.items()},
+        "coverage": {"tool": "py_cover (in-image harness)", "changed_old_hits": covered},
+        "failures": failures,
+        "required_runs": required_runs,
+        "stable_start": len(start_runs) == required_runs
+        and all(row["ok"] for row in start_runs),
+        "stable_golden": len(golden_runs) == required_runs
+        and all(row["ok"] for row in golden_runs),
+        "changed_lines_covered": bool(covered),
+        "pass_to_pass": min(passed_counts) if passed_counts else 0,
+        "scoring": True,
+    }
+    report["oracle_ok"] = bool(
+        report["stable_start"]
+        and report["stable_golden"]
+        and report["changed_lines_covered"]
+        and report["pass_to_pass"] > 0
+        and not failures
+    )
+    BASE.atomic_json(evidence / "validation.json", report)
+    return report
+
+
+def validate_one_oracle(
+    task_id: str,
+    entry: dict[str, Any],
+    task: dict[str, Any],
+    oracle: dict[str, Any],
+    *,
+    legacy_root: Path,
+    asset_root: Path,
+    work_root: Path,
+    evidence_root: Path,
+    runs: int,
+    timeout: int | None,
+) -> dict[str, Any]:
+    """Prove one recovered Oracle against the current hard-Oracle standard.
+
+    Checks, all of which must hold:
+
+    * **Exact-start baseline pass** -- the Oracle passes on the untouched
+      start revision, ``runs`` times in a row (repeated stability).
+    * **Source-only golden pass** -- it also passes after the maintainer's own
+      accepted delta on the reviewed production files is applied, so it is not
+      coupled to the start implementation.
+    * **Nonempty PASS_TO_PASS** -- at least one named public test/assertion is
+      actually judged.
+    * **Changed-old production coverage** -- at least one production line that
+      the accepted change removed or rewrote is executed on the start
+      revision, measured with a real coverage tool (go cover, coverage.py, or
+      bash xtrace line tracing), never inferred from source shape.
+    """
+    recipe = entry["recipe"]
+    repo_source = repo_checkout_dir(legacy_root, entry["repo"])
+    start_sha = str(task["start_sha"])
+    target_sha = str(task.get("target_sha") or oracle.get("target_sha") or "")
+    scratch = work_root / "validate" / BASE.safe_component(task_id)
+    shutil.rmtree(scratch, ignore_errors=True)
+    scratch.mkdir(parents=True, exist_ok=True)
+    evidence = evidence_root / BASE.safe_component(task_id)
+    evidence.mkdir(parents=True, exist_ok=True)
+
+    validation_mode = (entry.get("oracle_validation") or {}).get("mode")
+    if recipe["kind"] == "python_image_pytest":
+        return validate_in_image_harness(
+            task_id,
+            entry,
+            task,
+            oracle,
+            legacy_root=legacy_root,
+            asset_root=asset_root,
+            work_root=work_root,
+            evidence=evidence,
+            timeout=timeout,
+        )
+
+    golden_paths = source_only_golden_paths(entry, oracle)
+    anchors = (
+        changed_old_lines(repo_source, start_sha, target_sha, golden_paths)
+        if target_sha
+        else {}
+    )
+    report: dict[str, Any] = {
+        "id": task_id,
+        "repo": entry["repo"],
+        "lane": entry["lane"],
+        "recipe": recipe["kind"],
+        "start_sha": start_sha,
+        "target_sha": target_sha,
+        "runs": runs,
+        "golden_source_paths": golden_paths,
+        "changed_old_lines": {
+            path: len(lines) for path, lines in anchors.items()
+        },
+        "start_runs": [],
+        "golden_runs": [],
+        "coverage": {},
+        "failures": [],
+    }
+    coverage_paths = [
+        str(item) for item in ((recipe.get("coverage") or {}).get("paths") or [])
+    ]
+    if not coverage_paths:
+        report["failures"].append(
+            "recipe declares no coverage paths; changed-old production "
+            "coverage cannot be proven"
+        )
+    if not target_sha:
+        report["failures"].append(
+            "task carries no target_sha; the source-only golden cannot be "
+            "materialized"
+        )
+
+    workspace = scratch / "workspace"
+    try:
+        git_worktree_checkout(
+            repo_source, start_sha, workspace, str(recipe.get("image") or "") or None
+        )
+        # Validation must not mutate pinned assets either: writable mounts are
+        # copied into this run's scratch tree, read-only ones keep pointing at
+        # the pinned source.
+        recipe = isolate_mutable_mounts(
+            recipe, scratch, asset_root=asset_root, legacy_root=legacy_root
+        )
+        recipe = prepare_cache_mounts(recipe, scratch, asset_root=asset_root)
+        install_session_assets(recipe, asset_root, workspace)
+        for index in range(1, runs + 1):
+            outcome = execute_oracle(
+                recipe,
+                oracle,
+                workspace=workspace,
+                scratch=scratch,
+                label=f"start-{index}",
+                timeout=timeout or int(recipe.get("timeout_seconds") or 1800),
+                with_coverage=index == 1,
+            )
+            ok, passed, total, failed = judge_oracle(recipe, outcome)
+            report["start_runs"].append(
+                {
+                    "run": index,
+                    "ok": ok,
+                    "passed": passed,
+                    "total": total,
+                    "failed": failed[:20],
+                    "exit_code": outcome["exit_code"],
+                    "duration_seconds": outcome["duration_seconds"],
+                }
+            )
+            if index == 1:
+                # Coverage must be measured by this run. A historical
+                # attestation is informational only and can never satisfy the
+                # changed-old coverage requirement.
+                hits = coverage_hits(recipe, outcome)
+                covered = {
+                    path: sorted(
+                        set(hits.get(path, []))
+                        & set(anchor_lines_for(anchors, path))
+                    )
+                    for path in coverage_paths
+                }
+                report["coverage"] = {
+                    "tool": (recipe.get("coverage") or {}).get("kind"),
+                    "executed_lines": {
+                        path: len(values) for path, values in hits.items()
+                    },
+                    "changed_old_hits": {
+                        path: values for path, values in covered.items() if values
+                    },
+                }
+                if any(covered.values()):
+                    report["coverage"]["phase_with_hits"] = "start"
+                else:
+                    report["failures"].append(
+                        "no changed-old production line was executed on the "
+                        "exact start revision"
+                    )
+            if total <= 0:
+                report["failures"].append("PASS_TO_PASS set is empty")
+            if not ok:
+                report["failures"].append(f"start run {index} did not pass")
+                break
+
+        # The source-only golden phase is gated on the start phase only: a
+        # coverage shortfall must still be reported alongside a full
+        # start/golden stability picture rather than hiding it.
+        start_ok = bool(report["start_runs"]) and all(
+            run["ok"] for run in report["start_runs"]
+        )
+        if target_sha and start_ok:
+            validation = entry.get("oracle_validation") or {}
+            if validation.get("mode") == "start_and_target_commit_golden":
+                # The published Oracle for this task recorded
+                # golden_mode=target-commit: the accepted change moves whole
+                # packages, so the golden side is the target revision itself.
+                # This is really executed here, not attested.
+                remove_worktree(
+                    repo_source, workspace, str(recipe.get("image") or "") or None
+                )
+                git_worktree_checkout(
+                    repo_source, target_sha, workspace,
+                    str(recipe.get("image") or "") or None,
+                )
+                install_session_assets(recipe, asset_root, workspace)
+                golden_ok, detail = True, "target-commit checkout"
+                (scratch / "golden-apply.log").write_text(
+                    f"checked out target commit {target_sha}\n", encoding="utf-8"
+                )
+            else:
+                golden_ok, detail = None, ""
+            recorded_patch = None
+            if validation.get("golden_patch_asset"):
+                recorded_patch = asset_path(
+                    asset_root, str(validation["golden_patch_asset"])
+                )
+                digest = sha256_file(recorded_patch)
+                if digest != validation.get("golden_patch_sha256"):
+                    report["failures"].append(
+                        f"recorded golden patch {recorded_patch} has SHA-256 "
+                        f"{digest}, not the recorded "
+                        f"{validation.get('golden_patch_sha256')}"
+                    )
+                    recorded_patch = None
+            if golden_ok is None:
+                golden_ok, detail = apply_source_only_golden(
+                    repo_source,
+                    workspace,
+                    start_sha,
+                    target_sha,
+                    golden_paths,
+                    scratch / "golden-apply.log",
+                    recorded_patch=recorded_patch,
+                )
+            if not golden_ok:
+                report["failures"].append(
+                    f"source-only golden did not apply: {detail[-500:]}"
+                )
+            else:
+                golden_assets = (entry.get("oracle_validation") or {}).get(
+                    "golden_session_tests"
+                )
+                if golden_assets:
+                    # The published Oracle for a target-commit golden records a
+                    # paired golden-side session test (the accepted change
+                    # renamed the public API the start-side test calls). The
+                    # pairing is recorded explicitly, never inferred.
+                    install_session_assets(
+                        {"session_tests": golden_assets}, asset_root, workspace
+                    )
+                # A target-commit golden may legitimately require the
+                # revision's own pinned toolchain/module cache (the published
+                # Oracle for kraftkit recorded start=go1.24.0, golden=go1.25.0
+                # with separate caches). Overrides are recorded explicitly.
+                golden_recipe = dict(recipe)
+                golden_recipe.pop("host_mounts", None)
+                golden_recipe["host_mounts"] = recipe.get("host_mounts") or []
+                golden_recipe.update(
+                    (entry.get("oracle_validation") or {}).get(
+                        "golden_recipe_overrides"
+                    )
+                    or {}
+                )
+                golden_recipe.pop("gomodcache_dir", None)
+                golden_recipe = prepare_cache_mounts(
+                    golden_recipe, scratch, asset_root=asset_root, phase="golden"
+                )
+                coverage_phase = str(
+                    (recipe.get("coverage") or {}).get("phase") or "start"
+                )
+                for index in range(1, runs + 1):
+                    outcome = execute_oracle(
+                        golden_recipe,
+                        oracle,
+                        workspace=workspace,
+                        scratch=scratch,
+                        label=f"golden-{index}",
+                        timeout=timeout
+                        or int(recipe.get("timeout_seconds") or 1800),
+                        with_coverage=index == 1
+                        and coverage_phase in {"golden", "either"},
+                    )
+                    if index == 1 and coverage_phase in {"golden", "either"}:
+                        golden_hits = coverage_hits(golden_recipe, outcome)
+                        golden_covered = {
+                            path: sorted(
+                                set(golden_hits.get(path, []))
+                                & set(anchor_lines_for(anchors, path))
+                            )
+                            for path in coverage_paths
+                        }
+                        golden_covered = {
+                            path: lines
+                            for path, lines in golden_covered.items()
+                            if lines
+                        }
+                        report["coverage"]["golden_changed_old_hits"] = (
+                            golden_covered
+                        )
+                        if golden_covered:
+                            report["coverage"]["phase_with_hits"] = "golden"
+                            report["failures"] = [
+                                failure
+                                for failure in report["failures"]
+                                if "changed-old production line" not in failure
+                            ]
+                    ok, passed, total, failed = judge_oracle(
+                        golden_recipe, outcome
+                    )
+                    report["golden_runs"].append(
+                        {
+                            "run": index,
+                            "ok": ok,
+                            "passed": passed,
+                            "total": total,
+                            "failed": failed[:20],
+                            "exit_code": outcome["exit_code"],
+                            "duration_seconds": outcome["duration_seconds"],
+                        }
+                    )
+                    if not ok:
+                        report["failures"].append(
+                            f"source-only golden run {index} did not pass"
+                        )
+                        break
+    finally:
+        cleanup_image = str(recipe.get("image") or "") or None
+        for artifact in sorted(scratch.glob("*.log")):
+            shutil.copy2(artifact, evidence / artifact.name)
+        for artifact in sorted(scratch.glob("*.patch")):
+            shutil.copy2(artifact, evidence / artifact.name)
+        for reports in sorted(scratch.glob("reports-*")):
+            for artifact in sorted(reports.iterdir()):
+                if artifact.is_file():
+                    shutil.copy2(
+                        artifact, evidence / f"{reports.name}-{artifact.name}"
+                    )
+        remove_worktree(repo_source, workspace, cleanup_image)
+        force_remove_path(scratch, cleanup_image)
+
+    report["stable_start"] = bool(report["start_runs"]) and all(
+        run["ok"] for run in report["start_runs"]
+    )
+    report["stable_golden"] = bool(report["golden_runs"]) and all(
+        run["ok"] for run in report["golden_runs"]
+    )
+    report["changed_lines_covered"] = bool(
+        report.get("coverage", {}).get("changed_old_hits")
+        or report.get("coverage", {}).get("golden_changed_old_hits")
+    )
+    report["pass_to_pass"] = (
+        report["start_runs"][0]["total"] if report["start_runs"] else 0
+    )
+    report["oracle_ok"] = bool(
+        report["stable_start"]
+        and report["stable_golden"]
+        and report["changed_lines_covered"]
+        and report["pass_to_pass"] > 0
+        and not report["failures"]
+    )
+    BASE.atomic_json(evidence / "validation.json", report)
+    return report
+
+
+def cmd_validate_oracle(args: argparse.Namespace) -> int:
+    load_digest_cache(Path(args.asset_root).expanduser().resolve())
+    legacy_root, asset_root, session_files = resolve_roots(args)
+    contract = load_contract(Path(args.contract).resolve())
+    tasks_path = Path(args.tasks).resolve()
+    oracles_path = Path(args.oracles).resolve()
+    tasks_by_id, oracles_by_id, plan = load_release_and_plan(
+        tasks_path, oracles_path
+    )
+    rows = select_scope(plan, contract, args.task_id or None)
+    evidence_root = Path(args.output).resolve() / "oracle-validation"
+    work_root = (
+        Path(args.work_root).resolve()
+        if args.work_root
+        else Path(args.output).resolve() / "work"
+    )
+    reports = []
+    for row in rows:
+        task_id = row["id"]
+        entry = contract["tasks"][task_id]
+        if entry["status"] != "recovered":
+            continue
+        blockers = task_blockers(
+            task_id,
+            entry,
+            oracles_by_id[task_id],
+            tasks_by_id[task_id],
+            legacy_root=legacy_root,
+            asset_root=asset_root,
+            session_files=session_files,
+        )
+        if blockers:
+            reports.append(
+                {"id": task_id, "oracle_ok": False, "failures": blockers}
+            )
+            continue
+        reports.append(
+            validate_one_oracle(
+                task_id,
+                entry,
+                tasks_by_id[task_id],
+                oracles_by_id[task_id],
+                legacy_root=legacy_root,
+                asset_root=asset_root,
+                work_root=work_root,
+                evidence_root=evidence_root,
+                runs=args.runs,
+                timeout=args.timeout,
+            )
+        )
+    summary = {
+        "schema_version": "reviewbench-legacy-oracle-validation/v1",
+        "created_at": BASE.utc_now(),
+        "adapter_contract_version": ADAPTER_CONTRACT_VERSION,
+        "validated": len(reports),
+        "oracle_ok": sum(1 for report in reports if report.get("oracle_ok")),
+        "tasks": [
+            {
+                "id": report["id"],
+                "oracle_ok": report.get("oracle_ok", False),
+                "pass_to_pass": report.get("pass_to_pass"),
+                "stable_start": report.get("stable_start"),
+                "stable_golden": report.get("stable_golden"),
+                "changed_lines_covered": report.get("changed_lines_covered"),
+                "failures": report.get("failures", [])[:5],
+            }
+            for report in sorted(reports, key=lambda item: item["id"])
+        ],
+    }
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    BASE.atomic_json(evidence_root / "validation-summary.json", summary)
+    print(json.dumps(summary, indent=2))
+    return 0 if summary["validated"] == summary["oracle_ok"] else 1
+
+
+def cmd_pin_assets(args: argparse.Namespace) -> int:
+    """Record the current digest of every declared execution-relevant asset.
+
+    This is a deliberate, auditable action: it writes the *observed* digest of
+    each asset into the contract so preflight can fail closed on any later
+    drift. Run it when an asset is (re)built or repackaged -- never to paper
+    over an unexpected change.
+    """
+    legacy_root, asset_root, _ = resolve_roots(args)
+    load_digest_cache(asset_root)
+    contract_path = Path(args.contract).resolve()
+    contract = load_contract(contract_path)
+    updated = []
+    for task_id, entry in sorted(contract["tasks"].items()):
+        if entry.get("status") != "recovered":
+            continue
+        if args.task_id and task_id not in args.task_id:
+            continue
+        recipe = entry["recipe"]
+        overrides = (entry.get("oracle_validation") or {}).get(
+            "golden_recipe_overrides"
+        ) or {}
+        for mount in recipe.get("host_mounts") or []:
+            if mount.get("pin") == "git_commit":
+                # pinned by the commit it must contain, not by a tree digest
+                mount.pop("sha256", None)
+                continue
+            location = Path(expand_placeholders(
+                str(mount["host"]),
+                legacy_root=legacy_root,
+                asset_root=asset_root,
+                session_files=None,
+            ))
+            observed = path_digest(location, rehash=args.rehash)
+            if observed is None:
+                print(f"error: missing mount {location}", file=sys.stderr)
+                return 2
+            if mount.get("sha256") != observed:
+                mount["sha256"] = observed
+                updated.append(f"{task_id}: {mount['host']}")
+        for source, label in ((recipe, "start"), (overrides, "golden")):
+            for key in ("gomodcache_archive", "cache_archive"):
+                archive = source.get(key)
+                if not archive:
+                    continue
+                path = asset_path(asset_root, str(archive))
+                observed = path_digest(path, rehash=args.rehash)
+                if observed is None:
+                    print(f"error: missing archive {path}", file=sys.stderr)
+                    return 2
+                if source.get(f"{key}_sha256") != observed:
+                    source[f"{key}_sha256"] = observed
+                    updated.append(f"{task_id} [{label}]: {archive}")
+    contract_path.write_text(
+        json.dumps(contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    save_digest_cache()
+    print(json.dumps({"updated": updated}, indent=2))
+    return 0
+
+
+def safe_extract_tar(archive: Path, destination: Path) -> int:
+    """Extract a tar archive with path-traversal and link safety.
+
+    Rejects absolute paths, ``..`` components, and any hard/symlink whose
+    target escapes the destination; refuses device/FIFO members outright. No
+    container image and no external tar binary is involved, so nothing
+    unpinned can run as part of a restore.
+    """
+    destination = destination.resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    extracted = 0
+    with tarfile.open(archive, "r:*") as bundle:
+        for member in bundle:
+            name = member.name
+            if name.startswith("/") or ".." in Path(name).parts:
+                raise ValueError(f"unsafe member path in {archive}: {name!r}")
+            target = (destination / name).resolve()
+            if not str(target).startswith(str(destination) + os.sep) and target != destination:
+                raise ValueError(f"member escapes destination in {archive}: {name!r}")
+            if member.islnk() or member.issym():
+                link = member.linkname
+                if link.startswith("/") or ".." in Path(link).parts:
+                    raise ValueError(
+                        f"unsafe link target in {archive}: {name!r} -> {link!r}"
+                    )
+            elif member.isdev() or member.isfifo():
+                raise ValueError(f"refusing device/FIFO member in {archive}: {name!r}")
+            bundle.extract(member, destination)
+            extracted += 1
+    return extracted
+
+
+def load_asset_checksums(asset_root: Path) -> dict[str, str]:
+    sums_path = asset_root / "SHA256SUMS"
+    if not sums_path.is_file():
+        raise ValueError(f"missing asset checksum file: {sums_path}")
+    checksums: dict[str, str] = {}
+    for line in sums_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        digest, _, relative = line.partition("  ")
+        checksums[relative.strip()] = digest.strip()
+    return checksums
+
+
+def cmd_restore_caches(args: argparse.Namespace) -> int:
+    """Recreate a missing Go module cache volume from its packaged archive.
+
+    Every archive must (a) be listed in ``SHA256SUMS`` under ``--asset-root``,
+    (b) match that recorded digest byte for byte, and (c) match the digest the
+    contract pins, before anything is created. Extraction uses Python's
+    ``tarfile`` with traversal/link safety -- never an unpinned container image
+    and never the network -- and an existing volume is never overwritten.
+    """
+    _, asset_root, _ = resolve_roots(args)
+    load_digest_cache(asset_root)
+    contract = load_contract(Path(args.contract).resolve())
+    checksums = load_asset_checksums(asset_root)
+
+    actions = []
+    for task_id, entry in sorted(contract["tasks"].items()):
+        recipe = entry.get("recipe") or {}
+        overrides = (entry.get("oracle_validation") or {}).get(
+            "golden_recipe_overrides"
+        ) or {}
+        if args.task_id and task_id not in args.task_id:
+            continue
+        phases = [("start", recipe), ("golden", overrides)]
+        for phase, source in phases:
+            archive = source.get("gomodcache_archive")
+            if not archive:
+                continue
+            action = restore_one_cache(
+                task_id, phase, source, archive,
+                asset_root=asset_root, checksums=checksums,
+                target_root=Path(args.target_dir).resolve() if args.target_dir else None,
+                dry_run=args.dry_run,
+            )
+            actions.append(action)
+    save_digest_cache()
+    print(json.dumps({"actions": actions}, indent=2))
+    return 0
+
+
+def restore_one_cache(
+    task_id: str,
+    phase: str,
+    source: dict[str, Any],
+    archive: str,
+    *,
+    asset_root: Path,
+    checksums: dict[str, str],
+    target_root: Path | None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Verify and restore one phase's packaged module cache.
+
+    ``--target-dir`` restores into a plain directory, which is what a fresh
+    host without the historical Docker volumes needs; otherwise the recipe's
+    named volume is created and seeded.
+    """
+    if True:
+        volume = source.get("gomodcache_volume") or f"rb-restored-{phase}"
+        relative = str(archive)
+        archive_path = asset_path(asset_root, relative)
+        if relative not in checksums:
+            raise ValueError(
+                f"packaged cache archive {relative} is not listed in "
+                f"{asset_root / 'SHA256SUMS'}; refusing to restore an "
+                "unaccounted archive"
+            )
+        digest = path_digest(archive_path, rehash=True)
+        if digest is None:
+            raise ValueError(f"missing packaged cache archive: {archive_path}")
+        if digest != checksums[relative]:
+            raise ValueError(
+                f"packaged cache archive {archive_path} has SHA-256 {digest}, "
+                f"not the SHA256SUMS entry {checksums[relative]}"
+            )
+        pinned = source.get("gomodcache_archive_sha256")
+        if pinned and digest != pinned:
+            raise ValueError(
+                f"packaged cache archive {archive_path} has SHA-256 {digest}, "
+                f"not the contract-pinned {pinned}"
+            )
+        if dry_run:
+            return {"task": task_id, "phase": phase, "volume": volume,
+                    "action": "would_restore", "archive": relative,
+                    "sha256": digest}
+        if target_root is not None:
+            destination = target_root / f"{BASE.safe_component(task_id)}-{phase}"
+            members = safe_extract_tar(archive_path, destination)
+            return {"task": task_id, "phase": phase, "action": "restored_to_dir",
+                    "directory": str(destination), "archive": relative,
+                    "sha256": digest, "members": members}
+        if docker_volume_present(str(volume)):
+            return {"task": task_id, "phase": phase, "volume": volume,
+                    "action": "present"}
+        if not docker_available():
+            raise ValueError("docker CLI is not available; cannot create a volume")
+        created = subprocess.run(
+            ["docker", "volume", "create", str(volume)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        if created.returncode != 0:
+            raise ValueError(f"could not create volume {volume}: {created.stdout}")
+        mountpoint = (docker_volume_identity(str(volume)) or {}).get("mountpoint")
+        if not mountpoint:
+            raise ValueError(f"could not resolve mountpoint for volume {volume}")
+        members = safe_extract_tar(archive_path, Path(mountpoint))
+        return {"task": task_id, "phase": phase, "volume": volume,
+                "action": "restored", "archive": relative, "sha256": digest,
+                "members": members}
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def add_common_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--tasks", required=True)
+    parser.add_argument("--oracles", required=True)
+    parser.add_argument("--legacy-root", required=True)
+    parser.add_argument(
+        "--asset-root",
+        required=True,
+        help="Recovered asset root holding session Oracle files and packaged "
+        "caches (see docs/OPEN_MODEL_EVALUATION.md)",
+    )
+    parser.add_argument("--contract", default=str(DEFAULT_CONTRACT))
+    parser.add_argument(
+        "--session-files",
+        help="Historical ${REVIEWBENCH_SESSION_FILES} root; used only to "
+        "re-verify that a blocked task's lost assets are still lost",
+    )
+    parser.add_argument(
+        "--task-id",
+        action="append",
+        help="Restrict to a subset of the contract's task IDs (repeatable)",
+    )
+    parser.add_argument(
+        "--rehash",
+        action="store_true",
+        help="Ignore the per-file digest cache and re-read every asset byte",
+    )
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    preflight = sub.add_parser(
+        "preflight",
+        help="Fail-closed check of the 19 gopy/scripted legacy contracts",
+    )
+    add_common_args(preflight)
+    preflight.add_argument("--output")
+    preflight.add_argument("--allow-blocked", action="store_true")
+    preflight.set_defaults(func=cmd_preflight)
+
+    replay = sub.add_parser(
+        "replay",
+        help="Replay ready tasks for a staged model into "
+        "<output>/legacy/correctness/<lane>.jsonl",
+    )
+    add_common_args(replay)
+    replay.add_argument("--output", required=True)
+    replay.add_argument("--model", required=True)
+    replay.add_argument(
+        "--work-root",
+        help="Disposable scratch root (default: <output>/legacy/work). May "
+        "point anywhere: only small text/XML reports are copied into the "
+        "hashed <output>/legacy/evidence subtree.",
+    )
+    replay.add_argument("--timeout", type=int, default=None)
+    replay.add_argument("--force", action="store_true")
+    replay.add_argument("--dry-run", action="store_true")
+    replay.add_argument("--allow-blocked", action="store_true")
+    replay.set_defaults(func=cmd_replay)
+
+    validate = sub.add_parser(
+        "validate-oracle",
+        help="Prove a recovered Oracle against the hard-Oracle standard: "
+        "exact-start baseline pass, source-only golden pass, nonempty "
+        "PASS_TO_PASS, changed-old production coverage, repeated stability",
+    )
+    add_common_args(validate)
+    validate.add_argument("--output", required=True)
+    validate.add_argument("--work-root")
+    validate.add_argument("--runs", type=int, default=3)
+    validate.add_argument("--timeout", type=int, default=None)
+    validate.set_defaults(func=cmd_validate_oracle)
+
+    pin = sub.add_parser(
+        "pin-assets",
+        help="Record the current digest of every declared asset into the "
+        "contract (deliberate, auditable re-pinning)",
+    )
+    add_common_args(pin)
+    pin.set_defaults(func=cmd_pin_assets)
+
+    restore = sub.add_parser(
+        "restore-caches",
+        help="Recreate missing Go module cache volumes from the packaged, "
+        "hash-verified archives under --asset-root",
+    )
+    restore.add_argument("--asset-root", required=True)
+    restore.add_argument("--contract", default=str(DEFAULT_CONTRACT))
+    restore.add_argument("--legacy-root", default=".")
+    restore.add_argument("--task-id", action="append")
+    restore.add_argument(
+        "--target-dir",
+        help="Restore into plain directories instead of Docker volumes "
+        "(what a fresh host without the historical volumes needs)",
+    )
+    restore.add_argument("--dry-run", action="store_true")
+    restore.set_defaults(func=cmd_restore_caches)
+
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    try:
+        return args.func(args)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

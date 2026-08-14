@@ -1194,6 +1194,313 @@ Real combined runs against both roots, on the merged branch:
 | `replay` (one invocation) | singularity-eos (native), anchor (rust), OpossumUI (tsjs), RepoSense (jvm) | native `pass`, rust `fail` (broken candidate patch, not infra), tsjs `pass` with `pinned_trees_drifted_during_run: []`; RepoSense `infra_retry` because the candidate's own Java does not compile and the mandatory prime therefore fails before the scored command; no scratch left behind |
 | `replay` again, same arguments | as above | `skipped_resume: 4`, `stale_reran: 0`, `executed: 0` -- the lane-specific asset-root provenance makes a combined resume a no-op for all four lanes |
 
+#### 7.1.2 Go/Python + scripted legacy replay adapter (19 of the 40)
+
+`scripts/run_legacy_gopy_scripted_correctness.py` closes the gap for the
+other large slice: the 19 published-hard tasks whose lane is `gopy` (15) or
+`scripted` (4). Their per-task replay recipes are recorded in a reviewable
+data file, `data/legacy_contracts/gopy_scripted_20260808.json`
+(`reviewbench-legacy-replay-contract/v1`), so the executable contract is
+auditable independently of the code that runs it. Every one of the 19 IDs
+appears there exactly once, either `recovered` (with a fully pinned recipe)
+or `blocked` (with the exact lost assets, the evidence that they are lost,
+and what re-engineering would be required).
+
+Like the reserve adapter, it writes only
+`output/legacy/correctness/{gopy,scripted}.jsonl` -- the files `finalize()`
+already merges and normalizes through the same `normalized_record()` used
+for the 374 modern tasks -- and it consumes the already-staged,
+checksum-verified `generation_results.normalized.jsonl` from
+`prepare --allow-partial-modern`.
+
+Recovered recipe kinds (all replay the historical behavioral Oracle; no
+source-shape substitute is ever used):
+
+- `go_docker_p2p` (aws/eks-anywhere#2274, pingcap/tidb#68028): fresh
+  `git worktree` of the retained clone at the exact `start_sha`, staged
+  candidate patch applied, then the historical container (`golang:1.25-bookworm`,
+  the task's own dedicated `rb-wave2-*-mod`/`-build` Go cache volumes,
+  recorded `network: host`) runs
+  `go test -count=1 -json -run <oracle.test_selector> <test_target>` from the
+  recorded `module_dir`. Correctness requires *every* name in the Oracle's own
+  `pass_to_pass_tests` list (23 and 162 respectively) to report a `pass`
+  action in the JSON event stream; a build failure or a vanished test counts
+  as a failure, never as absent.
+- `go_docker_session_oracle` (unikraft/kraftkit#2007): same materialization
+  plus the retained, SHA-256-pinned session Oracle
+  (`initrd/recovery_oracle_test.go`, recovered from the incremental-go-2
+  recovery artifacts) copied into the worktree, then the historical
+  `go test -tags containers_image_openpgp -run ^TestRecoveryDirectoryCPIO$
+  ./initrd` under `golang:1.24.0-bookworm` (the recorded *start*-revision
+  toolchain), `CGO_ENABLED=0`, `GOTOOLCHAIN=local`, offline.
+- `python_image_pytest` (scikit-learn#18359): the historical image
+  `reviewbench-sklearn-18359` bakes the exact start checkout (built in place
+  with Python 3.8.20 / numpy 1.19.2 / scipy 1.5.2 / Cython 0.29.21 /
+  pytest 6.1.1) plus the original `run-recovery` harness; a disposable
+  container applies the candidate patch to that in-image workspace and runs
+  the historical `pytest -q sklearn/inspection/_plot/tests/
+  test_plot_partial_dependence.py --junitxml=...`, scored from the JUnit
+  report against the recorded 55 passing tests.
+
+Fail-closed guarantees: a task is replayed only when its contract entry is
+`recovered` **and** every live asset resolves right now (repo checkout
+containing the exact `start_sha`; Docker image present and matching the
+recorded image ID; Go module/build cache volumes present; session Oracle
+asset matching its recorded SHA-256; and, for the in-image workspace, an
+anchor file byte-identical both to the recorded digest and to the repository
+blob at `start_sha`). Anything missing is a preflight blocker: the task is
+never scored, never guessed, and never reported as a model failure. Blocked
+entries additionally re-verify their recorded `missing_assets`; if all of
+them reappear, preflight reports `blocker_possibly_resolved` and fails, so a
+recovered asset cannot be silently ignored. Nothing is fetched from the
+network to make a run succeed: containers use the recorded network mode,
+Go runs with `GOTOOLCHAIN=local`, and dependency resolution comes only from
+the retained, `go.sum`-verified module caches.
+
+Recovered assets live outside the repository (they are large and/or
+binary) under a dedicated asset root with a `MANIFEST.json` and
+`SHA256SUMS`:
+
+```text
+/data/<user>/reviewbench-openmodels/legacy-recovery-assets/gopy-scripted/
+  assets/kraftkit-2007/oracle-start_test.go      # session Oracle (pinned)
+  assets/sklearn-18359/run-recovery.sh           # historical harness copy
+  caches/rb-wave2-eks-anywhere-2274-mod.tar.gz   # go.sum-pinned module cache
+  caches/rb-wave2-tidb-68028-mod.tar.gz
+  caches/incgo2-mod124kraft.tar.gz
+```
+
+`restore-caches` recreates a lost Go module cache volume from those packaged
+archives after verifying them against `SHA256SUMS` -- never from the network,
+and never over an existing volume.
+
+Commands:
+
+```bash
+# 1) Stage patches as in 7.1.1 (prepare --allow-partial-modern).
+
+# 2) Fail-closed preflight of the 19 gopy/scripted contracts (no execution):
+python3 scripts/run_legacy_gopy_scripted_correctness.py preflight \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --legacy-root <retained-session-root> \
+  --asset-root  <legacy-recovery-assets>/gopy-scripted \
+  --session-files <historical REVIEWBENCH_SESSION_FILES root> \
+  --output <output> --allow-blocked
+
+# 3) Replay only what preflight reports ready, for one staged model:
+python3 scripts/run_legacy_gopy_scripted_correctness.py replay \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --legacy-root <retained-session-root> \
+  --asset-root  <legacy-recovery-assets>/gopy-scripted \
+  --output <output> --model '<model>' --allow-blocked
+
+# 4) Finalize as usual (blocked pairs remain visible, not fabricated).
+
+# Optional: rebuild a lost module cache volume from the packaged archive.
+python3 scripts/run_legacy_gopy_scripted_correctness.py restore-caches \
+  --asset-root <legacy-recovery-assets>/gopy-scripted
+```
+
+##### Engineered Oracles for the lost harnesses
+
+A lost historical harness is treated as an engineering task, not a terminal
+blocker. For every task whose session Oracle/harness did not survive, a **new**
+strict Oracle was derived from the authoritative task instruction and review
+comment, the exact-start source, the accepted source-only golden delta, and the
+repository's own public tests, and then proven against the current hard-Oracle
+standard by `validate-oracle`:
+
+* **exact-start baseline pass** -- the Oracle passes on the untouched start
+  revision, three runs in a row;
+* **source-only golden pass** -- it still passes after the maintainer's own
+  accepted production delta is applied, so it is not coupled to the start
+  implementation (a recorded `coupled_test_file_overlay`, `golden_patch_asset`,
+  paired `golden_session_tests` or `golden_recipe_overrides` may be part of the
+  golden definition, and each is pinned explicitly in the contract);
+* **nonempty PASS_TO_PASS** -- every judged test is named in the contract;
+* **changed-old production coverage** -- at least one production line the
+  accepted change removed or rewrote is executed on the start revision,
+  measured with a real tool (`go test -coverprofile`, `coverage.py`,
+  `sys.settrace`, or bash xtrace line tracing), never inferred from source
+  shape;
+* **repeated stability** and a fully offline final command.
+
+Every engineered Oracle drives public API/observable behavior only. Two earlier
+drafts were rejected and rebuilt for violating that rule (one tested an
+unexported Go helper, one used `unsafe.Pointer` to reach a struct field, and a
+third implemented the production class's private extension hooks). One draft
+was rejected for reading the historical image's baked source copy instead of
+the mounted workspace, which would have made it blind to the code under test.
+
+Three additional recipe kinds carry these Oracles:
+`python_docker_session_oracle` (pytest in a version-pinned image),
+`shell_docker_session_oracle` (a black-box harness driving a production script
+through controlled fake executables, with bash xtrace line coverage), and
+`sbt_docker_session_oracle` (the project's own sbt build against a packaged,
+hash-verified ivy/coursier closure).
+
+Status as of 2026-08-14: **15 of 19 tasks are replay-ready, and every one of
+them is proven by real execution in the validating run itself.**
+`validate-oracle` has no attestation-only path and no attested-coverage
+fallback: each Oracle is executed now -- exact start x3 and golden x3 -- and
+judged on its own output, PASS_TO_PASS set and changed-old production coverage
+**measured by that run**. A historical measurement may be carried in the
+contract for reference, but it can never satisfy the coverage requirement.
+
+| Task | Oracle | P2P | Golden mode | Coverage measured in-run |
+|---|---|---:|---|---|
+| aws/eks-anywhere#2274 | repository suite | 23 | source-only (+5 deleted production paths) | go cover |
+| pingcap/tidb#68028 | repository suite | 162 | source-only (published 407-path set) | go cover (golden phase, as published) |
+| unikraft/kraftkit#2007 | retained session Oracle | 1 | target-commit + paired golden test + golden toolchain | go cover |
+| scikit-learn#18359 | in-image harness re-executed | 55 | in-image golden patch | coverage.py (in-image) |
+| Agoric/agoric-sdk#8072 | 17 repository tests | 17 | source-only + coupled test overlay | go cover |
+| opentelemetry-go-contrib#6172 | engineered session Oracle | 1 | source-only | go cover |
+| ozontech/seq-ui#44 | engineered session Oracle | 1 | source-only | go cover |
+| postman17/metrics#13 | engineered session Oracle | 1 | source-only | go cover |
+| redis/redis-py#3350 | engineered session Oracle | 3 | source-only | coverage.py |
+| codecov/shared#90 | engineered session Oracle | 7 | source-only | coverage.py |
+| labscript-suite/lyse#119 | engineered session Oracle | 3 | source-only | coverage.py |
+| open-formulieren/open-forms#3125 | engineered session Oracle | 3 | source-only | `sys.settrace` |
+| OpenFreeEnergy/alchemiscale#421 | engineered session Oracle | 2 | source-only | coverage.py |
+| Pyomo/pyomo#3698 | engineered session Oracle | 1 | source-only | coverage.py |
+| runfinch/finch-core#780 | engineered shell harness | 7 | source-only | bash xtrace |
+
+The in-image harness (scikit-learn) is judged strictly: the harness process
+must exit 0, produce exactly the configured number of start and golden phases
+(three each), report every phase status as success, record a successful
+`golden_apply`, emit the matching per-phase JUnit report for each, and cover a
+changed-old production line. A truncated one-run harness or a non-zero exit can
+never be reported as a passing Oracle.
+
+Four tasks are **blocked and non-scoring**:
+
+* **scala-js#4707** and **scala-js#4988** -- both Oracles are engineered and
+  behaviourally strict (the project's own sbt build, executed offline against a
+  pinned, fully hashed ivy/coursier closure, 3/3 on start and 3/3 on golden with
+  a named PASS_TO_PASS set), but changed-old production coverage **cannot be
+  measured during the validating run**: the pinned JaCoCo 0.8.12 agent attached
+  with `-J-javaagent` does produce an exec and an XML report over 1,469 analysed
+  classes, yet the reviewed production sources report zero covered lines (the
+  analysed class files are not the class identities the tests executed), and the
+  alternative `set every Test/javaOptions += -javaagent:...` injection fails the
+  scala-js build. The recipes and their validation records are retained in the
+  contract under `engineered_oracle_not_scoring` /
+  `engineered_oracle_validation`; re-running `validate-oracle` after attaching
+  JaCoCo so the executed and analysed class identities match is all that is
+  needed to promote them.
+* **hashicorp/nomad#16383** -- behaviourally strict Ember/QUnit Oracle, but no
+  instrumentation path exists for changed-old line coverage at that revision.
+* **chazari-x/yandex-pr-diplom#1** -- the accepted change is public-API-breaking
+  in both directions (see below).
+
+##### Offline execution and cache provenance
+
+Dependency resolution can never touch the network. Every Go recipe runs with
+`GOPROXY=off`, `GOSUMDB=off` and `GOFLAGS=-mod=readonly` (readonly so a run can
+neither hide a missing dependency nor rewrite the workspace's `go.mod`, which
+would corrupt the golden patch), and the module cache is **not** a named Docker
+volume: each phase is seeded into a fresh, disposable directory extracted from
+an immutable, fully hashed archive under the asset root, verified against the
+contract-pinned digest first. The Go build cache is deliberately *not* pinned:
+it is content-addressed and self-verifying, so it is a derived accelerator
+rather than an execution input, and a metadata-only "pin" would be meaningless.
+
+Both the eks-anywhere and TiDB Oracles now run with `--network none`. Four of
+eks-anywhere's 23 PASS_TO_PASS tests read a release manifest over HTTPS; that
+response was captured once, is hash-pinned in the contract, and is served by a
+loopback TLS server started inside the container from a pinned certificate and
+a 20-line stdlib server, with `SSL_CERT_FILE` and `--add-host` pointing the
+test at it. Nothing is fetched live.
+
+`restore-caches` restores **both** the start and the golden cache of every task
+that declares them, and `--target-dir` restores into plain directories, which
+is what a fresh host without the historical Docker volumes needs. An end-to-end
+test restores an archive into an empty target and then runs a real `go run` in
+the pinned image with `--network none` and `GOPROXY=off`, proving the restored
+cache alone is sufficient.
+
+##### Asset integrity is a single source of truth
+
+`asset_inventory()` enumerates *every* execution-relevant asset of a recovered
+entry -- each pinned Oracle source (`session_test`, `session_tests`, `harness`,
+golden-side variants), the recorded golden patch, every declared `host_mounts`
+tree, every packaged cache archive, every Docker image and cache volume, the
+attested-coverage evidence file, and the retained repository checkout. Nothing
+may be read that does not appear there. From that one list:
+
+* **Preflight** requires a full, symlink-aware content digest for every file
+  and tree (a symlink is hashed as its target string and never followed) and an
+  exact match against the contract; an asset with *no* recorded digest is a
+  blocker in its own right, so nothing can execute unpinned. `--rehash`
+  bypasses the per-file digest cache and re-reads every byte.
+* **The replay-contract fingerprint** binds the observed digest of all of them,
+  so replacing any asset in place invalidates previously-recorded rows.
+* **The staged candidate patch** is re-resolved and re-hashed from disk
+  immediately before every replay and compared against the `patch_sha256`
+  recorded at staging time; its live digest is folded into the row provenance
+  and the staleness check, so a rewritten patch reruns the pair. A missing or
+  drifted patch is a non-scoring `infra_retry`, never a model `apply_error`.
+* **Replay** re-verifies the inventory immediately before executing, copies
+  every writable mount into a per-run scratch tree so pinned sources are never
+  mutated in place, and re-verifies the immutable sources afterwards. A missing,
+  tampered or drifted asset produces a non-scoring `infra_retry` row -- never a
+  model pass or fail.
+
+`pin-assets` records the current digest of every declared asset into the
+contract as a deliberate, auditable action.
+
+`restore-caches` rebuilds a missing Go module cache volume only from an archive
+that is (a) listed in `SHA256SUMS`, (b) byte-identical to that entry, and (c)
+byte-identical to the contract-pinned digest. Extraction uses Python's
+`tarfile` with path-traversal and link safety; no container image (pinned or
+otherwise) and no network is involved, and an existing volume is never
+overwritten.
+
+Commands for the validation gate:
+
+```bash
+python3 scripts/run_legacy_gopy_scripted_correctness.py validate-oracle \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --legacy-root <retained-session-root> \
+  --asset-root  <legacy-recovery-assets>/gopy-scripted \
+  --output <evidence-dir> --runs 3            # add --task-id to scope it
+```
+
+It writes `<evidence-dir>/oracle-validation/<task>/validation.json` (per-run
+results, the changed-old anchor set, the measured coverage intersection) plus a
+`validation-summary.json`, and exits non-zero unless every scoped Oracle meets
+the standard. There is no mode that reports success without executing: an
+Oracle whose golden side cannot be run is a failure, not an attestation.
+
+Two further subcommands support the asset contract:
+
+```bash
+# record the current digest of every declared asset (deliberate re-pinning)
+python3 scripts/run_legacy_gopy_scripted_correctness.py pin-assets \
+  --tasks ... --oracles ... --legacy-root ... --asset-root ...
+
+# rebuild a lost module-cache volume from its SHA256SUMS-listed archive
+python3 scripts/run_legacy_gopy_scripted_correctness.py restore-caches \
+  --asset-root <legacy-recovery-assets>/gopy-scripted [--dry-run]
+```
+
+`tests/test_run_legacy_gopy_scripted_correctness.py` covers this adapter with
+synthetic fixtures only (no real builds or containers): contract schema and
+scope-drift validation against the published release, PASS_TO_PASS judging
+over `go test -json` streams (including build failures and vanished tests),
+JUnit/pytest node-ID matching, per-recipe blocker detection (missing image,
+retagged image, missing cache volume, start SHA absent from the checkout,
+tampered session Oracle, drifted in-image workspace), reappeared-asset
+detection for blocked entries, provenance/staleness and row retraction,
+lock-safe raw-row merging, CLI fail-closed behavior, and the engineered-Oracle
+machinery: session-asset installation, workspace/workdir resolution, declared
+host mounts, coverage parsing for `go_cover`/`py_cover`/`py_settrace`/
+`bash_xtrace`, digest-verified `attested` coverage, changed-old anchor
+computation from a real git history, and the recorded coupled-test overlay.
+
 ### 7.2 Current five-model correctness replay
 
 At `2026-08-11T03:40:36Z`, five completed model archives passed generation
