@@ -540,17 +540,27 @@ python3 scripts/run_open_model_correctness.py finalize \
   --output <output> --allow-incomplete
 ```
 
-As of this writing, a read-only `preflight` pass against the retained
-session root reports 7 of the 14 tasks ready (ClickHouse, dpnp, memilio,
-rippled, singularity-eos, discourse, opossum-tool/OpossumUI) and 7 blocked:
-Desbordante (harness recipe was never proven historically -- every
+As originally written (2026-08-11), a read-only `preflight` pass against the
+retained session root reported 7 of the 14 tasks ready (ClickHouse, dpnp,
+memilio, rippled, singularity-eos, discourse, opossum-tool/OpossumUI) and 7
+blocked: Desbordante (harness recipe was never proven historically -- every
 historical candidate patch failed to apply through it), the 4 remaining JVM
 tasks plus web3signer's `-javaagent`/`-I` flags (missing recorded Gradle
 cache home and `/oracle-cache` assets under
 `oracle_recovery/java/cache/`), and FuelLabs/fuel-tx (missing recorded
 cargo cache under `oracle_recovery/rust/cache/cargo`). These are reported,
 not invented; recovering the missing cache directories (or the Desbordante
-proof) would move those tasks to "ready" without any code change.
+proof) moves those tasks to "ready" without any code change.
+
+The native/rust half of that list has since been recovered (including the
+Desbordante proof and the rust CARGO_HOME) -- see 7.1.2. The historical
+native/rust start workspaces have themselves been deleted from the retained
+session root since then, so those tasks are now replayed exclusively through
+the recovered-asset contracts described there; the JVM/TS-JS tasks are
+unaffected by this section's scope. `--task-id` scope also now spans the four
+native/rust published-legacy tasks that were never part of the 20260728
+reserve (apache/tsfile, grpc/grpc, python/cpython, otter-sec/anchor), which
+are blocked unless `--assets-root` supplies a verified contract for them.
 
 The real preflight was written on 2026-08-11 with all 14 exact IDs and the
 same 7-ready/7-blocked split. Replay is active for the 11 completed models.
@@ -580,6 +590,134 @@ apply/failure handling, git worktree materialization, blocker detection per
 lane, drift detection against the 14-task manifest, resume/skip behavior,
 and candidate-missing rows that normalize cleanly through the real
 `normalized_record()`.
+
+#### 7.1.2 Native/Rust recovered-asset bundle (11 of the 40)
+
+The 20260728 adapter above could only replay a native/rust task while the
+historical harness assets still existed. They no longer do: every
+`.../native-real/tasks/<case>/start` workspace subtree was deleted, the rust
+Oracle's recorded `oracle_recovery/rust/cache/cargo` CARGO_HOME never
+survived, and four in-scope tasks (apache/tsfile, grpc/grpc, python/cpython,
+otter-sec/anchor) were recovered in a session whose artifacts are not retained
+on this machine at all.
+
+`scripts/recover_legacy_native_rust.py` rebuilds that missing half and records
+it as a self-describing bundle:
+
+```text
+<assets-root>/
+  recovery-manifest.json   # one verified replay contract per task
+  SHA256SUMS               # every authored/retained small file
+  workspaces/<case>/start  # exact-start checkout (git HEAD == task start_sha)
+  harness/<case>/          # re-authored harness + derived source-only golden
+  caches/{cargo,cargo-anchor,conan}   # reconstructed pinned build caches
+  proofs/<case>.json       # recorded start/golden proof runs
+  logs/                    # full build/run logs for every proof
+```
+
+Exact-start workspaces are re-materialized from retained full repo objects
+(`git clone --shared` + `checkout --detach <start_sha>`), then made
+self-contained by packing the HEAD snapshot locally and dropping the
+`objects/info/alternates` link -- otherwise a build that shells out to `git`
+inside a container (rippled's `GIT_COMMIT_HASH`) cannot read its own object
+store. Vendored dependency trees that were part of the historical workspace
+are restored from the retained per-case archives (singularity-eos'
+`utils/spiner` + `utils/variant`, Desbordante's `lib/easyloggingpp` +
+`lib/better-enums` from the recovery image's `/opt/deps`), and dpnp keeps the
+retained dpctl-0.19 `dependency-compatibility.patch` that the historical
+recovery applied identically to start and golden.
+
+`run_legacy_reserve_correctness.py` gained one flag, `--assets-root`
+(or `REVIEWBENCH_LEGACY_ASSETS`). A recovered contract supersedes the
+historical one for the tasks it covers, and is re-verified against live state
+on **every** preflight and replay: the workspace must still be at the exact
+`start_sha`, every authored harness file must still hash to its manifest
+digest, the Docker image must still be loaded with the recorded image id, any
+reconstructed CARGO_HOME must still exist, and the manifest must carry a
+successful start-tree proof run. Anything else is a blocker, so nothing is
+ever scored off an unverified asset. The contract is also folded into each raw
+row's `replay_contract_fingerprint`, so changing a recovered command, mount,
+harness digest or image invalidates previously-recorded rows on resume.
+
+Two lane-level bugs were fixed while proving this end to end, both of which
+would silently mis-score a *passing* replay:
+
+- the rust lane ran its command through a **login** shell (`sh -lc`), which
+  re-sources `/etc/profile`, drops `$CARGO_HOME/bin` from `PATH` and fails
+  with `cargo: not found`; the historical evaluator used `/bin/sh -c`;
+- rust pass counting used the generic first-match counter, which reads only
+  the first test binary's `test result: ok. N passed` line -- 40 of fuel-tx's
+  77 recorded pass-to-pass tests -- and would have judged a fully passing run
+  as a failure. `rust_test_count()` now sums every target, like the
+  historical rust evaluator.
+
+Recovery status (proven by re-running each contract here, not assumed):
+
+| Task | Contract | Proof |
+| --- | --- | --- |
+| ClickHouse/ClickHouse #74193 | recovered | full 13,413-target clang-19 build; oracle query output byte-identical to the historical `start-runs.txt` |
+| Desbordante/desbordante-core #154 | recovered | `Desbordante_lib` + oracle link/run; stdout SHA-256 `50d9c3cd...` byte-identical to the historical proven start run (this task was previously blocked as "never proven end-to-end") |
+| IntelPython/dpnp #2201 | recovered | `dpnp.choose public behavior: 5 cases passed` |
+| SciCompMod/memilio #690 | recovered | oracle binary builds and exits 0 |
+| XRPLF/rippled #5143 | recovered | `2175 tests total, 0 failures` (matches the recorded 2175) |
+| lanl/singularity-eos #75 | recovered | oracle binary builds and exits 0 |
+| apache/tsfile #823 | recovered (re-authored harness) | `OracleAlignedBatch.DoubleValuesPreserveRowsAndValues` passes on start (repeatably) and on the derived source-only golden |
+| python/cpython #143314 | recovered (selected P2P tests) | 2 unchanged `test_os` tests that drive `parse_envlist()` pass on start (x2) and golden |
+| FuelLabs/fuel-tx #197 | recovered (rebuilt CARGO_HOME) | 77 passed, offline (`--network=none`) after deleting `target/`, matching the recorded `pass_to_pass: 77` |
+| otter-sec/anchor #2488 | recovered (re-authored harness) | both recorded tests pass on start and golden, offline |
+| grpc/grpc #32970 | **blocked** | no retained replay contract at all (Oracle carries only counters/coverage from `legacy159_oracle_native_normalized.jsonl`), the retained `repos/grpc__grpc` checkout does not contain the task `start_sha`, and no pinned Bazel toolchain/output-base cache for the 2023 tree was retained |
+
+Re-authored harnesses are real behavioral tests, never source-shape checks:
+the tsfile oracle writes six aligned fixed-width `DOUBLE` rows through the
+public writer API and reads them back through the public reader/result-set
+path, and the anchor oracle drives the public async client against an
+in-process loopback JSON-RPC server (a compile-time `IntoProgram` trait
+absorbs the start-vs-golden `Program` / `Result<Program>` public API
+difference without inspecting source text or branching on candidate symbols).
+Both pass on start *and* on the golden derived strictly from the Oracle's own
+`golden_scope`/`scope_expansion` paths, as a PASS_TO_PASS oracle requires.
+
+Commands:
+
+```bash
+# Rebuild/refresh the bundle manifest + checksums (fails closed per task):
+python3 scripts/recover_legacy_native_rust.py manifest \
+  --assets-root <assets-root> --legacy-root <retained-session-root>
+
+# Re-prove one contract (start tree, plus golden where recovered):
+python3 scripts/recover_legacy_native_rust.py smoke \
+  --assets-root <assets-root> --case 22-rippled --golden
+
+# Preflight/replay through the existing adapter, now asset-aware:
+python3 scripts/run_legacy_reserve_correctness.py preflight \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --legacy-root <retained-session-root> --assets-root <assets-root> \
+  --output <output> --allow-blocked
+
+python3 scripts/run_legacy_reserve_correctness.py replay \
+  --tasks data/releases/hard/20260808/tasks.jsonl \
+  --oracles data/releases/hard/20260808/oracles.jsonl \
+  --legacy-root <retained-session-root> --assets-root <assets-root> \
+  --output <output> --model '<model>' --work-root <scratch>
+```
+
+The bundle produced on 2026-08-14 lives at
+`/data/v-peiyangliu/reviewbench-openmodels/legacy-recovery-assets/native-rust`
+(`recovery-manifest.json` SHA-256
+`ff5a87f9a0a8d6cee166343d78de6d470db39e55a6328b06c19e3aa18085900b`,
+`SHA256SUMS` SHA-256
+`63ac4252b115ff77cd66d13d58bb07226ef2ef9d84998240b994de72595a3621`).
+
+A real preflight over the full release with the bundle reports 10 of the 11
+native/rust published-legacy tasks ready (grpc alone blocked), and a real
+replay of a staged model produced genuine behavioral verdicts -- passes for
+singularity-eos and cpython, and *model* failures (broken candidate patches:
+a template-arity error in memilio, unbalanced delimiters in fuel-tx and
+anchor) that are recorded as `fail`, never as infrastructure noise. Scratch
+copies, including root-owned container build state, are removed through a
+throwaway cleanup container (`purge_scratch`); shared caches are never
+deleted.
 
 ### 7.2 Current five-model correctness replay
 

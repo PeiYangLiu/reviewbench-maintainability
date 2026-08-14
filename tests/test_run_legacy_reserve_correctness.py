@@ -237,7 +237,7 @@ def test_select_scope_accepts_full_reserve(tmp_path):
 def test_select_scope_rejects_unknown_task_id(tmp_path):
     tasks_path, oracles_path = build_full_release(tmp_path)
     _, _, plan = MODULE.load_release_and_plan(tasks_path, oracles_path)
-    with pytest.raises(ValueError, match="outside the 14-task"):
+    with pytest.raises(ValueError, match="outside the reserve/recovered"):
         MODULE.select_scope(plan, ["not-a-reserve-task"])
 
 
@@ -455,7 +455,7 @@ def test_preflight_reports_all_blocked_on_empty_legacy_root(tmp_path, monkeypatc
     # silently treated as passing.
     tasks_path2, oracles_path2 = build_full_release(tmp_path / "release2")
     _, _, plan = MODULE.load_release_and_plan(tasks_path2, oracles_path2)
-    assert len(plan) == 14
+    assert len(plan) == len(MODULE.TASK_IDS)
 
 
 def test_preflight_exits_nonzero_when_blocked_without_allow_flag(tmp_path, monkeypatch):
@@ -492,8 +492,8 @@ def test_preflight_writes_json_report_when_output_given(tmp_path, monkeypatch):
     )
     MODULE.cmd_preflight(args)
     report = json.loads((output / "legacy-reserve-preflight.json").read_text())
-    assert report["scoped_task_count"] == 14
-    assert report["blocked_task_count"] == 14
+    assert report["scoped_task_count"] == len(MODULE.TASK_IDS)
+    assert report["blocked_task_count"] == len(MODULE.TASK_IDS)
     assert all(entry["status"] == "blocked" for entry in report["tasks"])
 
 
@@ -573,7 +573,7 @@ def test_replay_writes_candidate_missing_rows_and_is_resume_aware(tmp_path):
         len(BASE.read_jsonl(output / "legacy/correctness" / f"{lane}.jsonl"))
         for lane in ("native", "jvm", "rust", "tsjs")
     )
-    assert total_rows == 14
+    assert total_rows == len(MODULE.TASK_IDS)
 
     # Resume: rerunning without --force must not duplicate or re-derive rows.
     code_again = MODULE.cmd_replay(args)
@@ -582,7 +582,7 @@ def test_replay_writes_candidate_missing_rows_and_is_resume_aware(tmp_path):
         len(BASE.read_jsonl(output / "legacy/correctness" / f"{lane}.jsonl"))
         for lane in ("native", "jvm", "rust", "tsjs")
     )
-    assert total_rows_again == 14
+    assert total_rows_again == len(MODULE.TASK_IDS)
 
 
 def test_replay_reports_blockers_for_generated_candidates_on_empty_legacy_root(
@@ -1758,3 +1758,290 @@ def test_replay_tsjs_infra_retry_on_install_failure_persists_install_log(
         f"legacy/evidence/tsjs/{MODULE.model_component('my-model')}/{task_id}/install.log"
     )
     assert (output / row["log"]).is_file()
+
+
+# ---------------------------------------------------------------------------
+# Recovered native/rust contracts (--assets-root), with tiny synthetic assets
+# ---------------------------------------------------------------------------
+
+
+TSFILE_ID = "github__apache__tsfile__pull_823__comment_3418007322__modularity"
+ANCHOR_ID = "github__otter-sec__anchor__pull_2488__comment_1193854703__duplication"
+GRPC_ID = "github__grpc__grpc__pull_32970__comment_1195793486__duplication"
+
+
+@pytest.fixture(autouse=True)
+def _clear_recovery_state():
+    """Recovered-asset state is module-level; never leak it between tests."""
+    MODULE.load_recovery_assets(None)
+    yield
+    MODULE.load_recovery_assets(None)
+
+
+def build_recovered_assets(tmp_path, task_id=TSFILE_ID, **overrides):
+    """Tiny on-disk assets root with one recovered contract."""
+    assets = tmp_path / "assets"
+    workspace = assets / "workspaces/case"
+    start = workspace / "start"
+    head = make_git_repo(start)
+    harness = assets / "harness/case/oracle_test.cc"
+    harness.parent.mkdir(parents=True, exist_ok=True)
+    harness.write_text("// behavioral oracle\n", encoding="utf-8")
+    harness_sha = MODULE.hashlib.sha256(harness.read_bytes()).hexdigest()
+    entry = {
+        "id": task_id,
+        "status": "ready",
+        "recovered": True,
+        "lane": "native",
+        "repo": "owner/repo",
+        "case": "case",
+        "start_sha": head,
+        "workspace": "workspaces/case",
+        "patch_subdir": "start",
+        "docker_image": "image:tag",
+        "docker_image_id": "sha256:deadbeef",
+        "shell": ["sh", "-lc"],
+        "user": None,
+        "network": None,
+        "env": {},
+        "mount": {"start": "/work"},
+        "readonly_mounts": [],
+        "cache_mounts": {},
+        "cargo_cache": None,
+        "harness_mounts": [{"host": "harness/case", "container": "/harness"}],
+        "harness_copies": [],
+        "workdir": "/work",
+        "command": "run-oracle",
+        "golden_patch": None,
+        "pass_to_pass_tests": [],
+        "hashed_files": [{"path": "harness/case/oracle_test.cc", "sha256": harness_sha}],
+        "proof_runs": [{"variant": "start", "run": 1, "exit_code": 0}],
+        "blockers": [],
+    }
+    entry.update(overrides)
+    (assets / MODULE.RECOVERY_MANIFEST_NAME).write_text(
+        json.dumps({"schema_version": "x", "tasks": [entry]}), encoding="utf-8"
+    )
+    return assets, entry, head
+
+
+def test_load_recovery_assets_requires_a_manifest(tmp_path):
+    (tmp_path / "empty").mkdir()
+    with pytest.raises(ValueError, match="recovery-manifest.json"):
+        MODULE.load_recovery_assets(tmp_path / "empty")
+    # explicit "no assets" keeps historical behaviour
+    assert MODULE.load_recovery_assets(None)["tasks"] == {}
+
+
+def test_recovered_only_task_is_blocked_without_assets(tmp_path):
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("no recovered replay contract" in b for b in blockers)
+    # ... and it must never fall back to a historical manifest lookup
+    assert MODULE.native_blockers(TSFILE_ID, tmp_path)
+
+
+def test_recovered_contract_clears_blockers_when_assets_are_intact(tmp_path, monkeypatch):
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+    assert MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha") == []
+
+
+def test_recovered_contract_detects_harness_tampering(tmp_path, monkeypatch):
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+    (assets / "harness/case/oracle_test.cc").write_text("// tampered\n", encoding="utf-8")
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("does not match the manifest digest" in b for b in blockers)
+
+
+def test_recovered_contract_detects_workspace_and_image_drift(tmp_path, monkeypatch):
+    assets, _, head = build_recovered_assets(tmp_path, start_sha="0" * 40)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:other")
+    MODULE.load_recovery_assets(assets)
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("not the task start_sha" in b for b in blockers)
+    assert any("is now sha256:other" in b for b in blockers)
+
+
+def test_recovered_contract_requires_a_successful_start_proof(tmp_path, monkeypatch):
+    assets, _, _ = build_recovered_assets(tmp_path, proof_runs=[])
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("no successful start-tree proof run" in b for b in blockers)
+
+
+def test_unrecovered_task_keeps_its_recorded_blockers(tmp_path, monkeypatch):
+    assets, _, _ = build_recovered_assets(
+        tmp_path,
+        task_id=GRPC_ID,
+        recovered=False,
+        status="blocked",
+        blockers=["no retained replay contract", "start_sha absent from checkout"],
+    )
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+    blockers = MODULE.task_blockers(GRPC_ID, "native", {}, tmp_path, "sha")
+    assert blockers == ["no retained replay contract", "start_sha absent from checkout"]
+
+
+def test_rust_test_count_sums_every_target():
+    log = (
+        "test result: ok. 40 passed; 0 failed\n"
+        "test result: ok. 7 passed; 0 failed\n"
+        "test result: ok. 30 passed; 0 failed\n"
+    )
+    # the generic first-match counter would report only 40
+    assert MODULE.test_count(log, MODULE.GENERIC_TEST_COUNT_PATTERNS) == 40
+    assert MODULE.rust_test_count(log) == 77
+    assert MODULE.rust_test_count("no tests here") == 0
+
+
+def test_recovered_docker_argv_includes_every_declared_mount(tmp_path):
+    assets, entry, _ = build_recovered_assets(tmp_path)
+    entry = dict(entry)
+    entry.update(
+        {
+            "network": "host",
+            "user": "current",
+            "env": {"CARGO_TERM_COLOR": "never"},
+            "cargo_cache": "caches/cargo",
+            "cache_mounts": {"caches/conan": "/root/.conan"},
+            "readonly_mounts": ["start"],
+            "shell": ["/bin/sh", "-c"],
+        }
+    )
+    argv = MODULE.recovered_docker_argv(entry, assets, assets / "workspaces/case")
+    joined = " ".join(argv)
+    assert "--network=host" in argv
+    assert f"--user" in argv
+    assert f"{assets / 'workspaces/case/start'}:/work:ro" in joined
+    assert f"{assets / 'harness/case'}:/harness:ro" in joined
+    assert f"{assets / 'caches/conan'}:/root/.conan" in joined
+    assert f"{assets / 'caches/cargo'}:/cargo-cache" in joined
+    assert "CARGO_HOME=/cargo-cache" in joined
+    assert "CARGO_TERM_COLOR=never" in joined
+    assert argv[-3:] == ["/bin/sh", "-c", "run-oracle"]
+
+
+def test_replay_recovered_applies_patch_copies_harness_and_records_row(
+    tmp_path, monkeypatch
+):
+    assets, entry, head = build_recovered_assets(
+        tmp_path,
+        harness_copies=[
+            {"host": "harness/case/oracle_test.cc", "workspace_path": "tests/oracle.cc"}
+        ],
+    )
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+
+    patch_path = tmp_path / "candidate.patch"
+    patch_path.write_text(
+        "diff --git a/src.txt b/src.txt\n"
+        "--- a/src.txt\n"
+        "+++ b/src.txt\n"
+        "@@ -1,3 +1,3 @@\n"
+        " line1\n"
+        "-line2\n"
+        "+patched\n"
+        " line3\n",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_run_subprocess(command, *, cwd, log_path, env=None, timeout=1800):
+        captured["command"] = command
+        # the disposable copy must carry both the candidate patch and the
+        # harness file at the moment the container would start
+        start = Path(command[command.index("-v") + 1].split(":")[0])
+        captured["patched"] = (start / "src.txt").read_text(encoding="utf-8")
+        captured["harness"] = (start / "tests/oracle.cc").is_file()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("ok\n", encoding="utf-8")
+        return 0, 1.0, ""
+
+    monkeypatch.setattr(MODULE, "run_subprocess", fake_run_subprocess)
+    # never spawn the real root-owned-state cleanup container in a unit test
+    monkeypatch.setattr(MODULE, "purge_scratch", lambda scratch: None)
+
+    row = MODULE.replay_recovered(
+        TSFILE_ID,
+        "my-model",
+        strict_task(TSFILE_ID),
+        strict_oracle(TSFILE_ID, pass_to_pass=1),
+        {"patch_file": str(patch_path), "patch_sha256": "abc", "apply_ok": True},
+        tmp_path / "legacy",
+        tmp_path / "work",
+        tmp_path / "output",
+        900,
+        "native",
+    )
+    assert captured["patched"] == "line1\npatched\nline3\n"
+    assert captured["harness"] is True
+    assert row["status"] == "pass"
+    assert row["correctness_ok"] is True
+    assert row["patch_apply"] is True
+    assert row["replay_contract"] == "recovered"
+    assert row["start_sha"] == head
+    assert row["task_fingerprint"] and row["replay_contract_fingerprint"]
+
+
+def test_replay_recovered_reports_apply_error_without_running_the_harness(
+    tmp_path, monkeypatch
+):
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+    patch_path = tmp_path / "bad.patch"
+    patch_path.write_text(
+        "diff --git a/missing.txt b/missing.txt\n"
+        "--- a/missing.txt\n"
+        "+++ b/missing.txt\n"
+        "@@ -1 +1 @@\n"
+        "-nope\n"
+        "+nope2\n",
+        encoding="utf-8",
+    )
+
+    def explode(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("harness must not run after a failed apply")
+
+    monkeypatch.setattr(MODULE, "run_subprocess", explode)
+    row = MODULE.replay_recovered(
+        TSFILE_ID,
+        "my-model",
+        strict_task(TSFILE_ID),
+        strict_oracle(TSFILE_ID),
+        {"patch_file": str(patch_path), "patch_sha256": "abc", "apply_ok": True},
+        tmp_path / "legacy",
+        tmp_path / "work",
+        tmp_path / "output",
+        900,
+        "native",
+    )
+    assert row["status"] == "apply_error"
+    assert row["correctness_ok"] is False
+    assert row["patch_apply"] is False
+
+
+def test_recovered_contract_changes_the_replay_fingerprint(tmp_path, monkeypatch):
+    assets, entry, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+    task = strict_task(TSFILE_ID)
+    oracle = strict_oracle(TSFILE_ID)
+    before = MODULE.replay_contract_fingerprint(
+        TSFILE_ID, "native", oracle, tmp_path, []
+    )
+    manifest_path = assets / MODULE.RECOVERY_MANIFEST_NAME
+    payload = json.loads(manifest_path.read_text())
+    payload["tasks"][0]["command"] = "run-oracle --different"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    MODULE.load_recovery_assets(assets)
+    after = MODULE.replay_contract_fingerprint(
+        TSFILE_ID, "native", oracle, tmp_path, []
+    )
+    assert before != after

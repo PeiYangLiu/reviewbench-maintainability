@@ -143,7 +143,7 @@ BASE = _load_sibling_module()
 # The exact 14 published-hard task IDs sourced from the 20260728 reserve.
 # Any drift between this list and what --tasks/--oracles currently contain
 # is treated as a preflight blocker rather than silently adapting scope.
-TASK_IDS: tuple[str, ...] = (
+RESERVE_TASK_IDS: tuple[str, ...] = (
     "github__ClickHouse__ClickHouse__pull_74193__comment_2024566878__duplication",
     "github__Consensys__web3signer__pull_489__comment_789312375__modularity",
     "github__Desbordante__desbordante-core__pull_154__comment_1371183985__modularity",
@@ -159,7 +159,25 @@ TASK_IDS: tuple[str, ...] = (
     "github__opossum-tool__OpossumUI__pull_987__comment_972768731__duplication",
     "github__reposense__RepoSense__pull_2078__comment_1472205280__duplication",
 )
+
+# Native/rust published-legacy tasks that were never part of the 20260728
+# reserve and therefore have no historical harness under ``--legacy-root`` at
+# all. They are only replayable through a *recovered* contract supplied by
+# ``--assets-root`` (see scripts/recover_legacy_native_rust.py); without one
+# they are reported as explicit blockers, never skipped and never scored.
+RECOVERED_ONLY_TASK_IDS: tuple[str, ...] = (
+    "github__apache__tsfile__pull_823__comment_3418007322__modularity",
+    "github__grpc__grpc__pull_32970__comment_1195793486__duplication",
+    "github__otter-sec__anchor__pull_2488__comment_1193854703__duplication",
+    "github__python__cpython__pull_143314__comment_2656278401__complexity",
+)
+
+TASK_IDS: tuple[str, ...] = RESERVE_TASK_IDS + RECOVERED_ONLY_TASK_IDS
 EXPECTED_LANE = {
+    "github__apache__tsfile__pull_823__comment_3418007322__modularity": "native",
+    "github__grpc__grpc__pull_32970__comment_1195793486__duplication": "native",
+    "github__otter-sec__anchor__pull_2488__comment_1193854703__duplication": "rust",
+    "github__python__cpython__pull_143314__comment_2656278401__complexity": "native",
     "github__ClickHouse__ClickHouse__pull_74193__comment_2024566878__duplication": "native",
     "github__Consensys__web3signer__pull_489__comment_789312375__modularity": "jvm",
     "github__Desbordante__desbordante-core__pull_154__comment_1371183985__modularity": "native",
@@ -297,6 +315,143 @@ TSJS_NODE_OVERRIDES = {
 INFRA_RETRY = "infra_retry"
 CANDIDATE_MISSING = "candidate_missing"
 
+# ---------------------------------------------------------------------------
+# Recovered replay contracts (--assets-root)
+# ---------------------------------------------------------------------------
+# The historical native/rust harnesses were only partially retained: every
+# ``.../tasks/<case>/start`` workspace subtree and the recorded rust
+# ``cache/cargo`` CARGO_HOME were deleted, and four in-scope tasks never had a
+# retained harness on this machine at all. ``scripts/recover_legacy_native_rust
+# .py`` re-materializes those assets under an assets root and records each
+# proven contract in ``<assets-root>/recovery-manifest.json``. This adapter
+# consumes that manifest as an *additional, verified* source of replay
+# contracts; it never invents one, and every recovered contract is re-verified
+# against live disk/Docker state on each preflight and replay.
+RECOVERY_MANIFEST_NAME = "recovery-manifest.json"
+RECOVERY_STATE: dict[str, Any] = {"assets_root": None, "tasks": {}}
+
+
+def load_recovery_assets(assets_root: str | Path | None) -> dict[str, Any]:
+    """Load ``<assets-root>/recovery-manifest.json`` into module state.
+
+    Passing ``None`` (the default) clears the state, so behaviour is exactly
+    the historical one. A malformed/missing manifest is an error rather than a
+    silent fallback: pointing ``--assets-root`` somewhere that has no manifest
+    must fail loudly instead of quietly downgrading tasks to "blocked".
+    """
+    if assets_root in (None, ""):
+        RECOVERY_STATE["assets_root"] = None
+        RECOVERY_STATE["tasks"] = {}
+        return RECOVERY_STATE
+    root = Path(assets_root).expanduser().resolve()
+    manifest_path = root / RECOVERY_MANIFEST_NAME
+    if not manifest_path.is_file():
+        raise ValueError(
+            f"--assets-root {root} does not contain {RECOVERY_MANIFEST_NAME}; "
+            "run scripts/recover_legacy_native_rust.py manifest first"
+        )
+    payload = json.loads(manifest_path.read_text())
+    tasks = {entry["id"]: entry for entry in payload.get("tasks", [])}
+    RECOVERY_STATE["assets_root"] = root
+    RECOVERY_STATE["tasks"] = tasks
+    return RECOVERY_STATE
+
+
+def recovered_entry(task_id: str) -> dict[str, Any] | None:
+    return RECOVERY_STATE["tasks"].get(task_id)
+
+
+def recovered_blockers(task_id: str, entry: dict[str, Any]) -> list[str]:
+    """Re-verify a recovered contract against live disk/Docker state.
+
+    The manifest is evidence, not authority: a contract only stays "ready" if
+    its exact-start workspace is still present at the recorded ``start_sha``,
+    its authored harness files still hash to the recorded digests, its Docker
+    image is still loaded with the recorded image id, and any reconstructed
+    cargo cache is still there.
+    """
+    root: Path | None = RECOVERY_STATE["assets_root"]
+    if root is None:  # pragma: no cover - defensive
+        return ["recovered contract present without an --assets-root"]
+    blockers: list[str] = list(entry.get("blockers") or [])
+    if not entry.get("recovered"):
+        return blockers or [f"no recovered replay contract for {task_id}"]
+    workspace = root / entry["workspace"]
+    start = workspace / entry["patch_subdir"]
+    if not start.is_dir():
+        blockers.append(f"missing recovered exact-start subtree: {start}")
+    else:
+        head = subprocess.run(
+            ["git", "-C", str(start), "rev-parse", "HEAD"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        current = head.stdout.strip() if head.returncode == 0 else None
+        if current != entry["start_sha"]:
+            blockers.append(
+                f"recovered workspace {start} is at {current}, not the task "
+                f"start_sha {entry['start_sha']}"
+            )
+    for hashed in entry.get("hashed_files", []):
+        path = root / hashed["path"]
+        if not path.is_file():
+            blockers.append(f"missing recovered asset: {path}")
+            continue
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest != hashed["sha256"]:
+            blockers.append(
+                f"recovered asset {path} hash {digest} does not match the "
+                f"manifest digest {hashed['sha256']}"
+            )
+    image = entry.get("docker_image")
+    live_image_id = docker_image_id(image) if image else None
+    if live_image_id is None:
+        blockers.append(f"missing Docker image: {image}")
+    elif entry.get("docker_image_id") and live_image_id != entry["docker_image_id"]:
+        blockers.append(
+            f"Docker image {image} is now {live_image_id}, not the recovered "
+            f"{entry['docker_image_id']}"
+        )
+    if entry.get("cargo_cache") and not (root / entry["cargo_cache"] / "bin" / "cargo").exists():
+        blockers.append(
+            f"missing reconstructed CARGO_HOME: {root / entry['cargo_cache']}"
+        )
+    if not any(
+        run_row.get("variant") == "start" and run_row.get("exit_code") == 0
+        for run_row in entry.get("proof_runs", [])
+    ):
+        blockers.append(
+            "recovered contract has no successful start-tree proof run "
+            "recorded in recovery-manifest.json"
+        )
+    return blockers
+
+
+def recovered_asset_state(entry: dict[str, Any]) -> dict[str, Any]:
+    root: Path | None = RECOVERY_STATE["assets_root"]
+    if root is None:  # pragma: no cover - defensive
+        return {}
+    workspace = root / entry["workspace"]
+    return {
+        "assets_root": str(root),
+        "workspace_head": (
+            subprocess.run(
+                ["git", "-C", str(workspace / entry["patch_subdir"]),
+                 "rev-parse", "HEAD"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            ).stdout.strip()
+            or None
+        ),
+        "docker_image_id": docker_image_id(entry.get("docker_image") or ""),
+        "hashed_files": entry.get("hashed_files", []),
+        "command": entry.get("command"),
+        "shell": entry.get("shell"),
+        "mount": entry.get("mount"),
+        "cargo_cache": (
+            directory_identity(root / entry["cargo_cache"])
+            if entry.get("cargo_cache") else None
+        ),
+    }
+
 # Bump whenever the *behavior* of a replay_* function, NATIVE_MANIFEST entry,
 # or judging rule changes in a way that could change the outcome for
 # already-recorded rows. It is folded into every raw row's
@@ -305,7 +460,7 @@ CANDIDATE_MISSING = "candidate_missing"
 # silently treating them as fresh (code-review finding: "resume must
 # validate current task/oracle/replay-contract fingerprints and rerun
 # stale rows").
-ADAPTER_CONTRACT_VERSION = "v4-2026-08-11-retained-node-tools"
+ADAPTER_CONTRACT_VERSION = "v5-2026-08-14-recovered-native-rust-assets"
 
 
 def replay_contract_fingerprint(
@@ -339,8 +494,27 @@ def replay_contract_fingerprint(
         "blockers": sorted(blockers),
         "asset_state": asset_state(task_id, lane, oracle, legacy_root),
     }
-    if lane == "native":
-        payload["native_manifest"] = NATIVE_MANIFEST[task_id]
+    entry = recovered_entry(task_id)
+    if entry is not None:
+        # The recovered contract (command/mounts/harness digests/image id) is
+        # the recipe that will actually run, so it -- not the historical
+        # manifest -- must be what the fingerprint binds.
+        payload["recovered_contract"] = {
+            key: entry.get(key)
+            for key in (
+                "command", "shell", "user", "network", "env", "mount",
+                "readonly_mounts", "cache_mounts", "cargo_cache",
+                "harness_mounts", "harness_copies", "workdir", "workspace",
+                "patch_subdir", "start_sha", "docker_image",
+                "docker_image_id", "hashed_files",
+            )
+        }
+    elif lane == "native":
+        # ``.get``: a native published-legacy task outside the 20260728
+        # reserve has no historical manifest entry at all; it is blocked
+        # unless a recovered contract covers it, and blockers are already
+        # folded into this payload.
+        payload["native_manifest"] = NATIVE_MANIFEST.get(task_id)
     return BASE.canonical_hash(payload)
 
 
@@ -907,8 +1081,8 @@ def select_scope(
     unknown = wanted - set(TASK_IDS)
     if unknown:
         raise ValueError(
-            f"--task-id values outside the 14-task reserve scope: "
-            f"{sorted(unknown)}"
+            "--task-id values outside the reserve/recovered native-rust "
+            f"scope ({len(TASK_IDS)} tasks): {sorted(unknown)}"
         )
     rows = [row for row in plan if row["id"] in wanted]
     found = {row["id"] for row in rows}
@@ -943,7 +1117,13 @@ def select_scope(
 
 
 def native_blockers(task_id: str, legacy_root: Path) -> list[str]:
-    manifest = NATIVE_MANIFEST[task_id]
+    manifest = NATIVE_MANIFEST.get(task_id)
+    if manifest is None:
+        return [
+            f"no historical native harness manifest for {task_id} (task is "
+            "outside the 20260728 reserve; a recovered contract via "
+            "--assets-root is required)"
+        ]
     blockers = []
     task_dir = legacy_root / "strict_screen_20260726" / manifest["task_dir"]
     if not task_dir.is_dir():
@@ -1108,6 +1288,20 @@ def task_blockers(
     legacy_root: Path,
     start_sha: str,
 ) -> list[str]:
+    entry = recovered_entry(task_id)
+    if entry is not None:
+        # A recovered contract supersedes the historical one: for every
+        # native/rust task the historical ``start/`` workspace was deleted, so
+        # the recovered assets are the only executable route.
+        return recovered_blockers(task_id, entry)
+    if task_id in RECOVERED_ONLY_TASK_IDS:
+        return [
+            "no recovered replay contract available: this published-legacy "
+            "task was never part of the 20260728 reserve and has no harness "
+            "under --legacy-root; supply --assets-root with a "
+            f"{RECOVERY_MANIFEST_NAME} entry for it (see "
+            "scripts/recover_legacy_native_rust.py)"
+        ]
     if lane == "native":
         return native_blockers(task_id, legacy_root)
     if lane == "rust":
@@ -1140,8 +1334,16 @@ def asset_state(
     in-place replacement is detected and a huge cache/checkout is never
     fully read); single required files use ``safe_file_digest``.
     """
+    entry = recovered_entry(task_id)
+    if entry is not None:
+        return recovered_asset_state(entry)
     if lane == "native":
-        manifest = NATIVE_MANIFEST[task_id]
+        manifest = NATIVE_MANIFEST.get(task_id)
+        if manifest is None:
+            # Native published-legacy task outside the 20260728 reserve with
+            # no recovered contract: there is no asset state to fingerprint,
+            # and task_blockers() already fails it closed.
+            return {"historical_manifest": None}
         task_dir = legacy_root / "strict_screen_20260726" / manifest["task_dir"]
         workspace_source = (
             task_dir if manifest["workspace"] == "."
@@ -1236,6 +1438,7 @@ def asset_state(
 
 def cmd_preflight(args: argparse.Namespace) -> int:
     legacy_root = Path(args.legacy_root).expanduser().resolve()
+    load_recovery_assets(getattr(args, "assets_root", None))
     tasks_path = Path(args.tasks).resolve()
     oracles_path = Path(args.oracles).resolve()
     tasks_by_id, oracles_by_id, plan = load_release_and_plan(
@@ -1261,6 +1464,9 @@ def cmd_preflight(args: argparse.Namespace) -> int:
                 "lane": row["lane"],
                 "start_sha": row["start_sha"],
                 "status": status,
+                "replay_contract": (
+                    "recovered" if recovered_entry(task_id) else "historical"
+                ),
                 "blockers": blockers,
             }
         )
@@ -1268,6 +1474,10 @@ def cmd_preflight(args: argparse.Namespace) -> int:
         "schema_version": "reviewbench-legacy-reserve-preflight/v1",
         "created_at": BASE.utc_now(),
         "legacy_root": str(legacy_root),
+        "assets_root": (
+            str(RECOVERY_STATE["assets_root"])
+            if RECOVERY_STATE["assets_root"] else None
+        ),
         "tasks_sha256": BASE.sha256(tasks_path),
         "oracles_sha256": BASE.sha256(oracles_path),
         "reserve_task_count": len(TASK_IDS),
@@ -1456,6 +1666,184 @@ def missing_row(
 
 
 
+def rust_test_count(text: str) -> int:
+    """Total ``cargo test`` passes across *every* target in one run.
+
+    ``cargo test`` prints one ``test result: ok. N passed`` line per test
+    binary (lib, each integration test, doc-tests). The generic first-match
+    counter would return only the first binary's count, which for e.g.
+    fuel-tx's 77 recorded pass-to-pass tests reports 40 and would misjudge a
+    fully passing replay as a failure. Summing every line matches the
+    historical rust evaluator's own parser.
+    """
+    cleaned = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+    return sum(
+        int(value)
+        for value in re.findall(r"test result: ok\.\s+(\d+) passed", cleaned)
+    )
+
+
+def recovered_docker_argv(
+    entry: dict[str, Any],
+    assets_root: Path,
+    workspace: Path,
+) -> list[str]:
+    """Exact ``docker run`` argv for a recovered contract, built from the
+    manifest fields (never from a hardcoded per-task string)."""
+    argv = ["docker", "run", "--rm"]
+    if entry.get("network"):
+        argv.append(f"--network={entry['network']}")
+    if entry.get("user") == "current":
+        argv += ["--user", f"{os.getuid()}:{os.getgid()}"]
+    for host, container in (entry.get("mount") or {}).items():
+        source = workspace if host == "." else workspace / host
+        suffix = ":ro" if host in (entry.get("readonly_mounts") or []) else ""
+        argv += ["-v", f"{source}:{container}{suffix}"]
+    for host, container in (entry.get("cache_mounts") or {}).items():
+        argv += ["-v", f"{assets_root / host}:{container}"]
+    for mount in entry.get("harness_mounts") or []:
+        argv += ["-v", f"{assets_root / mount['host']}:{mount['container']}:ro"]
+    if entry.get("cargo_cache"):
+        argv += [
+            "-v", f"{assets_root / entry['cargo_cache']}:/cargo-cache",
+            "-e", "CARGO_HOME=/cargo-cache",
+        ]
+    for key, value in (entry.get("env") or {}).items():
+        argv += ["-e", f"{key}={value}"]
+    argv += ["-w", entry["workdir"], entry["docker_image"]]
+    argv += list(entry["shell"]) + [entry["command"]]
+    return argv
+
+
+def purge_scratch(scratch: Path) -> None:
+    """Delete a disposable replay workspace, including root-owned build state.
+
+    A container build writes as root into the bind-mounted scratch copy, so a
+    plain ``rmtree`` fails with EPERM; a throwaway cleanup container removes
+    the root-owned tree first. Shared caches are never touched -- only this
+    (task, model) scratch directory.
+    """
+    if not scratch.exists():
+        return
+    subprocess.run(
+        ["docker", "run", "--rm", "-v", f"{scratch}:/w", "alpine",
+         "sh", "-c", "rm -rf /w/* /w/.[!.]* 2>/dev/null; true"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    shutil.rmtree(scratch, ignore_errors=True)
+
+
+def replay_recovered(
+    task_id: str,
+    model: str,
+    task: dict[str, Any],
+    oracle: dict[str, Any],
+    generation: dict[str, Any],
+    legacy_root: Path,
+    work_root: Path,
+    output: Path,
+    timeout: int,
+    lane: str,
+) -> dict[str, Any]:
+    """Replay one recovered contract for a (task, model) pair.
+
+    Identical in shape to ``replay_native``/``replay_rust``: a disposable copy
+    of the recovered workspace receives the staged candidate patch, the
+    recovered harness files are copied in, and the recovered command is run
+    verbatim in the recovered image. The recovered workspace itself is never
+    mutated.
+    """
+    entry = recovered_entry(task_id)
+    assert entry is not None
+    assets_root: Path = RECOVERY_STATE["assets_root"]
+    scratch = work_root / lane / model_component(model) / task_id
+    shutil.rmtree(scratch, ignore_errors=True)
+    scratch.mkdir(parents=True, exist_ok=True)
+    provenance = row_provenance_fields(
+        task, oracle, task_id, lane, generation, legacy_root, []
+    )
+    workspace_scratch = scratch / "workspace"
+    shutil.copytree(
+        assets_root / entry["workspace"], workspace_scratch, symlinks=True
+    )
+    patch_workdir = workspace_scratch / entry["patch_subdir"]
+
+    patch_path = Path(generation["patch_file"])
+    ok, detail = apply_patch(patch_workdir, patch_path)
+    if not ok:
+        (scratch / "apply-error.log").write_text(detail, encoding="utf-8")
+        evidence = persist_evidence(output, lane, model, task_id, scratch)
+        row = {
+            "id": task_id,
+            "model": model,
+            "lane": lane,
+            "source_kind": "published_legacy",
+            "start_sha": entry["start_sha"],
+            "patch_sha256": generation.get("patch_sha256"),
+            "status": "apply_error",
+            "candidate_result": "apply_error",
+            "correctness_ok": False,
+            "patch_apply": False,
+            "scope_ok": None,
+            "replay_contract": "recovered",
+            "error": detail[-4000:],
+            "error_log": evidence.get("apply-error.log"),
+        }
+        row.update(provenance)
+        return row
+
+    # Harness files are copied in *after* the candidate patch so a candidate
+    # can never overwrite or delete the oracle harness.
+    for copy in entry.get("harness_copies") or []:
+        destination = patch_workdir / copy["workspace_path"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(assets_root / copy["host"], destination)
+
+    patch_text = patch_path.read_text(errors="replace")
+    changed = patch_changed_paths(patch_text)
+    scope_ok = scope_is_safe(changed)
+
+    argv = recovered_docker_argv(entry, assets_root, workspace_scratch)
+    log_path = scratch / "run.log"
+    exit_code, duration, error = run_subprocess(
+        argv, cwd=None, log_path=log_path, timeout=timeout
+    )
+    text = log_path.read_text(errors="replace") if log_path.is_file() else ""
+    expected = BASE.pass_to_pass_count(oracle.get("pass_to_pass"))
+    if lane == "rust":
+        passed = rust_test_count(text)
+        correctness_ok = exit_code == 0 and (not expected or passed >= expected)
+    else:
+        passed = expected if exit_code == 0 else 0
+        correctness_ok = exit_code == 0
+    evidence = persist_evidence(output, lane, model, task_id, scratch)
+    purge_scratch(scratch)
+    row = {
+        "id": task_id,
+        "model": model,
+        "lane": lane,
+        "source_kind": "published_legacy",
+        "start_sha": entry["start_sha"],
+        "patch_sha256": generation.get("patch_sha256"),
+        "status": "pass" if correctness_ok else "fail",
+        "candidate_result": "pass" if correctness_ok else "fail",
+        "correctness_ok": correctness_ok,
+        "patch_apply": True,
+        "scope_ok": scope_ok,
+        "changed_lines": len(changed),
+        "exit_code": exit_code,
+        "duration_seconds": duration,
+        "error": error,
+        "log": evidence.get("run.log"),
+        "replay_contract": "recovered",
+        "pass_to_pass_total": expected,
+        "pass_to_pass_passed": passed if correctness_ok else min(passed, expected),
+        "failed_tests": [] if correctness_ok else ["oracle-run"],
+    }
+    row.update(provenance)
+    return row
+
+
 def replay_native(
     task_id: str,
     model: str,
@@ -1608,16 +1996,23 @@ def replay_rust(
         mounts += ["-v", f"{cache_dir}:/cargo-cache", "-e", "CARGO_HOME=/cargo-cache"]
     docker_cmd = [
         "docker", "run", "--rm", "--network=host",
-        *mounts, "-w", "/work",
+        *mounts,
+        # Same environment the historical rust evaluator exported.
+        "-e", "CARGO_TERM_COLOR=never", "-e", "RUST_BACKTRACE=1",
+        "-e", "CARGO_BUILD_JOBS=16", "-e", "RUSTFLAGS=--cap-lints=allow",
+        "-w", "/work",
         environment["docker_image"],
-        "sh", "-lc", oracle["workspace_command"],
+        # ``/bin/sh -c``, not a *login* shell: sourcing /etc/profile resets
+        # PATH and drops the image's CARGO_HOME/bin, making ``cargo``
+        # unresolvable (observed as "sh: 1: cargo: not found").
+        "/bin/sh", "-c", oracle["workspace_command"],
     ]
     log_path = scratch / "run.log"
     exit_code, duration, error = run_subprocess(
         docker_cmd, cwd=None, log_path=log_path, timeout=timeout
     )
     text = log_path.read_text(errors="replace") if log_path.is_file() else ""
-    passed = test_count(text, GENERIC_TEST_COUNT_PATTERNS)
+    passed = rust_test_count(text)
     expected = BASE.pass_to_pass_count(oracle.get("pass_to_pass"))
     correctness_ok = exit_code == 0 and (not expected or passed >= expected)
     evidence = persist_evidence(output, "rust", model, task_id, scratch)
@@ -1895,6 +2290,7 @@ REPLAY_FUNCTIONS = {
 
 def cmd_replay(args: argparse.Namespace) -> int:
     legacy_root = Path(args.legacy_root).expanduser().resolve()
+    load_recovery_assets(getattr(args, "assets_root", None))
     tasks_path = Path(args.tasks).resolve()
     oracles_path = Path(args.oracles).resolve()
     output = Path(args.output).resolve()
@@ -1992,10 +2388,16 @@ def cmd_replay(args: argparse.Namespace) -> int:
             continue
 
         try:
-            raw_row = REPLAY_FUNCTIONS[lane](
-                task_id, model, task, oracle, generation, legacy_root, work_root,
-                output, args.timeout,
-            )
+            if recovered_entry(task_id) is not None:
+                raw_row = replay_recovered(
+                    task_id, model, task, oracle, generation, legacy_root,
+                    work_root, output, args.timeout, lane,
+                )
+            else:
+                raw_row = REPLAY_FUNCTIONS[lane](
+                    task_id, model, task, oracle, generation, legacy_root, work_root,
+                    output, args.timeout,
+                )
         except LookupError as error:
             # A missing-key/index error (e.g. reading a field an Oracle
             # does not actually carry -- the exact bug class this
@@ -2049,7 +2451,17 @@ def add_release_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--task-id",
         action="append",
-        help="Restrict to a subset of the 14 reserve task IDs (repeatable)",
+        help="Restrict to a subset of the reserve/recovered task IDs (repeatable)",
+    )
+    parser.add_argument(
+        "--assets-root",
+        default=os.environ.get("REVIEWBENCH_LEGACY_ASSETS", ""),
+        help="Root of a recovered-asset bundle containing "
+        f"{RECOVERY_MANIFEST_NAME} (scripts/recover_legacy_native_rust.py). "
+        "Recovered contracts supersede the historical ones for the tasks "
+        "they cover and are re-verified against live disk/Docker state; "
+        "without it, native/rust tasks whose historical start/ workspace was "
+        "deleted stay blocked.",
     )
 
 
