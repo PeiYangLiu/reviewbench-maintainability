@@ -772,6 +772,32 @@ Two tasks are **blocked and non-scoring**:
 * **chazari-x/yandex-pr-diplom#1** -- the accepted change is public-API-breaking
   in both directions (see below).
 
+##### Offline execution and cache provenance
+
+Dependency resolution can never touch the network. Every Go recipe runs with
+`GOPROXY=off`, `GOSUMDB=off` and `GOFLAGS=-mod=readonly` (readonly so a run can
+neither hide a missing dependency nor rewrite the workspace's `go.mod`, which
+would corrupt the golden patch), and the module cache is **not** a named Docker
+volume: each phase is seeded into a fresh, disposable directory extracted from
+an immutable, fully hashed archive under the asset root, verified against the
+contract-pinned digest first. The Go build cache is deliberately *not* pinned:
+it is content-addressed and self-verifying, so it is a derived accelerator
+rather than an execution input, and a metadata-only "pin" would be meaningless.
+
+Both the eks-anywhere and TiDB Oracles now run with `--network none`. Four of
+eks-anywhere's 23 PASS_TO_PASS tests read a release manifest over HTTPS; that
+response was captured once, is hash-pinned in the contract, and is served by a
+loopback TLS server started inside the container from a pinned certificate and
+a 20-line stdlib server, with `SSL_CERT_FILE` and `--add-host` pointing the
+test at it. Nothing is fetched live.
+
+`restore-caches` restores **both** the start and the golden cache of every task
+that declares them, and `--target-dir` restores into plain directories, which
+is what a fresh host without the historical Docker volumes needs. An end-to-end
+test restores an archive into an empty target and then runs a real `go run` in
+the pinned image with `--network none` and `GOPROXY=off`, proving the restored
+cache alone is sufficient.
+
 ##### Asset integrity is a single source of truth
 
 `asset_inventory()` enumerates *every* execution-relevant asset of a recovered
@@ -788,6 +814,11 @@ may be read that does not appear there. From that one list:
   bypasses the per-file digest cache and re-reads every byte.
 * **The replay-contract fingerprint** binds the observed digest of all of them,
   so replacing any asset in place invalidates previously-recorded rows.
+* **The staged candidate patch** is re-resolved and re-hashed from disk
+  immediately before every replay and compared against the `patch_sha256`
+  recorded at staging time; its live digest is folded into the row provenance
+  and the staleness check, so a rewritten patch reruns the pair. A missing or
+  drifted patch is a non-scoring `infra_retry`, never a model `apply_error`.
 * **Replay** re-verifies the inventory immediately before executing, copies
   every writable mount into a per-run scratch tree so pinned sources are never
   mutated in place, and re-verifies the immutable sources afterwards. A missing,

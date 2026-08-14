@@ -830,6 +830,18 @@ def asset_inventory(
             declared_as=str(evidence["evidence"]),
         ))
 
+    fixtures = recipe.get("offline_http_fixtures") or {}
+    for key in ("root", "cert", "key", "server"):
+        declared = fixtures.get(key)
+        if declared:
+            inventory.append(asset_record(
+                role=f"offline_http_fixture_{key}",
+                kind="tree" if key == "root" else "file",
+                location=str(asset_path(asset_root, str(declared))),
+                expected=fixtures.get(f"{key}_sha256"),
+                declared_as=str(declared),
+            ))
+
     for mount in recipe.get("host_mounts") or []:
         location = expand_placeholders(
             str(mount["host"]),
@@ -860,17 +872,20 @@ def asset_inventory(
             mode=str(mount.get("mode") or "rw"),
             source_archive=mount.get("source_archive"),
         ))
-    for override_key in ("gomodcache_archive", "cache_archive"):
-        archive = recipe.get(override_key)
-        if archive:
+    golden_overrides_early = validation.get("golden_recipe_overrides") or {}
+    for source, phase in ((recipe, "start"), (golden_overrides_early, "golden")):
+        for override_key in ("gomodcache_archive", "cache_archive"):
+            archive = source.get(override_key)
+            if not archive:
+                continue
             inventory.append(asset_record(
-                role="packaged_cache_archive",
+                role=f"packaged_cache_archive_{phase}",
                 kind="archive",
                 location=str(asset_path(asset_root, str(archive))),
-                expected=recipe.get(f"{override_key}_sha256")
-                or recipe.get("cache_archive_sha256"),
+                expected=source.get(f"{override_key}_sha256"),
                 declared_as=str(archive),
-                required=bool(recipe.get(f"{override_key}_required", False)),
+                phase=phase,
+                seeds_volume=source.get("gomodcache_volume"),
             ))
 
     golden_overrides = validation.get("golden_recipe_overrides") or {}
@@ -885,12 +900,25 @@ def asset_inventory(
             ))
         for key in ("gomodcache_volume", "gobuildcache_volume"):
             volume = source.get(key)
-            if volume:
-                inventory.append(asset_record(
-                    role=key,
-                    kind="docker_volume",
-                    location=str(volume),
-                ))
+            if not volume:
+                continue
+            if key == "gomodcache_volume" and source.get("gomodcache_archive"):
+                # The module cache is pinned by its immutable, fully hashed
+                # archive; the volume itself is a disposable, per-replay copy
+                # seeded from that archive, so its metadata is not an identity.
+                continue
+            if key == "gobuildcache_volume":
+                # Go's build cache is content-addressed and self-verifying: a
+                # stale or corrupt entry is detected and recompiled by the
+                # toolchain itself, so it is a derived accelerator, never an
+                # execution input. It is therefore deliberately not pinned
+                # (a metadata-only "pin" would be meaningless).
+                continue
+            inventory.append(asset_record(
+                role=key,
+                kind="docker_volume",
+                location=str(volume),
+            ))
 
     inventory.append(asset_record(
         role="repo_checkout",
@@ -1191,6 +1219,42 @@ def replay_contract_fingerprint(
     return BASE.canonical_hash(payload)
 
 
+def staged_patch_digest(generation: dict[str, Any]) -> tuple[Path | None, str | None]:
+    """``(resolved patch path, live SHA-256)`` for a staged candidate.
+
+    The digest is recomputed from the file on disk every time: a staged patch
+    that vanished or was rewritten after ``prepare`` must never be applied, and
+    must never be mistaken for a model whose patch failed to apply.
+    """
+    raw = generation.get("patch_file")
+    if not raw:
+        return None, None
+    path = Path(str(raw)).expanduser()
+    if not path.is_file():
+        return path, None
+    return path, file_content_digest(path, rehash=True)
+
+
+def verify_staged_patch(generation: dict[str, Any]) -> tuple[str | None, str | None]:
+    """``(live digest, problem)`` for the staged candidate patch."""
+    if generation.get("apply_ok") is not True:
+        return None, None
+    path, digest = staged_patch_digest(generation)
+    if path is None:
+        return None, "staged generation row carries no patch_file"
+    if digest is None:
+        return None, f"staged candidate patch is missing: {path}"
+    recorded = generation.get("patch_sha256")
+    if not recorded:
+        return digest, f"staged generation row for {path} carries no patch_sha256"
+    if digest != recorded:
+        return digest, (
+            f"staged candidate patch {path} has SHA-256 {digest}, not the "
+            f"staged patch_sha256 {recorded}"
+        )
+    return digest, None
+
+
 def row_provenance_fields(
     task: dict[str, Any],
     oracle: dict[str, Any],
@@ -1201,6 +1265,7 @@ def row_provenance_fields(
     asset_root: Path,
     blockers: list[str],
 ) -> dict[str, Any]:
+    live_patch_digest = staged_patch_digest(generation)[1]
     return {
         "task_fingerprint": BASE.task_fingerprint(task),
         "oracle_fingerprint": BASE.canonical_hash(oracle),
@@ -1208,6 +1273,9 @@ def row_provenance_fields(
             task_id, entry, legacy_root, asset_root, blockers
         ),
         "generation_apply_ok": generation.get("apply_ok"),
+        # The *live* digest of the staged patch file, not the digest the
+        # generation row claims: a rewritten patch must invalidate the row.
+        "patch_file_sha256": live_patch_digest,
     }
 
 
@@ -1234,7 +1302,11 @@ def row_is_stale(
     )
     if any(existing_row.get(field) != value for field, value in current.items()):
         return True
-    return existing_row.get("patch_sha256") != generation.get("patch_sha256")
+    if existing_row.get("patch_sha256") != generation.get("patch_sha256"):
+        return True
+    # Live drift of the staged patch file itself (same recorded sha256, new
+    # bytes on disk) also invalidates a recorded row.
+    return existing_row.get("patch_file_sha256") != staged_patch_digest(generation)[1]
 
 
 # ---------------------------------------------------------------------------
@@ -1482,6 +1554,8 @@ def docker_run_command(
         "docker", "run", "--rm",
         "--network", str(recipe.get("network") or "none"),
     ]
+    for host in (recipe.get("offline_http_fixtures") or {}).get("hosts") or []:
+        argv.extend(["--add-host", f"{host}:127.0.0.1"])
     if entrypoint is not None:
         argv.extend(["--entrypoint", entrypoint])
     argv.extend(mounts)
@@ -1654,12 +1728,17 @@ def oracle_mounts(
     if workspace is not None:
         mounts += ["-v", f"{workspace}:{recipe.get('workspace_mount', '/work')}"]
     mounts += ["-v", f"{reports}:/reports"]
-    if recipe.get("gomodcache_volume"):
+    if recipe.get("gomodcache_dir"):
+        mounts += ["-v", f"{recipe['gomodcache_dir']}:/go/pkg/mod"]
+    elif recipe.get("gomodcache_volume"):
         mounts += ["-v", f"{recipe['gomodcache_volume']}:/go/pkg/mod"]
     if recipe.get("gobuildcache_volume"):
         mounts += ["-v", f"{recipe['gobuildcache_volume']}:/root/.cache/go-build"]
     for mount in recipe.get("host_mounts") or []:
         mounts += ["-v", f"{mount['host']}:{mount['container']}:{mount.get('mode', 'rw')}"]
+    fixture_dir = recipe.get("offline_http_fixture_dir")
+    if fixture_dir:
+        mounts += ["-v", f"{fixture_dir}:/fixtures:ro"]
     mounts += list(extra or [])
     return mounts
 
@@ -1696,6 +1775,27 @@ def execute_oracle(
         command, expected = go_oracle_command(
             recipe, oracle, coverage_out=coverage_out
         )
+        fixtures = recipe.get("offline_http_fixtures") or {}
+        if fixtures:
+            # A repository test that performs an application-level HTTPS GET is
+            # served from a recorded, hash-pinned fixture set by a loopback TLS
+            # server inside the container, so the run needs no network at all.
+            env["ORACLE_FIXTURE_ROOT"] = "/fixtures/root"
+            env["ORACLE_FIXTURE_CERT"] = "/fixtures/tls.crt"
+            env["ORACLE_FIXTURE_KEY"] = "/fixtures/tls.key"
+            env["SSL_CERT_FILE"] = "/fixtures/tls.crt"
+            entrypoint = "/bin/sh"
+            inner = " ".join(shlex.quote(part) for part in command)
+            script = (
+                "export PATH=/usr/local/go/bin:$PATH; "
+                "set -e; go run /fixtures/server.go & "
+                "for i in $(seq 1 50); do "
+                "  if [ -n \"$(ls /proc/net/tcp 2>/dev/null)\" ] && "
+                "     grep -qi ':01BB ' /proc/net/tcp 2>/dev/null; then break; fi; "
+                "  sleep 0.2; done; "
+                f"{inner}"
+            )
+            command = ["-lc", script]
     elif kind in {"python_image_pytest", "python_docker_session_oracle"}:
         junit_out = "/reports/report.xml"
         py_cover_out = (
@@ -2133,6 +2233,92 @@ def immutable_asset_digests(
     return digests
 
 
+GO_OFFLINE_ENV = {
+    # Dependency resolution can never touch the network: everything must come
+    # from the seeded, hash-verified module cache.
+    "GOPROXY": "off",
+    # readonly, so a run can never rewrite the workspace's go.mod/go.sum --
+    # that would both hide a missing dependency and corrupt the golden patch.
+    "GOFLAGS": "-mod=readonly",
+    "GONOSUMDB": "*",
+    "GONOSUMCHECK": "1",
+    "GOSUMDB": "off",
+    "GOPRIVATE": "*",
+    "GOTOOLCHAIN": "local",
+}
+
+
+def seed_cache_directory(
+    archive: Path,
+    destination: Path,
+    *,
+    expected_sha256: str | None,
+) -> str:
+    """Materialize a disposable module cache from its immutable archive.
+
+    The archive's *full content* digest is verified first, then it is extracted
+    with the same traversal/link-safe extractor ``restore-caches`` uses. The
+    resulting directory is per-replay and disposable: nothing that runs can
+    change the pinned asset, because the pinned asset is the archive.
+    """
+    digest = file_content_digest(archive, rehash=True)
+    if expected_sha256 and digest != expected_sha256:
+        raise RuntimeError(
+            f"packaged cache archive {archive} has SHA-256 {digest}, not the "
+            f"contract-pinned {expected_sha256}"
+        )
+    force_remove_path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    safe_extract_tar(archive, destination)
+    return digest
+
+
+def prepare_cache_mounts(
+    recipe: dict[str, Any],
+    scratch: Path,
+    *,
+    asset_root: Path,
+    phase: str = "start",
+) -> dict[str, Any]:
+    """Replace a named module-cache volume with a seeded disposable directory.
+
+    Also forces the Go toolchain fully offline. A recipe that declares no
+    archive keeps its volume (and stays pinned by volume identity), so this is
+    purely additive for lanes that have no packaged cache.
+    """
+    archive = recipe.get("gomodcache_archive")
+    updated = dict(recipe)
+    if archive:
+        seeded = scratch / f"gomodcache-{phase}"
+        digest = seed_cache_directory(
+            asset_path(asset_root, str(archive)),
+            seeded,
+            expected_sha256=recipe.get("gomodcache_archive_sha256"),
+        )
+        updated["gomodcache_volume"] = None
+        updated["gomodcache_dir"] = str(seeded)
+        updated["gomodcache_archive_observed_sha256"] = digest
+    fixtures = recipe.get("offline_http_fixtures") or {}
+    if fixtures:
+        staged = scratch / f"fixtures-{phase}"
+        force_remove_path(staged)
+        staged.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            asset_path(asset_root, str(fixtures["root"])), staged / "root",
+            symlinks=True,
+        )
+        for name, key in (("tls.crt", "cert"), ("tls.key", "key"),
+                          ("server.go", "server")):
+            shutil.copy2(asset_path(asset_root, str(fixtures[key])), staged / name)
+        updated["offline_http_fixture_dir"] = str(staged)
+    if recipe["kind"] in {"go_docker_p2p", "go_docker_session_oracle"}:
+        env = dict(GO_OFFLINE_ENV)
+        env.update(recipe.get("env") or {})
+        env.update({key: value for key, value in GO_OFFLINE_ENV.items()})
+        updated["env"] = env
+    return updated
+
+
 def replay_worktree_oracle(
     task_id: str,
     model: str,
@@ -2169,6 +2355,7 @@ def replay_worktree_oracle(
         recipe = isolate_mutable_mounts(
             recipe, scratch, asset_root=asset_root, legacy_root=legacy_root
         )
+        recipe = prepare_cache_mounts(recipe, scratch, asset_root=asset_root)
         install_session_assets(recipe, asset_root, workspace)
         patch_path = Path(generation["patch_file"])
         ok, detail = apply_patch(workspace, patch_path)
@@ -2592,6 +2779,21 @@ def cmd_replay(args: argparse.Namespace) -> int:
             summary["ready"] += 1
             continue
 
+        # The staged candidate patch must still exist and still hash to what
+        # `prepare` recorded. A missing or rewritten patch is infrastructure,
+        # never a model apply_error.
+        live_digest, patch_problem = verify_staged_patch(generation)
+        if patch_problem:
+            raw_row = infra_row(
+                task_id, model, lane, row["start_sha"], generation, patch_problem
+            )
+            raw_row.update(provenance)
+            raw_row["patch_file_sha256"] = live_digest
+            by_lane[lane] = append_raw_row(legacy_dir, lane, raw_row)
+            summary["infra"] = summary.get("infra", 0) + 1
+            summary["errors"].append({"id": task_id, "blockers": [patch_problem]})
+            continue
+
         # Re-verify every execution-relevant asset immediately before running
         # (blockers were computed above, but an asset can disappear or be
         # replaced between the check and the run). A tampered input is
@@ -2984,6 +3186,7 @@ def validate_one_oracle(
         recipe = isolate_mutable_mounts(
             recipe, scratch, asset_root=asset_root, legacy_root=legacy_root
         )
+        recipe = prepare_cache_mounts(recipe, scratch, asset_root=asset_root)
         install_session_assets(recipe, asset_root, workspace)
         for index in range(1, runs + 1):
             outcome = execute_oracle(
@@ -3118,6 +3321,10 @@ def validate_one_oracle(
                         "golden_recipe_overrides"
                     )
                     or {}
+                )
+                golden_recipe.pop("gomodcache_dir", None)
+                golden_recipe = prepare_cache_mounts(
+                    golden_recipe, scratch, asset_root=asset_root, phase="golden"
                 )
                 coverage_phase = str(
                     (recipe.get("coverage") or {}).get("phase") or "start"
@@ -3310,7 +3517,14 @@ def cmd_pin_assets(args: argparse.Namespace) -> int:
         if args.task_id and task_id not in args.task_id:
             continue
         recipe = entry["recipe"]
+        overrides = (entry.get("oracle_validation") or {}).get(
+            "golden_recipe_overrides"
+        ) or {}
         for mount in recipe.get("host_mounts") or []:
+            if mount.get("pin") == "git_commit":
+                # pinned by the commit it must contain, not by a tree digest
+                mount.pop("sha256", None)
+                continue
             location = Path(expand_placeholders(
                 str(mount["host"]),
                 legacy_root=legacy_root,
@@ -3324,18 +3538,19 @@ def cmd_pin_assets(args: argparse.Namespace) -> int:
             if mount.get("sha256") != observed:
                 mount["sha256"] = observed
                 updated.append(f"{task_id}: {mount['host']}")
-        for key in ("gomodcache_archive", "cache_archive"):
-            archive = recipe.get(key)
-            if not archive:
-                continue
-            path = asset_path(asset_root, str(archive))
-            observed = path_digest(path, rehash=args.rehash)
-            if observed is None:
-                print(f"error: missing archive {path}", file=sys.stderr)
-                return 2
-            if recipe.get(f"{key}_sha256") != observed:
-                recipe[f"{key}_sha256"] = observed
-                updated.append(f"{task_id}: {archive}")
+        for source, label in ((recipe, "start"), (overrides, "golden")):
+            for key in ("gomodcache_archive", "cache_archive"):
+                archive = source.get(key)
+                if not archive:
+                    continue
+                path = asset_path(asset_root, str(archive))
+                observed = path_digest(path, rehash=args.rehash)
+                if observed is None:
+                    print(f"error: missing archive {path}", file=sys.stderr)
+                    return 2
+                if source.get(f"{key}_sha256") != observed:
+                    source[f"{key}_sha256"] = observed
+                    updated.append(f"{task_id} [{label}]: {archive}")
     contract_path.write_text(
         json.dumps(contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -3406,15 +3621,47 @@ def cmd_restore_caches(args: argparse.Namespace) -> int:
     actions = []
     for task_id, entry in sorted(contract["tasks"].items()):
         recipe = entry.get("recipe") or {}
-        volume = recipe.get("gomodcache_volume")
-        archive = recipe.get("gomodcache_archive")
-        if not volume or not archive:
-            continue
+        overrides = (entry.get("oracle_validation") or {}).get(
+            "golden_recipe_overrides"
+        ) or {}
         if args.task_id and task_id not in args.task_id:
             continue
-        if docker_volume_present(str(volume)):
-            actions.append({"volume": volume, "action": "present"})
-            continue
+        phases = [("start", recipe), ("golden", overrides)]
+        for phase, source in phases:
+            archive = source.get("gomodcache_archive")
+            if not archive:
+                continue
+            action = restore_one_cache(
+                task_id, phase, source, archive,
+                asset_root=asset_root, checksums=checksums,
+                target_root=Path(args.target_dir).resolve() if args.target_dir else None,
+                dry_run=args.dry_run,
+            )
+            actions.append(action)
+    save_digest_cache()
+    print(json.dumps({"actions": actions}, indent=2))
+    return 0
+
+
+def restore_one_cache(
+    task_id: str,
+    phase: str,
+    source: dict[str, Any],
+    archive: str,
+    *,
+    asset_root: Path,
+    checksums: dict[str, str],
+    target_root: Path | None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Verify and restore one phase's packaged module cache.
+
+    ``--target-dir`` restores into a plain directory, which is what a fresh
+    host without the historical Docker volumes needs; otherwise the recipe's
+    named volume is created and seeded.
+    """
+    if True:
+        volume = source.get("gomodcache_volume") or f"rb-restored-{phase}"
         relative = str(archive)
         archive_path = asset_path(asset_root, relative)
         if relative not in checksums:
@@ -3431,16 +3678,25 @@ def cmd_restore_caches(args: argparse.Namespace) -> int:
                 f"packaged cache archive {archive_path} has SHA-256 {digest}, "
                 f"not the SHA256SUMS entry {checksums[relative]}"
             )
-        pinned = recipe.get("gomodcache_archive_sha256")
+        pinned = source.get("gomodcache_archive_sha256")
         if pinned and digest != pinned:
             raise ValueError(
                 f"packaged cache archive {archive_path} has SHA-256 {digest}, "
                 f"not the contract-pinned {pinned}"
             )
-        if args.dry_run:
-            actions.append({"volume": volume, "action": "would_restore",
-                            "archive": relative, "sha256": digest})
-            continue
+        if dry_run:
+            return {"task": task_id, "phase": phase, "volume": volume,
+                    "action": "would_restore", "archive": relative,
+                    "sha256": digest}
+        if target_root is not None:
+            destination = target_root / f"{BASE.safe_component(task_id)}-{phase}"
+            members = safe_extract_tar(archive_path, destination)
+            return {"task": task_id, "phase": phase, "action": "restored_to_dir",
+                    "directory": str(destination), "archive": relative,
+                    "sha256": digest, "members": members}
+        if docker_volume_present(str(volume)):
+            return {"task": task_id, "phase": phase, "volume": volume,
+                    "action": "present"}
         if not docker_available():
             raise ValueError("docker CLI is not available; cannot create a volume")
         created = subprocess.run(
@@ -3453,11 +3709,9 @@ def cmd_restore_caches(args: argparse.Namespace) -> int:
         if not mountpoint:
             raise ValueError(f"could not resolve mountpoint for volume {volume}")
         members = safe_extract_tar(archive_path, Path(mountpoint))
-        actions.append({"volume": volume, "action": "restored",
-                        "archive": relative, "sha256": digest, "members": members})
-    save_digest_cache()
-    print(json.dumps({"actions": actions}, indent=2))
-    return 0
+        return {"task": task_id, "phase": phase, "volume": volume,
+                "action": "restored", "archive": relative, "sha256": digest,
+                "members": members}
 
 
 # ---------------------------------------------------------------------------
@@ -3556,6 +3810,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     restore.add_argument("--contract", default=str(DEFAULT_CONTRACT))
     restore.add_argument("--legacy-root", default=".")
     restore.add_argument("--task-id", action="append")
+    restore.add_argument(
+        "--target-dir",
+        help="Restore into plain directories instead of Docker volumes "
+        "(what a fresh host without the historical volumes needs)",
+    )
     restore.add_argument("--dry-run", action="store_true")
     restore.set_defaults(func=cmd_restore_caches)
 
