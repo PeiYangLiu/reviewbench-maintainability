@@ -1701,3 +1701,156 @@ def test_restore_then_run_offline_end_to_end(tmp_path, monkeypatch):
     assert "--network" in argv and argv[argv.index("--network") + 1] == "none"
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "42" in completed.stdout
+
+
+# ---------------------------------------------------------------------------
+# Coverage must be measured by the run under validation
+# ---------------------------------------------------------------------------
+
+
+def test_attested_coverage_is_never_consulted_by_the_scoring_path():
+    """A historical attestation may be recorded, but the scoring path must
+    read only coverage produced by the run being validated."""
+    source = (SCRIPTS_DIR / "run_legacy_gopy_scripted_correctness.py").read_text()
+    body = source[source.index("def validate_one_oracle("):]
+    assert "attested_coverage_hits" not in body
+    # ... and no recovered contract entry may rely on an attested measurement
+    contract = MODULE.load_contract(CONTRACT_PATH)
+    for task_id, entry in contract["tasks"].items():
+        if entry["status"] != "recovered":
+            continue
+        assert (entry["recipe"].get("coverage") or {}).get("kind") != "attested", task_id
+
+
+def test_no_live_coverage_means_no_oracle_ok(tmp_path, monkeypatch):
+    """An Oracle whose run produces no changed-old coverage cannot pass, even
+    if a historical attestation says it once did."""
+    recipe = {
+        "kind": "go_docker_session_oracle",
+        "coverage": {
+            "kind": "attested",
+            "paths": ["pkg/prod.go"],
+            "evidence": "hits.json",
+        },
+    }
+    outcome = {"coverage_path": tmp_path / "absent.out"}
+    assert MODULE.coverage_hits(recipe, outcome) == {}
+
+
+def test_jacoco_xml_hits_reads_covered_lines(tmp_path):
+    report = tmp_path / "jacoco.xml"
+    report.write_text(
+        "<report><package>"
+        '<sourcefile name="Prod.scala">'
+        '<line nr="10" ci="4" mi="0"/>'
+        '<line nr="11" ci="0" mi="3"/>'
+        '<line nr="12" ci="2" mi="1"/>'
+        "</sourcefile></package></report>",
+        encoding="utf-8",
+    )
+    assert MODULE.jacoco_xml_hits(report, ["src/main/scala/Prod.scala"]) == {
+        "src/main/scala/Prod.scala": [10, 12]
+    }
+    assert MODULE.jacoco_xml_hits(report, ["src/Other.scala"]) == {}
+    assert MODULE.jacoco_xml_hits(tmp_path / "missing.xml", ["x"]) == {}
+
+
+def test_scalajs_tasks_are_blocked_and_non_scoring():
+    contract = MODULE.load_contract(CONTRACT_PATH)
+    for task_id in (
+        "github__scala-js__scala-js__pull_4707__comment_950668211__duplication",
+        "github__scala-js__scala-js__pull_4988__comment_1623244819__duplication",
+    ):
+        entry = contract["tasks"][task_id]
+        assert entry["status"] == "blocked"
+        assert entry["blockers"][0]["kind"] == "unmeasurable_changed_old_coverage"
+        assert "recipe" not in entry
+        assert entry["engineered_oracle_not_scoring"]["kind"] == (
+            "sbt_docker_session_oracle"
+        )
+
+
+# ---------------------------------------------------------------------------
+# In-image harness judging must reject truncated or failing runs
+# ---------------------------------------------------------------------------
+
+
+def harness_inputs(**overrides):
+    statuses = {f"start_{i}": "0" for i in (1, 2, 3)}
+    statuses.update({f"golden_{i}": "0" for i in (1, 2, 3)})
+    statuses["golden_apply"] = "0"
+    payload = {
+        "exit_code": 0,
+        "statuses": statuses,
+        "report_names": [f"start-run-{i}.xml" for i in (1, 2, 3)]
+        + [f"golden-run-{i}.xml" for i in (1, 2, 3)],
+        "required_runs": 3,
+        "expected_passed": 55,
+        "passed_counts": [55] * 6,
+        "covered": {"pkg/prod.py": [10]},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_in_image_harness_accepts_a_complete_run():
+    assert MODULE.judge_in_image_harness(**harness_inputs()) == []
+
+
+def test_in_image_harness_rejects_a_nonzero_exit():
+    failures = MODULE.judge_in_image_harness(**harness_inputs(exit_code=1))
+    assert any("exited 1" in failure for failure in failures)
+
+
+def test_in_image_harness_rejects_a_truncated_run():
+    statuses = {"start_1": "0", "golden_1": "0", "golden_apply": "0"}
+    failures = MODULE.judge_in_image_harness(**harness_inputs(
+        statuses=statuses,
+        report_names=["start-run-1.xml", "golden-run-1.xml"],
+        passed_counts=[55, 55],
+    ))
+    assert any("expected 3 in-image start phases" in f for f in failures)
+    assert any("expected 3 in-image golden phases" in f for f in failures)
+    assert any("expected 6 in-image JUnit reports" in f for f in failures)
+
+
+def test_in_image_harness_rejects_a_failed_phase():
+    statuses = dict(harness_inputs()["statuses"])
+    statuses["golden_2"] = "1"
+    failures = MODULE.judge_in_image_harness(**harness_inputs(statuses=statuses))
+    assert any("phase golden_2 returned 1" in f for f in failures)
+
+
+def test_in_image_harness_rejects_a_failed_golden_apply():
+    statuses = dict(harness_inputs()["statuses"])
+    statuses["golden_apply"] = "1"
+    failures = MODULE.judge_in_image_harness(**harness_inputs(statuses=statuses))
+    assert any("golden patch did not apply" in f for f in failures)
+    statuses.pop("golden_apply")
+    failures = MODULE.judge_in_image_harness(**harness_inputs(statuses=statuses))
+    assert any("no golden_apply phase" in f for f in failures)
+
+
+def test_in_image_harness_rejects_a_missing_phase_report():
+    failures = MODULE.judge_in_image_harness(**harness_inputs(
+        report_names=["start-run-1.xml", "start-run-2.xml", "golden-run-1.xml",
+                      "golden-run-2.xml", "golden-run-3.xml"],
+    ))
+    assert any("missing in-image report for start_3" in f for f in failures)
+
+
+def test_in_image_harness_rejects_too_few_passing_tests():
+    failures = MODULE.judge_in_image_harness(**harness_inputs(
+        passed_counts=[55, 55, 54, 55, 55, 55]
+    ))
+    assert any("passed only 54" in f for f in failures)
+
+
+def test_in_image_harness_rejects_missing_changed_old_coverage():
+    failures = MODULE.judge_in_image_harness(**harness_inputs(covered={}))
+    assert any("no changed-old production line" in f for f in failures)
+
+
+def test_in_image_harness_requires_statuses():
+    failures = MODULE.judge_in_image_harness(**harness_inputs(statuses={}))
+    assert any("no statuses.log" in f for f in failures)

@@ -728,15 +728,15 @@ through controlled fake executables, with bash xtrace line coverage), and
 `sbt_docker_session_oracle` (the project's own sbt build against a packaged,
 hash-verified ivy/coursier closure).
 
-Status as of 2026-08-14: **17 of 19 tasks are replay-ready and every one of
-them is proven by real execution.** `validate-oracle` has no attestation-only
-path: each Oracle is executed now -- exact start x3 and golden x3 -- and judged
-on its own output, PASS_TO_PASS set and measured changed-old production
-coverage. The four originally-published Oracles are re-executed the same way
-(the scikit-learn image's own harness is re-run end to end, including its
-golden patch application and its coverage report).
+Status as of 2026-08-14: **15 of 19 tasks are replay-ready, and every one of
+them is proven by real execution in the validating run itself.**
+`validate-oracle` has no attestation-only path and no attested-coverage
+fallback: each Oracle is executed now -- exact start x3 and golden x3 -- and
+judged on its own output, PASS_TO_PASS set and changed-old production coverage
+**measured by that run**. A historical measurement may be carried in the
+contract for reference, but it can never satisfy the coverage requirement.
 
-| Task | Oracle | P2P | Golden mode | Coverage tool |
+| Task | Oracle | P2P | Golden mode | Coverage measured in-run |
 |---|---|---:|---|---|
 | aws/eks-anywhere#2274 | repository suite | 23 | source-only (+5 deleted production paths) | go cover |
 | pingcap/tidb#68028 | repository suite | 162 | source-only (published 407-path set) | go cover (golden phase, as published) |
@@ -753,22 +753,32 @@ golden patch application and its coverage report).
 | OpenFreeEnergy/alchemiscale#421 | engineered session Oracle | 2 | source-only | coverage.py |
 | Pyomo/pyomo#3698 | engineered session Oracle | 1 | source-only | coverage.py |
 | runfinch/finch-core#780 | engineered shell harness | 7 | source-only | bash xtrace |
-| scala-js#4707 | repository OptimizerTest | 10 | recorded golden patch | JaCoCo (attested, digest-verified) |
-| scala-js#4988 | engineered session Oracle | 1 | source-only | JaCoCo (attested, digest-verified) |
 
-Two tasks are **blocked and non-scoring**:
+The in-image harness (scikit-learn) is judged strictly: the harness process
+must exit 0, produce exactly the configured number of start and golden phases
+(three each), report every phase status as success, record a successful
+`golden_apply`, emit the matching per-phase JUnit report for each, and cover a
+changed-old production line. A truncated one-run harness or a non-zero exit can
+never be reported as a passing Oracle.
 
-* **hashicorp/nomad#16383** -- an Ember/QUnit Oracle was engineered and is
-  behaviourally strict (real headless-Chromium DOM assertions, 3/3 on start and
-  3/3 on the source-only golden, fully offline, Node 16.20.0 pinned by the
-  official `SHASUMS256.txt` with a `--frozen-lockfile` dependency tree), but
-  **changed-old production line coverage cannot be measured**: neither
-  `ember-cli-code-coverage` nor any `istanbul` package exists in the
-  repository's `yarn.lock` at `start_sha`, and adding one is an unpinned
-  build-time dependency that changes the Ember build. The engineered recipe is
-  retained in the contract under `engineered_oracle_not_scoring` so the work is
-  not lost, but the task is not replay-ready and is excluded from the ready
-  count.
+Four tasks are **blocked and non-scoring**:
+
+* **scala-js#4707** and **scala-js#4988** -- both Oracles are engineered and
+  behaviourally strict (the project's own sbt build, executed offline against a
+  pinned, fully hashed ivy/coursier closure, 3/3 on start and 3/3 on golden with
+  a named PASS_TO_PASS set), but changed-old production coverage **cannot be
+  measured during the validating run**: the pinned JaCoCo 0.8.12 agent attached
+  with `-J-javaagent` does produce an exec and an XML report over 1,469 analysed
+  classes, yet the reviewed production sources report zero covered lines (the
+  analysed class files are not the class identities the tests executed), and the
+  alternative `set every Test/javaOptions += -javaagent:...` injection fails the
+  scala-js build. The recipes and their validation records are retained in the
+  contract under `engineered_oracle_not_scoring` /
+  `engineered_oracle_validation`; re-running `validate-oracle` after attaching
+  JaCoCo so the executed and analysed class identities match is all that is
+  needed to promote them.
+* **hashicorp/nomad#16383** -- behaviourally strict Ember/QUnit Oracle, but no
+  instrumentation path exists for changed-old line coverage at that revision.
 * **chazari-x/yandex-pr-diplom#1** -- the accepted change is public-API-breaking
   in both directions (see below).
 

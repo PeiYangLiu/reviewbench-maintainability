@@ -1825,6 +1825,11 @@ def execute_oracle(
             )
         command = ["-lc", script]
     elif kind == "sbt_docker_session_oracle":
+        jacoco = (
+            (recipe.get("coverage") or {})
+            if with_coverage and coverage_kind == "jacoco"
+            else {}
+        )
         # The historical scala-js Oracles ran the project's own sbt build via
         # a launcher and a warm ivy/coursier home mounted from a packaged,
         # hash-verified cache; no artifact is ever resolved from the network.
@@ -1832,11 +1837,61 @@ def execute_oracle(
         launcher = str(recipe.get("sbt_launcher") or "/tools/sbt")
         entrypoint = str(recipe.get("entrypoint") or "/bin/sh")
         env.setdefault("HOME", str(recipe.get("home_mount") or "/root"))
-        script = (
+        sbt_java_flags = ""
+        if jacoco:
+            # sbt-extras forwards -J flags to the JVM it launches; the linker
+            # tests run unforked in that JVM, so the agent observes them.
+            agent = str(jacoco.get("agent") or "/tools/jacocoagent.jar")
+            includes = str(jacoco.get("includes") or "org.scalajs.*")
+            sbt_java_flags = shlex.quote(
+                f"-J-javaagent:{agent}=destfile=/reports/jacoco.exec,"
+                f"append=false,includes={includes}"
+            ) + " "
+        # NOTE: injecting the agent through `set every Test/javaOptions` is
+        # *not* done: it fails the scala-js build ("Test / javaOptions from
+        # Global / javaOptions"). Only the -J attachment to the sbt JVM is
+        # used, which is why in-run coverage attribution is currently
+        # unavailable for this lane (see the contract's blockers).
+        sbt_pre_commands = ""
+        sbt_call = (
             "git config --global --add safe.directory '*' && "
-            f"{shlex.quote(launcher)} -batch "
+            f"{shlex.quote(launcher)} {sbt_java_flags}-batch "
+            f"{sbt_pre_commands}"
             f"{shlex.quote(str(recipe['test_command']))}"
         )
+        if jacoco:
+            # Measure coverage *now*, in this run: the pinned JaCoCo agent is
+            # attached to the sbt JVM that runs the tests (scala-js linker
+            # tests run unforked), and the pinned CLI converts the execution
+            # data into an XML report this validation parses.
+            cli = str(jacoco.get("cli") or "/tools/jacococli.jar")
+            # Class/source directories are resolved by glob *inside* the
+            # container: the exact target directory depends on the Scala
+            # version the build selects, and a missing pattern must not abort
+            # the report.
+            class_globs = " ".join(
+                shlex.quote(pattern)
+                for pattern in (jacoco.get("classfiles") or [])
+            )
+            source_globs = " ".join(
+                shlex.quote(pattern)
+                for pattern in (jacoco.get("sourcefiles") or [])
+            )
+            coverage_out = "/reports/jacoco.xml"
+            script = (
+                f"{sbt_call}; status=$?; "
+                f"CF=''; for d in {class_globs}; do "
+                "  [ -e \"$d\" ] && CF=\"$CF --classfiles $d\"; done; "
+                f"SF=''; for d in {source_globs}; do "
+                "  [ -e \"$d\" ] && SF=\"$SF --sourcefiles $d\"; done; "
+                "echo \"jacoco classfiles:$CF sourcefiles:$SF\" "
+                "> /reports/jacoco-report.log; "
+                f"java -jar {shlex.quote(cli)} report /reports/jacoco.exec "
+                "$CF $SF --xml /reports/jacoco.xml "
+                ">> /reports/jacoco-report.log 2>&1; exit $status"
+            )
+        else:
+            script = sbt_call
         command = ["-lc", script]
     elif kind == "shell_docker_session_oracle":
         command, expected = shell_oracle_command(recipe)
@@ -2091,6 +2146,36 @@ def settrace_hits(report: Path, paths: list[str]) -> dict[str, list[int]]:
     return {path: sorted(set(values)) for path, values in hits.items()}
 
 
+def jacoco_xml_hits(report: Path, paths: list[str]) -> dict[str, list[int]]:
+    """Executed source lines from a JaCoCo XML report, by source file.
+
+    A line counts as executed when JaCoCo recorded covered instructions for it
+    (``ci > 0``). Matching is by source file name, which is what JaCoCo records
+    for Scala sources.
+    """
+    if not report.is_file():
+        return {}
+    try:
+        root = ET.parse(report).getroot()
+    except ET.ParseError:
+        return {}
+    hits: dict[str, set[int]] = {}
+    for sourcefile in root.iter("sourcefile"):
+        name = sourcefile.get("name") or ""
+        for path in paths:
+            if Path(path).name != name:
+                continue
+            for line in sourcefile.iter("line"):
+                try:
+                    covered = int(line.get("ci") or 0)
+                    number = int(line.get("nr") or 0)
+                except ValueError:
+                    continue
+                if covered > 0 and number:
+                    hits.setdefault(path, set()).add(number)
+    return {path: sorted(values) for path, values in hits.items()}
+
+
 def bash_xtrace_hits(trace: Path, paths: list[str]) -> dict[str, list[int]]:
     if not trace.is_file():
         return {}
@@ -2124,6 +2209,65 @@ def coverage_hits(
         return settrace_hits(profile, paths)
     if kind == "bash_xtrace":
         return bash_xtrace_hits(profile, paths)
+    if kind == "jacoco":
+        return jacoco_xml_hits(profile, paths)
+    return {}
+
+
+def attested_coverage_hits(
+    recipe: dict[str, Any],
+    asset_root: Path,
+) -> dict[str, list[int]]:
+    """Historical, out-of-band coverage evidence -- **informational only**.
+
+    This is never consulted by ``validate-oracle``'s scoring path: changed-old
+    production coverage must be measured by the run being validated. It exists
+    so a contract can carry the earlier measurement for comparison, and the
+    recorded evidence digest is still verified before it is believed.
+    """
+    coverage = recipe.get("coverage") or {}
+    evidence = coverage.get("evidence")
+    if not evidence:
+        return {}
+    path = asset_path(asset_root, str(evidence))
+    digest = sha256_file(path)
+    if digest is None or digest != coverage.get("evidence_sha256"):
+        return {}
+    try:
+        data = json.loads(path.read_text(errors="replace"))
+    except json.JSONDecodeError:
+        return {}
+    intersection = data.get("intersection") or data.get("changed_old_hits")
+    if intersection is None and data.get("path"):
+        covered = data.get("covered_changed_old_lines") or []
+        intersection = {str(data["path"]): covered} if covered else {}
+    return {
+        str(key): sorted(int(line) for line in value)
+        for key, value in (intersection or {}).items()
+        if value
+    }
+
+
+def coverage_hits(
+    recipe: dict[str, Any],
+    outcome: dict[str, Any],
+) -> dict[str, list[int]]:
+    coverage = recipe.get("coverage") or {}
+    kind = coverage.get("kind")
+    paths = [str(item) for item in (coverage.get("paths") or [])]
+    profile = outcome.get("coverage_path")
+    if not kind or not paths or profile is None:
+        return {}
+    if kind == "go_cover":
+        return go_cover_hits(profile, paths)
+    if kind == "py_cover":
+        return py_cover_hits(profile, paths)
+    if kind == "py_settrace":
+        return settrace_hits(profile, paths)
+    if kind == "bash_xtrace":
+        return bash_xtrace_hits(profile, paths)
+    if kind == "jacoco":
+        return jacoco_xml_hits(profile, paths)
     return {}
 
 
@@ -2948,6 +3092,77 @@ def anchor_lines_for(
     return []
 
 
+def judge_in_image_harness(
+    *,
+    exit_code: int,
+    statuses: dict[str, str],
+    report_names: list[str],
+    required_runs: int,
+    expected_passed: int,
+    passed_counts: list[int],
+    covered: dict[str, list[int]],
+) -> list[str]:
+    """Every condition an in-image harness run must satisfy.
+
+    A truncated harness (fewer than the configured start/golden runs), a
+    non-zero harness exit, a failed phase, a failed golden patch application or
+    a missing per-phase report all fail here, so a partial run can never be
+    reported as a passing Oracle.
+    """
+    failures: list[str] = []
+    if exit_code != 0:
+        failures.append(f"the in-image harness exited {exit_code}")
+    if not statuses:
+        failures.append("the in-image harness produced no statuses.log")
+    start_phases = sorted(name for name in statuses if name.startswith("start_"))
+    golden_phases = sorted(
+        name for name in statuses
+        if name.startswith("golden_") and name != "golden_apply"
+    )
+    if len(start_phases) != required_runs:
+        failures.append(
+            f"expected {required_runs} in-image start phases, found "
+            f"{len(start_phases)}: {start_phases}"
+        )
+    if len(golden_phases) != required_runs:
+        failures.append(
+            f"expected {required_runs} in-image golden phases, found "
+            f"{len(golden_phases)}: {golden_phases}"
+        )
+    for name in sorted(statuses):
+        if statuses[name].strip() != "0":
+            failures.append(
+                f"in-image harness phase {name} returned {statuses[name]}"
+            )
+    if "golden_apply" not in statuses:
+        failures.append("the in-image harness recorded no golden_apply phase")
+    elif statuses["golden_apply"].strip() != "0":
+        failures.append("the accepted golden patch did not apply in-image")
+    for phase in start_phases + golden_phases:
+        stem, _, index = phase.rpartition("_")
+        expected_report = f"{stem}-run-{index}.xml"
+        if expected_report not in report_names:
+            failures.append(f"missing in-image report for {phase}: {expected_report}")
+    if len(passed_counts) < 2 * required_runs:
+        failures.append(
+            f"expected {2 * required_runs} in-image JUnit reports, found "
+            f"{len(passed_counts)}"
+        )
+    if not passed_counts:
+        failures.append("the in-image harness produced no JUnit reports")
+    elif expected_passed and min(passed_counts) < expected_passed:
+        failures.append(
+            f"in-image harness passed only {min(passed_counts)} tests, "
+            f"expected at least {expected_passed}"
+        )
+    if not covered:
+        failures.append(
+            "no changed-old production line was executed by the in-image "
+            "harness on the exact start revision"
+        )
+    return failures
+
+
 def validate_in_image_harness(
     task_id: str,
     entry: dict[str, Any],
@@ -2995,36 +3210,23 @@ def validate_in_image_harness(
         for line in statuses_path.read_text(errors="replace").splitlines()
         if "=" in line
     ) if statuses_path.is_file() else {}
-    failures: list[str] = []
-    if not statuses:
-        failures.append("the in-image harness produced no statuses.log")
     start_runs, golden_runs = [], []
     for name, value in sorted(statuses.items()):
         ok = value.strip() == "0"
-        entry_row = {"phase": name, "ok": ok}
+        row = {"phase": name, "ok": ok}
         if name.startswith("start_"):
-            start_runs.append(entry_row)
+            start_runs.append(row)
         elif name.startswith("golden_") and name != "golden_apply":
-            golden_runs.append(entry_row)
-        if not ok:
-            failures.append(f"in-image harness phase {name} returned {value}")
-    if statuses.get("golden_apply", "1").strip() != "0":
-        failures.append("the accepted golden patch did not apply in-image")
+            golden_runs.append(row)
 
     expected = int(recipe.get("expected_passed") or 0)
     passed_counts = []
+    report_failures: list[str] = []
     for report in sorted(reports.glob("*-run-*.xml")):
-        passed, total, failed = junit_outcome(report)
+        passed, _total, failed = junit_outcome(report)
         passed_counts.append(passed)
         if failed:
-            failures.append(f"{report.name}: {failed[:3]}")
-    if not passed_counts:
-        failures.append("the in-image harness produced no JUnit reports")
-    elif expected and min(passed_counts) < expected:
-        failures.append(
-            f"in-image harness passed only {min(passed_counts)} tests, "
-            f"expected at least {expected}"
-        )
+            report_failures.append(f"{report.name}: {failed[:3]}")
 
     anchors = changed_old_lines(
         repo_checkout_dir(legacy_root, entry["repo"]),
@@ -3041,11 +3243,20 @@ def validate_in_image_harness(
         for path in coverage_paths
     }
     covered = {path: lines for path, lines in covered.items() if lines}
-    if not covered:
-        failures.append(
-            "no changed-old production line was executed by the in-image "
-            "harness on the exact start revision"
-        )
+
+    required_runs = int(
+        (entry.get("oracle_validation") or {}).get("required_runs") or 3
+    )
+    failures = judge_in_image_harness(
+        exit_code=exit_code,
+        statuses=statuses,
+        report_names=[path.name for path in reports.glob("*.xml")],
+        required_runs=required_runs,
+        expected_passed=expected,
+        passed_counts=passed_counts,
+        covered=covered,
+    ) + report_failures
+
     for artifact in sorted(scratch.glob("*.log")):
         shutil.copy2(artifact, evidence / artifact.name)
     for artifact in sorted(reports.iterdir()):
@@ -3068,8 +3279,11 @@ def validate_in_image_harness(
         "changed_old_lines": {path: len(lines) for path, lines in anchors.items()},
         "coverage": {"tool": "py_cover (in-image harness)", "changed_old_hits": covered},
         "failures": failures,
-        "stable_start": bool(start_runs) and all(row["ok"] for row in start_runs),
-        "stable_golden": bool(golden_runs) and all(row["ok"] for row in golden_runs),
+        "required_runs": required_runs,
+        "stable_start": len(start_runs) == required_runs
+        and all(row["ok"] for row in start_runs),
+        "stable_golden": len(golden_runs) == required_runs
+        and all(row["ok"] for row in golden_runs),
         "changed_lines_covered": bool(covered),
         "pass_to_pass": min(passed_counts) if passed_counts else 0,
         "scoring": True,
@@ -3211,9 +3425,10 @@ def validate_one_oracle(
                 }
             )
             if index == 1:
+                # Coverage must be measured by this run. A historical
+                # attestation is informational only and can never satisfy the
+                # changed-old coverage requirement.
                 hits = coverage_hits(recipe, outcome)
-                if not hits and (recipe.get("coverage") or {}).get("kind") == "attested":
-                    hits = attested_coverage_hits(recipe, asset_root)
                 covered = {
                     path: sorted(
                         set(hits.get(path, []))
