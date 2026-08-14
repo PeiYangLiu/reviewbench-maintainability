@@ -348,6 +348,23 @@ TSJS_NODE_OVERRIDES = {
 # ``expected_tests`` is the frozen ``pass_to_pass`` evidence and is what
 # ``verify-contracts`` requires a fresh unpatched start replay to reproduce
 # before the task may be treated as runner-ready.
+# Pinned SHA-256 of every reconstructed ``/oracle-cache`` blob a published JVM
+# Oracle command can reference. A token the recovery has no pinned digest for
+# is a preflight blocker: an unpinned blob could silently change the replayed
+# behavior, and "the file happens to exist" is not provenance.
+ORACLE_CACHE_ASSET_SHA256: dict[str, str] = {
+    "jacocoagent.jar": (
+        "47e700ccb0fdb9e27c5241353f8161938f4e53c3561dd35e063c5fe88dc3349b"
+    ),
+    "jacococli.jar": (
+        "8f748683833d4dc4d72cea5d6b43f49344687b831e0582c97bcb9b984e3de0a3"
+    ),
+    "oracle.init.gradle": (
+        "d1e1ffee7439e1144bcf571918be80ba5d6798ff9b530466056089229e501f65"
+    ),
+}
+
+
 JVM_MANIFEST: dict[str, dict[str, Any]] = {
     "github__Consensys__web3signer__pull_489__comment_789312375__modularity": {
         "cache_index": "8",
@@ -364,6 +381,7 @@ JVM_MANIFEST: dict[str, dict[str, Any]] = {
         # historical one; dependency resolution is served by the pinned cache
         # and its file:// mirror, which oracle.init.gradle declares first.
         "network": "bridge",
+        "required_cache_dirs": ("m2-mirror",),
         "prefetch": (
             {
                 "asset": "prefetch/web3signer-hashicorp.zip",
@@ -381,6 +399,7 @@ JVM_MANIFEST: dict[str, dict[str, Any]] = {
         "prime_command": None,
         "test_results_globs": ("build/test-results/**/*.xml",),
         "expected_tests": 1,
+        "required_cache_dirs": ("m2-mirror",),
     },
     "github__apache__solr__pull_3433__comment_2231064740__modularity": {
         "cache_index": "31",
@@ -393,7 +412,13 @@ JVM_MANIFEST: dict[str, dict[str, Any]] = {
         # is pinned as a durable asset and installed from it after verifying the
         # repository's *own* recorded gradle-wrapper.jar.sha256, so the
         # installed bytes are exactly what the checked-out revision demands.
+        # The digest below is that recorded value at this exact start commit,
+        # pinned here so preflight can require and hash-validate the asset
+        # before anything runs instead of discovering it mid-replay.
         "needs_gradle_wrapper_jar": True,
+        "gradle_wrapper_jar_sha256": (
+            "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+        ),
     },
     "github__hibernate__hibernate-orm__pull_4938__comment_844341285__duplication": {
         "cache_index": "35",
@@ -404,6 +429,7 @@ JVM_MANIFEST: dict[str, dict[str, Any]] = {
             "hibernate-spatial/build/test-results/**/*.xml",
         ),
         "expected_tests": 4,
+        "required_cache_dirs": ("m2-mirror",),
     },
     "github__reposense__RepoSense__pull_2078__comment_1472205280__duplication": {
         "cache_index": "41",
@@ -415,6 +441,7 @@ JVM_MANIFEST: dict[str, dict[str, Any]] = {
         ),
         "test_results_globs": ("build/test-results/**/*.xml",),
         "expected_tests": 1,
+        "required_cache_dirs": ("m2-mirror",),
     },
     # sniffy's published Oracle predates the JVM ``environment`` block: it
     # records only ``command`` plus ``toolchain``
@@ -487,6 +514,16 @@ def jvm_cache(oracle: dict[str, Any], task_id: str) -> str:
 # published ``yarn test:local ...`` string instead expands to the whole ``src/``
 # suite and can never reproduce that signature, so it would turn recovered
 # infrastructure into model failure.
+#
+# ``required_runtime_executables`` / ``required_dependency_executables`` /
+# ``required_dependency_files`` name the *exact* binaries and package roots the
+# recovered ``test_command`` actually executes. Checking only that a
+# ``node_modules`` parent directory exists is not enough: a truncated,
+# partially pruned or half-copied dependency tree still has the parent
+# directory, and the resulting "cannot find vitest/config" style failure would
+# be recorded as a candidate failure. Each of these paths is required in
+# preflight, checked for the executable bit where applicable, and folded into
+# ``asset_state`` so tampering with any of them invalidates recorded rows.
 TSJS_MANIFEST: dict[str, dict[str, Any]] = {
     "github__discourse__discourse__pull_37336__comment_2752215814__complexity": {
         "node": "20.19.5",
@@ -501,6 +538,14 @@ TSJS_MANIFEST: dict[str, dict[str, Any]] = {
         "test_count_patterns": (r"\bTests\s+(\d+) passed",),
         "expected_tests": 2,
         "runtime_root": "legacy",
+        "required_runtime_executables": ("node",),
+        "required_dependency_executables": (".bin/vitest",),
+        # The session vitest.config.js imports "vitest/config" and the Oracle
+        # command runs it with --coverage against the v8 provider.
+        "required_dependency_files": (
+            "vitest/package.json",
+            "@vitest/coverage-v8/package.json",
+        ),
     },
     "github__opossum-tool__OpossumUI__pull_987__comment_972768731__duplication": {
         "node": "18.20.8",
@@ -518,6 +563,13 @@ TSJS_MANIFEST: dict[str, dict[str, Any]] = {
         "test_count_patterns": (r"\bTests:\s+(\d+) passed",),
         "expected_tests": 2,
         "runtime_root": "legacy",
+        "required_runtime_executables": ("node",),
+        # The recovered command literally invokes node_modules/.bin/react-scripts.
+        "required_dependency_executables": (".bin/react-scripts",),
+        "required_dependency_files": (
+            "react-scripts/package.json",
+            "jest/package.json",
+        ),
     },
     # Recovered verbatim from the retained pre-release oracle record
     # legacy159_oracle_typescript.jsonl ("commands"/"environment_notes"), the
@@ -551,6 +603,13 @@ TSJS_MANIFEST: dict[str, dict[str, Any]] = {
         # The validated-at-exact-start count is what a candidate must preserve.
         "expected_tests": 152,
         "runtime_root": "assets",
+        # This workspace's dependency tree is materialized by pnpm from the
+        # pinned store, so there is no pre-existing node_modules to check;
+        # what must exist is the pinned package manager itself. The bare
+        # ``pnpm`` shim is load-bearing rather than cosmetic: FluidFramework's
+        # test-version-utils postinstall shells out to plain ``pnpm``, and
+        # without the shim the offline install fails.
+        "required_runtime_executables": ("node", "corepack", "pnpm"),
     },
 }
 
@@ -854,6 +913,184 @@ def safe_file_digest(path: Path | None) -> str | None:
         return _bounded_file_digest(path)
     except OSError:
         return None
+
+
+_FULL_DIGEST_CACHE: dict[tuple[str, int, int], str] = {}
+
+
+def full_file_digest(path: Path | None) -> str | None:
+    """Complete SHA-256 of a pinned asset, or ``None`` if unreadable.
+
+    Pinned assets are validated by their *whole* content, not by a bounded
+    prefix: a same-size in-place tamper anywhere in a multi-megabyte archive
+    must be rejected, not merely be unlikely to be noticed. Results are memoised
+    on (path, size, mtime_ns) so repeated preflight/fingerprint calls across
+    many models do not rehash the same asset over and over.
+    """
+    if path is None:
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    key = (str(path), stat.st_size, stat.st_mtime_ns)
+    cached = _FULL_DIGEST_CACHE.get(key)
+    if cached is not None:
+        return cached
+    hasher = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                hasher.update(chunk)
+    except OSError:
+        return None
+    digest = hasher.hexdigest()
+    _FULL_DIGEST_CACHE[key] = digest
+    return digest
+
+
+def jvm_cache_root(
+    oracle: dict[str, Any],
+    task_id: str,
+    legacy_root: Path,
+    asset_root: Path | None,
+) -> Path | None:
+    """Directory bind-mounted at ``/oracle-cache`` for a JVM replay."""
+    cache = jvm_cache(oracle, task_id)
+    if not cache:
+        return None
+    return resolve_legacy_relative(cache, legacy_root, asset_root).parent
+
+
+def jvm_required_assets(
+    task_id: str,
+    oracle: dict[str, Any],
+    legacy_root: Path,
+    asset_root: Path | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Every pinned file and directory a JVM replay is allowed to depend on.
+
+    Returns ``(files, directories)`` where each file entry carries the pinned
+    ``sha256`` it must hash to (``None`` when the recovery has no pinned digest
+    for it, which is itself a blocker). This is the single source of truth
+    shared by ``jvm_blockers`` (fail closed) and ``asset_state`` (fingerprint),
+    so an asset can never be required by one and ignored by the other.
+    """
+    manifest = JVM_MANIFEST.get(task_id) or {}
+    cache_root = jvm_cache_root(oracle, task_id, legacy_root, asset_root)
+    files: list[dict[str, Any]] = []
+    directories: list[dict[str, Any]] = []
+    if cache_root is None:
+        return files, directories
+    for token in oracle_cache_tokens(str(oracle.get("command") or "")):
+        files.append(
+            {
+                "kind": "oracle_cache",
+                "path": cache_root / token,
+                "relative": token,
+                "sha256": ORACLE_CACHE_ASSET_SHA256.get(token),
+            }
+        )
+    wrapper_sha256 = manifest.get("gradle_wrapper_jar_sha256")
+    if manifest.get("needs_gradle_wrapper_jar"):
+        files.append(
+            {
+                "kind": "gradle_wrapper",
+                "path": (
+                    cache_root / "gradle-wrapper" / f"{wrapper_sha256}.jar"
+                    if wrapper_sha256
+                    else cache_root / "gradle-wrapper"
+                ),
+                "relative": f"gradle-wrapper/{wrapper_sha256}.jar",
+                "sha256": wrapper_sha256,
+            }
+        )
+    for entry in manifest.get("prefetch") or ():
+        files.append(
+            {
+                "kind": "prefetch",
+                "path": cache_root / entry["asset"],
+                "relative": entry["asset"],
+                "sha256": entry["sha256"],
+                "workspace_path": entry["workspace_path"],
+            }
+        )
+    for name in manifest.get("required_cache_dirs") or ():
+        directories.append(
+            {
+                "kind": "cache_dir",
+                "path": cache_root / name,
+                "relative": name,
+            }
+        )
+    return files, directories
+
+
+def tsjs_dependency_root(
+    task_id: str,
+    manifest: dict[str, Any],
+    legacy_root: Path,
+    asset_root: Path | None,
+) -> Path | None:
+    """Root of the pinned dependency tree a tsjs replay provisions from.
+
+    ``None`` for the pnpm-workspace contract, whose tree is materialized by the
+    pinned package manager at replay time rather than pre-existing.
+    """
+    provisioning = manifest.get("node_modules")
+    if provisioning == "shared_node_tools":
+        return oracle_recovery_root(legacy_root) / "tsjs/_node_tools/node_modules"
+    if provisioning == "pinned" and asset_root is not None:
+        return asset_root / manifest["pinned_node_modules"]
+    return None
+
+
+def tsjs_required_executables(
+    task_id: str,
+    oracle: dict[str, Any],
+    manifest: dict[str, Any],
+    legacy_root: Path,
+    asset_root: Path | None,
+) -> list[dict[str, Any]]:
+    """The exact binaries/package roots this Oracle's command executes.
+
+    Each entry has ``path``, a human ``label``, and ``executable`` telling
+    whether the exec bit is required. Shared by ``tsjs_blockers`` and
+    ``asset_state`` so a required executable is always also fingerprinted.
+    """
+    entries: list[dict[str, Any]] = []
+    node = tsjs_node_version(task_id, oracle)
+    runtime_bin = node_runtime_bin(
+        node, legacy_root, asset_root, manifest.get("runtime_root", "legacy")
+    )
+    for name in manifest.get("required_runtime_executables") or ("node",):
+        entries.append(
+            {
+                "label": f"node runtime executable {name}",
+                "path": (runtime_bin / name) if runtime_bin else None,
+                "executable": True,
+            }
+        )
+    dependency_root = tsjs_dependency_root(
+        task_id, manifest, legacy_root, asset_root
+    )
+    for relative in manifest.get("required_dependency_executables") or ():
+        entries.append(
+            {
+                "label": f"dependency executable {relative}",
+                "path": (dependency_root / relative) if dependency_root else None,
+                "executable": True,
+            }
+        )
+    for relative in manifest.get("required_dependency_files") or ():
+        entries.append(
+            {
+                "label": f"dependency file {relative}",
+                "path": (dependency_root / relative) if dependency_root else None,
+                "executable": False,
+            }
+        )
+    return entries
 
 
 def directory_identity(
@@ -1440,17 +1677,49 @@ def jvm_blockers(
     cache = jvm_cache(oracle, task_id)
     if cache:
         cache_home = resolve_legacy_relative(cache, legacy_root, asset_root)
-        cache_root = cache_home.parent
         if not cache_home.is_dir():
             blockers.append(
                 f"missing recorded Gradle cache home: {cache_home} "
                 "(environment.cache is required to avoid a network-"
                 "dependent dependency resolution divergence)"
             )
-        for token in oracle_cache_tokens(command):
-            asset = cache_root / token
-            if not asset.is_file():
-                blockers.append(f"missing /oracle-cache asset: {asset}")
+        # Every pinned asset this replay may depend on is required *and*
+        # hash-validated here, before anything executes. A missing or tampered
+        # asset is a hard blocker: it is never silently skipped and never
+        # substituted from the live network -- including for the two Oracles
+        # that keep a network namespace, whose runs simply do not happen.
+        files, directories = jvm_required_assets(
+            task_id, oracle, legacy_root, asset_root
+        )
+        for entry in files:
+            path = entry["path"]
+            if entry["sha256"] is None:
+                blockers.append(
+                    f"unpinned {entry['kind']} asset {entry['relative']}: the "
+                    "recovery has no pinned SHA-256 for it, so its content "
+                    "cannot be validated"
+                )
+                continue
+            if not path.is_file():
+                blockers.append(
+                    f"missing pinned {entry['kind']} asset: {path}"
+                )
+                continue
+            digest = full_file_digest(path)
+            if digest != entry["sha256"]:
+                blockers.append(
+                    f"pinned {entry['kind']} asset {path} has SHA-256 "
+                    f"{digest}, expected {entry['sha256']}"
+                )
+        for entry in directories:
+            path = entry["path"]
+            if not path.is_dir() or not any(path.iterdir()):
+                blockers.append(
+                    f"missing pinned {entry['kind']}: {path} (required by the "
+                    "reconstructed /oracle-cache/oracle.init.gradle, which "
+                    "declares it as the first repository so a network-isolated "
+                    "replay can resolve retired coordinates)"
+                )
     else:
         blockers.append("Oracle is missing environment.cache")
     if manifest.get("session_tests"):
@@ -1527,7 +1796,7 @@ def tsjs_blockers(
             )
         else:
             pinned = asset_root / manifest["pinned_node_modules"]
-            if not (pinned / ".bin").is_dir() and not pinned.is_dir():
+            if not pinned.is_dir():
                 blockers.append(f"missing pinned node_modules asset: {pinned}")
     elif provisioning == "pnpm_workspace":
         if asset_root is None:
@@ -1540,6 +1809,25 @@ def tsjs_blockers(
                 blockers.append(f"missing pinned pnpm store: {store}")
     else:  # pragma: no cover - defensive
         blockers.append(f"unsupported node_modules provisioning: {provisioning}")
+
+    # Requiring only the dependency *root* is not enough: a truncated or
+    # partially pruned tree still has the root, and the resulting
+    # "cannot find module" failure would be scored as a candidate failure.
+    # Check the exact binaries/package roots the recovered command executes.
+    for entry in tsjs_required_executables(
+        task_id, oracle, manifest, legacy_root, asset_root
+    ):
+        path = entry["path"]
+        if path is None:
+            blockers.append(f"cannot resolve required {entry['label']}")
+            continue
+        if not path.is_file():
+            blockers.append(f"missing required {entry['label']}: {path}")
+            continue
+        if entry["executable"] and not os.access(path, os.X_OK):
+            blockers.append(
+                f"required {entry['label']} is not executable: {path}"
+            )
 
     if manifest.get("session_from_recovery"):
         try:
@@ -1637,13 +1925,24 @@ def asset_state(
         cache = jvm_cache(oracle, task_id)
         repo = oracle.get("repo") or ""
         checkout = repo_checkout_dir(legacy_root, repo) if repo else None
-        cache_blobs: dict[str, str | None] = {}
-        if cache:
-            cache_root = resolve_legacy_relative(
-                cache, legacy_root, asset_root
-            ).parent
-            for token in oracle_cache_tokens(oracle.get("command") or ""):
-                cache_blobs[token] = safe_file_digest(cache_root / token)
+        # Every pinned file jvm_required_assets() makes mandatory is bound by
+        # its *full* SHA-256 (not a bounded prefix), and every required cache
+        # directory by a bounded content identity, so a same-size in-place
+        # tamper anywhere in a pinned archive still invalidates recorded rows.
+        required_files, required_dirs = jvm_required_assets(
+            task_id, oracle, legacy_root, asset_root
+        )
+        pinned_assets = {
+            f"{entry['kind']}:{entry['relative']}": {
+                "expected_sha256": entry["sha256"],
+                "observed_sha256": full_file_digest(entry["path"]),
+            }
+            for entry in required_files
+        }
+        pinned_directories = {
+            f"{entry['kind']}:{entry['relative']}": directory_identity(entry["path"])
+            for entry in required_dirs
+        }
         session_tests = None
         if JVM_MANIFEST.get(task_id, {}).get("session_tests"):
             try:
@@ -1657,8 +1956,11 @@ def asset_state(
             "docker_image_id": docker_image_id(image) if image else None,
             # the exact repo checkout replay_jvm materializes the start from
             "repo_checkout": directory_identity(checkout) if checkout else None,
-            # the exact /oracle-cache blobs the recorded command requires
-            "oracle_cache_blobs": cache_blobs,
+            # every pinned /oracle-cache blob, prefetched archive and pinned
+            # Gradle wrapper jar the recorded command requires
+            "pinned_assets": pinned_assets,
+            # the pinned cache directories oracle.init.gradle declares
+            "pinned_directories": pinned_directories,
             "cache_home": (
                 directory_identity(
                     resolve_legacy_relative(cache, legacy_root, asset_root)
@@ -1690,21 +1992,28 @@ def asset_state(
                 session_tree = None
         dependencies: dict[str, Any] | None = None
         provisioning = manifest["node_modules"]
-        if provisioning == "shared_node_tools":
-            dependencies = directory_identity(
-                oracle_recovery_root(legacy_root) / "tsjs/_node_tools/node_modules"
-            )
-        elif provisioning == "pinned" and asset_root is not None:
-            dependencies = directory_identity(
-                asset_root / manifest["pinned_node_modules"]
-            )
+        dependency_root = tsjs_dependency_root(
+            task_id, manifest, legacy_root, asset_root
+        )
+        if dependency_root is not None:
+            dependencies = directory_identity(dependency_root)
         elif provisioning == "pnpm_workspace" and asset_root is not None:
             dependencies = directory_identity(asset_root / "tsjs/pnpm-store")
+        # Bind the *exact* binaries/package roots the recovered command runs,
+        # by full content digest, so replacing or truncating any one of them
+        # invalidates every row recorded against the old tree.
+        required_executables = {
+            entry["label"]: full_file_digest(entry["path"])
+            for entry in tsjs_required_executables(
+                task_id, oracle, manifest, legacy_root, asset_root
+            )
+        }
         return {
             "node_runtime": (
                 safe_file_digest(runtime / "node") if runtime else None
             ),
             "node_modules": dependencies,
+            "required_executables": required_executables,
             # the exact repo checkout replay_tsjs materializes the start from
             "repo_checkout": directory_identity(checkout) if checkout else None,
             # the exact recovered session/ tree copied into the workspace
@@ -2186,14 +2495,17 @@ def jvm_docker_command(
         jvm_cache(oracle, task_id), legacy_root, asset_root
     )
     cache_root = cache_home.parent
-    passwd = cache_root / "container.passwd"
-    if not passwd.is_file():
-        passwd.parent.mkdir(parents=True, exist_ok=True)
-        passwd.write_text(
-            "root:x:0:0:root:/root:/bin/bash\n"
-            f"oracle:x:{os.getuid()}:{os.getgid()}:Oracle:/cachehome:/bin/bash\n",
-            encoding="utf-8",
-        )
+    # The container passwd file encodes the *current* uid/gid, so it is host
+    # state rather than a pinned artifact: it is written into the disposable
+    # per-replay scratch instead of the pinned asset root, which therefore
+    # stays read-only and hash-stable across replays.
+    task_dir.mkdir(parents=True, exist_ok=True)
+    passwd = task_dir / "container.passwd"
+    passwd.write_text(
+        "root:x:0:0:root:/root:/bin/bash\n"
+        f"oracle:x:{os.getuid()}:{os.getgid()}:Oracle:/cachehome:/bin/bash\n",
+        encoding="utf-8",
+    )
     command = [
         "docker", "run", "--rm",
         "--user", f"{os.getuid()}:{os.getgid()}",
@@ -2234,36 +2546,45 @@ def jvm_docker_command(
 
 def install_pinned_gradle_wrapper(
     workspace: Path,
-    legacy_root: Path,
-    asset_root: Path | None,
-    cache_home: Path,
-) -> str | None:
+    cache_root: Path,
+    pinned_sha256: str | None,
+) -> tuple[str, str | None]:
     """Install the repository's own Gradle wrapper jar from the pinned store.
 
     Solr's checked-in ``gradlew`` fetches ``gradle-wrapper.jar`` from
     raw.githubusercontent.com when it is absent, which a network-isolated
     replay cannot do -- and failing there would be scored as a model failure.
+
     The jar is pinned as a durable asset keyed by *the repository's own*
-    recorded ``gradle-wrapper.jar.sha256``, and the pinned bytes are verified
-    against that recorded digest before being installed, so this can only ever
-    supply exactly what the checked-out revision itself demands.
+    recorded ``gradle-wrapper.jar.sha256``, and three things must agree before
+    anything is installed: the digest the checked-out revision records, the
+    digest the recovery manifest pins, and the actual bytes in the durable
+    store. Any disagreement returns a failure status so the caller can stop
+    the replay instead of letting the build fall back to the live network.
+
+    Returns ``(status, sha256)`` where status is one of ``installed``,
+    ``already-present``, ``no-marker``, ``bad-marker``, ``manifest-mismatch``,
+    ``missing-pinned-jar`` or ``digest-mismatch``.
     """
     marker = workspace / "gradle/wrapper/gradle-wrapper.jar.sha256"
     jar = workspace / "gradle/wrapper/gradle-wrapper.jar"
-    if jar.is_file() or not marker.is_file():
-        return None
+    if jar.is_file():
+        return "already-present", None
+    if not marker.is_file():
+        return "no-marker", None
     expected = marker.read_text(encoding="utf-8", errors="replace").strip()
     if not re.fullmatch(r"[0-9a-f]{64}", expected):
-        return None
-    pinned = cache_home.parent / "gradle-wrapper" / f"{expected}.jar"
+        return "bad-marker", None
+    if pinned_sha256 is not None and pinned_sha256 != expected:
+        return "manifest-mismatch", None
+    pinned = cache_root / "gradle-wrapper" / f"{expected}.jar"
     if not pinned.is_file():
-        return None
-    digest = hashlib.sha256(pinned.read_bytes()).hexdigest()
-    if digest != expected:
-        return None
+        return "missing-pinned-jar", None
+    if full_file_digest(pinned) != expected:
+        return "digest-mismatch", None
     jar.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(pinned, jar)
-    return expected
+    return "installed", expected
 
 
 def replay_jvm(
@@ -2283,6 +2604,7 @@ def replay_jvm(
     repo = oracle["repo"]
     repo_source = repo_checkout_dir(legacy_root, repo)
     start_sha = oracle.get("start_sha") or task["start_sha"]
+    cache_root = jvm_cache_root(oracle, task_id, legacy_root, asset_root)
     scratch = work_root / "jvm" / model_component(model) / task_id
     workspace_scratch = scratch / "workspace"
     task_scratch = scratch / "task"
@@ -2301,38 +2623,71 @@ def replay_jvm(
             )
             shutil.copytree(session_tests, workspace_scratch, dirs_exist_ok=True)
 
-        prefetched = []
+        # Pinned assets are installed strictly from the validated durable
+        # store. Anything missing or mismatched is an *infrastructure* fault
+        # that stops the replay outright -- it is never quietly skipped so the
+        # build can fetch a live substitute, which is the only reason the two
+        # network-namespace Oracles could otherwise drift.
+        prefetched: list[dict[str, str]] = []
+        asset_faults: list[str] = []
         for entry in manifest.get("prefetch") or ():
-            source = (
-                resolve_legacy_relative(
-                    jvm_cache(oracle, task_id), legacy_root, asset_root
-                ).parent
-                / entry["asset"]
-            )
-            if not source.is_file():
+            source = cache_root / entry["asset"]
+            digest = full_file_digest(source)
+            if digest is None:
+                asset_faults.append(f"missing pinned prefetch asset: {source}")
                 continue
-            digest = hashlib.sha256(source.read_bytes()).hexdigest()
             if digest != entry["sha256"]:
+                asset_faults.append(
+                    f"pinned prefetch asset {source} has SHA-256 {digest}, "
+                    f"expected {entry['sha256']}"
+                )
                 continue
             destination = workspace_scratch / entry["workspace_path"]
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
-            prefetched.append(entry["workspace_path"])
+            prefetched.append(
+                {"workspace_path": entry["workspace_path"], "sha256": digest}
+            )
 
         wrapper_sha256 = None
         if manifest.get("needs_gradle_wrapper_jar"):
-            wrapper_sha256 = install_pinned_gradle_wrapper(
-                workspace_scratch,
-                legacy_root,
-                asset_root,
-                resolve_legacy_relative(
-                    jvm_cache(oracle, task_id), legacy_root, asset_root
-                ),
+            wrapper_status, wrapper_sha256 = install_pinned_gradle_wrapper(
+                workspace_scratch, cache_root,
+                manifest.get("gradle_wrapper_jar_sha256"),
             )
+            if wrapper_status not in ("installed", "already-present"):
+                asset_faults.append(
+                    f"pinned Gradle wrapper jar unusable ({wrapper_status})"
+                )
 
         patch_path = Path(generation["patch_file"])
         ok, detail = apply_patch(workspace_scratch, patch_path)
-        if not ok:
+        if asset_faults:
+            # Fail closed: a pinned asset the recovery declares mandatory is
+            # missing or no longer matches its pinned digest. The Oracle is not
+            # executed at all, so no candidate can be scored against a
+            # degraded harness and no run can silently substitute a live
+            # download for the pinned bytes.
+            (scratch / "asset-error.log").write_text(
+                "\n".join(asset_faults) + "\n", encoding="utf-8"
+            )
+            log_kind = "asset-error.log"
+            result = {
+                "id": task_id,
+                "model": model,
+                "lane": "jvm",
+                "source_kind": "published_legacy",
+                "start_sha": start_sha,
+                "patch_sha256": generation.get("patch_sha256"),
+                "status": INFRA_RETRY,
+                "candidate_result": INFRA_RETRY,
+                "correctness_ok": None,
+                "patch_apply": None,
+                "scope_ok": None,
+                "error": "; ".join(asset_faults)[-4000:],
+                "pinned_asset_faults": asset_faults,
+            }
+        elif not ok:
             (scratch / "apply-error.log").write_text(detail, encoding="utf-8")
             log_kind = "apply-error.log"
             result = {
@@ -2375,6 +2730,16 @@ def replay_jvm(
                 log_path=log_path,
                 timeout=timeout,
             )
+            # The pinned inputs must still be the pinned inputs *after* the
+            # run: an Oracle that keeps a network namespace could otherwise
+            # have replaced a pre-placed archive with a freshly downloaded one
+            # mid-build, which would quietly reintroduce a live dependency.
+            tampered = [
+                entry["workspace_path"]
+                for entry in prefetched
+                if full_file_digest(workspace_scratch / entry["workspace_path"])
+                != entry["sha256"]
+            ]
             executed, failures = jvm_test_count(
                 workspace_scratch, manifest["test_results_globs"]
             )
@@ -2387,8 +2752,16 @@ def replay_jvm(
             # Oracles, so an empty run means the harness did not actually
             # execute the behavior anchor.
             correctness_ok = (
-                exit_code == 0 and failures == 0 and executed >= expected
+                exit_code == 0
+                and failures == 0
+                and executed >= expected
+                and not tampered
             )
+            status = "pass" if correctness_ok else "fail"
+            if tampered:
+                # A replaced pinned input is an infrastructure fault, never a
+                # candidate failure.
+                status = INFRA_RETRY
             result = {
                 "id": task_id,
                 "model": model,
@@ -2396,9 +2769,9 @@ def replay_jvm(
                 "source_kind": "published_legacy",
                 "start_sha": start_sha,
                 "patch_sha256": generation.get("patch_sha256"),
-                "status": "pass" if correctness_ok else "fail",
-                "candidate_result": "pass" if correctness_ok else "fail",
-                "correctness_ok": correctness_ok,
+                "status": status,
+                "candidate_result": status,
+                "correctness_ok": None if tampered else correctness_ok,
                 "patch_apply": True,
                 "scope_ok": scope_ok,
                 "changed_lines": len(changed),
@@ -2414,12 +2787,13 @@ def replay_jvm(
                 ),
                 "pinned_gradle_wrapper_sha256": wrapper_sha256,
                 "prefetched_assets": prefetched,
+                "prefetched_assets_replaced_during_run": tampered,
             }
     finally:
         shutil.rmtree(workspace_scratch, ignore_errors=True)
     evidence = persist_evidence(output, "jvm", model, task_id, scratch)
-    if log_kind == "apply-error.log":
-        result["error_log"] = evidence.get("apply-error.log")
+    if log_kind in ("apply-error.log", "asset-error.log"):
+        result["error_log"] = evidence.get(log_kind)
     else:
         result["log"] = evidence.get("run.log")
         if evidence.get("prime.log"):

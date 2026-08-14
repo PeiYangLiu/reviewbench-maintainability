@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -49,6 +50,60 @@ def make_git_repo(root: Path) -> str:
     run("git", "-C", str(root), "add", "-A")
     run("git", "-C", str(root), "commit", "-q", "-m", "init")
     return run("git", "-C", str(root), "rev-parse", "HEAD").strip()
+
+
+def build_pinned_jvm_cache(
+    root,
+    monkeypatch,
+    *,
+    tokens=("oracle.init.gradle",),
+    directories=("m2-mirror",),
+):
+    """Materialize a *valid* pinned /oracle-cache tree and pin its digests.
+
+    Preflight now requires every manifest-driven JVM asset to exist and to hash
+    to its pinned SHA-256, so synthetic fixtures must pin the digests of the
+    bytes they write rather than assume mere presence is enough.
+    """
+    import hashlib as _hashlib
+
+    cache_home = root / "strict_screen_20260726/oracle_recovery/java/cache/home"
+    cache_home.mkdir(parents=True, exist_ok=True)
+    cache_root = cache_home.parent
+    digests = dict(MODULE.ORACLE_CACHE_ASSET_SHA256)
+    for token in tokens:
+        payload = f"pinned-{token}".encode("utf-8")
+        (cache_root / token).write_bytes(payload)
+        digests[token] = _hashlib.sha256(payload).hexdigest()
+    monkeypatch.setattr(MODULE, "ORACLE_CACHE_ASSET_SHA256", digests)
+    for name in directories:
+        directory = cache_root / name
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "marker").write_text("x", encoding="utf-8")
+    return cache_root
+
+
+def pin_web3signer_prefetch(cache_root, monkeypatch):
+    """Materialize web3signer's pinned prefetch archive and pin its digest."""
+    import hashlib as _hashlib
+
+    payload = b"pinned-hashicorp-vault-archive"
+    asset = cache_root / "prefetch/web3signer-hashicorp.zip"
+    asset.parent.mkdir(parents=True, exist_ok=True)
+    asset.write_bytes(payload)
+    digest = _hashlib.sha256(payload).hexdigest()
+    manifest = {
+        key: (
+            {**value, "prefetch": (
+                {**value["prefetch"][0], "sha256": digest},
+            )}
+            if key == WEB3SIGNER_TASK_ID
+            else value
+        )
+        for key, value in MODULE.JVM_MANIFEST.items()
+    }
+    monkeypatch.setattr(MODULE, "JVM_MANIFEST", manifest)
+    return digest
 
 
 WEB3SIGNER_TASK_ID = (
@@ -334,9 +389,8 @@ def test_jvm_blockers_fails_closed_without_a_recovered_manifest(tmp_path):
 def test_jvm_blockers_clears_when_cache_and_repo_present(tmp_path, monkeypatch):
     monkeypatch.setattr(MODULE, "docker_image_present", lambda image: True)
     (tmp_path / "repos/Consensys__web3signer").mkdir(parents=True)
-    cache_home = tmp_path / "strict_screen_20260726/oracle_recovery/java/cache/home"
-    cache_home.mkdir(parents=True)
-    (cache_home.parent / "oracle.init.gradle").write_text("", encoding="utf-8")
+    cache_root = build_pinned_jvm_cache(tmp_path, monkeypatch)
+    pin_web3signer_prefetch(cache_root, monkeypatch)
     oracle = {
         "repo": "Consensys/web3signer",
         "command": "bash x -I /oracle-cache/oracle.init.gradle",
@@ -359,11 +413,8 @@ def test_jvm_blockers_resolve_recovered_cache_through_asset_root(
     legacy_root = tmp_path / "legacy"
     asset_root = tmp_path / "assets"
     (legacy_root / "repos/Consensys__web3signer").mkdir(parents=True)
-    cache_home = (
-        asset_root / "strict_screen_20260726/oracle_recovery/java/cache/home"
-    )
-    cache_home.mkdir(parents=True)
-    (cache_home.parent / "oracle.init.gradle").write_text("", encoding="utf-8")
+    cache_root = build_pinned_jvm_cache(asset_root, monkeypatch)
+    pin_web3signer_prefetch(cache_root, monkeypatch)
     oracle = {
         "repo": "Consensys/web3signer",
         "command": "bash x -I /oracle-cache/oracle.init.gradle",
@@ -1451,7 +1502,7 @@ def test_asset_state_binds_jvm_repo_checkout_and_oracle_cache_blob_identity(tmp_
     os.utime(cache_blob, (blob_stat.st_atime, blob_stat.st_mtime))
     after_blob_change = MODULE.asset_state(task_id, "jvm", oracle, legacy_root)
     assert after_blob_change["repo_checkout"] == before["repo_checkout"]
-    assert after_blob_change["oracle_cache_blobs"] != before["oracle_cache_blobs"]
+    assert after_blob_change["pinned_assets"] != before["pinned_assets"]
 
 
 def test_asset_state_binds_tsjs_repo_checkout_and_session_tree_identity(tmp_path):
@@ -1616,6 +1667,8 @@ def test_replay_jvm_applies_patch_persists_evidence_and_removes_worktree(
     tmp_path, monkeypatch
 ):
     legacy_root = tmp_path / "legacy"
+    cache_root = build_pinned_jvm_cache(legacy_root, monkeypatch)
+    prefetch_digest = pin_web3signer_prefetch(cache_root, monkeypatch)
     start_sha = make_git_repo(legacy_root / "repos/org__repo")
     task_id = "github__Consensys__web3signer__pull_489__comment_789312375__modularity"
     task = strict_task(task_id, repo="org/repo")
@@ -1669,6 +1722,15 @@ def test_replay_jvm_applies_patch_persists_evidence_and_removes_worktree(
     )
     assert row["status"] == "pass"
     assert row["correctness_ok"] is True
+    # the pinned prefetch archive was installed from the durable store and was
+    # still byte-identical after the run
+    assert row["prefetched_assets"] == [
+        {
+            "workspace_path": "acceptance-tests/build/hashicorp.zip",
+            "sha256": prefetch_digest,
+        }
+    ]
+    assert row["prefetched_assets_replaced_during_run"] == []
     assert row["log"] == (
         f"legacy/evidence/jvm/{MODULE.model_component('my-model')}/{task_id}/run.log"
     )
@@ -1692,6 +1754,8 @@ def test_replay_jvm_applies_patch_persists_evidence_and_removes_worktree(
 
 def test_replay_jvm_fails_a_green_run_that_executed_no_tests(tmp_path, monkeypatch):
     legacy_root = tmp_path / "legacy"
+    cache_root = build_pinned_jvm_cache(legacy_root, monkeypatch)
+    pin_web3signer_prefetch(cache_root, monkeypatch)
     start_sha = make_git_repo(legacy_root / "repos/org__repo")
     task_id = WEB3SIGNER_TASK_ID
     task = strict_task(task_id, repo="org/repo")
@@ -1727,6 +1791,8 @@ def test_replay_jvm_apply_error_persists_error_log_and_removes_worktree(
     tmp_path, monkeypatch
 ):
     legacy_root = tmp_path / "legacy"
+    cache_root = build_pinned_jvm_cache(legacy_root, monkeypatch)
+    pin_web3signer_prefetch(cache_root, monkeypatch)
     start_sha = make_git_repo(legacy_root / "repos/org__repo")
     task_id = "github__Consensys__web3signer__pull_489__comment_789312375__modularity"
     task = strict_task(task_id, repo="org/repo")
@@ -2047,22 +2113,38 @@ def test_install_pinned_gradle_wrapper_verifies_the_repositorys_own_digest(tmp_p
     (cache_home.parent / "gradle-wrapper" / f"{digest}.jar").write_bytes(payload)
     (workspace / "gradle-wrapper.jar.sha256").write_text(digest, encoding="utf-8")
 
-    installed = MODULE.install_pinned_gradle_wrapper(
-        tmp_path / "workspace", tmp_path, None, cache_home
+    status, installed = MODULE.install_pinned_gradle_wrapper(
+        tmp_path / "workspace", cache_home.parent, digest
     )
-    assert installed == digest
+    assert (status, installed) == ("installed", digest)
     assert (workspace / "gradle-wrapper.jar").read_bytes() == payload
 
     # A digest the pinned store cannot satisfy must install nothing at all
     # rather than supply arbitrary bytes.
     (workspace / "gradle-wrapper.jar").unlink()
     (workspace / "gradle-wrapper.jar.sha256").write_text("0" * 64, encoding="utf-8")
-    assert (
-        MODULE.install_pinned_gradle_wrapper(
-            tmp_path / "workspace", tmp_path, None, cache_home
-        )
-        is None
+    assert MODULE.install_pinned_gradle_wrapper(
+        tmp_path / "workspace", cache_home.parent, None
+    ) == ("missing-pinned-jar", None)
+    assert not (workspace / "gradle-wrapper.jar").exists()
+
+    # The recovery manifest's pinned digest and the repository's own recorded
+    # digest must agree; a disagreement installs nothing.
+    (workspace / "gradle-wrapper.jar.sha256").write_text(digest, encoding="utf-8")
+    assert MODULE.install_pinned_gradle_wrapper(
+        tmp_path / "workspace", cache_home.parent, "1" * 64
+    ) == ("manifest-mismatch", None)
+    assert not (workspace / "gradle-wrapper.jar").exists()
+
+    # Tampering the pinned bytes in place must be rejected on content, not
+    # merely on path.
+    (cache_home.parent / "gradle-wrapper" / f"{digest}.jar").write_bytes(
+        b"tampered-wrapper-jar-bytes"
     )
+    MODULE._FULL_DIGEST_CACHE.clear()
+    assert MODULE.install_pinned_gradle_wrapper(
+        tmp_path / "workspace", cache_home.parent, digest
+    ) == ("digest-mismatch", None)
     assert not (workspace / "gradle-wrapper.jar").exists()
 
 
@@ -2143,3 +2225,442 @@ def test_replay_contract_fingerprint_changes_with_asset_root(tmp_path):
         task_id, "jvm", oracle, tmp_path, [], tmp_path / "assets"
     )
     assert without != with_assets
+
+
+# ---------------------------------------------------------------------------
+# Pinned-asset and required-executable enforcement (merge-review blockers)
+# ---------------------------------------------------------------------------
+
+
+def _web3signer_oracle():
+    return {
+        "repo": "Consensys/web3signer",
+        "command": (
+            "export JAVA_TOOL_OPTIONS='-javaagent:/oracle-cache/jacocoagent.jar"
+            "=destfile=/task/start.exec'; bash ./gradlew "
+            "-I /oracle-cache/oracle.init.gradle"
+        ),
+        "environment": {
+            "container": "oracle-java-tools:17",
+            "cache": "strict_screen_20260726/oracle_recovery/java/cache/home",
+        },
+    }
+
+
+def _ready_web3signer_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(MODULE, "docker_image_present", lambda image: True)
+    (tmp_path / "repos/Consensys__web3signer").mkdir(parents=True)
+    cache_root = build_pinned_jvm_cache(
+        tmp_path, monkeypatch, tokens=("oracle.init.gradle", "jacocoagent.jar")
+    )
+    pin_web3signer_prefetch(cache_root, monkeypatch)
+    oracle = _web3signer_oracle()
+    assert MODULE.jvm_blockers(WEB3SIGNER_TASK_ID, oracle, tmp_path) == []
+    return cache_root, oracle
+
+
+@pytest.mark.parametrize(
+    "relative,expected",
+    [
+        ("oracle.init.gradle", "missing pinned oracle_cache asset"),
+        ("jacocoagent.jar", "missing pinned oracle_cache asset"),
+        ("prefetch/web3signer-hashicorp.zip", "missing pinned prefetch asset"),
+    ],
+)
+def test_preflight_blocks_when_a_pinned_jvm_asset_is_removed(
+    tmp_path, monkeypatch, relative, expected
+):
+    cache_root, oracle = _ready_web3signer_root(tmp_path, monkeypatch)
+    (cache_root / relative).unlink()
+    MODULE._FULL_DIGEST_CACHE.clear()
+    blockers = MODULE.jvm_blockers(WEB3SIGNER_TASK_ID, oracle, tmp_path)
+    assert any(expected in blocker for blocker in blockers), blockers
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "oracle.init.gradle",
+        "jacocoagent.jar",
+        "prefetch/web3signer-hashicorp.zip",
+    ],
+)
+def test_preflight_blocks_when_a_pinned_jvm_asset_is_tampered(
+    tmp_path, monkeypatch, relative
+):
+    cache_root, oracle = _ready_web3signer_root(tmp_path, monkeypatch)
+    asset = cache_root / relative
+    # Same path, same length: only a content-addressed check can catch this.
+    original = asset.read_bytes()
+    asset.write_bytes(b"X" * len(original))
+    MODULE._FULL_DIGEST_CACHE.clear()
+    blockers = MODULE.jvm_blockers(WEB3SIGNER_TASK_ID, oracle, tmp_path)
+    assert any("expected" in blocker and "SHA-256" in blocker for blocker in blockers)
+
+
+def test_preflight_blocks_when_the_init_script_mirror_directory_is_removed(
+    tmp_path, monkeypatch
+):
+    cache_root, oracle = _ready_web3signer_root(tmp_path, monkeypatch)
+    shutil.rmtree(cache_root / "m2-mirror")
+    blockers = MODULE.jvm_blockers(WEB3SIGNER_TASK_ID, oracle, tmp_path)
+    assert any("missing pinned cache_dir" in blocker for blocker in blockers)
+    # an empty directory is no better than a missing one
+    (cache_root / "m2-mirror").mkdir()
+    assert any(
+        "missing pinned cache_dir" in blocker
+        for blocker in MODULE.jvm_blockers(WEB3SIGNER_TASK_ID, oracle, tmp_path)
+    )
+
+
+def test_preflight_blocks_an_unpinned_oracle_cache_token(tmp_path, monkeypatch):
+    cache_root, _ = _ready_web3signer_root(tmp_path, monkeypatch)
+    (cache_root / "mystery-tool.jar").write_bytes(b"unknown provenance")
+    oracle = _web3signer_oracle()
+    oracle["command"] += " -Dtool=/oracle-cache/mystery-tool.jar"
+    blockers = MODULE.jvm_blockers(WEB3SIGNER_TASK_ID, oracle, tmp_path)
+    assert any("unpinned oracle_cache asset" in blocker for blocker in blockers)
+
+
+def test_preflight_blocks_when_the_pinned_gradle_wrapper_jar_is_missing(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(MODULE, "docker_image_present", lambda image: True)
+    task_id = "github__apache__solr__pull_3433__comment_2231064740__modularity"
+    (tmp_path / "repos/apache__solr").mkdir(parents=True)
+    cache_root = build_pinned_jvm_cache(tmp_path, monkeypatch, tokens=())
+    oracle = {
+        "repo": "apache/solr",
+        "command": "bash ./gradlew :solr:modules:ltr:test",
+        "environment": {
+            "container": "eclipse-temurin:21-jdk",
+            "cache": "strict_screen_20260726/oracle_recovery/java/cache/home",
+        },
+    }
+    blockers = MODULE.jvm_blockers(task_id, oracle, tmp_path)
+    assert any("missing pinned gradle_wrapper asset" in b for b in blockers)
+
+    pinned = MODULE.JVM_MANIFEST[task_id]["gradle_wrapper_jar_sha256"]
+    jar = cache_root / "gradle-wrapper" / f"{pinned}.jar"
+    jar.parent.mkdir(parents=True, exist_ok=True)
+    jar.write_bytes(b"not the pinned wrapper jar")
+    MODULE._FULL_DIGEST_CACHE.clear()
+    blockers = MODULE.jvm_blockers(task_id, oracle, tmp_path)
+    assert any("has SHA-256" in b and "expected" in b for b in blockers)
+
+
+def test_jvm_asset_state_and_fingerprint_change_when_a_pinned_asset_is_tampered(
+    tmp_path, monkeypatch
+):
+    # Removing or tampering a pinned asset must invalidate previously recorded
+    # rows, not merely block future ones.
+    cache_root, oracle = _ready_web3signer_root(tmp_path, monkeypatch)
+    task = strict_task(WEB3SIGNER_TASK_ID, repo="Consensys/web3signer")
+    generation = {"patch_sha256": "abc", "apply_ok": True}
+    row = MODULE.row_provenance_fields(
+        task, oracle, WEB3SIGNER_TASK_ID, "jvm", generation, tmp_path, []
+    )
+    assert not MODULE.row_is_stale(
+        {**row, "patch_sha256": "abc"}, task, oracle, WEB3SIGNER_TASK_ID,
+        "jvm", generation, tmp_path, [],
+    )
+
+    archive = cache_root / "prefetch/web3signer-hashicorp.zip"
+    original = archive.read_bytes()
+    archive.write_bytes(b"Y" * len(original))
+    MODULE._FULL_DIGEST_CACHE.clear()
+    tampered_state = MODULE.asset_state(
+        WEB3SIGNER_TASK_ID, "jvm", oracle, tmp_path
+    )
+    assert tampered_state["pinned_assets"][
+        "prefetch:prefetch/web3signer-hashicorp.zip"
+    ]["observed_sha256"] != tampered_state["pinned_assets"][
+        "prefetch:prefetch/web3signer-hashicorp.zip"
+    ]["expected_sha256"]
+    assert MODULE.row_is_stale(
+        {**row, "patch_sha256": "abc"}, task, oracle, WEB3SIGNER_TASK_ID,
+        "jvm", generation, tmp_path, [],
+    )
+
+
+def test_replay_jvm_fails_closed_without_running_when_a_pinned_asset_is_missing(
+    tmp_path, monkeypatch
+):
+    # No live network fallback: a missing pinned asset must stop the replay
+    # before the Oracle command runs, even for the network-namespace Oracles.
+    legacy_root = tmp_path / "legacy"
+    cache_root = build_pinned_jvm_cache(legacy_root, monkeypatch)
+    pin_web3signer_prefetch(cache_root, monkeypatch)
+    (cache_root / "prefetch/web3signer-hashicorp.zip").unlink()
+    MODULE._FULL_DIGEST_CACHE.clear()
+    start_sha = make_git_repo(legacy_root / "repos/org__repo")
+    task = strict_task(WEB3SIGNER_TASK_ID, repo="org/repo")
+    oracle = {
+        "repo": "org/repo",
+        "start_sha": start_sha,
+        "command": "gradle test",
+        "pass_to_pass": 6,
+        "environment": {
+            "container": "oracle-java-tools:17",
+            "cache": "strict_screen_20260726/oracle_recovery/java/cache/home",
+        },
+    }
+    patch_path = tmp_path / "candidate.patch"
+    patch_path.write_text("", encoding="utf-8")
+    generation = {"patch_file": str(patch_path), "patch_sha256": BASE.sha256(patch_path)}
+
+    calls = {"count": 0}
+
+    def fake_run_subprocess(*args, **kwargs):
+        calls["count"] += 1
+        return 0, 1.0, ""
+
+    monkeypatch.setattr(MODULE, "run_subprocess", fake_run_subprocess)
+    output = tmp_path / "output"
+    row = MODULE.replay_jvm(
+        WEB3SIGNER_TASK_ID, "my-model", task, oracle, generation, legacy_root,
+        tmp_path / "work", output, 60,
+    )
+    assert row["status"] == "infra_retry"
+    assert row["correctness_ok"] is None
+    assert calls["count"] == 0  # the Oracle command never ran
+    assert any("missing pinned prefetch asset" in f for f in row["pinned_asset_faults"])
+    assert (output / row["error_log"]).is_file()
+
+
+def test_replay_jvm_reports_infra_when_a_prefetched_asset_is_replaced_mid_run(
+    tmp_path, monkeypatch
+):
+    # A network-namespace Oracle that re-downloads a pre-placed archive during
+    # the build must never be scored: the pinned bytes were not what ran.
+    legacy_root = tmp_path / "legacy"
+    cache_root = build_pinned_jvm_cache(legacy_root, monkeypatch)
+    pin_web3signer_prefetch(cache_root, monkeypatch)
+    start_sha = make_git_repo(legacy_root / "repos/org__repo")
+    task = strict_task(WEB3SIGNER_TASK_ID, repo="org/repo")
+    oracle = {
+        "repo": "org/repo",
+        "start_sha": start_sha,
+        "command": "gradle test",
+        "pass_to_pass": 6,
+        "environment": {
+            "container": "oracle-java-tools:17",
+            "cache": "strict_screen_20260726/oracle_recovery/java/cache/home",
+        },
+    }
+    patch_path = tmp_path / "candidate.patch"
+    patch_path.write_text("", encoding="utf-8")
+    generation = {"patch_file": str(patch_path), "patch_sha256": BASE.sha256(patch_path)}
+    work_root = tmp_path / "work"
+    workspace = (
+        work_root / "jvm" / MODULE.model_component("my-model")
+        / WEB3SIGNER_TASK_ID / "workspace"
+    )
+
+    def fake_run_subprocess(command, *, cwd, log_path, env=None, timeout=1800):
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("BUILD SUCCESSFUL\n", encoding="utf-8")
+        report = workspace / "acceptance-tests/build/test-results/test/TEST-x.xml"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(
+            '<testsuite tests="6" failures="0" errors="0"/>', encoding="utf-8"
+        )
+        # simulate the build re-downloading the archive over the pinned copy
+        (workspace / "acceptance-tests/build/hashicorp.zip").write_bytes(
+            b"freshly downloaded archive"
+        )
+        return 0, 2.0, ""
+
+    monkeypatch.setattr(MODULE, "run_subprocess", fake_run_subprocess)
+    MODULE._FULL_DIGEST_CACHE.clear()
+    row = MODULE.replay_jvm(
+        WEB3SIGNER_TASK_ID, "my-model", task, oracle, generation, legacy_root,
+        work_root, tmp_path / "output", 60,
+    )
+    assert row["status"] == "infra_retry"
+    assert row["correctness_ok"] is None
+    assert row["prefetched_assets_replaced_during_run"] == [
+        "acceptance-tests/build/hashicorp.zip"
+    ]
+
+
+def _ready_discourse_root(tmp_path, monkeypatch):
+    legacy_root = tmp_path / "legacy"
+    start_sha = make_git_repo(legacy_root / "repos/discourse__discourse")
+    runtime = (
+        legacy_root / "strict_screen_20260726/oracle_recovery/tsjs/_runtimes"
+        / "node-v20.19.5-linux-x64/bin"
+    )
+    runtime.mkdir(parents=True)
+    (runtime / "node").write_text("#!/bin/sh\n", encoding="utf-8")
+    (runtime / "node").chmod(0o755)
+    tools = (
+        legacy_root
+        / "strict_screen_20260726/oracle_recovery/tsjs/_node_tools/node_modules"
+    )
+    (tools / ".bin").mkdir(parents=True)
+    (tools / ".bin/vitest").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tools / ".bin/vitest").chmod(0o755)
+    for package in ("vitest", "@vitest/coverage-v8"):
+        (tools / package).mkdir(parents=True, exist_ok=True)
+        (tools / package / "package.json").write_text("{}", encoding="utf-8")
+    session = (
+        legacy_root / "strict_screen_20260726/oracle_recovery/tsjs"
+        / "20_discourse__discourse/session"
+    )
+    session.mkdir(parents=True)
+    (session / "vitest.config.js").write_text("", encoding="utf-8")
+    oracle = {
+        "repo": "discourse/discourse",
+        "historical_node": "20.19.5",
+        "recovery_artifact": "oracle_recovery/tsjs/20_discourse__discourse",
+    }
+    assert MODULE.tsjs_blockers(DISCOURSE_TASK_ID, oracle, legacy_root, start_sha) == []
+    return legacy_root, start_sha, oracle, tools, runtime
+
+
+@pytest.mark.parametrize(
+    "relative,expected",
+    [
+        (".bin/vitest", "missing required dependency executable .bin/vitest"),
+        ("vitest/package.json", "missing required dependency file vitest/package.json"),
+        (
+            "@vitest/coverage-v8/package.json",
+            "missing required dependency file @vitest/coverage-v8/package.json",
+        ),
+    ],
+)
+def test_tsjs_preflight_blocks_when_a_required_executable_or_package_is_removed(
+    tmp_path, monkeypatch, relative, expected
+):
+    legacy_root, start_sha, oracle, tools, _ = _ready_discourse_root(
+        tmp_path, monkeypatch
+    )
+    # The node_modules parent directory still exists: only an exact per-binary
+    # check can catch a truncated dependency tree.
+    (tools / relative).unlink()
+    assert tools.is_dir()
+    blockers = MODULE.tsjs_blockers(
+        DISCOURSE_TASK_ID, oracle, legacy_root, start_sha
+    )
+    assert any(expected in blocker for blocker in blockers), blockers
+
+
+def test_tsjs_preflight_blocks_a_required_binary_without_the_executable_bit(
+    tmp_path, monkeypatch
+):
+    legacy_root, start_sha, oracle, tools, _ = _ready_discourse_root(
+        tmp_path, monkeypatch
+    )
+    (tools / ".bin/vitest").chmod(0o644)
+    blockers = MODULE.tsjs_blockers(
+        DISCOURSE_TASK_ID, oracle, legacy_root, start_sha
+    )
+    assert any("is not executable" in blocker for blocker in blockers), blockers
+
+
+def test_tsjs_preflight_blocks_a_missing_runtime_executable(tmp_path, monkeypatch):
+    legacy_root, start_sha, oracle, _, runtime = _ready_discourse_root(
+        tmp_path, monkeypatch
+    )
+    (runtime / "node").unlink()
+    blockers = MODULE.tsjs_blockers(
+        DISCOURSE_TASK_ID, oracle, legacy_root, start_sha
+    )
+    assert any("missing pinned Node 20.19.5 runtime" in b for b in blockers)
+
+
+def test_fluid_preflight_requires_the_pinned_pnpm_shim(tmp_path, monkeypatch):
+    # FluidFramework's offline install shells out to a bare `pnpm`; the pinned
+    # corepack shim is a required, fingerprinted asset.
+    task_id = (
+        "github__microsoft__FluidFramework__pull_27466__"
+        "comment_3350352130__complexity"
+    )
+    legacy_root = tmp_path / "legacy"
+    asset_root = tmp_path / "assets"
+    start_sha = make_git_repo(legacy_root / "repos/microsoft__FluidFramework")
+    runtime = asset_root / "tsjs/_runtimes/node-v22.22.2-linux-x64/bin"
+    runtime.mkdir(parents=True)
+    for name in ("node", "corepack", "pnpm"):
+        (runtime / name).write_text("#!/bin/sh\n", encoding="utf-8")
+        (runtime / name).chmod(0o755)
+    (asset_root / "tsjs/pnpm-store").mkdir(parents=True)
+    oracle = {"repo": "microsoft/FluidFramework"}
+    assert (
+        MODULE.tsjs_blockers(task_id, oracle, legacy_root, start_sha, asset_root)
+        == []
+    )
+
+    (runtime / "pnpm").unlink()
+    blockers = MODULE.tsjs_blockers(
+        task_id, oracle, legacy_root, start_sha, asset_root
+    )
+    assert any("node runtime executable pnpm" in blocker for blocker in blockers)
+
+
+def test_tsjs_asset_state_and_fingerprint_change_when_a_binary_is_tampered(
+    tmp_path, monkeypatch
+):
+    legacy_root, start_sha, oracle, tools, _ = _ready_discourse_root(
+        tmp_path, monkeypatch
+    )
+    task = strict_task(DISCOURSE_TASK_ID, repo="discourse/discourse")
+    task["start_sha"] = start_sha
+    generation = {"patch_sha256": "abc", "apply_ok": True}
+    row = MODULE.row_provenance_fields(
+        task, oracle, DISCOURSE_TASK_ID, "tsjs", generation, legacy_root, []
+    )
+    before = MODULE.asset_state(DISCOURSE_TASK_ID, "tsjs", oracle, legacy_root)
+    assert before["required_executables"]["dependency executable .bin/vitest"]
+
+    binary = tools / ".bin/vitest"
+    stat = binary.stat()
+    binary.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    os.utime(binary, (stat.st_atime, stat.st_mtime))
+    MODULE._FULL_DIGEST_CACHE.clear()
+    after = MODULE.asset_state(DISCOURSE_TASK_ID, "tsjs", oracle, legacy_root)
+    assert after["required_executables"] != before["required_executables"]
+    assert MODULE.row_is_stale(
+        {**row, "patch_sha256": "abc"}, task, oracle, DISCOURSE_TASK_ID,
+        "tsjs", generation, legacy_root, [],
+    )
+
+
+def test_required_jvm_assets_cover_every_manifest_declared_dependency():
+    # Guard: anything a JVM manifest entry declares (prefetch, wrapper jar,
+    # cache dirs) must be surfaced by jvm_required_assets, which is the single
+    # source both the blocker check and the fingerprint read from.
+    for task_id, manifest in MODULE.JVM_MANIFEST.items():
+        oracle = {
+            "repo": "x/y",
+            "command": "gradle test",
+            "environment": {
+                "container": "img",
+                "cache": "strict_screen_20260726/oracle_recovery/java/cache/home",
+            },
+        }
+        files, directories = MODULE.jvm_required_assets(
+            task_id, oracle, Path("/nonexistent"), None
+        )
+        kinds = {entry["kind"] for entry in files}
+        if manifest.get("prefetch"):
+            assert "prefetch" in kinds, task_id
+        if manifest.get("needs_gradle_wrapper_jar"):
+            assert "gradle_wrapper" in kinds, task_id
+            assert manifest.get("gradle_wrapper_jar_sha256"), task_id
+        assert len(directories) == len(manifest.get("required_cache_dirs") or ())
+
+
+def test_every_gradle_init_script_task_requires_the_pinned_mirror_directory():
+    # The reconstructed oracle.init.gradle declares /oracle-cache/m2-mirror as
+    # its first repository whenever it is present, so its presence is part of
+    # the replay contract for every Oracle that passes -I.
+    for task_id, manifest in MODULE.JVM_MANIFEST.items():
+        if task_id in (
+            "github__apache__solr__pull_3433__comment_2231064740__modularity",
+            "github__sniffy__sniffy__pull_554__comment_3568493577__modularity",
+        ):
+            assert not manifest.get("required_cache_dirs"), task_id
+        else:
+            assert "m2-mirror" in (manifest.get("required_cache_dirs") or ()), task_id

@@ -520,10 +520,37 @@ Design:
   workspace an earlier run already compiled), the Discourse `node_modules`
   symlink into the retained shared Node tools, the proven OpossumUI
   `react-scripts` invocation, and the FluidFramework pnpm/mocha recipe.
+- **Every pinned asset is required, hash-validated and fingerprinted.**
+  `jvm_required_assets()` is the single source of truth that both
+  `jvm_blockers()` (fail closed) and `asset_state()` (replay fingerprint) read,
+  so an asset can never be mandatory for one and invisible to the other. Each
+  `/oracle-cache` blob the recorded command references, each prefetched
+  archive, and the pinned Gradle wrapper jar must exist **and hash to its
+  pinned SHA-256** (full content, not a bounded prefix); a token with no pinned
+  digest is itself a blocker. The cache directories the reconstructed
+  `oracle.init.gradle` declares (`m2-mirror`) must exist and be non-empty. On
+  the TS/JS side `tsjs_required_executables()` requires the *exact* binaries
+  and package roots the recovered command runs -- `.bin/vitest` plus
+  `vitest`/`@vitest/coverage-v8`, `.bin/react-scripts` plus
+  `react-scripts`/`jest`, and the pinned `node`/`corepack`/`pnpm` runtime
+  shims -- with the executable bit checked, because a truncated dependency
+  tree still has its `node_modules` parent directory and the resulting
+  "cannot find module" failure would otherwise be scored as a candidate
+  failure. All of them are bound by full content digest into the replay
+  fingerprint, so removing or tampering with any one invalidates previously
+  recorded rows on resume instead of being resumed past.
+- **No live network fallback for a missing pinned asset.** A pinned asset that
+  is absent or mismatched stops the replay before the Oracle command runs and
+  is recorded as `infra_retry` with a `pinned_asset_faults` list -- never as a
+  candidate failure, and never quietly skipped so the build can fetch a
+  substitute. This holds for the two Oracles that keep a network namespace as
+  well; in addition, every prefetched archive is re-hashed *after* the run, and
+  a build that replaced it with a fresh download yields `infra_retry` rather
+  than a score.
 - Any task whose required Docker image, retained repo checkout, cache home,
-  session harness, pinned dependency snapshot or Node runtime is missing is
-  reported as a **preflight blocker** and is left out of the raw output
-  entirely -- it is never scored as a pass/fail. `finalize
+  session harness, pinned dependency snapshot, pinned executable or Node
+  runtime is missing is reported as a **preflight blocker** and is left out of
+  the raw output entirely -- it is never scored as a pass/fail. `finalize
   --allow-incomplete` will show it under `missing_pairs` until the asset is
   recovered.
 
@@ -643,7 +670,15 @@ lane, fail-closed behavior for tasks without a recovered manifest,
 asset-root resolution, the Discourse shared-node-tools symlink, refusal to
 pass a green run that executed no tests, drift detection against the
 task-ID manifest, resume/skip behavior, and candidate-missing rows that
-normalize cleanly through the real `normalized_record()`.
+normalize cleanly through the real `normalized_record()`. It also removes or
+tampers with each pinned asset and each required executable in turn --
+`/oracle-cache` blobs, the prefetched archive, the pinned wrapper jar, the
+`m2-mirror` directory, `.bin/vitest`, `.bin/react-scripts`, their package
+roots and the pinned `pnpm` shim, including same-length in-place content
+swaps and a cleared executable bit -- and asserts that preflight blocks, that
+`asset_state()`/`replay_contract_fingerprint()` change, that `row_is_stale()`
+invalidates already-recorded rows, and that `replay_jvm` refuses to run the
+Oracle command at all.
 
 ### 7.2 Current five-model correctness replay
 
