@@ -570,6 +570,18 @@ Design:
   `scored_command_executed: false` -- the scored command is never invoked, so
   the resulting "no tests found" build failure can never be scored as a model
   failure.
+- **One complete identity function feeds all provenance.**
+  `full_tree_digest()` is a full `lstat` traversal that binds every regular
+  file by its whole SHA-256 plus size and executable bit, every symlink (to a
+  file *or* a directory) by its literal target without following it, every
+  directory by its path so an added, removed or emptied directory is visible,
+  and any other node by kind; `full_entry_digest()` does the same for a single
+  entry. There is no file-count cap and no per-file byte cap. The bounded,
+  sampling, symlink-blind `directory_identity()`/`safe_file_digest()` helpers
+  are **quarantined out of every replay fingerprint** on every lane -- native,
+  rust, jvm and tsjs -- and a static guard test asserts they appear nowhere in
+  `asset_state()`, `replay_contract_fingerprint()`, `row_provenance_fields()`
+  or any of the required-asset resolvers.
 - **Pinned assets are never mounted writable.** `/oracle-cache` -- the
   immutable jars, `oracle.init.gradle`, the `file://` m2-mirror, the pinned
   Gradle wrapper store and the prefetched archives -- is bind-mounted `:ro`,
@@ -578,7 +590,10 @@ Design:
   just the entries the task needs (`.m2`, `.cache`, `.config` and *its own*
   `gradle-task-<index>` partition) into per-replay scratch and only that copy
   is mounted read-write; the only other writable mounts are the disposable
-  `/workspace` and `/task`. Dependency trees are provisioned with
+  `/workspace` and `/task`. The rust lane follows the same contract: the
+  retained cargo cache is exposed only at `/cargo-cache-pinned:ro` while
+  `CARGO_HOME=/cargo-cache` points at a per-replay seeded copy, and a seeding
+  failure is an `infra_retry` before anything runs. Dependency trees are provisioned with
   `copy_tree()`, a real or copy-on-write copy -- never `cp -al`, whose shared
   inodes would let an in-place rewrite reach straight back into the pinned
   source. After every run the pinned assets, the required
@@ -715,6 +730,16 @@ remains stored at:
 SHA-256 8cfa350847d4a86a612b4be4f278ac7c6b4fe64a5f453439a81f4f059598acfd
 ```
 
+> **Cherry-pick note.** The native/rust legacy paths are also being reworked on
+> the sibling `legacy-recover-native-rust` branch. The changes here are kept
+> deliberately narrow -- the shared generic digest helpers
+> (`full_tree_digest`/`full_entry_digest` and the quarantine of the bounded
+> helpers) plus the reserve JVM and Rust replay paths -- but
+> `replay_rust()`'s mount list and `asset_state()`'s native/rust branches are
+> the most likely cherry-pick conflicts. Resolve them by keeping *both* the
+> generic helper swap (bounded -> full digests) and whichever lane-specific
+> recipe that branch lands, since the two are orthogonal.
+
 `tests/test_run_legacy_reserve_correctness.py` covers this adapter with
 tiny synthetic fixtures only (no real builds/containers): patch
 apply/failure handling, exact-start materialization, blocker detection per
@@ -734,7 +759,13 @@ invalidates already-recorded rows, and that `replay_jvm` refuses to run the
 Oracle command at all. A dedicated case builds a dependency tree containing
 *only* the launcher shim and its `package.json` and proves it is rejected, and
 others prove that a single stray file inside a pinned dependency tree, Node
-runtime or pnpm store blocks. Whole-tree cases build an `m2-mirror` of more than 500
+runtime or pnpm store blocks. Digest cases prove the complete identity function catches every
+mutation bounded sampling misses -- a tail edit past 64 KiB, an edit beyond the
+500-file cap, a same-size swap, a symlink retargeted between byte-identical
+files, a removed empty directory and a retargeted directory symlink -- each
+asserting in the same test that `directory_identity()` is unchanged, and a
+parametrised case checks every lane's `asset_state()` reports only complete
+digests. Whole-tree cases build an `m2-mirror` of more than 500
 files, each padded past 64 KiB, and prove that a same-size tamper in the last
 file, a same-size tamper past the sampled prefix, and a removed artifact each
 block -- asserting in the same test that `directory_identity()` is blind to

@@ -137,6 +137,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -362,7 +363,7 @@ TSJS_NODE_OVERRIDES = {
 # candidate failure.
 ORACLE_CACHE_DIR_SHA256: dict[str, str] = {
     "m2-mirror": (
-        "b3841ddfe930e260368943d1c63bd8be147df8bfd59af2cabcfa146349ce39b2"
+        "1dd6ee41cc10766c83c9cebb93813abc1b7ed1c27a0f959545648c9e4f1845d2"
     ),
 }
 
@@ -574,11 +575,11 @@ TSJS_MANIFEST: dict[str, dict[str, Any]] = {
         # apart from Vitest's own scratch cache directory, which the runner
         # legitimately rewrites and which is not part of the resolved payload.
         "dependency_tree_sha256": (
-            "2edb6dc949b2a1b67475c29224c4b2f156d78bed24b71bb98444421b57390245"
+            "e2d7ee52b90ef8c7d27b5c1337ee8203e5cc67b3fc589fabe74487ba61012474"
         ),
         "dependency_tree_exclusions": (".vite",),
         "runtime_tree_sha256": (
-            "96f62ecb3d936ccdd0104e9557fe7d3d2b918e0b2e979bc65ba3528288413249"
+            "54dde7a39d83a58c93eb4aae30515179a8e4264a1e5cecbd055061ef294ab629"
         ),
     },
     "github__opossum-tool__OpossumUI__pull_987__comment_972768731__duplication": {
@@ -612,10 +613,10 @@ TSJS_MANIFEST: dict[str, dict[str, Any]] = {
             "jest-cli/package.json",
         ),
         "dependency_tree_sha256": (
-            "b2dde6fd5449f0e39697a274ac3a70a79a43cf7cb688944619e8dfdc416188b3"
+            "6457c2cc2f860c4bd55630229abd25b921ee09e282babb6e81df17a0f0358953"
         ),
         "runtime_tree_sha256": (
-            "353c6f27606c6c02f1fb61319b14d7dace46f0bd304ab11287638c7fcdcc61ae"
+            "d8480948b951a2b80f77e50183eb9085ef5c6bda08a34e4f190974c785683dc3"
         ),
     },
     # Recovered verbatim from the retained pre-release oracle record
@@ -666,7 +667,7 @@ TSJS_MANIFEST: dict[str, dict[str, Any]] = {
             "../lib/node_modules/corepack/package.json",
         ),
         "runtime_tree_sha256": (
-            "04dec7eecff0a0ce0cd11ba144cbb0f60ed30118b0449344f5d403f2ff9dcdfc"
+            "b48c9d72dde2de2c62c578210367c81c5fd0d7b182988b06621dc8004ff0f939"
         ),
         # This contract materializes node_modules from the pinned pnpm store,
         # so the store *is* its dependency payload and is validated as a whole.
@@ -678,7 +679,7 @@ TSJS_MANIFEST: dict[str, dict[str, Any]] = {
         # mutable bookkeeping is what keeps the pin stable across replays
         # instead of self-invalidating after the first one.
         "store_tree_sha256": (
-            "eed254d99c765f50001c0e8b88ad4149bf15a1e76602e02b8b9fd8221d586a76"
+            "386fbe0b5aa17e98e002261d79eeb1712a89d3a3a6ec7adada16ecd13c5e76f1"
         ),
         "store_tree_exclusions": ("v10/index", "v10/projects"),
     },
@@ -983,7 +984,15 @@ def _bounded_file_digest(path: Path) -> str:
 
 
 def safe_file_digest(path: Path | None) -> str | None:
-    """``_bounded_file_digest`` that degrades to ``None`` for a missing
+    """BOUNDED, SYMLINK-BLIND -- **never** use for provenance.
+
+    Quarantined from every replay fingerprint: it hashes only a file's size
+    plus its first ``_DIRECTORY_IDENTITY_MAX_BYTES_PER_FILE`` bytes and follows
+    symlinks, so a tail edit or a retargeted link passes unnoticed. Provenance
+    uses ``full_entry_digest``. Retained only for cheap human-facing reporting
+    and for the regression tests that prove the bounded check was insufficient.
+
+    ``_bounded_file_digest`` that degrades to ``None`` for a missing
     path/unreadable file instead of raising -- asset-state fingerprinting
     must never itself fail closed with an exception (that is
     ``task_blockers()``'s job); a ``None`` digest simply differs from any
@@ -1002,20 +1011,88 @@ _FULL_DIGEST_CACHE: dict[tuple[str, int, int], str] = {}
 _TREE_DIGEST_CACHE: dict[tuple[str, tuple[str, ...]], str | None] = {}
 
 
+def full_file_digest(path: Path | None) -> str | None:
+    """Complete SHA-256 of a pinned asset, or ``None`` if unreadable.
+
+    Pinned assets are validated by their *whole* content, not by a bounded
+    prefix: a same-size in-place tamper anywhere in a multi-megabyte archive
+    must be rejected, not merely be unlikely to be noticed. Results are memoised
+    on (path, size, mtime_ns) so repeated preflight/fingerprint calls across
+    many models do not rehash the same asset over and over.
+    """
+    if path is None:
+        return None
+    try:
+        status = path.stat()
+    except OSError:
+        return None
+    key = (str(path), status.st_size, status.st_mtime_ns)
+    cached = _FULL_DIGEST_CACHE.get(key)
+    if cached is not None:
+        return cached
+    hasher = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                hasher.update(chunk)
+    except OSError:
+        return None
+    digest = hasher.hexdigest()
+    _FULL_DIGEST_CACHE[key] = digest
+    return digest
+
+
+def full_entry_digest(path: Path | None) -> str | None:
+    """Complete, symlink-aware identity of a single pinned filesystem entry.
+
+    Unlike ``full_file_digest`` -- which follows symlinks and therefore reports
+    the *target's* content -- this uses ``lstat`` semantics: a symlink is
+    identified by its literal target string, so retargeting ``.bin/vitest`` at a
+    different (even byte-identical) file changes the identity. Regular files are
+    identified by their complete SHA-256, directories and anything else by kind.
+    ``None`` means the entry does not exist, which differs from every real
+    identity and so still invalidates a fingerprint.
+    """
+    if path is None:
+        return None
+    try:
+        status = path.lstat()
+    except OSError:
+        return None
+    if stat.S_ISLNK(status.st_mode):
+        try:
+            return f"L:{os.readlink(path)}"
+        except OSError:  # pragma: no cover - defensive
+            return None
+    if stat.S_ISDIR(status.st_mode):
+        return "D:"
+    if stat.S_ISREG(status.st_mode):
+        digest = full_file_digest(path)
+        return None if digest is None else f"F:{digest}"
+    return f"O:{stat.S_IFMT(status.st_mode)}"
+
+
 def full_tree_digest(
     root: Path | None, exclude: tuple[str, ...] = ()
 ) -> str | None:
     """Deterministic, complete content digest of a pinned directory tree.
 
-    Unlike ``directory_identity`` -- which deliberately samples a bounded
-    prefix of a bounded number of files so a multi-gigabyte cache can be
-    fingerprinted cheaply -- this reads *every* regular file in full and also
-    binds each entry's relative path, size, executable bit and (for symlinks)
-    link target without following it. A pinned dependency tree or language
-    runtime must be validated as a whole payload: checking only a launcher
-    shim and a ``package.json`` would accept a tree whose actual executed code
-    has been replaced or removed, and the resulting "cannot find module"
-    failure would be scored as a candidate failure.
+    A full ``lstat`` traversal: it binds **every** entry the tree contains --
+    regular files by their complete SHA-256 plus size and executable bit,
+    symlinks (to files *or* directories) by their literal target without ever
+    following them, directories by their relative path so an added, removed or
+    emptied directory is visible, and any other node type by its kind. Nothing
+    is sampled: there is no file-count cap and no per-file byte cap, so a tail
+    edit past any prefix, a same-size in-place swap, an artifact removed from a
+    tree of thousands, a retargeted symlink and a vanished empty directory all
+    change the digest.
+
+    This is deliberately the *only* identity function that feeds provenance.
+    ``directory_identity``/``safe_file_digest`` remain available for cheap
+    non-provenance reporting but are quarantined out of every replay
+    fingerprint: they cap at ``_DIRECTORY_IDENTITY_MAX_FILES`` files and
+    ``_DIRECTORY_IDENTITY_MAX_BYTES_PER_FILE`` bytes per file and are blind to
+    symlink targets and to directories.
 
     ``exclude`` lists relative path prefixes that are *runtime scratch*, not
     payload -- a test runner's own cache directory, or a package store's
@@ -1034,28 +1111,47 @@ def full_tree_digest(
     if key in _TREE_DIGEST_CACHE:
         return _TREE_DIGEST_CACHE[key]
     digest: str | None
-    if not root.is_dir():
+    if not root.is_dir() or root.is_symlink():
         digest = None
     else:
         hasher = hashlib.sha256()
         try:
             for current, directories, names in os.walk(root, followlinks=False):
-                directories.sort()
                 relative_dir = Path(current).relative_to(root)
-                directories[:] = [
-                    name
-                    for name in directories
-                    if str(relative_dir / name) not in exclusions
-                ]
+                directories.sort()
+                kept: list[str] = []
+                for name in directories:
+                    relative = str(relative_dir / name)
+                    if relative in exclusions:
+                        continue
+                    path = Path(current) / name
+                    if path.is_symlink():
+                        # A symlink to a directory is never descended into and
+                        # is bound by its literal target.
+                        hasher.update(
+                            f"L\0{relative}\0{os.readlink(path)}\0".encode("utf-8")
+                        )
+                        continue
+                    # Bind the directory itself, so an added, removed or
+                    # emptied directory is visible even when it holds no files.
+                    hasher.update(f"D\0{relative}\0".encode("utf-8"))
+                    kept.append(name)
+                directories[:] = kept
                 for name in sorted(names):
                     path = Path(current) / name
                     relative = str(path.relative_to(root))
                     if relative in exclusions:
                         continue
                     status = path.lstat()
-                    if os.path.islink(path):
+                    if stat.S_ISLNK(status.st_mode):
                         hasher.update(
                             f"L\0{relative}\0{os.readlink(path)}\0".encode("utf-8")
+                        )
+                        continue
+                    if not stat.S_ISREG(status.st_mode):
+                        hasher.update(
+                            f"O\0{relative}\0{stat.S_IFMT(status.st_mode)}\0"
+                            .encode("utf-8")
                         )
                         continue
                     inner = hashlib.sha256()
@@ -1072,37 +1168,6 @@ def full_tree_digest(
         else:
             digest = hasher.hexdigest()
     _TREE_DIGEST_CACHE[key] = digest
-    return digest
-
-
-def full_file_digest(path: Path | None) -> str | None:
-    """Complete SHA-256 of a pinned asset, or ``None`` if unreadable.
-
-    Pinned assets are validated by their *whole* content, not by a bounded
-    prefix: a same-size in-place tamper anywhere in a multi-megabyte archive
-    must be rejected, not merely be unlikely to be noticed. Results are memoised
-    on (path, size, mtime_ns) so repeated preflight/fingerprint calls across
-    many models do not rehash the same asset over and over.
-    """
-    if path is None:
-        return None
-    try:
-        stat = path.stat()
-    except OSError:
-        return None
-    key = (str(path), stat.st_size, stat.st_mtime_ns)
-    cached = _FULL_DIGEST_CACHE.get(key)
-    if cached is not None:
-        return cached
-    hasher = hashlib.sha256()
-    try:
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                hasher.update(chunk)
-    except OSError:
-        return None
-    digest = hasher.hexdigest()
-    _FULL_DIGEST_CACHE[key] = digest
     return digest
 
 
@@ -1315,7 +1380,18 @@ def tsjs_required_trees(
 def directory_identity(
     path: Path, *, max_files: int = _DIRECTORY_IDENTITY_MAX_FILES
 ) -> dict[str, Any] | None:
-    """Bounded, content-sensitive identity of a directory tree.
+    """BOUNDED, SAMPLED, SYMLINK-BLIND -- **never** use for provenance.
+
+    Quarantined from every replay fingerprint: it samples at most ``max_files``
+    files, reads only each file's first
+    ``_DIRECTORY_IDENTITY_MAX_BYTES_PER_FILE`` bytes, and records neither
+    symlink targets nor directories, so a removal from a large tree, a tail
+    edit, a same-size swap, a retargeted symlink and a vanished empty directory
+    are all invisible to it. Provenance uses ``full_tree_digest``. Retained
+    only for cheap human-facing reporting and for the regression tests that
+    prove the bounded check was insufficient.
+
+    Bounded, content-sensitive identity of a directory tree.
 
     Unlike ``path_identity`` (a single stat() of the directory itself),
     this walks the tree -- in a stable, deterministic (sorted at every
@@ -2176,9 +2252,14 @@ def asset_state(
     replaced with different content at the same path). Every lane's
     *actual execution input tree* -- the exact directory each
     ``replay_*`` function copies/checks out from -- is fingerprinted with
-    ``directory_identity`` (bounded, content-sensitive, so a same-path
-    in-place replacement is detected and a huge cache/checkout is never
-    fully read); single required files use ``safe_file_digest``.
+    ``full_tree_digest`` -- a complete ``lstat`` traversal binding every
+    file's whole content, every symlink's literal target and every directory,
+    with no file-count or per-file byte cap. Single required entries use
+    ``full_entry_digest``, which is symlink-aware for the same reason. The
+    bounded ``directory_identity``/``safe_file_digest`` helpers are
+    deliberately *never* used here: their sampling caps and symlink blindness
+    would let a tail edit, a same-size swap, a removal from a large tree or a
+    retargeted launcher shim pass provenance unnoticed.
     """
     if lane == "native":
         manifest = NATIVE_MANIFEST[task_id]
@@ -2188,13 +2269,13 @@ def asset_state(
             else task_dir / manifest["workspace"]
         )
         harness_digests = {
-            mount["host"]: safe_file_digest(task_dir / mount["host"])
+            mount["host"]: full_entry_digest(task_dir / mount["host"])
             for mount in manifest["harness_mounts"]
         }
         return {
             "docker_image_id": docker_image_id(manifest["docker_image"]),
             # the exact tree replay_native copies into scratch and patches
-            "workspace": directory_identity(workspace_source),
+            "workspace": full_tree_digest(workspace_source),
             "harness_mounts": harness_digests,
         }
     if lane == "rust":
@@ -2203,7 +2284,7 @@ def asset_state(
         cargo_cache = environment.get("cargo_cache")
         try:
             task_dir = artifacts_directory(oracle, legacy_root)
-            start_tree = directory_identity(task_dir / "start")
+            start_tree = full_tree_digest(task_dir / "start")
         except ValueError:
             start_tree = None
         return {
@@ -2211,7 +2292,7 @@ def asset_state(
             # the exact "start/" tree replay_rust copies into scratch
             "start": start_tree,
             "cargo_cache": (
-                directory_identity(resolve_legacy_relative(cargo_cache, legacy_root))
+                full_tree_digest(resolve_legacy_relative(cargo_cache, legacy_root))
                 if cargo_cache
                 else None
             ),
@@ -2249,7 +2330,7 @@ def asset_state(
         session_tests = None
         if JVM_MANIFEST.get(task_id, {}).get("session_tests"):
             try:
-                session_tests = directory_identity(
+                session_tests = full_tree_digest(
                     artifacts_directory(oracle, legacy_root, asset_root)
                     / "session-tests"
                 )
@@ -2258,14 +2339,14 @@ def asset_state(
         return {
             "docker_image_id": docker_image_id(image) if image else None,
             # the exact repo checkout replay_jvm materializes the start from
-            "repo_checkout": directory_identity(checkout) if checkout else None,
+            "repo_checkout": full_tree_digest(checkout) if checkout else None,
             # every pinned /oracle-cache blob, prefetched archive and pinned
             # Gradle wrapper jar the recorded command requires
             "pinned_assets": pinned_assets,
             # the pinned cache directories oracle.init.gradle declares
             "pinned_directories": pinned_directories,
             "cache_home": (
-                directory_identity(
+                full_tree_digest(
                     resolve_legacy_relative(cache, legacy_root, asset_root)
                 )
                 if cache
@@ -2288,7 +2369,7 @@ def asset_state(
         session_tree = None
         if manifest.get("session_from_recovery"):
             try:
-                session_tree = directory_identity(
+                session_tree = full_tree_digest(
                     artifacts_directory(oracle, legacy_root, asset_root) / "session"
                 )
             except ValueError:
@@ -2299,9 +2380,9 @@ def asset_state(
             task_id, manifest, legacy_root, asset_root
         )
         if dependency_root is not None:
-            dependencies = directory_identity(dependency_root)
+            dependencies = full_tree_digest(dependency_root)
         elif provisioning == "pnpm_workspace" and asset_root is not None:
-            dependencies = directory_identity(asset_root / "tsjs/pnpm-store")
+            dependencies = full_tree_digest(asset_root / "tsjs/pnpm-store")
         # Bind the *exact* binaries/entrypoints the recovered command runs, by
         # full content digest, so replacing or truncating any one of them
         # invalidates every row recorded against the old tree.
@@ -2327,13 +2408,13 @@ def asset_state(
         }
         return {
             "node_runtime": (
-                safe_file_digest(runtime / "node") if runtime else None
+                full_entry_digest(runtime / "node") if runtime else None
             ),
             "node_modules": dependencies,
             "required_executables": required_executables,
             "required_trees": required_trees,
             # the exact repo checkout replay_tsjs materializes the start from
-            "repo_checkout": directory_identity(checkout) if checkout else None,
+            "repo_checkout": full_tree_digest(checkout) if checkout else None,
             # the exact recovered session/ tree copied into the workspace
             "session": session_tree,
             "manifest": manifest,
@@ -2720,11 +2801,53 @@ def replay_rust(
     changed = patch_changed_paths(patch_text)
     scope_ok = scope_is_safe(changed)
 
+    # Same immutability contract as the JVM lane: the *retained* cargo cache is
+    # a pinned durable asset and is never mounted writable. Cargo writes into
+    # CARGO_HOME (registry index locks, .package-cache), so a disposable copy
+    # is seeded per replay and mounted read-write while the retained cache is
+    # additionally exposed read-only for reference. A seeding failure is an
+    # infrastructure fault, never a candidate verdict.
     cargo_cache = environment.get("cargo_cache")
     mounts = ["-v", f"{workspace_scratch}:/work"]
+    cache_dir = None
+    cargo_home_scratch = None
+    asset_faults: list[str] = []
     if cargo_cache:
         cache_dir = resolve_legacy_relative(cargo_cache, legacy_root)
-        mounts += ["-v", f"{cache_dir}:/cargo-cache", "-e", "CARGO_HOME=/cargo-cache"]
+        cargo_home_scratch = scratch / "cargo-home"
+        try:
+            copy_tree(cache_dir, cargo_home_scratch)
+        except OSError as error:  # pragma: no cover - defensive
+            asset_faults.append(f"could not seed cargo home: {error!r}")
+        mounts += [
+            "-v", f"{cargo_home_scratch}:/cargo-cache",
+            "-v", f"{cache_dir}:/cargo-cache-pinned:ro",
+            "-e", "CARGO_HOME=/cargo-cache",
+        ]
+    if asset_faults:
+        (scratch / "asset-error.log").write_text(
+            "\n".join(asset_faults) + "\n", encoding="utf-8"
+        )
+        evidence = persist_evidence(output, "rust", model, task_id, scratch)
+        row = {
+            "id": task_id,
+            "model": model,
+            "lane": "rust",
+            "source_kind": "published_legacy",
+            "start_sha": oracle["start_sha"],
+            "patch_sha256": generation.get("patch_sha256"),
+            "status": INFRA_RETRY,
+            "candidate_result": INFRA_RETRY,
+            "correctness_ok": None,
+            "patch_apply": True,
+            "scope_ok": scope_ok,
+            "error": "; ".join(asset_faults)[-4000:],
+            "pinned_asset_faults": asset_faults,
+            "error_log": evidence.get("asset-error.log"),
+        }
+        row.update(provenance)
+        return row
+    pinned_cargo_cache_digest = full_tree_digest(cache_dir) if cache_dir else None
     docker_cmd = [
         "docker", "run", "--rm", "--network=host",
         *mounts, "-w", "/work",
@@ -2735,10 +2858,27 @@ def replay_rust(
     exit_code, duration, error = run_subprocess(
         docker_cmd, cwd=None, log_path=log_path, timeout=timeout
     )
+    # Defensive post-run revalidation of the pinned cargo cache: it is only
+    # ever mounted read-only, so drift is impossible by construction; if it is
+    # observed anyway the row is infrastructure, never a candidate verdict.
+    _TREE_DIGEST_CACHE.clear()
+    drifted_assets = (
+        [str(cache_dir)]
+        if cache_dir is not None
+        and full_tree_digest(cache_dir) != pinned_cargo_cache_digest
+        else []
+    )
     text = log_path.read_text(errors="replace") if log_path.is_file() else ""
     passed = test_count(text, GENERIC_TEST_COUNT_PATTERNS)
     expected = BASE.pass_to_pass_count(oracle.get("pass_to_pass"))
-    correctness_ok = exit_code == 0 and (not expected or passed >= expected)
+    correctness_ok = (
+        exit_code == 0
+        and (not expected or passed >= expected)
+        and not drifted_assets
+    )
+    status = "pass" if correctness_ok else "fail"
+    if drifted_assets:
+        status = INFRA_RETRY
     evidence = persist_evidence(output, "rust", model, task_id, scratch)
     row = {
         "id": task_id,
@@ -2747,8 +2887,9 @@ def replay_rust(
         "source_kind": "published_legacy",
         "start_sha": oracle["start_sha"],
         "patch_sha256": generation.get("patch_sha256"),
-        "status": "pass" if correctness_ok else "fail",
-        "correctness_ok": correctness_ok,
+        "status": status,
+        "candidate_result": status,
+        "correctness_ok": None if drifted_assets else correctness_ok,
         "patch_apply": True,
         "scope_ok": scope_ok,
         "changed_lines": len(changed),
@@ -2759,6 +2900,9 @@ def replay_rust(
         "pass_to_pass_total": expected,
         "pass_to_pass_passed": passed,
         "failed_tests": [] if correctness_ok else ["cargo-test"],
+        "pinned_assets_drifted_during_run": drifted_assets,
+        "pinned_cargo_cache_mounted_readonly": cache_dir is not None,
+        "seeded_cargo_home": cargo_home_scratch is not None,
     }
     row.update(provenance)
     return row

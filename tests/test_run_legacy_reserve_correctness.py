@@ -1464,6 +1464,10 @@ def test_asset_state_binds_rust_start_tree_identity(tmp_path):
     (start_dir / "Cargo.toml").write_text("replaced\n", encoding="utf-8")
     os.utime(start_dir / "Cargo.toml", (stat.st_atime, stat.st_mtime))
 
+    MODULE._TREE_DIGEST_CACHE.clear()
+
+    MODULE._FULL_DIGEST_CACHE.clear()
+
     after = MODULE.asset_state(task_id, "rust", oracle, legacy_root)
     assert after["start"] != before["start"]
 
@@ -1495,6 +1499,8 @@ def test_asset_state_binds_jvm_repo_checkout_and_oracle_cache_blob_identity(tmp_
     stat = (checkout / "build.gradle").stat()
     (checkout / "build.gradle").write_text("replaced\n", encoding="utf-8")
     os.utime(checkout / "build.gradle", (stat.st_atime, stat.st_mtime))
+    MODULE._TREE_DIGEST_CACHE.clear()
+    MODULE._FULL_DIGEST_CACHE.clear()
     after_checkout_change = MODULE.asset_state(task_id, "jvm", oracle, legacy_root)
     assert after_checkout_change["repo_checkout"] != before["repo_checkout"]
 
@@ -1505,6 +1511,8 @@ def test_asset_state_binds_jvm_repo_checkout_and_oracle_cache_blob_identity(tmp_
     blob_stat = cache_blob.stat()
     cache_blob.write_text("replaced init\n", encoding="utf-8")
     os.utime(cache_blob, (blob_stat.st_atime, blob_stat.st_mtime))
+    MODULE._TREE_DIGEST_CACHE.clear()
+    MODULE._FULL_DIGEST_CACHE.clear()
     after_blob_change = MODULE.asset_state(task_id, "jvm", oracle, legacy_root)
     assert after_blob_change["repo_checkout"] == before["repo_checkout"]
     assert after_blob_change["pinned_assets"] != before["pinned_assets"]
@@ -1531,6 +1539,8 @@ def test_asset_state_binds_tsjs_repo_checkout_and_session_tree_identity(tmp_path
     (session_dir / "state.json").write_text('{"v": 2}', encoding="utf-8")
     os.utime(session_dir / "state.json", (stat.st_atime, stat.st_mtime))
 
+    MODULE._TREE_DIGEST_CACHE.clear()
+    MODULE._FULL_DIGEST_CACHE.clear()
     after = MODULE.asset_state(task_id, "tsjs", oracle, legacy_root)
     assert after["session"] != before["session"]
     assert after["repo_checkout"] == before["repo_checkout"]  # unchanged
@@ -3551,3 +3561,286 @@ def test_every_required_cache_dir_is_pinned_by_a_whole_tree_digest():
     for task_id, manifest in MODULE.JVM_MANIFEST.items():
         for name in manifest.get("required_cache_dirs") or ():
             assert name in MODULE.ORACLE_CACHE_DIR_SHA256, (task_id, name)
+
+
+# ---------------------------------------------------------------------------
+# Provenance digests are complete, lstat-based and unsampled at every call site
+# ---------------------------------------------------------------------------
+
+
+def _payload_tree(root, *, files=750, size=200_000):
+    """A tree deliberately larger than the bounded sampler's caps."""
+    for index in range(files):
+        path = root / f"group{index // 50}" / f"artifact-{index:04d}.bin"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"P" * size + f"|{index}".encode("utf-8"))
+    return sorted(root.rglob("*.bin"))
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["tail_edit_past_64k", "beyond_500_files", "same_size_swap", "symlink_retarget",
+     "empty_dir_removed", "dir_symlink_retarget"],
+)
+def test_full_tree_digest_detects_every_mutation_bounded_sampling_misses(
+    tmp_path, mutation
+):
+    root = tmp_path / "tree"
+    root.mkdir()
+    artifacts = _payload_tree(root)
+    # byte-identical targets: only the link target string can distinguish them
+    (root / "real-a.txt").write_text("A" * 10, encoding="utf-8")
+    (root / "real-b.txt").write_text("A" * 10, encoding="utf-8")
+    (root / "link").symlink_to("real-a.txt")
+    (root / "empty").mkdir()
+    (root / "targetdir").mkdir()
+    (root / "otherdir").mkdir()
+    (root / "dirlink").symlink_to("targetdir")
+
+    MODULE._TREE_DIGEST_CACHE.clear()
+    before = MODULE.full_tree_digest(root)
+    sampled_before = MODULE.directory_identity(root)
+
+    if mutation == "tail_edit_past_64k":
+        victim = artifacts[0]
+        payload = bytearray(victim.read_bytes())
+        payload[-1] = (payload[-1] + 1) % 256  # far past the 64 KiB prefix
+        victim.write_bytes(bytes(payload))
+    elif mutation == "beyond_500_files":
+        victim = artifacts[-1]  # sorted well past the 500-file cap
+        payload = bytearray(victim.read_bytes())
+        payload[10] = (payload[10] + 1) % 256
+        victim.write_bytes(bytes(payload))
+    elif mutation == "same_size_swap":
+        victim = artifacts[-2]
+        original = victim.read_bytes()
+        victim.write_bytes(b"Q" * len(original))
+        assert victim.stat().st_size == len(original)
+    elif mutation == "symlink_retarget":
+        # both targets have identical length; only the link target differs
+        (root / "link").unlink()
+        (root / "link").symlink_to("real-b.txt")
+    elif mutation == "empty_dir_removed":
+        (root / "empty").rmdir()
+    else:  # dir_symlink_retarget
+        (root / "dirlink").unlink()
+        (root / "dirlink").symlink_to("otherdir")
+
+    MODULE._TREE_DIGEST_CACHE.clear()
+    after = MODULE.full_tree_digest(root)
+    assert after != before, mutation
+    # ... and prove the bounded sampler could not see it, so this is a real gap
+    assert MODULE.directory_identity(root) == sampled_before, mutation
+
+
+def test_full_entry_digest_is_symlink_aware_and_complete(tmp_path):
+    target_a = tmp_path / "a.js"
+    target_b = tmp_path / "b.js"
+    target_a.write_bytes(b"X" * 200_000)
+    target_b.write_bytes(b"X" * 200_000)  # byte-identical content
+    link = tmp_path / "link"
+    link.symlink_to("a.js")
+
+    assert MODULE.full_entry_digest(link) == "L:a.js"
+    link.unlink()
+    link.symlink_to("b.js")
+    # a retarget between byte-identical files still changes the identity
+    assert MODULE.full_entry_digest(link) == "L:b.js"
+    # a bounded, symlink-following digest cannot tell them apart
+    assert MODULE.safe_file_digest(target_a) == MODULE.safe_file_digest(target_b)
+
+    # tail edit past the sampled prefix changes a file identity
+    MODULE._FULL_DIGEST_CACHE.clear()
+    before = MODULE.full_entry_digest(target_a)
+    sampled = MODULE.safe_file_digest(target_a)
+    payload = bytearray(target_a.read_bytes())
+    payload[-1] = 0x59
+    target_a.write_bytes(bytes(payload))
+    MODULE._FULL_DIGEST_CACHE.clear()
+    assert MODULE.full_entry_digest(target_a) != before
+    assert MODULE.safe_file_digest(target_a) == sampled  # bounded check is blind
+
+    assert MODULE.full_entry_digest(tmp_path) == "D:"
+    assert MODULE.full_entry_digest(tmp_path / "missing") is None
+
+
+def test_asset_state_never_uses_the_bounded_helpers_on_any_lane():
+    # Static guard: the bounded, sampling, symlink-blind helpers must not
+    # appear anywhere in the provenance path for *any* lane.
+    import inspect
+
+    for function in (
+        MODULE.asset_state,
+        MODULE.replay_contract_fingerprint,
+        MODULE.row_provenance_fields,
+        MODULE.jvm_required_assets,
+        MODULE.tsjs_required_trees,
+        MODULE.tsjs_required_executables,
+    ):
+        source = inspect.getsource(function)
+        body = source.split('"""')[-1] if '"""' in source else source
+        assert "directory_identity(" not in body, function.__name__
+        assert "safe_file_digest(" not in body, function.__name__
+
+
+@pytest.mark.parametrize("lane", ["native", "rust", "jvm", "tsjs"])
+def test_asset_state_values_are_full_digests_for_every_lane(tmp_path, lane, monkeypatch):
+    # Every lane's asset_state must report complete digests (hex strings or the
+    # expected/observed pairs), never a bounded directory_identity mapping.
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:x")
+    legacy_root = tmp_path / "legacy"
+    if lane == "native":
+        task_id = "github__ClickHouse__ClickHouse__pull_74193__comment_2024566878__duplication"
+        manifest = MODULE.NATIVE_MANIFEST[task_id]
+        task_dir = legacy_root / "strict_screen_20260726" / manifest["task_dir"]
+        (task_dir / "start").mkdir(parents=True)
+        (task_dir / "start/file.txt").write_text("x", encoding="utf-8")
+        (task_dir / "query.sql").write_text("select 1", encoding="utf-8")
+        oracle = {}
+    elif lane == "rust":
+        task_id = "github__FuelLabs__fuel-tx__pull_197__comment_1003742605__complexity"
+        recovery = legacy_root / "strict_screen_20260726/oracle_recovery/rust/x"
+        (recovery / "start").mkdir(parents=True)
+        (recovery / "start/lib.rs").write_text("//", encoding="utf-8")
+        cargo = legacy_root / "strict_screen_20260726/oracle_recovery/rust/cache/cargo"
+        cargo.mkdir(parents=True)
+        (cargo / "config").write_text("[net]", encoding="utf-8")
+        oracle = {
+            "recovery_artifact": "oracle_recovery/rust/x",
+            "environment": {
+                "docker_image": "img",
+                "cargo_cache": "oracle_recovery/rust/cache/cargo",
+            },
+        }
+    elif lane == "jvm":
+        task_id = WEB3SIGNER_TASK_ID
+        (legacy_root / "repos/Consensys__web3signer").mkdir(parents=True)
+        build_pinned_jvm_cache(legacy_root, monkeypatch)
+        oracle = {
+            "repo": "Consensys/web3signer",
+            "command": "gradle -I /oracle-cache/oracle.init.gradle",
+            "environment": {
+                "container": "img",
+                "cache": "strict_screen_20260726/oracle_recovery/java/cache/home",
+            },
+        }
+    else:
+        task_id = DISCOURSE_TASK_ID
+        (legacy_root / "repos/discourse__discourse").mkdir(parents=True)
+        oracle = {"repo": "discourse/discourse", "historical_node": "20.19.5"}
+
+    MODULE._TREE_DIGEST_CACHE.clear()
+    state = MODULE.asset_state(task_id, lane, oracle, legacy_root)
+
+    def check(value, path="root"):
+        if isinstance(value, dict):
+            # a bounded directory_identity mapping is recognisable by its keys
+            assert "sampled_files" not in value, path
+            assert "bounded_content_sha256" not in value, path
+            for key, child in value.items():
+                check(child, f"{path}.{key}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                check(child, f"{path}[{index}]")
+
+    check(state)
+
+
+def test_replay_rust_mounts_the_pinned_cargo_cache_read_only(tmp_path, monkeypatch):
+    # The retained cargo cache is a pinned durable asset: Cargo writes into
+    # CARGO_HOME, so a disposable seeded copy is mounted RW while the retained
+    # cache is only ever exposed :ro.
+    legacy_root = tmp_path / "legacy"
+    task_id = "github__FuelLabs__fuel-tx__pull_197__comment_1003742605__complexity"
+    recovery = legacy_root / "strict_screen_20260726/oracle_recovery/rust/x"
+    (recovery / "start").mkdir(parents=True)
+    (recovery / "start/src.txt").write_text("line1\nline2\nline3\n", encoding="utf-8")
+    cargo = legacy_root / "strict_screen_20260726/oracle_recovery/rust/cache/cargo"
+    (cargo / "registry").mkdir(parents=True)
+    (cargo / "registry/index").write_text("pinned", encoding="utf-8")
+    oracle = {
+        "start_sha": "abc",
+        "pass_to_pass": 1,
+        "workspace_command": "cargo test",
+        "recovery_artifact": "oracle_recovery/rust/x",
+        "environment": {
+            "docker_image": "img",
+            "cargo_cache": "oracle_recovery/rust/cache/cargo",
+        },
+    }
+    task = strict_task(task_id, repo="FuelLabs/fuel-tx")
+    patch_path = tmp_path / "candidate.patch"
+    patch_path.write_text("", encoding="utf-8")
+    generation = {"patch_file": str(patch_path), "patch_sha256": BASE.sha256(patch_path)}
+
+    seen = {}
+
+    def fake_run_subprocess(command, *, cwd, log_path, env=None, timeout=1800):
+        seen["mounts"] = [
+            command[i + 1] for i, arg in enumerate(command) if arg == "-v"
+        ]
+        # the build writes into CARGO_HOME, which must be the seeded copy
+        home = Path(
+            [m.split(":")[0] for m in seen["mounts"] if m.endswith(":/cargo-cache")][0]
+        )
+        (home / "registry/index").write_text("mutated by cargo", encoding="utf-8")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("test result: ok. 1 passed\n", encoding="utf-8")
+        return 0, 1.0, ""
+
+    monkeypatch.setattr(MODULE, "run_subprocess", fake_run_subprocess)
+    row = MODULE.replay_rust(
+        task_id, "my-model", task, oracle, generation, legacy_root,
+        tmp_path / "work", tmp_path / "output", 60,
+    )
+    assert row["status"] == "pass"
+    assert f"{cargo}:/cargo-cache-pinned:ro" in seen["mounts"]
+    assert f"{cargo}:/cargo-cache" not in seen["mounts"]
+    assert row["pinned_cargo_cache_mounted_readonly"] is True
+    assert row["seeded_cargo_home"] is True
+    assert row["pinned_assets_drifted_during_run"] == []
+    # the retained cache is untouched by the build's write
+    assert (cargo / "registry/index").read_text() == "pinned"
+
+
+def test_replay_rust_reports_infra_when_the_pinned_cargo_cache_drifts(
+    tmp_path, monkeypatch
+):
+    legacy_root = tmp_path / "legacy"
+    task_id = "github__FuelLabs__fuel-tx__pull_197__comment_1003742605__complexity"
+    recovery = legacy_root / "strict_screen_20260726/oracle_recovery/rust/x"
+    (recovery / "start").mkdir(parents=True)
+    (recovery / "start/src.txt").write_text("line1\n", encoding="utf-8")
+    cargo = legacy_root / "strict_screen_20260726/oracle_recovery/rust/cache/cargo"
+    cargo.mkdir(parents=True)
+    (cargo / "config").write_text("pinned", encoding="utf-8")
+    oracle = {
+        "start_sha": "abc",
+        "pass_to_pass": 1,
+        "workspace_command": "cargo test",
+        "recovery_artifact": "oracle_recovery/rust/x",
+        "environment": {
+            "docker_image": "img",
+            "cargo_cache": "oracle_recovery/rust/cache/cargo",
+        },
+    }
+    task = strict_task(task_id, repo="FuelLabs/fuel-tx")
+    patch_path = tmp_path / "candidate.patch"
+    patch_path.write_text("", encoding="utf-8")
+    generation = {"patch_file": str(patch_path), "patch_sha256": BASE.sha256(patch_path)}
+
+    def fake_run_subprocess(command, *, cwd, log_path, env=None, timeout=1800):
+        # simulate the impossible: the retained cache changes under the run
+        (cargo / "config").write_text("drifted", encoding="utf-8")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("test result: ok. 1 passed\n", encoding="utf-8")
+        return 0, 1.0, ""
+
+    monkeypatch.setattr(MODULE, "run_subprocess", fake_run_subprocess)
+    row = MODULE.replay_rust(
+        task_id, "my-model", task, oracle, generation, legacy_root,
+        tmp_path / "work", tmp_path / "output", 60,
+    )
+    assert row["status"] == "infra_retry"
+    assert row["correctness_ok"] is None
+    assert row["pinned_assets_drifted_during_run"] == [str(cargo)]
