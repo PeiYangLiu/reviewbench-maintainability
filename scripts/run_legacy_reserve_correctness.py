@@ -120,6 +120,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -449,68 +450,115 @@ def file_input_digest(path: Path) -> dict[str, Any] | None:
     }
 
 
-def cache_tree_digest(
-    path: Path, *, exclude: set[str] | None = None
-) -> dict[str, Any] | None:
-    """Full-content digest of a mounted directory tree.
 
-    Byte-for-byte identical algorithm to
-    ``recover_legacy_native_rust.tree_digest``: every regular file's path,
-    mode, size **and SHA-256 of its contents**, plus symlink targets, with no
-    sampling and no truncation -- so a same-size, same-mtime byte swap inside
-    a cache or mounted asset tree is detected. Never memoized: mounted caches
-    are writable, and a stale memo would defeat the check.
+def _enumerate_tree(
+    path: Path, exclude: set[str]
+) -> tuple[list[tuple[str, str, int, int, str]], list[tuple[str, Path]]]:
+    """lstat-based enumeration of **every** path entry under ``path``.
+
+    Yields one record per entry -- regular files, symlinks (to files *or*
+    directories), real directories (including empty ones) and anything else --
+    as ``(relative_path, kind, mode, size, detail)``. Symlinks are never
+    followed: a symlinked directory is recorded by its target string, so
+    retargeting or removing it changes the digest, and a real directory is
+    recorded in its own right, so adding or removing an empty directory does
+    too. ``os.walk`` could do neither: it drops directory entries from the
+    record entirely, silently leaving symlinked and empty directories unbound.
+
+    Returns the entry list plus the list of regular files whose bytes still
+    need hashing.
     """
-    if not path.is_dir():
-        return None
-    exclude = exclude or set()
-    targets: list[tuple[str, Path]] = []
-    entries: list[tuple[str, int, int, str]] = []
-    for root, dirnames, filenames in os.walk(path):
-        if Path(root) == path:
-            dirnames[:] = sorted(name for name in dirnames if name not in exclude)
-            filenames = [name for name in filenames if name not in exclude]
-        else:
-            dirnames.sort()
-        for name in sorted(filenames):
-            item = Path(root) / name
-            relative = str(item.relative_to(path))
-            try:
-                stat = item.lstat()
-            except OSError:
-                entries.append((relative, -1, -1, "unreadable"))
+    entries: list[tuple[str, str, int, int, str]] = []
+    files: list[tuple[str, Path]] = []
+    stack: list[Path] = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as scanner:
+                items = sorted(scanner, key=lambda item: item.name)
+        except OSError:
+            entries.append(
+                (str(current.relative_to(path)), "unreadable-dir", -1, -1, "")
+            )
+            continue
+        for item in items:
+            item_path = Path(item.path)
+            relative = str(item_path.relative_to(path))
+            if current == path and item.name in exclude:
                 continue
-            if os.path.islink(item):
+            try:
+                info = item.stat(follow_symlinks=False)
+            except OSError:
+                entries.append((relative, "unreadable", -1, -1, ""))
+                continue
+            if item.is_symlink():
                 try:
-                    target = os.readlink(item)
+                    target = os.readlink(item_path)
                 except OSError:
                     target = "unreadable"
                 entries.append(
-                    (relative, stat.st_size, stat.st_mode, f"symlink:{target}")
+                    (relative, "symlink", info.st_mode, info.st_size, target)
                 )
-                continue
-            targets.append((relative, item))
-            entries.append((relative, stat.st_size, stat.st_mode, ""))
+            elif stat.S_ISDIR(info.st_mode):
+                entries.append((relative, "dir", info.st_mode, 0, ""))
+                stack.append(item_path)
+            elif stat.S_ISREG(info.st_mode):
+                entries.append((relative, "file", info.st_mode, info.st_size, ""))
+                files.append((relative, item_path))
+            else:
+                entries.append((relative, "other", info.st_mode, info.st_size, ""))
+    return entries, files
+
+
+def _tree_digest_impl(
+    path: Path, exclude: set[str] | None = None
+) -> dict[str, Any] | None:
+    """Full-content digest of every entry under ``path``.
+
+    Identical implementation and semantics in the recovery tool and the replay
+    adapter: every regular file contributes its bytes' SHA-256 plus path, mode
+    and size; every symlink contributes its link target (never followed);
+    every real directory, including empty ones, contributes its own record.
+    """
+    if not path.is_dir():
+        return None
+    entries, files = _enumerate_tree(path, exclude or set())
     hashes: dict[str, str] = {}
-    if targets:
+    if files:
         with concurrent.futures.ThreadPoolExecutor(_HASH_WORKERS) as pool:
             futures = {
                 pool.submit(_safe_file_sha256, item): relative
-                for relative, item in targets
+                for relative, item in files
             }
             for future in concurrent.futures.as_completed(futures):
                 hashes[futures[future]] = future.result()
     final = [
-        (relative, size, mode, marker or hashes.get(relative, "unreadable"))
-        for relative, size, mode, marker in entries
+        (
+            relative,
+            kind,
+            mode,
+            size,
+            hashes.get(relative, "unreadable") if kind == "file" else detail,
+        )
+        for relative, kind, mode, size, detail in entries
     ]
     return {
         "kind": "tree",
-        "file_count": len(final),
+        "entry_count": len(final),
+        "file_count": sum(1 for row in final if row[1] == "file"),
+        "dir_count": sum(1 for row in final if row[1] == "dir"),
+        "symlink_count": sum(1 for row in final if row[1] == "symlink"),
         "digest": hashlib.sha256(
             json.dumps(sorted(final), sort_keys=True).encode("utf-8")
         ).hexdigest(),
     }
+
+
+def cache_tree_digest(
+    path: Path, *, exclude: set[str] | None = None
+) -> dict[str, Any] | None:
+    """See ``_tree_digest_impl``; never memoized (mounted trees are writable)."""
+    return _tree_digest_impl(path, exclude)
 
 
 def mount_input_digests(entry: dict[str, Any], assets_root: Path) -> dict[str, Any]:

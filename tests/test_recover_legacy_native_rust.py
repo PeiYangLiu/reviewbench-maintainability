@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -804,6 +805,111 @@ def test_manifest_blocks_after_same_size_tamper_of_a_mounted_input(
 
     # same-size edit of the mounted oracle source -> proofs are stale
     (workspace / "oracle.cpp").write_text("int main(){return 1;}\n", encoding="utf-8")
+    MODULE.cmd_manifest(args)
+    entries = {
+        row["id"]: row
+        for row in json.loads((assets / MODULE.MANIFEST_NAME).read_text())["tasks"]
+    }
+    assert entries[task_id]["status"] == "blocked"
+    assert any("stale" in text for text in entries[task_id]["blockers"])
+
+
+# ---------------------------------------------------------------------------
+# Directory entries: symlinked dirs and empty dirs must be bound too
+# ---------------------------------------------------------------------------
+
+
+def build_symlinked_tree(root: Path) -> Path:
+    (root / "sub").mkdir(parents=True)
+    (root / "sub/f.txt").write_text("hello\n", encoding="utf-8")
+    (root / "empty").mkdir()
+    os.symlink("sub", root / "dirlink")
+    os.symlink("sub/f.txt", root / "filelink")
+    return root
+
+
+def test_tree_digest_records_directories_symlinks_and_empty_dirs(tmp_path):
+    tree = build_symlinked_tree(tmp_path / "tree")
+    digest = MODULE.tree_digest(tree, use_cache=False)
+    # 1 file + 2 real dirs (sub, empty) + 2 symlinks (dir + file)
+    assert digest["entry_count"] == 5
+    assert digest["file_count"] == 1
+    assert digest["dir_count"] == 2
+    assert digest["symlink_count"] == 2
+
+
+def test_directory_symlink_retarget_and_removal_change_the_digest(tmp_path):
+    tree = build_symlinked_tree(tmp_path / "tree")
+    base = MODULE.tree_digest(tree, use_cache=False)
+
+    # retarget the *directory* symlink -- same name, same mode, new target
+    (tree / "dirlink").unlink()
+    os.symlink("empty", tree / "dirlink")
+    assert MODULE.tree_digest(tree, use_cache=False) != base
+    (tree / "dirlink").unlink()
+    os.symlink("sub", tree / "dirlink")
+    assert MODULE.tree_digest(tree, use_cache=False) == base
+
+    # remove it entirely
+    (tree / "dirlink").unlink()
+    assert MODULE.tree_digest(tree, use_cache=False) != base
+
+
+def test_empty_directory_add_and_remove_change_the_digest(tmp_path):
+    tree = build_symlinked_tree(tmp_path / "tree")
+    base = MODULE.tree_digest(tree, use_cache=False)
+    (tree / "brand-new-empty").mkdir()
+    assert MODULE.tree_digest(tree, use_cache=False) != base
+    (tree / "brand-new-empty").rmdir()
+    assert MODULE.tree_digest(tree, use_cache=False) == base
+    (tree / "empty").rmdir()
+    assert MODULE.tree_digest(tree, use_cache=False) != base
+
+
+def test_directory_symlinks_are_never_followed(tmp_path):
+    """A symlink loop or an out-of-tree target must not be traversed."""
+    tree = tmp_path / "tree"
+    (tree / "real").mkdir(parents=True)
+    (tree / "real/a.txt").write_text("a\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("s\n", encoding="utf-8")
+    os.symlink(str(outside), tree / "escape")
+    os.symlink(".", tree / "loop")
+    digest = MODULE.tree_digest(tree, use_cache=False)
+    assert digest["file_count"] == 1  # only real/a.txt was hashed
+    assert digest["symlink_count"] == 2
+    # content behind the symlink is irrelevant; only the target string counts
+    (outside / "secret.txt").write_text("changed\n", encoding="utf-8")
+    assert MODULE.tree_digest(tree, use_cache=False) == digest
+
+
+def test_manifest_blocks_when_a_mounted_directory_symlink_is_retargeted(
+    tmp_path, monkeypatch
+):
+    task_id, recipe, assets, _ = build_assets(tmp_path, monkeypatch)
+    monkeypatch.setitem(MODULE.RECIPES, task_id, recipe)
+    workspace = assets / recipe["workspace"]
+    (workspace / "deps").mkdir(parents=True, exist_ok=True)
+    (workspace / "deps/lib.h").write_text("h\n", encoding="utf-8")
+    (workspace / "alt").mkdir(exist_ok=True)
+    os.symlink("deps", workspace / "vendor")
+    fingerprint = current_fingerprint(task_id, recipe, assets)
+    write_proof(
+        assets, recipe, task_id, proof_runs("start", "golden", fingerprint=fingerprint)
+    )
+    args = MODULE.parse_args(
+        ["manifest", "--assets-root", str(assets), "--legacy-root", str(tmp_path)]
+    )
+    MODULE.cmd_manifest(args)
+    entries = {
+        row["id"]: row
+        for row in json.loads((assets / MODULE.MANIFEST_NAME).read_text())["tasks"]
+    }
+    assert entries[task_id]["status"] == "ready"
+
+    (workspace / "vendor").unlink()
+    os.symlink("alt", workspace / "vendor")
     MODULE.cmd_manifest(args)
     entries = {
         row["id"]: row

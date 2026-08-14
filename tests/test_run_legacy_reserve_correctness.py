@@ -2551,3 +2551,83 @@ def test_asset_state_includes_every_mounted_input(tmp_path, monkeypatch):
         TSFILE_ID, "native", strict_oracle(TSFILE_ID), tmp_path, []
     )
     assert before != after
+
+
+# ---------------------------------------------------------------------------
+# Adapter: directory entries (symlinked dirs, empty dirs) are bound too
+# ---------------------------------------------------------------------------
+
+
+def test_adapter_digest_matches_the_recovery_tool_entry_for_entry(tmp_path):
+    """Both tools must produce byte-identical digests for the same tree."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "recover_legacy_native_rust", SCRIPTS_DIR / "recover_legacy_native_rust.py"
+    )
+    recovery = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(recovery)
+
+    tree = tmp_path / "tree"
+    (tree / "sub").mkdir(parents=True)
+    (tree / "sub/f.bin").write_bytes(b"payload")
+    (tree / "empty").mkdir()
+    os.symlink("sub", tree / "dirlink")
+    os.symlink("sub/f.bin", tree / "filelink")
+    assert MODULE.cache_tree_digest(tree) == recovery.tree_digest(
+        tree, use_cache=False
+    )
+
+
+def test_adapter_blocks_on_directory_symlink_and_empty_dir_drift(
+    tmp_path, monkeypatch
+):
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    cache = assets / "caches/demo"
+    (cache / "real").mkdir(parents=True, exist_ok=True)
+    (cache / "real/lib.a").write_bytes(b"lib")
+    (cache / "alt").mkdir(exist_ok=True)
+    (cache / "hollow").mkdir(exist_ok=True)
+    os.symlink("real", cache / "include-link")
+    # rebind the manifest to this exact state
+    MODULE.load_recovery_assets(assets)
+    entry = MODULE.recovered_entry(TSFILE_ID)
+    _ready_entry(
+        assets,
+        mounted_cache_digests={"caches/demo": MODULE.cache_tree_digest(cache)},
+    )
+    assert MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha") == []
+
+    # 1) retarget the directory symlink
+    (cache / "include-link").unlink()
+    os.symlink("alt", cache / "include-link")
+    assert any(
+        "has drifted" in b
+        for b in MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    )
+    (cache / "include-link").unlink()
+    os.symlink("real", cache / "include-link")
+    assert MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha") == []
+
+    # 2) remove the directory symlink entirely
+    (cache / "include-link").unlink()
+    assert any(
+        "has drifted" in b
+        for b in MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    )
+    os.symlink("real", cache / "include-link")
+
+    # 3) add and remove empty directories
+    (cache / "new-empty").mkdir()
+    assert any(
+        "has drifted" in b
+        for b in MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    )
+    (cache / "new-empty").rmdir()
+    assert MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha") == []
+    (cache / "hollow").rmdir()
+    assert any(
+        "has drifted" in b
+        for b in MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    )

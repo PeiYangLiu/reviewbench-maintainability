@@ -658,6 +658,15 @@ immediately before the Oracle runs:
   workspace sibling is detected and blocks. Hashing is parallelized (16
   threads); the 7.8 GB Conan cache and the 166 MB CARGO_HOME together digest
   in ~35 s per verification pass;
+- the traversal is an `lstat`-based enumeration of **every path entry**, not an
+  `os.walk` over files: regular files (bytes), symlinks to files *and to
+  directories* (link target, never followed), and real directories including
+  empty ones each contribute a record. `os.walk` reported neither symlinked
+  directories nor empty directories, which left them unbound -- and the real
+  rippled Conan cache contains both (e.g. `grpc/1.50.1/.../spm-core-include/
+  grpc` is a directory symlink, alongside dozens of empty directories), so
+  retargeting or deleting one used to be invisible. Both tools share one
+  implementation (`_tree_digest_impl`) and produce byte-identical digests;
 - the Docker image must still be loaded with the recorded image id;
 - the manifest must carry a successful start-tree proof run **and**, for any
   contract that declares a source-only golden patch, a successful golden
@@ -783,13 +792,18 @@ python3 scripts/run_legacy_reserve_correctness.py replay \
 The bundle produced on 2026-08-14 lives at
 `/data/v-peiyangliu/reviewbench-openmodels/legacy-recovery-assets/native-rust`
 (`recovery-manifest.json` SHA-256
-`e0573da373faf11ac5505670f787b2364b82dbcf8d748001a59c11cfdc7c2c2f`,
+`953cde9cc577076005465f67355e5f4b4eafead24f11c55a0f7840d34a11a447`,
 `SHA256SUMS` SHA-256
-`b1a4c3b62227eeb9e0c1d85aa5c42c21c9b8130377c2d69b85cb21ebf8f9eda6`).
+`acf3f5f056d6c512b4622381878f1d5ded46cd7d338cc93f24f6913bca9d8b32`). The
+Conan cache alone now binds 142,680 entries -- 128,802 files, 13,853
+directories and 25 symlinks -- where the previous file-only traversal bound
+128,802.
 Live checks against that bundle: a same-size byte swap in ClickHouse's mounted
-`query.sql`, and a same-size byte swap inside a `.crate` file in the mounted
-CARGO_HOME, each block the affected task ("has drifted from its recorded
-content digest"); restoring the original bytes returns both to ready.
+`query.sql`; a same-size byte swap inside a `.crate` file in the mounted
+CARGO_HOME; retargeting the `grpc/1.50.1/.../spm-core-include/grpc` *directory
+symlink* in the Conan cache; and adding a single empty directory to it -- each
+blocks the affected task ("has drifted from its recorded content digest"),
+and restoring the original state returns each to ready.
 Every contract's start and golden proof in that bundle was executed on a
 disposable copy, and a post-proof replay confirms the canonical CARGO_HOME
 (8,343 files) and workspaces are byte-identical afterwards.
