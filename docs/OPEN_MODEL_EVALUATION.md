@@ -642,9 +642,22 @@ immediately before the Oracle runs:
 - every authored harness file, golden patch and harness-copy source must
   still hash to its recorded SHA-256;
 - every mounted cache -- both `cache_mounts` (rippled's Conan cache) and the
-  rebuilt CARGO_HOMEs -- must be present *and* match its recorded tree digest
-  (a complete, unsampled walk over every file's path, size, mode and symlink
-  target), and a CARGO_HOME missing `bin/cargo` is reported as incomplete;
+  rebuilt CARGO_HOMEs -- must be present *and* match its recorded tree digest,
+  and a CARGO_HOME missing `bin/cargo` is reported as incomplete;
+- **every other replay-mounted input** is bound the same way through
+  `mount_input_digests`: single mounted files (ClickHouse's `query.sql`,
+  dpnp's `behavior_test.py`), the whole workspace directory a `mount: "."`
+  recipe exposes next to `start/` (`oracle.cpp`, the retained source-only
+  patches, `checkpoint.json`), read-only harness directories and harness-copy
+  sources. The exact-start subtree is the only mounted input not in that map,
+  because it is verified through git `workspace_state`; a mount source that
+  the manifest never bound is itself a blocker;
+- all of those digests are **full-content SHA-256** over every regular file
+  (plus path, mode, size and symlink target), never path/size/mode alone, so a
+  same-size, same-mtime byte swap inside a cache, a harness file or a mounted
+  workspace sibling is detected and blocks. Hashing is parallelized (16
+  threads); the 7.8 GB Conan cache and the 166 MB CARGO_HOME together digest
+  in ~35 s per verification pass;
 - the Docker image must still be loaded with the recorded image id;
 - the manifest must carry a successful start-tree proof run **and**, for any
   contract that declares a source-only golden patch, a successful golden
@@ -770,9 +783,13 @@ python3 scripts/run_legacy_reserve_correctness.py replay \
 The bundle produced on 2026-08-14 lives at
 `/data/v-peiyangliu/reviewbench-openmodels/legacy-recovery-assets/native-rust`
 (`recovery-manifest.json` SHA-256
-`fee00ceff616da7a0fa970a9b9d9337760aa0a99ea6422f46c8c221801193f7d`,
+`e0573da373faf11ac5505670f787b2364b82dbcf8d748001a59c11cfdc7c2c2f`,
 `SHA256SUMS` SHA-256
-`cb8c50c5f1dd4a62099dcd660cd4d5c5bd00cbb0971707616093ee2fe7a209aa`).
+`b1a4c3b62227eeb9e0c1d85aa5c42c21c9b8130377c2d69b85cb21ebf8f9eda6`).
+Live checks against that bundle: a same-size byte swap in ClickHouse's mounted
+`query.sql`, and a same-size byte swap inside a `.crate` file in the mounted
+CARGO_HOME, each block the affected task ("has drifted from its recorded
+content digest"); restoring the original bytes returns both to ready.
 Every contract's start and golden proof in that bundle was executed on a
 disposable copy, and a post-proof replay confirms the canonical CARGO_HOME
 (8,343 files) and workspaces are byte-identical afterwards.

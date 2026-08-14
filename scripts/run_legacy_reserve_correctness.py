@@ -110,6 +110,7 @@ Typical usage
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import contextlib
 import fcntl
 import hashlib
@@ -406,29 +407,71 @@ def workspace_git_state(start: Path) -> dict[str, Any]:
 # precisely the window in which a drifted cache would be waved through. Every
 # call re-walks the tree; the walk costs well under a second per gigabyte and
 # runs at most twice per (task, model) replay.
+# Deliberately *not* memoized. A mounted cache is a live, writable directory,
+# so any process-lifetime memo could hand a later blocker check a digest that
+# predates a mutation -- precisely the window in which a drifted cache would be
+# waved through. Every call re-walks and re-hashes the tree.
 _CACHE_TREE_DIGESTS: dict[str, dict[str, Any] | None] = {}
+_HASH_WORKERS = 16
+_HASH_CHUNK = 4 * 1024 * 1024
 
 
 def invalidate_cache_digests() -> None:
-    """Drop any cached cache-digest state (see ``cache_tree_digest``)."""
+    """Drop any cached digest state (see ``cache_tree_digest``)."""
     _CACHE_TREE_DIGESTS.clear()
 
 
-def cache_tree_digest(path: Path) -> dict[str, Any] | None:
-    """Complete, freshly computed structural digest of a mounted cache.
+def file_content_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(_HASH_CHUNK), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
-    Identical algorithm to ``recover_legacy_native_rust.tree_digest``: every
-    file's path, size, mode and symlink target, with no sampling and no
-    truncation, so a swapped/truncated/partially-restored cache cannot slip
-    through the bounded sampling the historical ``directory_identity`` used.
-    The result is *never* memoized across calls: mounted caches are writable,
-    so a stale memo would defeat the very check this exists for.
+
+def _safe_file_sha256(path: Path) -> str:
+    try:
+        return file_content_sha256(path)
+    except OSError:
+        return "unreadable"
+
+
+def file_input_digest(path: Path) -> dict[str, Any] | None:
+    """Content identity of a single mounted file."""
+    if not path.is_file():
+        return None
+    stat = path.lstat()
+    return {
+        "kind": "file",
+        "size": stat.st_size,
+        "mode": stat.st_mode,
+        "sha256": file_content_sha256(path),
+    }
+
+
+def cache_tree_digest(
+    path: Path, *, exclude: set[str] | None = None
+) -> dict[str, Any] | None:
+    """Full-content digest of a mounted directory tree.
+
+    Byte-for-byte identical algorithm to
+    ``recover_legacy_native_rust.tree_digest``: every regular file's path,
+    mode, size **and SHA-256 of its contents**, plus symlink targets, with no
+    sampling and no truncation -- so a same-size, same-mtime byte swap inside
+    a cache or mounted asset tree is detected. Never memoized: mounted caches
+    are writable, and a stale memo would defeat the check.
     """
     if not path.is_dir():
         return None
+    exclude = exclude or set()
+    targets: list[tuple[str, Path]] = []
     entries: list[tuple[str, int, int, str]] = []
     for root, dirnames, filenames in os.walk(path):
-        dirnames.sort()
+        if Path(root) == path:
+            dirnames[:] = sorted(name for name in dirnames if name not in exclude)
+            filenames = [name for name in filenames if name not in exclude]
+        else:
+            dirnames.sort()
         for name in sorted(filenames):
             item = Path(root) / name
             relative = str(item.relative_to(path))
@@ -437,19 +480,72 @@ def cache_tree_digest(path: Path) -> dict[str, Any] | None:
             except OSError:
                 entries.append((relative, -1, -1, "unreadable"))
                 continue
-            target = ""
             if os.path.islink(item):
                 try:
                     target = os.readlink(item)
                 except OSError:
                     target = "unreadable"
-            entries.append((relative, stat.st_size, stat.st_mode, target))
+                entries.append(
+                    (relative, stat.st_size, stat.st_mode, f"symlink:{target}")
+                )
+                continue
+            targets.append((relative, item))
+            entries.append((relative, stat.st_size, stat.st_mode, ""))
+    hashes: dict[str, str] = {}
+    if targets:
+        with concurrent.futures.ThreadPoolExecutor(_HASH_WORKERS) as pool:
+            futures = {
+                pool.submit(_safe_file_sha256, item): relative
+                for relative, item in targets
+            }
+            for future in concurrent.futures.as_completed(futures):
+                hashes[futures[future]] = future.result()
+    final = [
+        (relative, size, mode, marker or hashes.get(relative, "unreadable"))
+        for relative, size, mode, marker in entries
+    ]
     return {
-        "file_count": len(entries),
+        "kind": "tree",
+        "file_count": len(final),
         "digest": hashlib.sha256(
-            json.dumps(sorted(entries), sort_keys=True).encode("utf-8")
+            json.dumps(sorted(final), sort_keys=True).encode("utf-8")
         ).hexdigest(),
     }
+
+
+def mount_input_digests(entry: dict[str, Any], assets_root: Path) -> dict[str, Any]:
+    """Live content digests of every replay-mounted input except the
+    exact-start subtree (which is verified through git ``workspace_state``).
+
+    Mirrors ``recover_legacy_native_rust.mount_input_digests`` key for key, so
+    the manifest's recorded map can be compared entry by entry.
+    """
+    workspace = assets_root / entry["workspace"]
+    digests: dict[str, Any] = {}
+    for host in sorted(entry.get("mount") or {}):
+        if host == entry["patch_subdir"]:
+            continue
+        source = workspace if host == "." else workspace / host
+        key = f"mount:{host}"
+        if host == ".":
+            digests[key] = cache_tree_digest(
+                source, exclude={entry["patch_subdir"]}
+            )
+        elif source.is_dir():
+            digests[key] = cache_tree_digest(source)
+        else:
+            digests[key] = file_input_digest(source)
+    for mount in entry.get("harness_mounts") or []:
+        source = assets_root / mount["host"]
+        digests[f"harness_mount:{mount['host']}"] = (
+            cache_tree_digest(source) if source.is_dir()
+            else file_input_digest(source)
+        )
+    for copy in entry.get("harness_copies") or []:
+        digests[f"harness_copy:{copy['host']}"] = file_input_digest(
+            assets_root / copy["host"]
+        )
+    return digests
 
 
 def recovered_blockers(task_id: str, entry: dict[str, Any]) -> list[str]:
@@ -523,6 +619,37 @@ def recovered_blockers(task_id: str, entry: dict[str, Any]) -> list[str]:
             f"Docker image {image} is now {live_image_id}, not the recovered "
             f"{entry['docker_image_id']}"
         )
+    # Every *non-start* input the replay mounts -- single harness files
+    # (query.sql, behavior_test.py), whole workspace directories exposed by a
+    # ``mount: "."`` recipe (oracle.cpp, retained patches), read-only harness
+    # directories and harness copy sources -- must be present and match its
+    # recorded content digest. Tampering with any one of them blocks here,
+    # both at preflight and in the pre-execution check.
+    recorded_mounts = entry.get("mount_input_digests")
+    if recorded_mounts is None:
+        blockers.append(
+            "recovered contract manifest does not record "
+            "mount_input_digests; regenerate it with "
+            "scripts/recover_legacy_native_rust.py manifest"
+        )
+    else:
+        live_mounts = mount_input_digests(entry, root)
+        for key in sorted(set(recorded_mounts) | set(live_mounts)):
+            recorded_value = recorded_mounts.get(key)
+            live_value = live_mounts.get(key)
+            if key not in recorded_mounts:
+                blockers.append(
+                    f"mounted input {key} is not bound to the recovery "
+                    "manifest (no recorded content digest)"
+                )
+            elif live_value is None:
+                blockers.append(f"missing mounted input: {key}")
+            elif live_value != recorded_value:
+                blockers.append(
+                    f"mounted input {key} has drifted from its recorded "
+                    "content digest"
+                )
+
     # Every directory a replay actually mounts must be present *and* bound to
     # the manifest, not merely exist: a mounted cache silently swapped,
     # truncated or partially restored changes what the Oracle compiles.
@@ -644,6 +771,8 @@ def recovered_asset_state(entry: dict[str, Any]) -> dict[str, Any]:
             relative: cache_tree_digest(root / relative)
             for relative in sorted(mounted_caches)
         },
+        # every other mounted input (files, workspace siblings, harness dirs)
+        "mounted_inputs": mount_input_digests(entry, root),
     }
 
 # Bump whenever the *behavior* of a replay_* function, NATIVE_MANIFEST entry,

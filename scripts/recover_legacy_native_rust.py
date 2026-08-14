@@ -43,6 +43,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -661,35 +662,64 @@ def workspace_state(start: Path) -> dict[str, Any]:
 workspace_provenance = workspace_state
 
 
-_TREE_DIGEST_CACHE: dict[str, dict[str, Any]] = {}
+_HASH_WORKERS = 16
+_HASH_CHUNK = 4 * 1024 * 1024
 
 
-def tree_digest(path: Path, *, use_cache: bool = True) -> dict[str, Any] | None:
-    """Complete, order-independent structural digest of a mounted directory.
+def file_content_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(_HASH_CHUNK), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
-    Every file under ``path`` contributes its repository-relative path, size,
-    mode and symlink target -- with **no sampling and no truncation**, unlike
-    the adapter's historical bounded ``directory_identity``. That is what lets
-    a reconstructed cache (a 7.8 GB Conan tree, a CARGO_HOME registry) be
-    bound to the manifest as a whole: adding, removing, truncating, growing or
-    re-permissioning any file inside it changes the digest, so a tampered or
-    partially-restored cache blocks instead of silently changing what a replay
-    compiles against.
 
-    File *contents* are deliberately not read: the caches are multi-gigabyte
-    and are mounted read-write by design (cargo/conan write lock files), so a
-    full content hash would be both prohibitively slow and unstable. Small
-    authored inputs (harness sources, golden patches, recipes) are covered by
-    real SHA-256 content hashes in ``SHA256SUMS`` instead.
+def file_input_digest(path: Path) -> dict[str, Any] | None:
+    """Content identity of a single mounted file (bytes, size and mode)."""
+    if not path.is_file():
+        return None
+    stat = path.lstat()
+    return {
+        "kind": "file",
+        "size": stat.st_size,
+        "mode": stat.st_mode,
+        "sha256": file_content_sha256(path),
+    }
+
+
+def tree_digest(
+    path: Path,
+    *,
+    use_cache: bool = True,
+    exclude: set[str] | None = None,
+) -> dict[str, Any] | None:
+    """Full-content digest of a mounted directory tree.
+
+    Every regular file contributes its repository-relative path, mode, size
+    **and SHA-256 of its bytes**; symlinks contribute their target. Nothing is
+    sampled and nothing is truncated, so a same-size, same-mtime byte swap
+    inside a mounted cache or asset tree changes the digest and blocks the
+    contract -- which a path/size/mode-only digest could not detect.
+
+    ``exclude`` skips top-level names (used to leave the exact-start subtree,
+    which is verified through git ``workspace_state``, out of a ``mount: "."``
+    digest so a multi-gigabyte build tree is not rehashed on every check).
+
+    Hashing is parallelized across ``_HASH_WORKERS`` threads (hashlib releases
+    the GIL for large buffers), which keeps a multi-gigabyte cache well inside
+    a few seconds per verification pass.
     """
-    key = str(path)
-    if use_cache and key in _TREE_DIGEST_CACHE:
-        return _TREE_DIGEST_CACHE[key]
     if not path.is_dir():
         return None
+    exclude = exclude or set()
+    targets: list[tuple[str, Path]] = []
     entries: list[tuple[str, int, int, str]] = []
     for root, dirnames, filenames in os.walk(path):
-        dirnames.sort()
+        if Path(root) == path:
+            dirnames[:] = sorted(name for name in dirnames if name not in exclude)
+            filenames = [name for name in filenames if name not in exclude]
+        else:
+            dirnames.sort()
         for name in sorted(filenames):
             item = Path(root) / name
             relative = str(item.relative_to(path))
@@ -698,20 +728,87 @@ def tree_digest(path: Path, *, use_cache: bool = True) -> dict[str, Any] | None:
             except OSError:
                 entries.append((relative, -1, -1, "unreadable"))
                 continue
-            target = ""
             if os.path.islink(item):
                 try:
                     target = os.readlink(item)
                 except OSError:
                     target = "unreadable"
-            entries.append((relative, stat.st_size, stat.st_mode, target))
-    digest = hashlib.sha256(
-        json.dumps(sorted(entries), sort_keys=True).encode("utf-8")
-    ).hexdigest()
-    value = {"file_count": len(entries), "digest": digest}
-    if use_cache:
-        _TREE_DIGEST_CACHE[key] = value
-    return value
+                entries.append((relative, stat.st_size, stat.st_mode, f"symlink:{target}"))
+                continue
+            targets.append((relative, item))
+            entries.append((relative, stat.st_size, stat.st_mode, ""))
+
+    hashes: dict[str, str] = {}
+    if targets:
+        with concurrent.futures.ThreadPoolExecutor(_HASH_WORKERS) as pool:
+            futures = {
+                pool.submit(_safe_file_sha256, item): relative
+                for relative, item in targets
+            }
+            for future in concurrent.futures.as_completed(futures):
+                hashes[futures[future]] = future.result()
+    final = [
+        (relative, size, mode, marker or hashes.get(relative, "unreadable"))
+        for relative, size, mode, marker in entries
+    ]
+    return {
+        "kind": "tree",
+        "file_count": len(final),
+        "digest": hashlib.sha256(
+            json.dumps(sorted(final), sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def _safe_file_sha256(path: Path) -> str:
+    try:
+        return file_content_sha256(path)
+    except OSError:
+        return "unreadable"
+
+
+def mount_input_digests(
+    recipe: dict[str, Any], assets_root: Path
+) -> dict[str, Any]:
+    """Content identity of **every** replay-mounted input except the
+    exact-start subtree.
+
+    The recipes mount more than the start checkout: single harness files
+    (``query.sql``, ``behavior_test.py``), whole workspace directories
+    (``mount: "."`` exposes ``oracle.cpp``, the retained patches and
+    checkpoints next to ``start/``) and read-only harness directories. Each of
+    those is bound here by full content digest, so tampering with any one of
+    them invalidates the recipe fingerprint, blocks preflight and blocks the
+    pre-execution check. The start subtree itself is deliberately excluded --
+    it is verified through git ``workspace_state`` -- and is the only mounted
+    input not covered by this map.
+    """
+    workspace = assets_root / recipe["workspace"]
+    digests: dict[str, Any] = {}
+    for host in sorted(recipe.get("mount", {})):
+        if host == recipe["patch_subdir"]:
+            continue  # covered by workspace_state (git)
+        source = workspace if host == "." else workspace / host
+        key = f"mount:{host}"
+        if host == ".":
+            digests[key] = tree_digest(
+                source, use_cache=False, exclude={recipe["patch_subdir"]}
+            )
+        elif source.is_dir():
+            digests[key] = tree_digest(source, use_cache=False)
+        else:
+            digests[key] = file_input_digest(source)
+    for mount in recipe.get("harness_mounts", []):
+        source = assets_root / mount["host"]
+        digests[f"harness_mount:{mount['host']}"] = (
+            tree_digest(source, use_cache=False) if source.is_dir()
+            else file_input_digest(source)
+        )
+    for copy in recipe.get("harness_copies", []):
+        digests[f"harness_copy:{copy['host']}"] = file_input_digest(
+            assets_root / copy["host"]
+        )
+    return digests
 
 
 def mounted_cache_digests(
@@ -739,6 +836,7 @@ def contract_blockers(
     assets_root: Path,
     *,
     expected_state: dict[str, Any] | None = None,
+    expected_mounts: dict[str, Any] | None = None,
 ) -> list[str]:
     """Fail-closed asset check for one recovered contract.
 
@@ -789,6 +887,18 @@ def contract_blockers(
             continue
         if not (workspace / host).exists():
             blockers.append(f"missing mount source: {workspace / host}")
+    if expected_mounts is not None:
+        live_mounts = mount_input_digests(recipe, assets_root)
+        for key, expected in sorted(expected_mounts.items()):
+            if live_mounts.get(key) != expected:
+                blockers.append(
+                    f"mounted input {key} has drifted from its recorded "
+                    "content digest"
+                )
+        for key in sorted(set(live_mounts) - set(expected_mounts)):
+            blockers.append(
+                f"mounted input {key} is not bound to the recovery manifest"
+            )
     for host in recipe.get("cache_mounts", {}):
         if not (assets_root / host).is_dir():
             blockers.append(f"missing mounted cache: {assets_root / host}")
@@ -896,10 +1006,19 @@ def cmd_manifest(args: argparse.Namespace) -> int:
         blockers = contract_blockers(task_id, recipe, assets_root)
         live_workspace_state = workspace_state(workspace / recipe["patch_subdir"])
         cache_digests = mounted_cache_digests(recipe, assets_root)
+        mount_digests = mount_input_digests(recipe, assets_root)
+        missing_mounts = [
+            key for key, value in mount_digests.items() if value is None
+        ]
+        blockers.extend(
+            f"mounted input {key} could not be digested (missing or unreadable)"
+            for key in sorted(missing_mounts)
+        )
         fingerprint = recipe_fingerprint(
             task_id, recipe, assets_root,
             workspace_state_value=live_workspace_state,
             cache_digests=cache_digests,
+            mount_digests=mount_digests,
         )
         proof = proofs.get(task_id, {})
         proof_runs = proof.get("runs", [])
@@ -948,6 +1067,7 @@ def cmd_manifest(args: argparse.Namespace) -> int:
             "workspace": recipe["workspace"],
             "workspace_state": live_workspace_state,
             "mounted_cache_digests": cache_digests,
+            "mount_input_digests": mount_digests,
             "recipe_fingerprint": fingerprint,
             "patch_subdir": recipe["patch_subdir"],
             "docker_image": recipe["docker_image"],
@@ -1055,6 +1175,7 @@ def recipe_fingerprint(
     *,
     workspace_state_value: dict[str, Any] | None = None,
     cache_digests: dict[str, Any] | None = None,
+    mount_digests: dict[str, Any] | None = None,
 ) -> str:
     """Cryptographic identity of everything a proof run depends on.
 
@@ -1074,7 +1195,9 @@ def recipe_fingerprint(
         workspace_state_value = workspace_state(workspace / recipe["patch_subdir"])
     if cache_digests is None:
         cache_digests = mounted_cache_digests(recipe, assets_root)
-    inputs: dict[str, str | None] = {}
+    if mount_digests is None:
+        mount_digests = mount_input_digests(recipe, assets_root)
+    inputs: dict[str, Any] = {}
     for relative in sorted(
         set(recipe.get("harness_files", []))
         | {copy["host"] for copy in recipe.get("harness_copies", [])}
@@ -1086,9 +1209,6 @@ def recipe_fingerprint(
     ):
         path = assets_root / relative
         inputs[relative] = sha256_file(path) if path.is_file() else None
-    for mount in recipe.get("harness_mounts", []):
-        digest = tree_digest(assets_root / mount["host"], use_cache=False)
-        inputs[f"mount:{mount['host']}"] = digest["digest"] if digest else None
     payload = {
         "task_id": task_id,
         "adapter_contract_version": adapter_contract_version(),
@@ -1104,6 +1224,8 @@ def recipe_fingerprint(
         "docker_image_id": docker_image_id(recipe["docker_image"]),
         "workspace_state": workspace_state_value,
         "cache_digests": cache_digests,
+        # every mounted input except the git-verified start subtree
+        "mount_digests": mount_digests,
         "inputs": inputs,
     }
     return hashlib.sha256(
@@ -1256,6 +1378,7 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         fingerprint = recipe_fingerprint(
             task_id, recipe, assets_root, workspace_state_value=before_state
         )
+        before_mounts = mount_input_digests(recipe, assets_root)
         proof_path = proof_dir / f"{recipe['case']}.json"
         existing = {}
         if proof_path.is_file():
@@ -1387,6 +1510,12 @@ def cmd_smoke(args: argparse.Namespace) -> int:
 
         after_state = workspace_state(start_tree)
         side_effects: list[str] = []
+        after_mounts = mount_input_digests(recipe, assets_root)
+        if after_mounts != before_mounts:
+            side_effects.append(
+                "canonical mounted inputs were mutated by the proof runs "
+                f"({recipe['case']}); proofs must run on disposable copies only"
+            )
         if after_state != before_state:
             side_effects.append(
                 "canonical workspace was mutated by the proof runs: "

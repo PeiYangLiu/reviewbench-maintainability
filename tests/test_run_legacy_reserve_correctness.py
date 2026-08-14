@@ -1807,6 +1807,7 @@ def build_recovered_assets(tmp_path, task_id=TSFILE_ID, **overrides):
         },
         "cache_mounts": {"caches/demo": "/cache"},
         "patch_subdir": "start",
+        "_mount_inputs_placeholder": True,
         "docker_image": "image:tag",
         "docker_image_id": "sha256:deadbeef",
         "shell": ["sh", "-lc"],
@@ -1831,7 +1832,10 @@ def build_recovered_assets(tmp_path, task_id=TSFILE_ID, **overrides):
         "golden_command": None,
         "blockers": [],
     }
+    entry.pop("_mount_inputs_placeholder", None)
     entry.update(overrides)
+    if "mount_input_digests" not in entry:
+        entry["mount_input_digests"] = MODULE.mount_input_digests(entry, assets)
     (assets / MODULE.RECOVERY_MANIFEST_NAME).write_text(
         json.dumps({"schema_version": "x", "tasks": [entry]}), encoding="utf-8"
     )
@@ -2066,10 +2070,14 @@ def test_recovered_contract_changes_the_replay_fingerprint(tmp_path, monkeypatch
 # ---------------------------------------------------------------------------
 
 
-def _ready_entry(assets, **overrides):
+def _ready_entry(assets, *, refresh_mounts=True, **overrides):
     manifest_path = assets / MODULE.RECOVERY_MANIFEST_NAME
     payload = json.loads(manifest_path.read_text())
     payload["tasks"][0].update(overrides)
+    if refresh_mounts and "mount_input_digests" not in overrides:
+        payload["tasks"][0]["mount_input_digests"] = MODULE.mount_input_digests(
+            payload["tasks"][0], assets
+        )
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
     MODULE.load_recovery_assets(assets)
 
@@ -2417,3 +2425,129 @@ def test_stale_proof_fingerprint_blocks_the_contract(tmp_path, monkeypatch):
         "does not record a recipe_fingerprint" in b
         for b in MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
     )
+
+
+# ---------------------------------------------------------------------------
+# Adapter: every mounted input is bound by content, same-size swaps included
+# ---------------------------------------------------------------------------
+
+
+def test_adapter_blocks_same_size_tamper_of_a_mounted_harness_file(
+    tmp_path, monkeypatch
+):
+    assets, entry, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+    assert MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha") == []
+    harness = assets / "harness/case/oracle_test.cc"
+    original = harness.read_bytes()
+    tampered = original[:-2] + b"X\n"
+    assert len(tampered) == len(original)
+    harness.write_bytes(tampered)
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert blockers, "a same-size harness swap must not pass"
+    harness.write_bytes(original)
+    assert MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha") == []
+
+
+def test_adapter_blocks_same_size_tamper_inside_a_mounted_cache(
+    tmp_path, monkeypatch
+):
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+    blob = assets / "caches/demo/bin/cargo"
+    original = blob.read_bytes()
+    tampered = b"#!/bin/xx" + original[9:] if len(original) > 9 else b"x" * len(original)
+    tampered = tampered[: len(original)].ljust(len(original), b"x")
+    assert len(tampered) == len(original)
+    blob.write_bytes(tampered)
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("has drifted" in b for b in blockers)
+    blob.write_bytes(original)
+    assert MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha") == []
+
+
+def test_adapter_binds_every_mounted_input_from_the_manifest(tmp_path, monkeypatch):
+    """A mount source that the manifest never bound must block."""
+    assets, entry, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    # add a new mounted file to the contract without recording its digest
+    (assets / "workspaces/case/query.sql").write_text("SELECT 1;\n", encoding="utf-8")
+    recorded = dict(entry["mount_input_digests"])
+    _ready_entry(
+        assets,
+        mount={"start": "/work", "query.sql": "/work/query.sql"},
+        mount_input_digests=recorded,
+    )
+    blockers = MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    assert any("not bound to the recovery manifest" in b for b in blockers)
+
+    # binding it clears the blocker; a same-size edit then blocks again
+    MODULE.load_recovery_assets(assets)
+    entry_now = MODULE.recovered_entry(TSFILE_ID)
+    _ready_entry(
+        assets,
+        mount_input_digests=MODULE.mount_input_digests(entry_now, assets),
+    )
+    assert MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha") == []
+    (assets / "workspaces/case/query.sql").write_text("SELECT 2;\n", encoding="utf-8")
+    assert any(
+        "has drifted from its recorded content digest" in b
+        for b in MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    )
+
+
+def test_adapter_requires_recorded_mount_input_digests(tmp_path, monkeypatch):
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    _ready_entry(assets, mount_input_digests=None)
+    assert any(
+        "does not record mount_input_digests" in b
+        for b in MODULE.task_blockers(TSFILE_ID, "native", {}, tmp_path, "sha")
+    )
+
+
+def test_tampered_mounted_input_yields_infra_not_candidate_fail(tmp_path, monkeypatch):
+    assets, _, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+    patch_path = tmp_path / "candidate.patch"
+    patch_path.write_text(
+        "diff --git a/src.txt b/src.txt\n--- a/src.txt\n+++ b/src.txt\n"
+        "@@ -1,3 +1,3 @@\n line1\n-line2\n+patched\n line3\n",
+        encoding="utf-8",
+    )
+
+    def explode(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("Oracle must not execute with a tampered input")
+
+    monkeypatch.setattr(MODULE, "run_subprocess", explode)
+    monkeypatch.setattr(MODULE, "purge_scratch", lambda scratch: None)
+    harness = assets / "harness/case/oracle_test.cc"
+    harness.write_bytes(harness.read_bytes()[:-2] + b"Z\n")
+    row = MODULE.replay_recovered(
+        TSFILE_ID, "my-model", strict_task(TSFILE_ID), strict_oracle(TSFILE_ID),
+        {"patch_file": str(patch_path), "patch_sha256": "abc", "apply_ok": True},
+        tmp_path / "legacy", tmp_path / "work", tmp_path / "output", 900, "native",
+    )
+    assert row["status"] == MODULE.INFRA_RETRY
+    assert row["correctness_ok"] is None
+    assert row["asset_blockers"]
+
+
+def test_asset_state_includes_every_mounted_input(tmp_path, monkeypatch):
+    assets, entry, _ = build_recovered_assets(tmp_path)
+    monkeypatch.setattr(MODULE, "docker_image_id", lambda image: "sha256:deadbeef")
+    MODULE.load_recovery_assets(assets)
+    state = MODULE.recovered_asset_state(MODULE.recovered_entry(TSFILE_ID))
+    assert "harness_mount:harness/case" in state["mounted_inputs"]
+    before = MODULE.replay_contract_fingerprint(
+        TSFILE_ID, "native", strict_oracle(TSFILE_ID), tmp_path, []
+    )
+    harness = assets / "harness/case/oracle_test.cc"
+    harness.write_bytes(harness.read_bytes()[:-2] + b"Q\n")
+    after = MODULE.replay_contract_fingerprint(
+        TSFILE_ID, "native", strict_oracle(TSFILE_ID), tmp_path, []
+    )
+    assert before != after

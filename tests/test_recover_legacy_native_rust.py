@@ -101,7 +101,6 @@ def build_assets(tmp_path, monkeypatch, *, image_id="sha256:abc"):
         encoding="utf-8",
     )
     monkeypatch.setattr(MODULE, "docker_image_id", lambda image: image_id)
-    MODULE._TREE_DIGEST_CACHE.clear()
     return task_id, recipe, assets, head
 
 
@@ -407,7 +406,6 @@ def test_mounted_cache_digests_cover_cache_mounts_and_cargo_home(tmp_path):
     conan = assets / "caches/conan"
     conan.mkdir(parents=True)
     (conan / "blob").write_text("x", encoding="utf-8")
-    MODULE._TREE_DIGEST_CACHE.clear()
     digests = MODULE.mounted_cache_digests(recipe, assets)
     assert set(digests) == {"caches/conan"}
     assert digests["caches/conan"]["file_count"] == 1
@@ -416,7 +414,6 @@ def test_mounted_cache_digests_cover_cache_mounts_and_cargo_home(tmp_path):
     cargo = assets / MODULE.RECIPES[fuel]["cargo_cache"]
     (cargo / "bin").mkdir(parents=True)
     (cargo / "bin/cargo").write_text("#!/bin/sh\n", encoding="utf-8")
-    MODULE._TREE_DIGEST_CACHE.clear()
     digests = MODULE.mounted_cache_digests(MODULE.RECIPES[fuel], assets)
     assert set(digests) == {MODULE.RECIPES[fuel]["cargo_cache"]}
 
@@ -677,3 +674,140 @@ def test_docker_argv_cache_overlay_never_mounts_the_canonical_cache(tmp_path):
     assert f"{cargo}:/cargo-cache" not in joined
     assert f"{overlay / recipe['cargo_cache']}:/cargo-cache" in joined
     assert (overlay / recipe["cargo_cache"] / "bin/cargo").is_file()
+
+
+# ---------------------------------------------------------------------------
+# Every mounted input is covered, and content (not just size) is bound
+# ---------------------------------------------------------------------------
+
+
+def test_every_mount_source_of_every_recipe_is_covered_by_a_digest(tmp_path):
+    """Guard: no replay-mounted input may escape the manifest binding.
+
+    For every recipe, each mount source is either the exact-start subtree
+    (verified through git ``workspace_state``) or must appear in
+    ``mount_input_digests``/``mounted_cache_digests``.
+    """
+    for task_id, recipe in MODULE.RECIPES.items():
+        assets = tmp_path / task_id[:24]
+        workspace = assets / recipe["workspace"]
+        start = workspace / recipe["patch_subdir"]
+        make_start_tree(start)
+        # materialize every declared non-start mount source
+        for host in recipe.get("mount", {}):
+            if host in (".", recipe["patch_subdir"]):
+                continue
+            target = workspace / host
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("payload\n", encoding="utf-8")
+        for mount in recipe.get("harness_mounts", []):
+            source = assets / mount["host"]
+            source.mkdir(parents=True, exist_ok=True)
+            (source / "harness.txt").write_text("h\n", encoding="utf-8")
+        for copy in recipe.get("harness_copies", []):
+            source = assets / copy["host"]
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text("h\n", encoding="utf-8")
+        for relative in list(recipe.get("cache_mounts", {})) + (
+            [recipe["cargo_cache"]] if recipe.get("cargo_cache") else []
+        ):
+            cache = assets / relative
+            cache.mkdir(parents=True, exist_ok=True)
+            (cache / "blob").write_text("c\n", encoding="utf-8")
+
+        mounts = MODULE.mount_input_digests(recipe, assets)
+        caches = MODULE.mounted_cache_digests(recipe, assets)
+        covered = set(mounts) | {f"cache:{key}" for key in caches}
+        for host in recipe.get("mount", {}):
+            if host == recipe["patch_subdir"]:
+                continue  # git-verified start tree
+            assert f"mount:{host}" in covered, (task_id, host)
+            assert mounts[f"mount:{host}"] is not None, (task_id, host)
+        for mount in recipe.get("harness_mounts", []):
+            assert f"harness_mount:{mount['host']}" in covered, task_id
+        for copy in recipe.get("harness_copies", []):
+            assert f"harness_copy:{copy['host']}" in covered, task_id
+        for relative in list(recipe.get("cache_mounts", {})) + (
+            [recipe["cargo_cache"]] if recipe.get("cargo_cache") else []
+        ):
+            assert f"cache:{relative}" in covered, (task_id, relative)
+
+
+def test_mount_digest_covers_workspace_siblings_for_dot_mounts(tmp_path, monkeypatch):
+    """A ``mount: "."`` recipe exposes oracle.cpp/patches next to start/."""
+    task_id, recipe, assets, _ = build_assets(tmp_path, monkeypatch)
+    assert recipe["mount"] == {".": "/work"}
+    workspace = assets / recipe["workspace"]
+    (workspace / "oracle.cpp").write_text("int main(){}\n", encoding="utf-8")
+    before = MODULE.mount_input_digests(recipe, assets)
+    assert before["mount:."] is not None
+    # same-size byte swap in the mounted harness source
+    (workspace / "oracle.cpp").write_text("int main(){;}"[:13], encoding="utf-8")
+    (workspace / "oracle.cpp").write_text("int main(){}\n".replace("{}", "{;"),
+                                          encoding="utf-8")
+    after = MODULE.mount_input_digests(recipe, assets)
+    assert after != before
+    # ... and the start subtree is excluded from that digest (git covers it)
+    (workspace / recipe["patch_subdir"] / "file.txt").write_text(
+        "y\n", encoding="utf-8"
+    )
+    assert MODULE.mount_input_digests(recipe, assets) == after
+
+
+def test_tree_digest_detects_same_size_byte_swap(tmp_path):
+    cache = tmp_path / "cache"
+    (cache / "sub").mkdir(parents=True)
+    blob = cache / "sub/blob.bin"
+    blob.write_bytes(b"A" * 4096)
+    before = MODULE.tree_digest(cache, use_cache=False)
+    # identical size, identical mode, only the bytes differ
+    blob.write_bytes(b"A" * 4095 + b"B")
+    after = MODULE.tree_digest(cache, use_cache=False)
+    assert before["file_count"] == after["file_count"] == 1
+    assert before != after
+    blob.write_bytes(b"A" * 4096)
+    assert MODULE.tree_digest(cache, use_cache=False) == before
+
+
+def test_file_input_digest_detects_same_size_byte_swap(tmp_path):
+    path = tmp_path / "query.sql"
+    path.write_text("SELECT 1;\n", encoding="utf-8")
+    before = MODULE.file_input_digest(path)
+    path.write_text("SELECT 2;\n", encoding="utf-8")
+    after = MODULE.file_input_digest(path)
+    assert before["size"] == after["size"]
+    assert before != after
+    assert MODULE.file_input_digest(tmp_path / "absent") is None
+
+
+def test_manifest_blocks_after_same_size_tamper_of_a_mounted_input(
+    tmp_path, monkeypatch
+):
+    task_id, recipe, assets, _ = build_assets(tmp_path, monkeypatch)
+    monkeypatch.setitem(MODULE.RECIPES, task_id, recipe)
+    workspace = assets / recipe["workspace"]
+    (workspace / "oracle.cpp").write_text("int main(){return 0;}\n", encoding="utf-8")
+    fingerprint = current_fingerprint(task_id, recipe, assets)
+    write_proof(
+        assets, recipe, task_id, proof_runs("start", "golden", fingerprint=fingerprint)
+    )
+    args = MODULE.parse_args(
+        ["manifest", "--assets-root", str(assets), "--legacy-root", str(tmp_path)]
+    )
+    MODULE.cmd_manifest(args)
+    entries = {
+        row["id"]: row
+        for row in json.loads((assets / MODULE.MANIFEST_NAME).read_text())["tasks"]
+    }
+    assert entries[task_id]["status"] == "ready"
+    assert entries[task_id]["mount_input_digests"]["mount:."] is not None
+
+    # same-size edit of the mounted oracle source -> proofs are stale
+    (workspace / "oracle.cpp").write_text("int main(){return 1;}\n", encoding="utf-8")
+    MODULE.cmd_manifest(args)
+    entries = {
+        row["id"]: row
+        for row in json.loads((assets / MODULE.MANIFEST_NAME).read_text())["tasks"]
+    }
+    assert entries[task_id]["status"] == "blocked"
+    assert any("stale" in text for text in entries[task_id]["blockers"])
