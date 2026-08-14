@@ -346,6 +346,27 @@ def test_normalization_keeps_infra_retry_distinct_and_embeds_raw_record():
     assert normalized["raw_record"] == raw
 
 
+def test_scripted_candidate_missing_normalizes_as_missing():
+    raw = {
+        "id": "task",
+        "model": "model",
+        "status": "candidate_missing",
+        "candidate_result": "candidate_missing",
+        "correctness_ok": None,
+        "patch_apply": False,
+    }
+
+    normalized = MODULE.normalized_record(
+        "scripted",
+        raw,
+        raw_source="legacy/correctness/scripted.jsonl",
+        source_kind="published_legacy",
+    )
+
+    assert normalized["raw_status"] == "candidate_missing"
+    assert normalized["status"] == "candidate_missing"
+
+
 def prepare_finalize_fixture(tmp_path):
     output = tmp_path / "output"
     tasks_path = tmp_path / "tasks.jsonl"

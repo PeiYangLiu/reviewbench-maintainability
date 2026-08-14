@@ -2171,12 +2171,14 @@ def raw_status(lane: str, record: dict[str, Any]) -> str:
     if lane == "scripted":
         if record.get("error_category"):
             return str(record["error_category"])
-        return (
-            "pass"
-            if record.get("correctness_ok") is True
-            else "fail"
-            if record.get("correctness_ok") is False
-            else "UNKNOWN"
+        if record.get("correctness_ok") is True:
+            return "pass"
+        if record.get("correctness_ok") is False:
+            return "fail"
+        return str(
+            record.get("candidate_result")
+            or record.get("status")
+            or "UNKNOWN"
         )
     return str(record.get("status") or "UNKNOWN")
 
