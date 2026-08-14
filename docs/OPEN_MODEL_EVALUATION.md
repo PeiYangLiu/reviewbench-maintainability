@@ -529,16 +529,40 @@ Design:
   pinned SHA-256** (full content, not a bounded prefix); a token with no pinned
   digest is itself a blocker. The cache directories the reconstructed
   `oracle.init.gradle` declares (`m2-mirror`) must exist and be non-empty. On
-  the TS/JS side `tsjs_required_executables()` requires the *exact* binaries
-  and package roots the recovered command runs -- `.bin/vitest` plus
-  `vitest`/`@vitest/coverage-v8`, `.bin/react-scripts` plus
-  `react-scripts`/`jest`, and the pinned `node`/`corepack`/`pnpm` runtime
-  shims -- with the executable bit checked, because a truncated dependency
-  tree still has its `node_modules` parent directory and the resulting
-  "cannot find module" failure would otherwise be scored as a candidate
-  failure. All of them are bound by full content digest into the replay
-  fingerprint, so removing or tampering with any one invalidates previously
-  recorded rows on resume instead of being resumed past.
+  the TS/JS side validation binds the **whole resolved runtime payload**, not a
+  launcher shim: `tsjs_required_trees()` requires each task's pinned dependency
+  tree, pinned Node runtime and (for the pnpm-workspace contract) pinned pnpm
+  store to digest to exactly the value recorded in the manifest --
+  `full_tree_digest()` reads every regular file in full and binds each entry's
+  relative path, size, executable bit and symlink target. On top of that,
+  `tsjs_required_executables()` resolves the *concrete entrypoints that
+  execute*: `vitest/vitest.mjs`, `vitest/dist/cli.js`, `vitest/dist/config.js`,
+  `@vitest/coverage-v8/dist/{index,provider}.js`,
+  `react-scripts/bin/react-scripts.js`, `react-scripts/scripts/test.js`,
+  `jest-cli/bin/jest.js`, and the corepack modules the bare `pnpm`/`corepack`
+  symlinks dispatch to. A tree containing only a shim and a `package.json`
+  therefore **blocks**, and so does any tree with a single added, removed or
+  edited file anywhere inside it. Only declared *runtime scratch* is excluded
+  from a tree digest (Vitest's own `.vite` cache, pnpm's `v10/index` and
+  `v10/projects` bookkeeping), because a tool legitimately rewrites those while
+  running and including them would make the pin self-invalidating after the
+  first replay; the Discourse contract additionally hardlink-copies the
+  retained shared Node tools instead of symlinking them, so a replay can never
+  write back into the retained tree at all. `write_manifest.py` recomputes
+  every pinned tree digest and fails if it disagrees with the digest the
+  adapter manifests enforce, so durable-asset drift is caught at manifest
+  generation rather than shipped. All of these are bound by full content digest
+  into the replay fingerprint, so removing or tampering with any one
+  invalidates previously recorded rows on resume instead of being resumed past.
+- **A declared `prime_command` is mandatory.** RepoSense's published command
+  carries `-x compileTestJava` and therefore finds no test classes at all in a
+  workspace nothing has compiled yet, so the recorded pre-repeat command must
+  run first. Its exit code, duration and error are captured into the row's
+  `prime_result`; a nonzero exit, a timeout or a spawn error yields
+  `infra_retry` with the prime log persisted as the row's evidence and
+  `scored_command_executed: false` -- the scored command is never invoked, so
+  the resulting "no tests found" build failure can never be scored as a model
+  failure.
 - **No live network fallback for a missing pinned asset.** A pinned asset that
   is absent or mismatched stops the replay before the Oracle command runs and
   is recorded as `infra_retry` with a `pinned_asset_faults` list -- never as a
@@ -576,6 +600,10 @@ has an asset:
   tsjs/node_modules/opossum-tool__OpossumUI   pinned dependency snapshot
   tsjs/yarn-cache, tsjs/pnpm-store            pinned package-manager stores
   tsjs/_runtimes/node-v22.22.2-linux-x64      pinned Node runtime
+  SHA256TREES             whole-payload digests of every pinned dependency
+                          tree, Node runtime and package store, cross-checked
+                          by write_manifest.py against the digests the adapter
+                          manifests enforce (drift fails manifest generation)
 ```
 
 `oracle.init.gradle` -- required by four of the JVM Oracle commands and lost
@@ -673,12 +701,19 @@ task-ID manifest, resume/skip behavior, and candidate-missing rows that
 normalize cleanly through the real `normalized_record()`. It also removes or
 tampers with each pinned asset and each required executable in turn --
 `/oracle-cache` blobs, the prefetched archive, the pinned wrapper jar, the
-`m2-mirror` directory, `.bin/vitest`, `.bin/react-scripts`, their package
-roots and the pinned `pnpm` shim, including same-length in-place content
-swaps and a cleared executable bit -- and asserts that preflight blocks, that
+`m2-mirror` directory, `.bin/vitest`, `.bin/react-scripts`, their concrete
+entrypoints, the corepack dispatch targets and the pinned `pnpm` shim,
+including same-length in-place content swaps and a cleared executable bit --
+and asserts that preflight blocks, that
 `asset_state()`/`replay_contract_fingerprint()` change, that `row_is_stale()`
 invalidates already-recorded rows, and that `replay_jvm` refuses to run the
-Oracle command at all.
+Oracle command at all. A dedicated case builds a dependency tree containing
+*only* the launcher shim and its `package.json` and proves it is rejected, and
+others prove that a single stray file inside a pinned dependency tree, Node
+runtime or pnpm store blocks. The mandatory-prime cases cover a nonzero exit,
+a timeout, a spawn error and an error string with a zero exit, each asserting
+`infra_retry`, a persisted prime log, `scored_command_executed: false` and
+that the scored command was never invoked.
 
 ### 7.2 Current five-model correctness replay
 

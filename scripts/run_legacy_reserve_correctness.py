@@ -541,10 +541,30 @@ TSJS_MANIFEST: dict[str, dict[str, Any]] = {
         "required_runtime_executables": ("node",),
         "required_dependency_executables": (".bin/vitest",),
         # The session vitest.config.js imports "vitest/config" and the Oracle
-        # command runs it with --coverage against the v8 provider.
+        # command runs it with --coverage against the v8 provider. These are the
+        # concrete modules that are actually loaded, not just the launcher shim
+        # and its package.json.
         "required_dependency_files": (
             "vitest/package.json",
+            "vitest/vitest.mjs",
+            "vitest/dist/cli.js",
+            "vitest/dist/config.js",
+            "vitest/dist/config.cjs",
             "@vitest/coverage-v8/package.json",
+            "@vitest/coverage-v8/dist/index.js",
+            "@vitest/coverage-v8/dist/provider.js",
+            "vite/package.json",
+        ),
+        # Whole-payload validation: the retained shared Node tools tree must be
+        # byte-identical to the one the frozen evidence was produced with,
+        # apart from Vitest's own scratch cache directory, which the runner
+        # legitimately rewrites and which is not part of the resolved payload.
+        "dependency_tree_sha256": (
+            "2edb6dc949b2a1b67475c29224c4b2f156d78bed24b71bb98444421b57390245"
+        ),
+        "dependency_tree_exclusions": (".vite",),
+        "runtime_tree_sha256": (
+            "96f62ecb3d936ccdd0104e9557fe7d3d2b918e0b2e979bc65ba3528288413249"
         ),
     },
     "github__opossum-tool__OpossumUI__pull_987__comment_972768731__duplication": {
@@ -566,9 +586,22 @@ TSJS_MANIFEST: dict[str, dict[str, Any]] = {
         "required_runtime_executables": ("node",),
         # The recovered command literally invokes node_modules/.bin/react-scripts.
         "required_dependency_executables": (".bin/react-scripts",),
+        # react-scripts' shim dispatches to scripts/test.js, which runs Jest
+        # through jest-cli; these are the concrete entrypoints that execute.
         "required_dependency_files": (
             "react-scripts/package.json",
+            "react-scripts/bin/react-scripts.js",
+            "react-scripts/scripts/test.js",
+            "react-scripts/scripts/utils/createJestConfig.js",
             "jest/package.json",
+            "jest-cli/bin/jest.js",
+            "jest-cli/package.json",
+        ),
+        "dependency_tree_sha256": (
+            "b2dde6fd5449f0e39697a274ac3a70a79a43cf7cb688944619e8dfdc416188b3"
+        ),
+        "runtime_tree_sha256": (
+            "353c6f27606c6c02f1fb61319b14d7dace46f0bd304ab11287638c7fcdcc61ae"
         ),
     },
     # Recovered verbatim from the retained pre-release oracle record
@@ -610,12 +643,48 @@ TSJS_MANIFEST: dict[str, dict[str, Any]] = {
         # test-version-utils postinstall shells out to plain ``pnpm``, and
         # without the shim the offline install fails.
         "required_runtime_executables": ("node", "corepack", "pnpm"),
+        # The bare ``pnpm``/``corepack`` entries in the runtime bin directory
+        # are symlinks into corepack's dist; the concrete dispatched modules
+        # are what actually execute, so they are required and hashed too.
+        "required_runtime_files": (
+            "../lib/node_modules/corepack/dist/pnpm.js",
+            "../lib/node_modules/corepack/dist/corepack.js",
+            "../lib/node_modules/corepack/package.json",
+        ),
+        "runtime_tree_sha256": (
+            "04dec7eecff0a0ce0cd11ba144cbb0f60ed30118b0449344f5d403f2ff9dcdfc"
+        ),
+        # This contract materializes node_modules from the pinned pnpm store,
+        # so the store *is* its dependency payload and is validated as a whole.
+        # ``v10/index`` and ``v10/projects`` are pnpm's own bookkeeping, which
+        # the install rewrites and prunes on every run; only ``v10/files`` --
+        # the content-addressed package payload that is actually linked into
+        # the workspace, and which is immutable by construction because each
+        # file is named by its own hash -- stays inside the digest. Excluding
+        # mutable bookkeeping is what keeps the pin stable across replays
+        # instead of self-invalidating after the first one.
+        "store_tree_sha256": (
+            "eed254d99c765f50001c0e8b88ad4149bf15a1e76602e02b8b9fd8221d586a76"
+        ),
+        "store_tree_exclusions": ("v10/index", "v10/projects"),
     },
 }
 
 
 INFRA_RETRY = "infra_retry"
 CANDIDATE_MISSING = "candidate_missing"
+
+
+class _PrimeFailure(Exception):
+    """Raised when a mandatory ``prime_command`` did not succeed.
+
+    Carries the already-built ``infra_retry`` row so ``replay_jvm`` can persist
+    its evidence and return without ever reaching the scored command.
+    """
+
+    def __init__(self, result: dict[str, Any]) -> None:
+        super().__init__(result.get("error", "prime_command failed"))
+        self.result = result
 
 # Bump whenever the *behavior* of a replay_* function, NATIVE_MANIFEST entry,
 # or judging rule changes in a way that could change the outcome for
@@ -916,6 +985,80 @@ def safe_file_digest(path: Path | None) -> str | None:
 
 
 _FULL_DIGEST_CACHE: dict[tuple[str, int, int], str] = {}
+_TREE_DIGEST_CACHE: dict[tuple[str, tuple[str, ...]], str | None] = {}
+
+
+def full_tree_digest(
+    root: Path | None, exclude: tuple[str, ...] = ()
+) -> str | None:
+    """Deterministic, complete content digest of a pinned directory tree.
+
+    Unlike ``directory_identity`` -- which deliberately samples a bounded
+    prefix of a bounded number of files so a multi-gigabyte cache can be
+    fingerprinted cheaply -- this reads *every* regular file in full and also
+    binds each entry's relative path, size, executable bit and (for symlinks)
+    link target without following it. A pinned dependency tree or language
+    runtime must be validated as a whole payload: checking only a launcher
+    shim and a ``package.json`` would accept a tree whose actual executed code
+    has been replaced or removed, and the resulting "cannot find module"
+    failure would be scored as a candidate failure.
+
+    ``exclude`` lists relative path prefixes that are *runtime scratch*, not
+    payload -- a test runner's own cache directory, or a package store's
+    per-project bookkeeping. They are excluded because a tool legitimately
+    rewrites them while running, so including them would make the pinned digest
+    self-invalidating after the first replay; everything that is actually
+    resolved and executed stays inside the digest.
+
+    Memoised per process by (root path, exclusions): preflight and every
+    per-model fingerprint call in one run share a single pass over each tree.
+    """
+    if root is None:
+        return None
+    exclusions = tuple(sorted(exclude))
+    key = (str(root), exclusions)
+    if key in _TREE_DIGEST_CACHE:
+        return _TREE_DIGEST_CACHE[key]
+    digest: str | None
+    if not root.is_dir():
+        digest = None
+    else:
+        hasher = hashlib.sha256()
+        try:
+            for current, directories, names in os.walk(root, followlinks=False):
+                directories.sort()
+                relative_dir = Path(current).relative_to(root)
+                directories[:] = [
+                    name
+                    for name in directories
+                    if str(relative_dir / name) not in exclusions
+                ]
+                for name in sorted(names):
+                    path = Path(current) / name
+                    relative = str(path.relative_to(root))
+                    if relative in exclusions:
+                        continue
+                    status = path.lstat()
+                    if os.path.islink(path):
+                        hasher.update(
+                            f"L\0{relative}\0{os.readlink(path)}\0".encode("utf-8")
+                        )
+                        continue
+                    inner = hashlib.sha256()
+                    with path.open("rb") as handle:
+                        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                            inner.update(chunk)
+                    executable = 1 if status.st_mode & 0o111 else 0
+                    hasher.update(
+                        f"F\0{relative}\0{status.st_size}\0{executable}\0"
+                        f"{inner.hexdigest()}\0".encode("utf-8")
+                    )
+        except OSError:
+            digest = None
+        else:
+            digest = hasher.hexdigest()
+    _TREE_DIGEST_CACHE[key] = digest
+    return digest
 
 
 def full_file_digest(path: Path | None) -> str | None:
@@ -1088,6 +1231,66 @@ def tsjs_required_executables(
                 "label": f"dependency file {relative}",
                 "path": (dependency_root / relative) if dependency_root else None,
                 "executable": False,
+            }
+        )
+    for relative in manifest.get("required_runtime_files") or ():
+        entries.append(
+            {
+                "label": f"node runtime file {relative}",
+                "path": (
+                    (runtime_bin / relative).resolve() if runtime_bin else None
+                ),
+                "executable": False,
+            }
+        )
+    return entries
+
+
+def tsjs_required_trees(
+    task_id: str,
+    oracle: dict[str, Any],
+    manifest: dict[str, Any],
+    legacy_root: Path,
+    asset_root: Path | None,
+) -> list[dict[str, Any]]:
+    """Whole pinned payload trees this Oracle's runtime resolves through.
+
+    Each entry carries the pinned ``sha256`` the tree must digest to. Shared by
+    ``tsjs_blockers`` (fail closed) and ``asset_state`` (fingerprint), so the
+    payload that is required is exactly the payload that is fingerprinted.
+    """
+    entries: list[dict[str, Any]] = []
+    node = tsjs_node_version(task_id, oracle)
+    runtime_bin = node_runtime_bin(
+        node, legacy_root, asset_root, manifest.get("runtime_root", "legacy")
+    )
+    if manifest.get("runtime_tree_sha256"):
+        entries.append(
+            {
+                "label": f"pinned Node {node} runtime tree",
+                "path": runtime_bin.parent if runtime_bin else None,
+                "sha256": manifest["runtime_tree_sha256"],
+                "exclude": (),
+            }
+        )
+    if manifest.get("dependency_tree_sha256"):
+        entries.append(
+            {
+                "label": "pinned dependency tree",
+                "path": tsjs_dependency_root(
+                    task_id, manifest, legacy_root, asset_root
+                ),
+                "sha256": manifest["dependency_tree_sha256"],
+                "exclude": tuple(manifest.get("dependency_tree_exclusions") or ()),
+            }
+        )
+    if manifest.get("store_tree_sha256"):
+        entries.append(
+            {
+                "label": "pinned pnpm store tree",
+                "path": (asset_root / "tsjs/pnpm-store") if asset_root else None,
+                "sha256": manifest["store_tree_sha256"],
+                "exclude": tuple(manifest.get("store_tree_exclusions") or ()),
             }
         )
     return entries
@@ -1829,6 +2032,26 @@ def tsjs_blockers(
                 f"required {entry['label']} is not executable: {path}"
             )
 
+    # Whole-payload validation. Requiring a launcher shim plus a package.json is
+    # not provenance: a synthetic tree containing only those still satisfies a
+    # per-file existence check while none of the code that actually executes is
+    # present. The pinned dependency tree, the pinned Node runtime and (for the
+    # pnpm-workspace contract) the pinned store must digest to exactly the value
+    # the frozen evidence was produced with.
+    for entry in tsjs_required_trees(
+        task_id, oracle, manifest, legacy_root, asset_root
+    ):
+        path = entry["path"]
+        if path is None or not path.is_dir():
+            blockers.append(f"missing {entry['label']}: {path}")
+            continue
+        digest = full_tree_digest(path, entry["exclude"])
+        if digest != entry["sha256"]:
+            blockers.append(
+                f"{entry['label']} {path} has content digest {digest}, "
+                f"expected {entry['sha256']}"
+            )
+
     if manifest.get("session_from_recovery"):
         try:
             recovery_dir = artifacts_directory(oracle, legacy_root, asset_root)
@@ -1999,12 +2222,26 @@ def asset_state(
             dependencies = directory_identity(dependency_root)
         elif provisioning == "pnpm_workspace" and asset_root is not None:
             dependencies = directory_identity(asset_root / "tsjs/pnpm-store")
-        # Bind the *exact* binaries/package roots the recovered command runs,
-        # by full content digest, so replacing or truncating any one of them
+        # Bind the *exact* binaries/entrypoints the recovered command runs, by
+        # full content digest, so replacing or truncating any one of them
         # invalidates every row recorded against the old tree.
         required_executables = {
             entry["label"]: full_file_digest(entry["path"])
             for entry in tsjs_required_executables(
+                task_id, oracle, manifest, legacy_root, asset_root
+            )
+        }
+        # Bind the whole pinned payload trees too, so a change anywhere inside
+        # the resolved runtime -- not just at a named entrypoint -- invalidates
+        # recorded rows. This is the same set tsjs_blockers() requires.
+        required_trees = {
+            entry["label"]: {
+                "expected_sha256": entry["sha256"],
+                "observed_sha256": full_tree_digest(
+                    entry["path"], entry["exclude"]
+                ),
+            }
+            for entry in tsjs_required_trees(
                 task_id, oracle, manifest, legacy_root, asset_root
             )
         }
@@ -2014,6 +2251,7 @@ def asset_state(
             ),
             "node_modules": dependencies,
             "required_executables": required_executables,
+            "required_trees": required_trees,
             # the exact repo checkout replay_tsjs materializes the start from
             "repo_checkout": directory_identity(checkout) if checkout else None,
             # the exact recovered session/ tree copied into the workspace
@@ -2709,9 +2947,18 @@ def replay_jvm(
             changed = patch_changed_paths(patch_text)
             scope_ok = scope_is_safe(changed)
 
+            # A declared prime_command is *mandatory*, not best effort. It is
+            # what reproduces the historical workspace state the scored command
+            # depends on (RepoSense's published command carries
+            # -x compileTestJava and therefore finds no test classes at all in
+            # a workspace nothing has compiled yet). If priming fails, times
+            # out, or errors, the scored command must not run: the resulting
+            # "no tests found" build failure is infrastructure, and scoring it
+            # would turn missing infrastructure into a model failure.
             prime_command = manifest.get("prime_command")
+            prime_result: dict[str, Any] | None = None
             if prime_command:
-                run_subprocess(
+                prime_exit, prime_duration, prime_error = run_subprocess(
                     jvm_docker_command(
                         oracle, task_id, legacy_root, asset_root,
                         workspace_scratch, task_scratch, prime_command, offline,
@@ -2720,6 +2967,36 @@ def replay_jvm(
                     log_path=scratch / "prime.log",
                     timeout=timeout,
                 )
+                prime_result = {
+                    "command": prime_command,
+                    "exit_code": prime_exit,
+                    "duration_seconds": prime_duration,
+                    "error": prime_error,
+                    "ok": prime_exit == 0 and not prime_error,
+                }
+            if prime_result is not None and not prime_result["ok"]:
+                log_kind = "prime.log"
+                result = {
+                    "id": task_id,
+                    "model": model,
+                    "lane": "jvm",
+                    "source_kind": "published_legacy",
+                    "start_sha": start_sha,
+                    "patch_sha256": generation.get("patch_sha256"),
+                    "status": INFRA_RETRY,
+                    "candidate_result": INFRA_RETRY,
+                    "correctness_ok": None,
+                    "patch_apply": True,
+                    "scope_ok": scope_ok,
+                    "error": (
+                        "mandatory prime_command failed with exit "
+                        f"{prime_result['exit_code']}"
+                        + (f": {prime_result['error']}" if prime_result["error"] else "")
+                    ),
+                    "prime_result": prime_result,
+                    "scored_command_executed": False,
+                }
+                raise _PrimeFailure(result)
             log_path = scratch / "run.log"
             exit_code, duration, error = run_subprocess(
                 jvm_docker_command(
@@ -2788,12 +3065,21 @@ def replay_jvm(
                 "pinned_gradle_wrapper_sha256": wrapper_sha256,
                 "prefetched_assets": prefetched,
                 "prefetched_assets_replaced_during_run": tampered,
+                "prime_result": prime_result,
+                "scored_command_executed": True,
             }
+    except _PrimeFailure as failure:
+        result = failure.result
     finally:
         shutil.rmtree(workspace_scratch, ignore_errors=True)
     evidence = persist_evidence(output, "jvm", model, task_id, scratch)
     if log_kind in ("apply-error.log", "asset-error.log"):
         result["error_log"] = evidence.get(log_kind)
+    elif log_kind == "prime.log":
+        # A failed mandatory prime never produced a scored run, so its own log
+        # is the evidence for this row.
+        result["error_log"] = evidence.get("prime.log")
+        result["prime_log"] = evidence.get("prime.log")
     else:
         result["log"] = evidence.get("run.log")
         if evidence.get("prime.log"):
@@ -2822,14 +3108,21 @@ def provision_tsjs_dependencies(
     destination = workspace / "node_modules"
     if provisioning == "shared_node_tools":
         # The retained historical workspace
-        # (oracle_recovery/tsjs/_work/discourse__discourse) still carries this
-        # exact symlink; without it the session Vitest config cannot resolve
-        # "vitest/config" and every candidate fails for infrastructure reasons.
-        shutil.rmtree(destination, ignore_errors=True)
-        destination.symlink_to(
-            oracle_recovery_root(legacy_root) / "tsjs/_node_tools/node_modules"
-        )
-        return True, "symlinked retained shared node tools"
+        # (oracle_recovery/tsjs/_work/discourse__discourse) carries a
+        # node_modules *symlink* into this tree, and without that resolution
+        # root the session Vitest config cannot resolve "vitest/config" and
+        # every candidate fails for infrastructure reasons. A symlink would let
+        # the runner write its scratch cache straight back into the retained
+        # tree, mutating frozen evidence and invalidating its pinned digest for
+        # every later replay, so the tree is hardlink-copied instead --
+        # identical module resolution, zero writes to the retained asset -- and
+        # the runner's own cache directory is pruned from the copy so it is
+        # recreated fresh rather than modified through a shared inode.
+        source = oracle_recovery_root(legacy_root) / "tsjs/_node_tools/node_modules"
+        link_tree(source, destination)
+        for scratch_name in manifest.get("dependency_tree_exclusions") or ():
+            shutil.rmtree(destination / scratch_name, ignore_errors=True)
+        return True, "hardlink-copied retained shared node tools"
     if provisioning == "pinned":
         assert asset_root is not None
         link_tree(asset_root / manifest["pinned_node_modules"], destination)
@@ -3020,8 +3313,8 @@ def replay_tsjs(
                     "dependency_provisioning": provision_detail,
                 }
     finally:
-        # node_modules may be a symlink into a retained shared tree; never
-        # follow it while cleaning up the disposable workspace.
+        # Defensive: never follow a symlink out of the disposable workspace
+        # while cleaning it up.
         link = workspace_scratch / "node_modules"
         if link.is_symlink():
             link.unlink()
