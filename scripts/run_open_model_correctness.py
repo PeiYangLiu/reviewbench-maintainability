@@ -945,10 +945,48 @@ def adapt_runner_source(
             ),
             label="scripted Composer policy compatibility",
         )
+        text = replace_required(
+            text,
+            (
+                '        setup_template = cfg.get("setup_host_command")\n'
+                '        if setup_template and "composer install " in '
+                "setup_template"
+            ),
+            (
+                '        setup_template = cfg.get("setup_host_command")\n'
+                '        if setup_template and task["repo"] == '
+                '"Redot-Engine/DraconicEngine":\n'
+                '            setup_template = setup_template.replace(\n'
+                '                "{mode}", "start"\n'
+                "            )\n"
+                '        if setup_template and "composer install " in '
+                "setup_template"
+            ),
+            label="scripted Draconic setup mode",
+        )
+        text = replace_required(
+            text,
+            (
+                "        command = format_command(\n"
+                '            cfg["test_host_command"],'
+            ),
+            (
+                '        test_template = cfg["test_host_command"]\n'
+                '        if task["repo"] == '
+                '"Redot-Engine/DraconicEngine":\n'
+                "            test_template = test_template.replace(\n"
+                '                "{mode}", "start"\n'
+                "            )\n"
+                "        command = format_command(\n"
+                "            test_template,"
+            ),
+            label="scripted Draconic Oracle mode",
+        )
         changes.extend(
             [
                 "configure task count",
                 "disable host-version Composer policy blocking",
+                "map Draconic candidate and baseline to the start contract",
             ]
         )
     elif lane == "csharp":

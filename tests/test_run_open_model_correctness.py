@@ -208,15 +208,20 @@ class Replay:
     def validate_inputs(self, node_bin):
         if len(self.tasks) != 35:
             raise RuntimeError(f"expected 35 scripted tasks, found {len(self.tasks)}")
-    def run_setup_and_oracle(self, cfg):
+    def run_setup_and_oracle(self, task, cfg):
         setup_template = cfg.get("setup_host_command")
         if setup_template:
             pass
+        command = format_command(
+            cfg["test_host_command"],
+        )
 """
     adapted, _ = MODULE.adapt_runner_source("scripted", source)
     assert 'MODELS = tuple(_OPEN_CONFIG["models"])' in adapted
     assert "len(self.tasks) != EXPECTED_TASKS" in adapted
     assert "composer install --no-blocking" in adapted
+    assert "Redot-Engine/DraconicEngine" in adapted
+    assert 'test_template.replace(' in adapted
     assert "claude-opus-4.8" not in adapted
 
 
