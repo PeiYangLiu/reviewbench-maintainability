@@ -1015,6 +1015,78 @@ def adapt_runner_source(
         text = replace_required(
             text,
             (
+                "                future_to_pair = {\n"
+                "                    executor.submit("
+                "self.evaluate_pair, task, model): (task, model)\n"
+                "                    for task, model in pairs\n"
+                "                }\n"
+                "                for future in as_completed(future_to_pair):\n"
+                "                    task, model = future_to_pair[future]"
+            ),
+            (
+                "                task_queues: dict[\n"
+                "                    str, list[tuple[dict[str, Any], str]]\n"
+                "                ] = {}\n"
+                "                for task, model in pairs:\n"
+                "                    task_queues.setdefault(\n"
+                '                        task["id"], []\n'
+                "                    ).append((task, model))\n"
+                "                future_to_pair = {}\n"
+                "                for task_queue in task_queues.values():\n"
+                "                    task, model = task_queue.pop(0)\n"
+                "                    future_to_pair[\n"
+                "                        executor.submit(\n"
+                "                            self.evaluate_pair, task, model\n"
+                "                        )\n"
+                "                    ] = ((task, model), task_queue)\n"
+                "                while future_to_pair:\n"
+                "                    future = next(\n"
+                "                        as_completed(tuple(future_to_pair))\n"
+                "                    )\n"
+                "                    (task, model), task_queue = (\n"
+                "                        future_to_pair.pop(future)\n"
+                "                    )"
+            ),
+            label="scripted nonblocking task queues",
+        )
+        text = replace_required(
+            text,
+            (
+                "                    print(\n"
+                "                        f\"[{int(task['_scripted_lane_index']):02d}] \"\n"
+                "                        f\"{model} => {status} "
+                "attempts={record.get('attempt_count', 0)}\",\n"
+                "                        flush=True,\n"
+                "                    )\n"
+                "        self.write_state()"
+            ),
+            (
+                "                    print(\n"
+                "                        f\"[{int(task['_scripted_lane_index']):02d}] \"\n"
+                "                        f\"{model} => {status} "
+                "attempts={record.get('attempt_count', 0)}\",\n"
+                "                        flush=True,\n"
+                "                    )\n"
+                "                    if task_queue:\n"
+                "                        next_task, next_model = "
+                "task_queue.pop(0)\n"
+                "                        future_to_pair[\n"
+                "                            executor.submit(\n"
+                "                                self.evaluate_pair,\n"
+                "                                next_task,\n"
+                "                                next_model,\n"
+                "                            )\n"
+                "                        ] = (\n"
+                "                            (next_task, next_model),\n"
+                "                            task_queue,\n"
+                "                        )\n"
+                "        self.write_state()"
+            ),
+            label="scripted task queue continuation",
+        )
+        text = replace_required(
+            text,
+            (
                 '    workers_root = output_root / "scripted-worker-state"\n'
                 "    workers = []"
             ),
@@ -1092,6 +1164,7 @@ def adapt_runner_source(
                 "disable host-version Composer policy blocking",
                 "map Draconic candidate and baseline to the start contract",
                 "interleave repositories across worker submissions",
+                "admit only one active pair per task",
                 "materialize one output-local shared task cache",
             ]
         )

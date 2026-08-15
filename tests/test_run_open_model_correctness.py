@@ -219,6 +219,8 @@ def test_scripted_runner_adaptation_uses_dynamic_models_and_task_count():
     assert "Redot-Engine/DraconicEngine" in adapted
     assert 'test_template.replace(' in adapted
     assert "MODELS.index(pair[1])" in adapted
+    assert "while future_to_pair:" in adapted
+    assert "task_queue.pop(0)" in adapted
     assert "scripted-shared-cache" in adapted
     assert '"draconic-submodules"' in adapted
     assert "claude-opus-4.8" not in adapted
