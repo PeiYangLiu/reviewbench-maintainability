@@ -4523,11 +4523,13 @@ def provision_tsjs_dependencies(
     scratch: Path,
     timeout: int,
     offline: bool = True,
+    log_prefix: str = "",
 ) -> tuple[bool, str]:
     """Make the historical dependency tree available without re-resolving it.
 
-    Returns ``(ok, detail)``; ``ok is False`` is an *infrastructure* failure
-    and is never scored as a candidate failure.
+    Returns ``(ok, detail)``. A failed install is infrastructure; a failed
+    candidate build is classified only after the same build runs at exact
+    start.
     """
     provisioning = manifest["node_modules"]
     destination = workspace / "node_modules"
@@ -4567,7 +4569,7 @@ def provision_tsjs_dependencies(
             ["corepack", package_manager, *install[1:],
              f"--config.store-dir={store}", *offline_flags],
             cwd=workspace,
-            log_path=scratch / "install.log",
+            log_path=scratch / f"{log_prefix}install.log",
             env=env,
             timeout=timeout,
         )
@@ -4579,7 +4581,7 @@ def provision_tsjs_dependencies(
             exit_code, _, detail = run_subprocess(
                 ["corepack", package_manager, *build_parts[1:]],
                 cwd=workspace,
-                log_path=scratch / "build.log",
+                log_path=scratch / f"{log_prefix}build.log",
                 env=env,
                 timeout=timeout,
             )
@@ -4669,21 +4671,94 @@ def replay_tsjs(
                 env, scratch, timeout, offline,
             )
             if not provisioned:
-                log_kind = "install.log"
-                result = {
-                    "id": task_id,
-                    "model": model,
-                    "lane": "tsjs",
-                    "source_kind": "published_legacy",
-                    "start_sha": task["start_sha"],
-                    "patch_sha256": generation.get("patch_sha256"),
-                    "status": INFRA_RETRY,
-                    "candidate_result": INFRA_RETRY,
-                    "correctness_ok": None,
-                    "patch_apply": True,
-                    "scope_ok": scope_ok,
-                    "error": provision_detail,
-                }
+                log_kind = (
+                    "build.log"
+                    if provision_detail.startswith("build_command failed")
+                    else "install.log"
+                )
+                baseline_ok = False
+                baseline_detail = ""
+                if log_kind == "build.log":
+                    baseline_workspace = scratch / "baseline-workspace"
+                    materialize_start(
+                        repo_source,
+                        task["start_sha"],
+                        baseline_workspace,
+                    )
+                    try:
+                        if manifest.get("session_from_recovery"):
+                            session_dir = (
+                                artifacts_directory(
+                                    oracle, legacy_root, asset_root
+                                )
+                                / "session"
+                            )
+                            shutil.copytree(
+                                session_dir,
+                                baseline_workspace / "session",
+                                symlinks=True,
+                            )
+                        baseline_ok, baseline_detail = (
+                            provision_tsjs_dependencies(
+                                task_id,
+                                manifest,
+                                legacy_root,
+                                asset_root,
+                                baseline_workspace,
+                                env,
+                                scratch,
+                                timeout,
+                                offline,
+                                log_prefix="baseline-",
+                            )
+                        )
+                    finally:
+                        shutil.rmtree(
+                            baseline_workspace,
+                            ignore_errors=True,
+                        )
+                if baseline_ok:
+                    result = {
+                        "id": task_id,
+                        "model": model,
+                        "lane": "tsjs",
+                        "source_kind": "published_legacy",
+                        "start_sha": task["start_sha"],
+                        "patch_sha256": generation.get("patch_sha256"),
+                        "status": "fail",
+                        "candidate_result": "fail",
+                        "correctness_ok": False,
+                        "patch_apply": True,
+                        "scope_ok": scope_ok,
+                        "error": provision_detail,
+                        "failure_validated_by_baseline": True,
+                        "pass_to_pass_total": manifest["expected_tests"],
+                        "pass_to_pass_passed": 0,
+                        "failed_tests": ["tsjs-build"],
+                        "baseline_dependency_provisioning": baseline_detail,
+                    }
+                else:
+                    result = {
+                        "id": task_id,
+                        "model": model,
+                        "lane": "tsjs",
+                        "source_kind": "published_legacy",
+                        "start_sha": task["start_sha"],
+                        "patch_sha256": generation.get("patch_sha256"),
+                        "status": INFRA_RETRY,
+                        "candidate_result": INFRA_RETRY,
+                        "correctness_ok": None,
+                        "patch_apply": True,
+                        "scope_ok": scope_ok,
+                        "error": (
+                            provision_detail
+                            + (
+                                f"; exact-start baseline: {baseline_detail}"
+                                if baseline_detail
+                                else ""
+                            )
+                        ),
+                    }
             else:
                 workspace = manifest.get("workspace") or "."
                 cwd = (
@@ -4771,9 +4846,14 @@ def replay_tsjs(
         result["error_log"] = evidence.get("apply-error.log")
     else:
         result["log"] = evidence.get(log_kind)
-        for extra in ("install.log", "build.log"):
+        for extra in (
+            "install.log",
+            "build.log",
+            "baseline-install.log",
+            "baseline-build.log",
+        ):
             if extra != log_kind and evidence.get(extra):
-                result[extra.replace(".", "_")] = evidence[extra]
+                result[extra.replace("-", "_").replace(".", "_")] = evidence[extra]
     result.update(provenance)
     return result
 

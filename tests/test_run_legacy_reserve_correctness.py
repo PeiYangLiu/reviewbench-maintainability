@@ -2228,6 +2228,78 @@ def test_replay_tsjs_infra_retry_on_install_failure_persists_install_log(
     assert (output / row["log"]).is_file()
 
 
+@pytest.mark.parametrize(
+    ("baseline_build_exit", "expected_status", "expected_correctness"),
+    [(0, "fail", False), (1, "infra_retry", None)],
+)
+def test_replay_tsjs_diagnoses_candidate_build_failure_against_exact_start(
+    tmp_path,
+    monkeypatch,
+    baseline_build_exit,
+    expected_status,
+    expected_correctness,
+):
+    legacy_root = tmp_path / "legacy"
+    asset_root = tmp_path / "assets"
+    start_sha = make_git_repo(legacy_root / "repos/microsoft__FluidFramework")
+    task_id = (
+        "github__microsoft__FluidFramework__pull_27466__"
+        "comment_3350352130__complexity"
+    )
+    task = strict_task(task_id, repo="microsoft/FluidFramework", language="TypeScript")
+    task["start_sha"] = start_sha
+    node_runtime = asset_root / "tsjs/_runtimes/node-v22.22.2-linux-x64/bin"
+    node_runtime.mkdir(parents=True)
+    (node_runtime / "node").write_text("#!/bin/sh\n", encoding="utf-8")
+    (asset_root / "tsjs/pnpm-store").mkdir(parents=True)
+    oracle = {"repo": "microsoft/FluidFramework", "pass_to_pass": 151}
+    patch_path = tmp_path / "candidate.patch"
+    patch_path.write_text("", encoding="utf-8")
+    generation = {"patch_file": str(patch_path), "patch_sha256": BASE.sha256(patch_path)}
+    output = tmp_path / "output"
+    calls = []
+
+    def fake_run_subprocess(command, *, cwd, log_path, env=None, timeout=1800):
+        calls.append(log_path.name)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        if log_path.name == "build.log":
+            log_path.write_text("candidate biome formatting failed\n", encoding="utf-8")
+            return 1, 0.5, "candidate build failed"
+        if log_path.name == "baseline-build.log":
+            log_path.write_text("baseline build\n", encoding="utf-8")
+            return baseline_build_exit, 0.5, (
+                "" if baseline_build_exit == 0 else "baseline build failed"
+            )
+        log_path.write_text("install passed\n", encoding="utf-8")
+        return 0, 0.5, ""
+
+    monkeypatch.setattr(MODULE, "run_subprocess", fake_run_subprocess)
+
+    row = MODULE.replay_tsjs(
+        task_id, "my-model", task, oracle, generation, legacy_root,
+        tmp_path / "work", output, 60, asset_root=asset_root,
+    )
+
+    assert calls == [
+        "install.log",
+        "build.log",
+        "baseline-install.log",
+        "baseline-build.log",
+    ]
+    assert row["status"] == expected_status
+    assert row["correctness_ok"] is expected_correctness
+    assert row["log"].endswith("/build.log")
+    assert (output / row["log"]).is_file()
+    assert (output / row["baseline_install_log"]).is_file()
+    assert (output / row["baseline_build_log"]).is_file()
+    if baseline_build_exit == 0:
+        assert row["failure_validated_by_baseline"] is True
+        assert row["failed_tests"] == ["tsjs-build"]
+    else:
+        assert "exact-start baseline" in row["error"]
+    assert_no_scratch_files(tmp_path / "work")
+
+
 def test_replay_tsjs_provisions_retained_shared_node_tools_without_mutating_them(
     tmp_path, monkeypatch
 ):
