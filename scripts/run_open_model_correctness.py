@@ -838,6 +838,59 @@ def adapt_runner_source(
             ),
             label="jvm Neo4j Java compatibility",
         )
+        text = replace_required(
+            text,
+            (
+                "    submodules_exact = (\n"
+                "        submodules['exit_code'] == 0\n"
+                "        and all(line[0] not in {'-', '+', 'U'} "
+                "for line in submodule_lines)\n"
+                "    )"
+            ),
+            (
+                "    allow_uninitialized_submodules = (\n"
+                "        task['repo'] == 'apache/iotdb'\n"
+                "    )\n"
+                "    submodules_exact = (\n"
+                "        submodules['exit_code'] == 0\n"
+                "        and all(\n"
+                "            line[0] not in {'+', 'U'}\n"
+                "            and (\n"
+                "                line[0] != '-'\n"
+                "                or allow_uninitialized_submodules\n"
+                "            )\n"
+                "            for line in submodule_lines\n"
+                "        )\n"
+                "    )"
+            ),
+            label="jvm IoTDB unrelated submodule handling",
+        )
+        text = replace_required(
+            text,
+            (
+                "        'configured_submodules': gitmodules.is_file(),\n"
+                "        'submodules_exact': submodules_exact,"
+            ),
+            (
+                "        'configured_submodules': gitmodules.is_file(),\n"
+                "        'allow_uninitialized_submodules': "
+                "allow_uninitialized_submodules,\n"
+                "        'submodules_exact': submodules_exact,"
+            ),
+            label="jvm submodule exception evidence",
+        )
+        text = replace_required(
+            text,
+            (
+                "    if reset['exit_code'] or clean['exit_code'] "
+                "or submodule['exit_code'] or not evidence['exact']:"
+            ),
+            (
+                "    if reset['exit_code'] or clean['exit_code'] "
+                "or not evidence['exact']:"
+            ),
+            label="jvm exact evidence authority",
+        )
         changes.extend(
             [
                 "configure lane/repo/runtime roots",
@@ -845,6 +898,7 @@ def adapt_runner_source(
                 "use an open-model-specific container prefix",
                 "pin nested Docker API negotiation",
                 "run Neo4j with the current plugin-compatible JDK",
+                "allow IoTDB's unrelated unavailable submodule",
             ]
         )
     elif lane == "scripted":

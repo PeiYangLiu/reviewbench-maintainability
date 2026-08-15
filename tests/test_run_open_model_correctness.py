@@ -297,6 +297,8 @@ def test_jvm_runner_adaptation_stabilizes_runtime():
     assert "-Dapi.version=1.40" in adapted
     assert "task['repo'] == 'neo4j/import-spec'" in adapted
     assert "image = 'oracle-java-tools:17'" in adapted
+    assert "allow_uninitialized_submodules" in adapted
+    assert "task['repo'] == 'apache/iotdb'" in adapted
 
 
 def test_native_runner_restores_release_placeholders():
