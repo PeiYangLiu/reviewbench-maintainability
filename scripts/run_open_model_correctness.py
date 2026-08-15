@@ -1366,6 +1366,12 @@ def adapt_runner_source(
             ),
             label="native plan environment",
         )
+        text = replace_required(
+            text,
+            '            groups[case["task"]["repo"]].append((case, model))',
+            '            groups[case["task"]["id"]].append((case, model))',
+            label="native task-balanced scheduling",
+        )
         changes.extend(
             [
                 "configure lane/repo roots",
@@ -1374,6 +1380,7 @@ def adapt_runner_source(
                 "use an open-model-specific container prefix",
                 "restore sanitized session paths before plan validation",
                 "anchor IREE submodule preservation to the repository root",
+                "schedule independent tasks concurrently within one repo",
             ]
         )
     elif lane == "rust":

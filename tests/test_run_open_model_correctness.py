@@ -347,6 +347,7 @@ def test_native_runner_restores_release_placeholders():
     assert "IREE_ERROR_ON_MISSING_SUBMODULES=OFF" in adapted
     assert "preserve_submodules" in adapted
     assert '"-e", "/third_party/"' in adapted
+    assert 'groups[case["task"]["id"]]' in adapted
     assert '(plan.get("env") or {}).items()' in adapted
 
 
