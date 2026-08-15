@@ -164,6 +164,8 @@ def validate_pair(
     key: tuple[str, str],
     generation: dict[str, Any],
     correctness: dict[str, Any],
+    *,
+    allow_intermediate_infra: bool = False,
 ) -> None:
     status = correctness.get("status")
     if generation.get("apply_ok") is True:
@@ -172,7 +174,13 @@ def validate_pair(
             raise ValueError(f"{key}: generated candidate has no patch SHA-256")
         if correctness.get("patch_sha256") != generation_sha:
             raise ValueError(f"{key}: correctness patch does not match generation")
-        if status not in GENERATED_FINAL_STATUSES:
+        if (
+            status not in GENERATED_FINAL_STATUSES
+            and not (
+                allow_intermediate_infra
+                and status == "infra_retry"
+            )
+        ):
             raise ValueError(
                 f"{key}: generated candidate has non-final correctness status "
                 f"{status!r}"
@@ -260,7 +268,12 @@ def merge(
                 f"{directory}: unknown overlay pairs: {sorted(unknown)[:5]}"
             )
         for key, row in rows.items():
-            validate_pair(key, generations[key], row)
+            validate_pair(
+                key,
+                generations[key],
+                row,
+                allow_intermediate_infra=True,
+            )
             correctness[key] = row
             provenance[key] = {
                 "source": sources[key],

@@ -67,6 +67,29 @@ def test_merge_applies_matching_overlay(tmp_path):
     assert result["infra_records"] == 0
 
 
+def test_merge_allows_intermediate_infra_only_when_later_overlay_resolves_it(
+    tmp_path,
+):
+    base = tmp_path / "base"
+    retry = tmp_path / "retry"
+    resolved = tmp_path / "resolved"
+    write_jsonl(base / "gopy.jsonl", [correctness("fail", "canonical")])
+    write_jsonl(retry / "gopy.jsonl", [correctness("infra_retry", "canonical")])
+    write_jsonl(resolved / "gopy.jsonl", [correctness("pass", "canonical")])
+
+    MODULE.merge(
+        ids=["task"],
+        expected_models=["model"],
+        generation_paths={"model": generation(tmp_path)},
+        base_directories=[base],
+        overlay_directories=[retry, resolved],
+        output=tmp_path / "out",
+    )
+
+    rows = MODULE.load_jsonl(tmp_path / "out" / "gopy.jsonl")
+    assert rows[0]["status"] == "pass"
+
+
 def test_merge_rejects_stale_final_patch(tmp_path):
     base = tmp_path / "base"
     write_jsonl(base / "gopy.jsonl", [correctness("pass", "stale")])
