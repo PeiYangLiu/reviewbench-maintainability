@@ -971,6 +971,12 @@ def adapt_runner_source(
                 '            setup_template = setup_template.replace(\n'
                 '                "{mode}", "start"\n'
                 "            )\n"
+                '        if setup_template and task["repo"] == '
+                '"celeritas-project/celeritas":\n'
+                "            setup_template = (\n"
+                '                "rm -rf {task_dir}/build-{mode}; "\n'
+                "                + setup_template\n"
+                "            )\n"
                 '        if setup_template and "composer install " in '
                 "setup_template"
             ),
@@ -1287,6 +1293,9 @@ def adapt_runner_source(
                 "interleave repositories across worker submissions",
                 "admit only one active pair per task",
                 "use short standalone Celeritas pair clones",
+                "schedule standalone Celeritas pairs independently",
+                "reuse pinned Celeritas objects through read-only alternates",
+                "clear stale per-attempt Celeritas CMake builds",
                 "materialize one output-local shared task cache",
             ]
         )
