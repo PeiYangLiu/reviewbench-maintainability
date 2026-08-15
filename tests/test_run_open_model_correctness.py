@@ -414,6 +414,39 @@ def test_normalization_keeps_infra_retry_distinct_and_embeds_raw_record():
     assert normalized["raw_record"] == raw
 
 
+@pytest.mark.parametrize(
+    ("correctness_status", "correctness_ok", "expected"),
+    [("pass", True, "pass"), ("fail", False, "fail")],
+)
+def test_normalization_prefers_terminal_verdict_over_prior_infra_attempt(
+    correctness_status,
+    correctness_ok,
+    expected,
+):
+    raw = {
+        "id": "task",
+        "model": "model",
+        "correctness_status": correctness_status,
+        "correctness_ok": correctness_ok,
+        "infra_error": True,
+        "attempt_history": [
+            {"attempt": 1, "outcome": "infra_retry"},
+            {"attempt": 2, "outcome": expected},
+        ],
+    }
+
+    normalized = MODULE.normalized_record(
+        "csharp",
+        raw,
+        raw_source="modern/correctness/csharp.jsonl",
+        source_kind="modern",
+    )
+
+    assert normalized["status"] == expected
+    assert normalized["retryable"] is False
+    assert normalized["raw_record"]["infra_error"] is True
+
+
 def test_scripted_candidate_missing_normalizes_as_missing():
     raw = {
         "id": "task",

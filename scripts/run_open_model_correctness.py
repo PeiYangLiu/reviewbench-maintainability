@@ -2943,14 +2943,6 @@ def raw_status(lane: str, record: dict[str, Any]) -> str:
 
 def normalized_status(lane: str, record: dict[str, Any]) -> str:
     status = raw_status(lane, record).lower()
-    if (
-        record.get("retryable")
-        or record.get("retry_required")
-        or record.get("infra_failure")
-        or record.get("infra_error")
-        or status in INFRA_STATUSES
-    ):
-        return "infra_retry"
     if "candidate_missing" in status or "generation_missing" in status:
         return "candidate_missing"
     if "scope" in status:
@@ -2966,6 +2958,14 @@ def normalized_status(lane: str, record: dict[str, Any]) -> str:
         "oracle_failure",
     }:
         return "fail"
+    if (
+        record.get("retryable")
+        or record.get("retry_required")
+        or record.get("infra_failure")
+        or record.get("infra_error")
+        or status in INFRA_STATUSES
+    ):
+        return "infra_retry"
     return "infra_retry"
 
 
