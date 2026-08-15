@@ -1670,6 +1670,35 @@ def adapt_runner_source(
             ),
             label="rust attempt-state cleanup",
         )
+        text = replace_required(
+            text,
+            (
+                "        for oracle in selected_oracles:\n"
+                "            futures.append(\n"
+                "                executor.submit(\n"
+                "                    run_repo_queue,\n"
+                "                    oracle,\n"
+                "                    selected_models,\n"
+                "                    args.retry_attempts,\n"
+                "                    args.rerun_final,\n"
+                "                )\n"
+                "            )"
+            ),
+            (
+                "        for oracle in selected_oracles:\n"
+                "            for model in selected_models:\n"
+                "                futures.append(\n"
+                "                    executor.submit(\n"
+                "                        run_repo_queue,\n"
+                "                        oracle,\n"
+                "                        [model],\n"
+                "                        args.retry_attempts,\n"
+                "                        args.rerun_final,\n"
+                "                    )\n"
+                "                )"
+            ),
+            label="rust pair-level scheduling",
+        )
         changes.extend(
             [
                 "configure lane/repo roots",
@@ -1679,6 +1708,7 @@ def adapt_runner_source(
                 "remove root-owned per-attempt build state after evidence",
                 "remove root-owned worktree state between attempts",
                 "seed Materialize's pinned unavailable git dependency",
+                "schedule isolated task-model pairs independently",
             ]
         )
     else:
