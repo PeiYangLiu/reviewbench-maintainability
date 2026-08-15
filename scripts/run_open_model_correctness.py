@@ -1563,6 +1563,84 @@ def adapt_runner_source(
         )
         text = replace_required(
             text,
+            (
+                "def remove_worktree(repo: Path, worktree: Path) -> None:\n"
+                "    if repo.is_dir():\n"
+                '        git(repo, "worktree", "remove", "--force", '
+                "str(worktree), timeout=600)\n"
+                '        git(repo, "worktree", "prune", timeout=600)\n'
+                "    if worktree.exists():\n"
+                "        shutil.rmtree(worktree, ignore_errors=True)"
+            ),
+            (
+                "def remove_worktree(repo: Path, worktree: Path) -> None:\n"
+                "    with REPO_LOCKS[str(repo)]:\n"
+                "        if repo.is_dir():\n"
+                '            git(repo, "worktree", "remove", "--force", '
+                "str(worktree), timeout=600)\n"
+                '            git(repo, "worktree", "prune", timeout=600)\n'
+                "        if worktree.exists():\n"
+                "            shutil.rmtree(worktree, ignore_errors=True)"
+            ),
+            label="native narrow remove worktree lock",
+        )
+        text = replace_required(
+            text,
+            (
+                "    git(\n"
+                "        repo,\n"
+                '        "worktree",\n'
+                '        "add",\n'
+                '        "--force",\n'
+                '        "--detach",\n'
+                "        str(worktree),\n"
+                "        case[\"task\"][\"start_sha\"],\n"
+                "        timeout=1800,\n"
+                "        check=True,\n"
+                "    )\n"
+                "    verify_exact_start(repo, worktree, case)"
+            ),
+            (
+                "    with REPO_LOCKS[str(repo)]:\n"
+                "        git(\n"
+                "            repo,\n"
+                '            "worktree",\n'
+                '            "add",\n'
+                '            "--force",\n'
+                '            "--detach",\n'
+                "            str(worktree),\n"
+                "            case[\"task\"][\"start_sha\"],\n"
+                "            timeout=1800,\n"
+                "            check=True,\n"
+                "        )\n"
+                "    verify_exact_start(repo, worktree, case)"
+            ),
+            label="native narrow add worktree lock",
+        )
+        text = replace_required(
+            text,
+            (
+                '        repo = case["task"]["repo"]\n'
+                "        with REPO_LOCKS[repo]:\n"
+                "            return evaluate_pair(\n"
+                "                case,\n"
+                "                model,\n"
+                "                args.attempts_per_run,\n"
+                "                args.retry_complete,\n"
+                "            )"
+            ),
+            (
+                "        return evaluate_pair(\n"
+                "            case,\n"
+                "            model,\n"
+                "            args.attempts_per_run,\n"
+                "            args.retry_complete,\n"
+                "        )"
+            ),
+            label="native concurrent Oracle execution",
+        )
+        text = replace_required(
+            text,
             '            groups[case["task"]["repo"]].append((case, model))',
             '            groups[case["task"]["id"]].append((case, model))',
             label="native task-balanced scheduling",
@@ -1576,6 +1654,7 @@ def adapt_runner_source(
                 "restore sanitized session paths before plan validation",
                 "anchor IREE submodule preservation to the repository root",
                 "schedule independent tasks concurrently within one repo",
+                "lock only worktree registry mutations",
             ]
         )
     elif lane == "rust":

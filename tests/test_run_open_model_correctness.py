@@ -357,6 +357,8 @@ def test_native_runner_restores_release_placeholders():
     assert "preserve_submodules" in adapted
     assert '"-e", "/third_party/"' in adapted
     assert 'groups[case["task"]["id"]]' in adapted
+    assert "with REPO_LOCKS[str(repo)]" in adapted
+    assert "with REPO_LOCKS[repo]" not in adapted
     assert '(plan.get("env") or {}).items()' in adapted
 
 
