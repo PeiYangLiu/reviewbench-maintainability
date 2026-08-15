@@ -824,6 +824,21 @@ def test_load_staged_generation_requires_every_scoped_id(tmp_path):
         MODULE.load_staged_generation(output, "m", {"task-1", "task-2"})
 
 
+def test_load_staged_generation_can_defer_missing_blocked_ids(tmp_path):
+    output = tmp_path / "out"
+    path = MODULE.staged_generation_path(output, "m")
+    write_jsonl(path, [{"id": "ready", "model": "m", "apply_ok": True}])
+
+    loaded = MODULE.load_staged_generation(
+        output,
+        "m",
+        {"ready", "blocked"},
+        allow_missing=True,
+    )
+
+    assert set(loaded) == {"ready"}
+
+
 def test_load_staged_generation_rejects_a_mislabeled_model(tmp_path):
     output = tmp_path / "out"
     path = MODULE.staged_generation_path(output, "m")

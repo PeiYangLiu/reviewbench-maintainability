@@ -996,6 +996,24 @@ def test_replay_rejects_staged_generation_row_with_mismatched_model_field(tmp_pa
         MODULE.cmd_replay(args)
 
 
+def test_load_staged_generation_can_defer_missing_blocked_ids(tmp_path):
+    output = tmp_path / "output"
+    path = MODULE.staged_generation_path(output, "my-model")
+    write_jsonl(
+        path,
+        [{"id": "ready", "model": "my-model", "apply_ok": True}],
+    )
+
+    loaded = MODULE.load_staged_generation(
+        output,
+        "my-model",
+        {"ready", "blocked"},
+        allow_missing=True,
+    )
+
+    assert set(loaded) == {"ready"}
+
+
 # ---------------------------------------------------------------------------
 # replay execution wiring, with docker/gradle/cargo/vitest calls mocked out
 # ---------------------------------------------------------------------------

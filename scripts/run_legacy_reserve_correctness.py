@@ -3342,6 +3342,8 @@ def load_staged_generation(
     output: Path,
     model: str,
     task_ids: set[str],
+    *,
+    allow_missing: bool = False,
 ) -> dict[str, dict[str, Any]]:
     path = staged_generation_path(output, model)
     if not path.is_file():
@@ -3379,7 +3381,7 @@ def load_staged_generation(
             f"staging directory): {mislabeled}"
         )
     missing = task_ids - set(by_id)
-    if missing:
+    if missing and not allow_missing:
         raise ValueError(
             f"staged generation results for {model!r} are missing IDs: "
             f"{sorted(missing)}"
@@ -4900,7 +4902,12 @@ def cmd_replay(args: argparse.Namespace) -> int:
         tasks_path, oracles_path
     )
     rows = select_scope(plan, args.task_id or None)
-    generations = load_staged_generation(output, model, {row["id"] for row in rows})
+    generations = load_staged_generation(
+        output,
+        model,
+        {row["id"] for row in rows},
+        allow_missing=True,
+    )
 
     legacy_dir = output / "legacy/correctness"
     work_root = Path(args.work_root).resolve() if args.work_root else output / "legacy/work"
@@ -4924,7 +4931,6 @@ def cmd_replay(args: argparse.Namespace) -> int:
         lane = row["lane"]
         task = tasks_by_id[task_id]
         oracle = oracles_by_id[task_id]
-        generation = generations[task_id]
         key = (task_id, model)
 
         # Blockers/asset provenance must be (re)computed unconditionally,
@@ -4944,6 +4950,23 @@ def cmd_replay(args: argparse.Namespace) -> int:
         # jvm/tsjs root, so a combined invocation that also supplies the other
         # lane group's root cannot make this row look stale.
         lane_root = lane_asset_root(lane, task_id, asset_root)
+        generation = generations.get(task_id)
+        if generation is None:
+            if blockers:
+                existing_row = by_lane[lane].get(key)
+                if existing_row is not None:
+                    retract_raw_row(legacy_dir, lane, task_id, model)
+                    by_lane[lane] = existing_raw_rows(legacy_dir, lane)
+                    summary["retracted_stale_rows"] += 1
+                summary["blocked"] += 1
+                summary["errors"].append(
+                    {"id": task_id, "blockers": blockers}
+                )
+                continue
+            raise ValueError(
+                f"ready legacy task {task_id} has no staged generation "
+                f"row for {model!r}"
+            )
 
         existing_row = by_lane[lane].get(key)
         if existing_row is not None and not args.force:
