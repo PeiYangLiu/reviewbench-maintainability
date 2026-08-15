@@ -22,26 +22,41 @@ def test_copy_generation_makes_patch_and_trace_paths_portable(tmp_path):
     )
     source = tmp_path / "generation.jsonl"
     source.write_text(
-        json.dumps(
-            {
-                "id": "task",
-                "repo": "owner/repo",
-                "model": "gpt-5.5",
-                "protocol": "agentic-line-edit/v1",
-                "status": "generated",
-                "apply_ok": True,
-                "changed_lines": 2,
-                "patch_sha256": "canonical",
-                "patch_file": str(patch),
-                "trace_file": str(trace),
-                "error": f"cache at {tmp_path}/cache",
-                "rounds": [
+        "\n".join(
+            [
+                json.dumps(
                     {
-                        "round": 1,
-                        "raw_api_response": {"model": "gpt-5.5-2026-04-23"},
+                        "id": "extra-task",
+                        "repo": "owner/repo",
+                        "model": "gpt-5.5",
+                        "status": "failed",
+                        "apply_ok": False,
                     }
-                ],
-            }
+                ),
+                json.dumps(
+                    {
+                        "id": "task",
+                        "repo": "owner/repo",
+                        "model": "gpt-5.5",
+                        "protocol": "agentic-line-edit/v1",
+                        "status": "generated",
+                        "apply_ok": True,
+                        "changed_lines": 2,
+                        "patch_sha256": "canonical",
+                        "patch_file": str(patch),
+                        "trace_file": str(trace),
+                        "error": f"cache at {tmp_path}/cache",
+                        "rounds": [
+                            {
+                                "round": 1,
+                                "raw_api_response": {
+                                    "model": "gpt-5.5-2026-04-23"
+                                },
+                            }
+                        ],
+                    }
+                ),
+            ]
         )
         + "\n",
         encoding="utf-8",

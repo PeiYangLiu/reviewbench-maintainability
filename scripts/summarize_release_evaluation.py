@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,18 @@ def parse_model_paths(values: list[str]) -> dict[str, Path]:
             raise ValueError(f"invalid model path: {value!r}")
         result[model] = Path(path)
     return result
+
+
+def generation_fingerprint(generation: dict[str, Any]) -> str:
+    record = json.dumps(
+        generation,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    patch = Path(str(generation.get("patch_file") or ""))
+    patch_bytes = patch.read_bytes() if patch.is_file() else b""
+    return hashlib.sha256(record + b"\0" + patch_bytes).hexdigest()
 
 
 def load_correctness(directory: Path) -> dict[tuple[str, str], dict[str, Any]]:
@@ -302,6 +315,19 @@ def build_evaluation(
                     raise ValueError(
                         f"{task_id} / {model} correctness patch does not "
                         "match canonical generation"
+                    )
+                rebind = judgment.get("generation_rebind") or {}
+                judgment_matches_generation = (
+                    rebind.get("canonical_patch_sha256")
+                    == generation_patch_sha256
+                    if rebind
+                    else judgment.get("generation_fingerprint")
+                    == generation_fingerprint(generation)
+                )
+                if not judgment_matches_generation:
+                    raise ValueError(
+                        f"{task_id} / {model} judgment does not match "
+                        "canonical generation"
                     )
             if (
                 not generation_apply

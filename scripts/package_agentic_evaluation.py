@@ -91,6 +91,8 @@ def copy_generation(
     records = []
     for model, source_path in model_paths.items():
         for item in summarizer.load_jsonl(source_path):
+            if item["id"] not in task_order:
+                continue
             rounds = list(item.get("rounds") or [])
             record = {
                 key: item[key]
@@ -186,6 +188,11 @@ def copy_judgments(
 ) -> list[dict[str, Any]]:
     records = []
     for item in summarizer.load_jsonl(source):
+        if (
+            item["id"] not in task_order
+            or item["solver_model"] not in model_order
+        ):
+            continue
         record = dict(item)
         record.pop("patch_file", None)
         raw_source = Path(str(record.pop("raw_file", "") or ""))

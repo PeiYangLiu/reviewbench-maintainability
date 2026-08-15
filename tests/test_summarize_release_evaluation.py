@@ -221,6 +221,65 @@ def test_build_evaluation_rejects_stale_correctness_patch(tmp_path):
         )
 
 
+def test_build_evaluation_rejects_stale_judgment_patch(tmp_path):
+    task_row = {
+        "id": "task",
+        "repo": "owner/repo",
+        "locality": {"path": "src/file.py"},
+    }
+    generation = tmp_path / "generation.jsonl"
+    correctness = tmp_path / "correctness"
+    judgments = tmp_path / "judgments.jsonl"
+    write_jsonl(
+        generation,
+        [
+            {
+                "id": "task",
+                "model": "model",
+                "apply_ok": True,
+                "patch_sha256": "canonical",
+                "changed_lines": 1,
+                "path": "src/file.py",
+            }
+        ],
+    )
+    write_jsonl(
+        correctness / "gopy.jsonl",
+        [
+            {
+                "id": "task",
+                "model": "model",
+                "status": "pass",
+                "oracle_replayed": True,
+                "patch_apply": True,
+                "correctness_ok": True,
+                "patch_sha256": "canonical",
+            }
+        ],
+    )
+    write_jsonl(
+        judgments,
+        [
+            {
+                "id": "task",
+                "solver_model": "model",
+                "maintainability_pass": True,
+                "generation_rebind": {
+                    "canonical_patch_sha256": "stale",
+                },
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="judgment does not match"):
+        MODULE.build_evaluation(
+            [task_row],
+            {"model": generation},
+            correctness,
+            judgments,
+        )
+
+
 def test_load_correctness_accepts_start_reset_policy(tmp_path):
     path = tmp_path / "start-reset.jsonl"
     path.write_text(
