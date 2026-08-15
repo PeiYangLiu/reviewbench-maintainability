@@ -288,6 +288,11 @@ def test_rust_runner_adaptation_replaces_completion_count():
     assert "rust-server-sdk-d8ce9116b17982c6" in adapted
     assert "pinned_git_cache" in adapted
     assert "if cached_db.is_dir()" in adapted
+    assert "def isolated_oracle_command(" in adapted
+    assert 'if "Xvfb :99" not in command:' in adapted
+    assert 'f"DISPLAY=127.0.0.1:{display}.0"' in adapted
+    assert 'f"Xvfb :{display}"' in adapted
+    assert 'oracle["workspace_command"], attempt_dir' in adapted
     assert "for model in selected_models" in adapted
     assert "                        [model]," in adapted
 

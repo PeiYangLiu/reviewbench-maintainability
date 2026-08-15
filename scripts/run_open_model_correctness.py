@@ -1945,6 +1945,38 @@ def adapt_runner_source(
         )
         text = replace_required(
             text,
+            "def execute_variant(\n",
+            (
+                "def isolated_oracle_command(\n"
+                "    command: str, attempt_dir: Path\n"
+                ") -> str:\n"
+                '    if "Xvfb :99" not in command:\n'
+                "        return command\n"
+                "    token = hashlib.sha256(\n"
+                "        str(attempt_dir).encode()\n"
+                "    ).hexdigest()\n"
+                "    display = 1000 + int(token[:8], 16) % 50000\n"
+                "    return command.replace(\n"
+                '        "DISPLAY=127.0.0.1:99.0",\n'
+                '        f"DISPLAY=127.0.0.1:{display}.0",\n'
+                '    ).replace("Xvfb :99", f"Xvfb :{display}")\n'
+                "\n\n"
+                "def execute_variant(\n"
+            ),
+            label="rust isolated Xvfb display helper",
+        )
+        text = replace_required(
+            text,
+            '        shell_command=oracle["workspace_command"],',
+            (
+                "        shell_command=isolated_oracle_command(\n"
+                '            oracle["workspace_command"], attempt_dir\n'
+                "        ),"
+            ),
+            label="rust isolated Xvfb command",
+        )
+        text = replace_required(
+            text,
             '    cargo_home = pair_state.parents[1] / "cargo-home"',
             '    cargo_home = pair_state / "cargo-home"',
             label="rust attempt-local cargo home",
@@ -2007,6 +2039,7 @@ def adapt_runner_source(
                 "remove root-owned worktree state between attempts",
                 "seed Materialize's pinned unavailable git dependency",
                 "reuse a verified attempt-local pinned Cargo cache",
+                "isolate Xvfb display ports per task-model attempt",
                 "schedule isolated task-model pairs independently",
             ]
         )
