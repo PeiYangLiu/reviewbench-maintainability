@@ -1302,6 +1302,120 @@ def adapt_runner_source(
         text = replace_required(
             text,
             (
+                "    if work.exists():\n"
+                "        shutil.rmtree(work, ignore_errors=True)\n"
+                "    subprocess.run(\n"
+                "        [\"git\", \"-c\", \"gc.auto=0\", \"-C\", "
+                "str(repo), \"worktree\", \"prune\"],"
+            ),
+            (
+                "    if work.exists():\n"
+                "        shutil.rmtree(work, ignore_errors=True)\n"
+                "    if work.exists():\n"
+                "        if WORKTREES.resolve() not in "
+                "work.resolve().parents:\n"
+                "            raise RuntimeError(\n"
+                '                f"refusing to remove non-worktree path: '
+                '{work}"\n'
+                "            )\n"
+                '        cleanup_name = "rb-open-rust-worktree-" + '
+                "hashlib.sha256(str(work).encode()).hexdigest()[:16]\n"
+                "        removed = subprocess.run(\n"
+                "            [\n"
+                '                "docker", "run", "--rm", "--name", '
+                "cleanup_name,\n"
+                '                "-v", "/data:/data", lane.DEFAULT_IMAGE,\n'
+                '                "sh", "-c", \'rm -rf -- "$1"\', "sh", '
+                "str(work),\n"
+                "            ],\n"
+                "            stdout=subprocess.PIPE,\n"
+                "            stderr=subprocess.STDOUT,\n"
+                "            text=True,\n"
+                "            check=False,\n"
+                "            timeout=300,\n"
+                "        )\n"
+                "        if removed.returncode != 0 or work.exists():\n"
+                "            raise RuntimeError(\n"
+                '                "root-owned worktree cleanup failed: "\n'
+                "                + removed.stdout[-1000:]\n"
+                "            )\n"
+                "    subprocess.run(\n"
+                "        [\"git\", \"-c\", \"gc.auto=0\", \"-C\", "
+                "str(repo), \"worktree\", \"prune\"],"
+            ),
+            label="rust root-owned worktree cleanup",
+        )
+        text = replace_required(
+            text,
+            "def run_docker(\n",
+            (
+                "def seed_pinned_git_cache(\n"
+                "    plan: dict[str, Any], cargo_home: Path\n"
+                ") -> list[dict[str, str]]:\n"
+                "    if int(plan.get(\"input_index\", -1)) != 10:\n"
+                "        return []\n"
+                "    name = \"rust-server-sdk-d8ce9116b17982c6\"\n"
+                "    commit = "
+                '"5c36592edc75b620482a92e6991147aee7baf2d8"\n'
+                "    source_root = LANE / \"cache/cargo/git\"\n"
+                "    for kind in (\"db\", \"checkouts\"):\n"
+                "        source = source_root / kind / name\n"
+                "        destination = cargo_home / \"git\" / kind / name\n"
+                "        if not source.is_dir():\n"
+                "            raise RuntimeError(\n"
+                '                f"pinned Cargo git cache missing: {source}"\n'
+                "            )\n"
+                "        shutil.copytree(\n"
+                "            source,\n"
+                "            destination,\n"
+                "            dirs_exist_ok=True,\n"
+                "            symlinks=True,\n"
+                "        )\n"
+                "    verified = run_host(\n"
+                "        [\n"
+                '            "git", "--git-dir",\n'
+                "            str(cargo_home / \"git/db\" / name),\n"
+                '            "cat-file", "-e", f"{commit}^{{commit}}",\n'
+                "        ],\n"
+                "        timeout=120,\n"
+                "    )\n"
+                "    if verified.returncode != 0:\n"
+                "        raise RuntimeError(\n"
+                '            "pinned Cargo git commit verification failed"\n'
+                "        )\n"
+                "    return [{\"name\": name, \"commit\": commit}]\n"
+                "\n\n"
+                "def run_docker(\n"
+            ),
+            label="rust pinned Materialize git cache helper",
+        )
+        text = replace_required(
+            text,
+            "    cargo_home.mkdir(parents=True, exist_ok=True)\n"
+            "    target.mkdir(parents=True, exist_ok=True)",
+            (
+                "    cargo_home.mkdir(parents=True, exist_ok=True)\n"
+                "    pinned_git_cache = seed_pinned_git_cache(\n"
+                "        plan, cargo_home\n"
+                "    )\n"
+                "    target.mkdir(parents=True, exist_ok=True)"
+            ),
+            label="rust pinned Cargo seed",
+        )
+        text = replace_required(
+            text,
+            '        "attempts": attempts,\n'
+            '        "log": relative(final_log),',
+            (
+                '        "attempts": attempts,\n'
+                '        "pinned_git_cache": pinned_git_cache,\n'
+                '        "log": relative(final_log),'
+            ),
+            label="rust pinned Cargo evidence",
+        )
+        text = replace_required(
+            text,
+            (
                 "def clean_variant(repo: Path, work: Path) -> None:\n"
             ),
             (
@@ -1376,6 +1490,8 @@ def adapt_runner_source(
                 "record the actual execution host",
                 "use an open-model-specific container prefix",
                 "remove root-owned per-attempt build state after evidence",
+                "remove root-owned worktree state between attempts",
+                "seed Materialize's pinned unavailable git dependency",
             ]
         )
     else:

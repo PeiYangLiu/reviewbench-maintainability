@@ -255,6 +255,9 @@ def test_rust_runner_adaptation_replaces_completion_count():
     assert "remove_pair_state(pair_state)" in adapted
     assert 'cargo_home = pair_state / "cargo-home"' in adapted
     assert "root-owned state cleanup failed" in adapted
+    assert "root-owned worktree cleanup failed" in adapted
+    assert "rust-server-sdk-d8ce9116b17982c6" in adapted
+    assert "pinned_git_cache" in adapted
 
 
 def test_gopy_runner_adaptation_preserves_oracle_runtimes():
