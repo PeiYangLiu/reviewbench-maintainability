@@ -2,6 +2,8 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -673,6 +675,39 @@ def test_run_rejects_duplicate_lane_selection(tmp_path):
             jobs=MODULE.DEFAULT_JOBS,
             allow_partial_modern=False,
         )
+
+
+def test_run_dispatches_selected_lanes_concurrently(tmp_path, monkeypatch):
+    output = tmp_path / "output"
+    MODULE.atomic_json(
+        output / "input-manifest.json",
+        {"partial_modern_only": False},
+    )
+    barrier = threading.Barrier(2)
+    started = []
+
+    monkeypatch.setattr(
+        MODULE,
+        "lane_command",
+        lambda lane, output, jobs: ["runner", lane],
+    )
+
+    def fake_run(command, **kwargs):
+        started.append(command[-1])
+        barrier.wait(timeout=2)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(MODULE.subprocess, "run", fake_run)
+
+    result = MODULE.run_lanes(
+        output=output,
+        selected_lanes=["gopy", "jvm"],
+        jobs=MODULE.DEFAULT_JOBS,
+        allow_partial_modern=False,
+    )
+
+    assert set(started) == {"gopy", "jvm"}
+    assert result["all_returncodes_zero"] is True
 
 
 def test_parse_jobs_is_strict():

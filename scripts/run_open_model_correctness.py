@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
+import concurrent.futures
 import datetime as dt
 import hashlib
 import json
@@ -16,6 +17,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 from typing import Any, Iterable
 
 
@@ -2840,7 +2842,6 @@ def run_lanes(
     invocations = (
         read_jsonl(invocations_path) if invocations_path.is_file() else []
     )
-    results = {}
     for lane in selected_lanes:
         existing_output = correctness / f"{lane}.jsonl"
         if existing_output.is_file():
@@ -2849,6 +2850,8 @@ def run_lanes(
                 ("id", "model"),
                 f"existing {lane} correctness pair",
             )
+
+    def run_lane(lane: str) -> dict[str, Any]:
         command = lane_command(lane, output, jobs[lane])
         log_path = logs / f"{lane}.log"
         started = utc_now()
@@ -2864,7 +2867,7 @@ def run_lanes(
                 stderr=subprocess.STDOUT,
                 check=False,
             )
-        invocation = {
+        return {
             "lane": lane,
             "started_at": started,
             "completed_at": utc_now(),
@@ -2873,9 +2876,28 @@ def run_lanes(
             "log": str(log_path),
             "log_sha256": sha256(log_path),
         }
-        invocations.append(invocation)
-        atomic_jsonl(invocations_path, invocations)
-        results[lane] = invocation
+
+    results: dict[str, dict[str, Any]] = {}
+    invocation_lock = threading.Lock()
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=max(1, len(selected_lanes))
+    ) as executor:
+        futures = {
+            executor.submit(run_lane, lane): lane
+            for lane in selected_lanes
+        }
+        for future in concurrent.futures.as_completed(futures):
+            lane = futures[future]
+            invocation = future.result()
+            results[lane] = invocation
+            with invocation_lock:
+                invocations.append(invocation)
+                atomic_jsonl(invocations_path, invocations)
+
+    results = {
+        lane: results[lane]
+        for lane in selected_lanes
+    }
     report = {
         "schema_version": "reviewbench-open-correctness-run/v1",
         "completed_at": utc_now(),
