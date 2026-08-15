@@ -173,6 +173,7 @@ def normalize_correctness(
             "error": value.get("error"),
         }
         for (task_id, model), value in normalized.items()
+        if task_id in task_order and model in model_order
     ]
     return sorted(
         records,

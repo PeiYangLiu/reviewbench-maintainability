@@ -97,20 +97,34 @@ def test_normalize_correctness_preserves_patch_identity(tmp_path):
     correctness = tmp_path / "correctness"
     correctness.mkdir()
     (correctness / "gopy.jsonl").write_text(
-        json.dumps(
-            {
-                "schema_version": "reviewbench-open-correctness-normalized/v1",
-                "id": "task",
-                "model": "model",
-                "lane": "gopy",
-                "source_kind": "modern",
-                "status": "pass",
-                "patch_sha256": "canonical",
-                "patch_apply": True,
-                "correctness_ok": True,
-                "scope_ok": True,
-                "retryable": False,
-            }
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "schema_version": (
+                            "reviewbench-open-correctness-normalized/v1"
+                        ),
+                        "id": "task",
+                        "model": "model",
+                        "lane": "gopy",
+                        "source_kind": "modern",
+                        "status": "pass",
+                        "patch_sha256": "canonical",
+                        "patch_apply": True,
+                        "correctness_ok": True,
+                        "scope_ok": True,
+                        "retryable": False,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "id": "task",
+                        "model": "out-of-scope-model",
+                        "lane": "gopy",
+                        "status": "pass",
+                    }
+                ),
+            ]
         )
         + "\n",
         encoding="utf-8",
