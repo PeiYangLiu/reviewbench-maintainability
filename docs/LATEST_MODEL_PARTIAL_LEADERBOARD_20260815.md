@@ -2,6 +2,11 @@
 
 更新时间：2026-08-15
 
+> **已撤回，不得用于模型比较。** 审计发现该快照漏合并 canonical generation
+> 对应的 correctness delta，且把两道全模型 Oracle metadata defect 留在分母。
+> GPT Responses 轨迹还未保存返回模型身份。修正版将使用 406 题、canonical
+> patch identity 硬校验，并对 GPT-5.5/5.6 Sol 与 Opus 4.8/5 执行同协议 fresh-run。
+
 ## 口径
 
 ```text

@@ -6,10 +6,11 @@
 artifact，再运行 correctness 和 maintainability；以后 rubric 改变时直接重判，
 不重新运行 GPU inference。
 
-> **最新评分更新（2026-08-15）：** 已恢复 34/40 published-legacy
-> contracts，并重放 12 个模型。统一 408-task leaderboard 见
-> [`LATEST_MODEL_PARTIAL_LEADERBOARD_20260815.md`](LATEST_MODEL_PARTIAL_LEADERBOARD_20260815.md)。
-> 本文后续 381/378 数字保留为恢复前历史 checkpoint。
+> **评分更正（2026-08-15）：** 408-task leaderboard 已撤回。审计发现
+> correctness delta 未完整合并、两个全模型 Oracle metadata defect 未排除，
+> 且 GPT Responses 轨迹缺返回模型身份。正在补跑 canonical mismatch pairs，
+> 并对跨代 GPT/Opus 执行同协议 fresh-run。本文中的 408/381/378 数字均仅保留
+> 为历史 checkpoint，不得用于当前模型比较。
 
 ## 1. AMLT experiment
 

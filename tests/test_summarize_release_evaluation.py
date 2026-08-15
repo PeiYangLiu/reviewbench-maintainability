@@ -1,5 +1,8 @@
 import importlib.util
+import json
 from pathlib import Path
+
+import pytest
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "summarize_release_evaluation.py"
@@ -7,6 +10,14 @@ SPEC = importlib.util.spec_from_file_location("summarize_release_evaluation", SC
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+def write_jsonl(path, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
 
 
 def test_breakdown_reports_resolved_rate():
@@ -152,6 +163,62 @@ def test_load_correctness_normalized_infra_is_not_replayed(tmp_path):
 
     assert result["oracle_replayed"] is False
     assert result["correctness_ok"] is False
+
+
+def test_build_evaluation_rejects_stale_correctness_patch(tmp_path):
+    task_row = {
+        "id": "task",
+        "repo": "owner/repo",
+        "locality": {"path": "src/file.py"},
+    }
+    generation = tmp_path / "generation.jsonl"
+    correctness = tmp_path / "correctness"
+    judgments = tmp_path / "judgments.jsonl"
+    write_jsonl(
+        generation,
+        [
+            {
+                "id": "task",
+                "model": "model",
+                "apply_ok": True,
+                "patch_sha256": "canonical",
+                "changed_lines": 1,
+                "path": "src/file.py",
+            }
+        ],
+    )
+    write_jsonl(
+        correctness / "gopy.jsonl",
+        [
+            {
+                "id": "task",
+                "model": "model",
+                "status": "pass",
+                "oracle_replayed": True,
+                "patch_apply": True,
+                "correctness_ok": True,
+                "patch_sha256": "stale",
+            }
+        ],
+    )
+    write_jsonl(
+        judgments,
+        [
+            {
+                "id": "task",
+                "solver_model": "model",
+                "maintainability_pass": True,
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="does not match canonical"):
+        MODULE.build_evaluation(
+            [task_row],
+            {"model": generation},
+            correctness,
+            judgments,
+        )
 
 
 def test_load_correctness_accepts_start_reset_policy(tmp_path):

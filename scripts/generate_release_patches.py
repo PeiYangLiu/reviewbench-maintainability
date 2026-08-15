@@ -27,7 +27,11 @@ MODEL_SPECS = {
     "claude-opus-4.8": {"provider": "chat", "reasoning_effort": None},
     "gemini-3.5-flash": {"provider": "chat", "reasoning_effort": "medium"},
     "gemini-3.6-flash": {"provider": "chat", "reasoning_effort": "medium"},
-    "gpt-5.5": {"provider": "responses", "reasoning_effort": "medium"},
+    "gpt-5.5": {
+        "provider": "responses",
+        "reasoning_effort": "medium",
+        "response_models": {"gpt-5.5", "gpt-5.5-2026-04-23"},
+    },
     "gpt-5.6-luna": {"provider": "responses", "reasoning_effort": "medium"},
     "gpt-5.6-sol": {"provider": "responses", "reasoning_effort": "medium"},
     "gpt-5.6-terra": {"provider": "responses", "reasoning_effort": "medium"},
@@ -310,16 +314,17 @@ def chat_text(data: dict[str, Any]) -> str:
     return ""
 
 
-def invoke_model(
+def invoke_model_envelope(
     model: str,
     instructions: str,
     prompt: str,
     args: argparse.Namespace,
-) -> tuple[str, dict[str, Any]]:
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
     spec = MODEL_SPECS.get(
         model,
         {"provider": "chat", "reasoning_effort": None},
     )
+    accepted_response_models = set(spec.get("response_models") or {model})
     if spec["provider"] == "chat" or getattr(args, "force_chat", False):
         payload: dict[str, Any] = {
             "model": model,
@@ -340,12 +345,14 @@ def invoke_model(
             retries=getattr(args, "request_retries", 6),
         )
         actual_model = str(data.get("model") or "")
-        if actual_model and actual_model != model:
+        if actual_model not in accepted_response_models:
             raise RuntimeError(
                 f"solver model mismatch: requested {model}, gateway returned "
-                f"{actual_model}; refusing a silent fallback"
+                f"{actual_model or '<missing>'}; refusing an unattested "
+                f"or silent fallback; accepted identities are "
+                f"{sorted(accepted_response_models)}"
             )
-        return chat_text(data), data.get("usage") or {}
+        return chat_text(data), data.get("usage") or {}, data
 
     payload = {
         "model": model,
@@ -379,7 +386,30 @@ def invoke_model(
             ):
                 continue
             raise
-    return response_text(data), data.get("usage") or {}
+    actual_model = str(data.get("model") or "")
+    if actual_model not in accepted_response_models:
+        raise RuntimeError(
+            f"solver model mismatch: requested {model}, gateway returned "
+            f"{actual_model or '<missing>'}; refusing an unattested or "
+            f"silent fallback; accepted identities are "
+            f"{sorted(accepted_response_models)}"
+        )
+    return response_text(data), data.get("usage") or {}, data
+
+
+def invoke_model(
+    model: str,
+    instructions: str,
+    prompt: str,
+    args: argparse.Namespace,
+) -> tuple[str, dict[str, Any]]:
+    text, usage, _ = invoke_model_envelope(
+        model,
+        instructions,
+        prompt,
+        args,
+    )
+    return text, usage
 
 
 def safe_component(value: str) -> str:

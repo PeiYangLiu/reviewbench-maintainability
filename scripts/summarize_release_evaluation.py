@@ -296,6 +296,23 @@ def build_evaluation(
             correct = correctness.get((task_id, model)) or {}
             judgment = judgments.get((task_id, model)) or {}
             generation_apply = generation.get("apply_ok") is True
+            generation_patch_sha256 = generation.get("patch_sha256")
+            if generation_apply and generation_patch_sha256 is not None:
+                if correct.get("patch_sha256") != generation_patch_sha256:
+                    raise ValueError(
+                        f"{task_id} / {model} correctness patch does not "
+                        "match canonical generation"
+                    )
+            if (
+                not generation_apply
+                and correct
+                and correct.get("status") != "candidate_missing"
+                and correct.get("candidate_result") != "candidate_missing"
+            ):
+                raise ValueError(
+                    f"{task_id} / {model} non-generated candidate has a "
+                    "correctness verdict"
+                )
             scope_ok = (
                 generation_apply
                 and type(generation.get("changed_lines")) is int

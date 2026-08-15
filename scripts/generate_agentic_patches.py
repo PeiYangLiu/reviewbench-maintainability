@@ -663,13 +663,13 @@ def invoke(
         request_retries=args.request_retries,
         force_chat=args.force_chat,
     )
-    text, usage = api.invoke_model(
+    text, usage, data = api.invoke_model_envelope(
         model,
         AGENT_INSTRUCTIONS,
         prompt,
         invoke_args,
     )
-    return text, usage, None
+    return text, usage, data
 
 
 def native_assistant_message(data: dict[str, Any]) -> dict[str, Any] | None:

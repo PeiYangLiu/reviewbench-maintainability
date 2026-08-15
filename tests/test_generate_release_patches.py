@@ -133,7 +133,7 @@ def test_current_gpt_models_use_responses_api(monkeypatch, model):
     def fake_post_json(endpoint, payload, headers, **kwargs):
         captured["endpoint"] = endpoint
         captured["payload"] = payload
-        return {"output_text": "OK", "usage": {}}
+        return {"model": model, "output_text": "OK", "usage": {}}
 
     monkeypatch.setattr(MODULE, "post_json", fake_post_json)
     monkeypatch.setattr(
@@ -156,6 +156,73 @@ def test_current_gpt_models_use_responses_api(monkeypatch, model):
     assert text == "OK"
     assert captured["endpoint"] == args.responses_endpoint
     assert captured["payload"]["model"] == model
+
+
+def test_responses_model_requires_returned_identity(monkeypatch):
+    monkeypatch.setattr(
+        MODULE,
+        "copilot_token",
+        lambda endpoint, refresh=False: "token",
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "post_json",
+        lambda *args, **kwargs: {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "ok"}],
+                }
+            ],
+            "usage": {},
+        },
+    )
+    args = Namespace(
+        force_chat=False,
+        responses_endpoint="https://example.invalid/responses",
+        token_endpoint="http://127.0.0.1:4141/token",
+        max_output_tokens=100,
+        request_timeout=30,
+        request_retries=0,
+    )
+
+    with pytest.raises(RuntimeError, match="gateway returned <missing>"):
+        MODULE.invoke_model("gpt-5.6-sol", "system", "prompt", args)
+
+
+def test_gpt_55_accepts_pinned_versioned_response_identity(monkeypatch):
+    monkeypatch.setattr(
+        MODULE,
+        "copilot_token",
+        lambda endpoint, refresh=False: "token",
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "post_json",
+        lambda *args, **kwargs: {
+            "model": "gpt-5.5-2026-04-23",
+            "output_text": "OK",
+            "usage": {},
+        },
+    )
+    args = Namespace(
+        force_chat=False,
+        responses_endpoint="https://example.invalid/responses",
+        token_endpoint="http://127.0.0.1:4141/token",
+        max_output_tokens=100,
+        request_timeout=30,
+        request_retries=0,
+    )
+
+    text, _, data = MODULE.invoke_model_envelope(
+        "gpt-5.5",
+        "system",
+        "prompt",
+        args,
+    )
+
+    assert text == "OK"
+    assert data["model"] == "gpt-5.5-2026-04-23"
 
 
 def test_custom_model_defaults_to_openai_compatible_chat(monkeypatch):
