@@ -3292,10 +3292,9 @@ def test_replay_jvm_records_a_successful_mandatory_prime_in_provenance(
 def test_replay_jvm_fails_closed_when_the_mandatory_prime_does_not_succeed(
     tmp_path, monkeypatch, prime_exit, prime_error
 ):
-    # A declared prime_command is mandatory: a nonzero exit, a timeout or a
-    # spawn error must produce infra_retry, persist the prime log, and must
-    # never invoke the scored command (whose "no tests found" failure would
-    # otherwise be scored as a model failure).
+    # A declared prime_command is mandatory. If both candidate and exact-start
+    # prime fail, the result remains infra_retry and the scored command must
+    # never run.
     legacy_root, task, oracle, generation = _reposense_replay_fixture(
         tmp_path, monkeypatch
     )
@@ -3317,8 +3316,10 @@ def test_replay_jvm_fails_closed_when_the_mandatory_prime_does_not_succeed(
     assert row["candidate_result"] == "infra_retry"
     assert row["correctness_ok"] is None
     assert row["scored_command_executed"] is False
-    # only the prime command was ever invoked
-    assert seen == [MODULE.JVM_MANIFEST[REPOSENSE_TASK_ID_FULL]["prime_command"]]
+    assert seen == [
+        MODULE.JVM_MANIFEST[REPOSENSE_TASK_ID_FULL]["prime_command"],
+        MODULE.JVM_MANIFEST[REPOSENSE_TASK_ID_FULL]["prime_command"],
+    ]
     assert row["prime_result"]["ok"] is False
     assert row["prime_result"]["exit_code"] == prime_exit
     assert row["prime_result"]["error"] == prime_error
@@ -3329,6 +3330,47 @@ def test_replay_jvm_fails_closed_when_the_mandatory_prime_does_not_succeed(
     )
     assert (output / row["error_log"]).is_file()
     assert (output / row["error_log"]).read_text() == "prime output\n"
+    assert (output / row["baseline_prime_log"]).is_file()
+    assert (output / row["baseline_prime_log"]).read_text() == "prime output\n"
+
+
+def test_replay_jvm_classifies_prime_failure_when_exact_start_passes(
+    tmp_path, monkeypatch
+):
+    legacy_root, task, oracle, generation = _reposense_replay_fixture(
+        tmp_path, monkeypatch
+    )
+    seen = []
+
+    def fake_run_subprocess(command, *, cwd, log_path, env=None, timeout=1800):
+        seen.append(log_path.name)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        if log_path.name == "prime.log":
+            log_path.write_text("candidate compile failed\n", encoding="utf-8")
+            return 1, 1.0, ""
+        if log_path.name == "baseline-prime.log":
+            log_path.write_text("BUILD SUCCESSFUL\n", encoding="utf-8")
+            return 0, 1.0, ""
+        raise AssertionError("scored command must not run")
+
+    monkeypatch.setattr(MODULE, "run_subprocess", fake_run_subprocess)
+    output = tmp_path / "output"
+    row = MODULE.replay_jvm(
+        REPOSENSE_TASK_ID_FULL, "my-model", task, oracle, generation, legacy_root,
+        tmp_path / "work", output, 60,
+    )
+
+    assert seen == ["prime.log", "baseline-prime.log"]
+    assert row["status"] == "fail"
+    assert row["candidate_result"] == "fail"
+    assert row["correctness_ok"] is False
+    assert row["failure_validated_by_baseline"] is True
+    assert row["failed_tests"] == ["jvm-prime"]
+    assert row["scored_command_executed"] is False
+    assert (output / row["prime_log"]).read_text() == "candidate compile failed\n"
+    assert (
+        output / row["baseline_prime_log"]
+    ).read_text() == "BUILD SUCCESSFUL\n"
 
 
 def test_reposense_is_the_only_task_declaring_a_mandatory_prime_command():

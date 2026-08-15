@@ -1500,8 +1500,8 @@ def recovered_asset_state(entry: dict[str, Any]) -> dict[str, Any]:
 class _PrimeFailure(Exception):
     """Raised when a mandatory ``prime_command`` did not succeed.
 
-    Carries the already-built ``infra_retry`` row so ``replay_jvm`` can persist
-    its evidence and return without ever reaching the scored command.
+    Carries the already-built terminal row so ``replay_jvm`` can persist its
+    evidence and return without ever reaching the scored command.
     """
 
     def __init__(self, result: dict[str, Any]) -> None:
@@ -1517,7 +1517,7 @@ class _PrimeFailure(Exception):
 # silently treating them as fresh (code-review finding: "resume must
 # validate current task/oracle/replay-contract fingerprints and rerun
 # stale rows").
-ADAPTER_CONTRACT_VERSION = "v6-2026-08-14-integrated-legacy-asset-recovery"
+ADAPTER_CONTRACT_VERSION = "v7-2026-08-15-baseline-failure-classification"
 
 
 def replay_contract_fingerprint(
@@ -4370,6 +4370,158 @@ def replay_jvm(
                 }
             if prime_result is not None and not prime_result["ok"]:
                 log_kind = "prime.log"
+                baseline_workspace = scratch / "baseline-workspace"
+                baseline_task = scratch / "baseline-task"
+                baseline_cache_home = scratch / "baseline-cachehome"
+                baseline_faults: list[str] = []
+                baseline_result: dict[str, Any]
+                try:
+                    materialize_start(
+                        repo_source,
+                        start_sha,
+                        baseline_workspace,
+                    )
+                    if manifest.get("session_tests"):
+                        session_tests = (
+                            artifacts_directory(
+                                oracle, legacy_root, asset_root
+                            )
+                            / "session-tests"
+                        )
+                        shutil.copytree(
+                            session_tests,
+                            baseline_workspace,
+                            dirs_exist_ok=True,
+                        )
+                    for entry in manifest.get("prefetch") or ():
+                        source = cache_root / entry["asset"]
+                        digest = full_file_digest(source)
+                        if digest != entry["sha256"]:
+                            baseline_faults.append(
+                                "baseline pinned prefetch asset mismatch: "
+                                f"{source}"
+                            )
+                            continue
+                        destination = (
+                            baseline_workspace / entry["workspace_path"]
+                        )
+                        destination.parent.mkdir(
+                            parents=True,
+                            exist_ok=True,
+                        )
+                        shutil.copy2(source, destination)
+                    _, baseline_seed_faults = seed_jvm_cache_home(
+                        cache_home,
+                        manifest["cache_index"],
+                        baseline_cache_home,
+                    )
+                    baseline_faults.extend(baseline_seed_faults)
+                    if manifest.get("needs_gradle_wrapper_jar"):
+                        baseline_wrapper_status, _ = (
+                            install_pinned_gradle_wrapper(
+                                baseline_workspace,
+                                cache_root,
+                                manifest.get(
+                                    "gradle_wrapper_jar_sha256"
+                                ),
+                            )
+                        )
+                        if baseline_wrapper_status not in (
+                            "installed",
+                            "already-present",
+                        ):
+                            baseline_faults.append(
+                                "baseline pinned Gradle wrapper jar "
+                                "unusable "
+                                f"({baseline_wrapper_status})"
+                            )
+                    if baseline_faults:
+                        baseline_error = "; ".join(baseline_faults)
+                        (scratch / "baseline-prime.log").write_text(
+                            baseline_error + "\n",
+                            encoding="utf-8",
+                        )
+                        baseline_result = {
+                            "command": prime_command,
+                            "exit_code": None,
+                            "duration_seconds": 0.0,
+                            "error": baseline_error,
+                            "ok": False,
+                            "setup_faults": baseline_faults,
+                        }
+                    else:
+                        (
+                            baseline_exit,
+                            baseline_duration,
+                            baseline_error,
+                        ) = run_subprocess(
+                            jvm_docker_command(
+                                oracle,
+                                task_id,
+                                legacy_root,
+                                asset_root,
+                                baseline_workspace,
+                                baseline_task,
+                                prime_command,
+                                offline,
+                                baseline_cache_home,
+                            ),
+                            cwd=None,
+                            log_path=scratch / "baseline-prime.log",
+                            timeout=timeout,
+                        )
+                        baseline_result = {
+                            "command": prime_command,
+                            "exit_code": baseline_exit,
+                            "duration_seconds": baseline_duration,
+                            "error": baseline_error,
+                            "ok": (
+                                baseline_exit == 0
+                                and not baseline_error
+                            ),
+                            "setup_faults": [],
+                        }
+                except (
+                    OSError,
+                    RuntimeError,
+                    subprocess.SubprocessError,
+                ) as error:
+                    baseline_error = repr(error)
+                    (scratch / "baseline-prime.log").write_text(
+                        baseline_error + "\n",
+                        encoding="utf-8",
+                    )
+                    baseline_result = {
+                        "command": prime_command,
+                        "exit_code": None,
+                        "duration_seconds": 0.0,
+                        "error": baseline_error,
+                        "ok": False,
+                        "setup_faults": [baseline_error],
+                    }
+                finally:
+                    shutil.rmtree(
+                        baseline_workspace,
+                        ignore_errors=True,
+                    )
+                    shutil.rmtree(
+                        baseline_task,
+                        ignore_errors=True,
+                    )
+                    shutil.rmtree(
+                        baseline_cache_home,
+                        ignore_errors=True,
+                    )
+                candidate_prime_error = (
+                    "mandatory prime_command failed with exit "
+                    f"{prime_result['exit_code']}"
+                    + (
+                        f": {prime_result['error']}"
+                        if prime_result["error"]
+                        else ""
+                    )
+                )
+                baseline_passed = baseline_result["ok"] is True
                 result = {
                     "id": task_id,
                     "model": model,
@@ -4377,17 +4529,39 @@ def replay_jvm(
                     "source_kind": "published_legacy",
                     "start_sha": start_sha,
                     "patch_sha256": generation.get("patch_sha256"),
-                    "status": INFRA_RETRY,
-                    "candidate_result": INFRA_RETRY,
-                    "correctness_ok": None,
+                    "status": "fail" if baseline_passed else INFRA_RETRY,
+                    "candidate_result": (
+                        "fail" if baseline_passed else INFRA_RETRY
+                    ),
+                    "correctness_ok": (
+                        False if baseline_passed else None
+                    ),
                     "patch_apply": True,
                     "scope_ok": scope_ok,
                     "error": (
-                        "mandatory prime_command failed with exit "
-                        f"{prime_result['exit_code']}"
-                        + (f": {prime_result['error']}" if prime_result["error"] else "")
+                        candidate_prime_error
+                        + (
+                            "; exact-start baseline passed"
+                            if baseline_passed
+                            else (
+                                "; exact-start baseline failed: "
+                                f"{baseline_result['error']}"
+                            )
+                        )
                     ),
                     "prime_result": prime_result,
+                    "baseline_prime_result": baseline_result,
+                    "failure_validated_by_baseline": baseline_passed,
+                    "pass_to_pass_total": (
+                        BASE.pass_to_pass_count(
+                            oracle.get("pass_to_pass")
+                        )
+                        or manifest["expected_tests"]
+                    ),
+                    "pass_to_pass_passed": 0,
+                    "failed_tests": (
+                        ["jvm-prime"] if baseline_passed else []
+                    ),
                     "scored_command_executed": False,
                 }
                 raise _PrimeFailure(result)
@@ -4505,6 +4679,10 @@ def replay_jvm(
         # is the evidence for this row.
         result["error_log"] = evidence.get("prime.log")
         result["prime_log"] = evidence.get("prime.log")
+        if evidence.get("baseline-prime.log"):
+            result["baseline_prime_log"] = evidence[
+                "baseline-prime.log"
+            ]
     else:
         result["log"] = evidence.get("run.log")
         if evidence.get("prime.log"):
