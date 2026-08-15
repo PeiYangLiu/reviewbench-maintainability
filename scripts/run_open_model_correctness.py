@@ -1012,12 +1012,87 @@ def adapt_runner_source(
             ),
             label="scripted repo-balanced scheduling",
         )
+        text = replace_required(
+            text,
+            (
+                '    workers_root = output_root / "scripted-worker-state"\n'
+                "    workers = []"
+            ),
+            (
+                '    workers_root = output_root / "scripted-worker-state"\n'
+                '    shared_cache = output_root / "scripted-shared-cache"\n'
+                "    shared_cache.mkdir(parents=True, exist_ok=True)\n"
+                "    shared_names = (\n"
+                '        "celeritas-home",\n'
+                '        "cmake-4.0",\n'
+                '        "draconic-apt",\n'
+                '        "draconic-submodules",\n'
+                '        "foundry-e2fa-target",\n'
+                '        "foundry-home",\n'
+                '        "svelte-oracle",\n'
+                '        "yarn",\n'
+                "    )\n"
+                "    for name in shared_names:\n"
+                "        source = lane_root / \"cache\" / name\n"
+                "        destination = shared_cache / name\n"
+                "        if destination.exists():\n"
+                "            continue\n"
+                "        if not source.is_dir():\n"
+                "            raise FileNotFoundError(\n"
+                '                f"missing Scripted cache asset: {source}"\n'
+                "            )\n"
+                "        destination.mkdir()\n"
+                "        subprocess.check_call(\n"
+                "            [\n"
+                '                "cp", "-a", "--reflink=auto",\n'
+                '                f"{source}/.", str(destination),\n'
+                "            ]\n"
+                "        )\n"
+                "    workers = []"
+            ),
+            label="scripted shared cache materialization",
+        )
+        text = replace_required(
+            text,
+            "        if not ready.exists():",
+            (
+                "        if (\n"
+                "            not ready.exists()\n"
+                '            or not (cache / "cmake-4.0").exists()\n'
+                "        ):"
+            ),
+            label="scripted cache-ready validation",
+        )
+        text = replace_required(
+            text,
+            (
+                '            (cache / "vue-oracle").symlink_to(\n'
+                '                lane_root / "cache" / "vue-oracle", '
+                "target_is_directory=True\n"
+                "            )\n"
+                '            (worker / "tools").symlink_to('
+            ),
+            (
+                '            (cache / "vue-oracle").symlink_to(\n'
+                '                lane_root / "cache" / "vue-oracle", '
+                "target_is_directory=True\n"
+                "            )\n"
+                "            for name in shared_names:\n"
+                "                (cache / name).symlink_to(\n"
+                "                    shared_cache / name,\n"
+                "                    target_is_directory=True,\n"
+                "                )\n"
+                '            (worker / "tools").symlink_to('
+            ),
+            label="scripted worker shared cache links",
+        )
         changes.extend(
             [
                 "configure task count",
                 "disable host-version Composer policy blocking",
                 "map Draconic candidate and baseline to the start contract",
                 "interleave repositories across worker submissions",
+                "materialize one output-local shared task cache",
             ]
         )
     elif lane == "csharp":

@@ -200,35 +200,27 @@ def test_staging_recovers_failed_record_metadata_from_fingerprint(tmp_path):
 
 
 def test_scripted_runner_adaptation_uses_dynamic_models_and_task_count():
-    source = """\
-import json
-from pathlib import Path
-MODELS = ("claude-opus-4.8", "gemini-3.5-flash", "gpt-5.5")
-class Replay:
-    def validate_inputs(self, node_bin):
-        if len(self.tasks) != 35:
-            raise RuntimeError(f"expected 35 scripted tasks, found {len(self.tasks)}")
-    def run_setup_and_oracle(self, task, cfg):
-        setup_template = cfg.get("setup_host_command")
-        if setup_template:
-            pass
-        command = format_command(
-            cfg["test_host_command"],
-        )
-    def selected_pairs(self):
-        pairs = []
-        for task in []:
-            for model in []:
-                pairs.append((task, model))
-        return pairs
-"""
-    adapted, _ = MODULE.adapt_runner_source("scripted", source)
+    source_path = Path(
+        "/data/v-peiyangliu/reviewbench-session-"
+        "9a9f50f0-cb30-462e-942e-1e9def267f6d/"
+        "hard_oracle_20260804/wave-001/correctness/"
+        "scripted_runner.py"
+    )
+    if not source_path.is_file():
+        pytest.skip("proven Scripted runner is not available")
+
+    adapted, _ = MODULE.adapt_runner_source(
+        "scripted",
+        source_path.read_text(encoding="utf-8"),
+    )
     assert 'MODELS = tuple(_OPEN_CONFIG["models"])' in adapted
     assert "len(self.tasks) != EXPECTED_TASKS" in adapted
     assert "composer install --no-blocking" in adapted
     assert "Redot-Engine/DraconicEngine" in adapted
     assert 'test_template.replace(' in adapted
     assert "MODELS.index(pair[1])" in adapted
+    assert "scripted-shared-cache" in adapted
+    assert '"draconic-submodules"' in adapted
     assert "claude-opus-4.8" not in adapted
 
 
