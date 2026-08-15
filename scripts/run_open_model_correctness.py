@@ -1021,12 +1021,26 @@ def adapt_runner_source(
                 '    if repo.name == "celeritas-project__celeritas":\n'
                 "        subprocess.check_call(\n"
                 "            [\n"
-                '                "git", "clone", "--local", '
-                '"--no-checkout",\n'
-                "                str(repo), str(work),\n"
+                '                "git", "init", "--quiet", str(work),\n'
                 "            ],\n"
                 "            stdout=subprocess.DEVNULL,\n"
                 "            stderr=subprocess.STDOUT,\n"
+                "        )\n"
+                "        objects_info = work / \".git/objects/info\"\n"
+                "        objects_info.mkdir(parents=True, exist_ok=True)\n"
+                "        source_objects = subprocess.check_output(\n"
+                "            [\n"
+                '                "git", "-C", str(repo),\n'
+                '                "rev-parse", "--git-path", "objects",\n'
+                "            ],\n"
+                "            text=True,\n"
+                "        ).strip()\n"
+                "        source_objects_path = Path(source_objects)\n"
+                "        if not source_objects_path.is_absolute():\n"
+                "            source_objects_path = repo / source_objects_path\n"
+                "        (objects_info / \"alternates\").write_text(\n"
+                "            str(source_objects_path.resolve()) + \"\\n\",\n"
+                '            encoding="utf-8",\n'
                 "        )\n"
                 "        subprocess.check_call(\n"
                 "            [\n"

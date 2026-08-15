@@ -224,6 +224,7 @@ def test_scripted_runner_adaptation_uses_dynamic_models_and_task_count():
     assert "queue_key = (" in adapted
     assert "/tmp/reviewbench-scripted-work" in adapted
     assert 'repo.name == "celeritas-project__celeritas"' in adapted
+    assert '"alternates").write_text' in adapted
     assert "scripted-shared-cache" in adapted
     assert '"draconic-submodules"' in adapted
     assert "claude-opus-4.8" not in adapted
