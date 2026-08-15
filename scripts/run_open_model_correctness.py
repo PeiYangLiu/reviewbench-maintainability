@@ -813,11 +813,38 @@ def adapt_runner_source(
         if text.count("'rb-jvm-w3r-'") != 2:
             raise ValueError("jvm container prefix count changed")
         text = text.replace("'rb-jvm-w3r-'", "'rb-open-jvm-'")
+        text = replace_required(
+            text,
+            "    java_options = '-Duser.home=/cachehome ' + java_agent",
+            (
+                "    java_options = "
+                "'-Duser.home=/cachehome -Dapi.version=1.40 ' + java_agent"
+            ),
+            label="jvm nested Docker API compatibility",
+        )
+        text = replace_required(
+            text,
+            (
+                "    elif task['repo'] == 'SeleniumHQ/selenium':\n"
+                "        image = 'reviewbench-oracle-selenium:17'\n"
+                "    else:"
+            ),
+            (
+                "    elif task['repo'] == 'SeleniumHQ/selenium':\n"
+                "        image = 'reviewbench-oracle-selenium:17'\n"
+                "    elif task['repo'] == 'neo4j/import-spec':\n"
+                "        image = 'oracle-java-tools:17'\n"
+                "    else:"
+            ),
+            label="jvm Neo4j Java compatibility",
+        )
         changes.extend(
             [
                 "configure lane/repo/runtime roots",
                 "make per-task model cardinality dynamic",
                 "use an open-model-specific container prefix",
+                "pin nested Docker API negotiation",
+                "run Neo4j with the current plugin-compatible JDK",
             ]
         )
     elif lane == "scripted":

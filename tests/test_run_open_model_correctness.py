@@ -279,6 +279,26 @@ def test_gopy_runner_adaptation_preserves_oracle_runtimes():
     assert "oracle-remapped.sh" in adapted
 
 
+def test_jvm_runner_adaptation_stabilizes_runtime():
+    source_path = Path(
+        "/data/v-peiyangliu/reviewbench-session-"
+        "9a9f50f0-cb30-462e-942e-1e9def267f6d/"
+        "hard_oracle_20260804/wave-003/correctness/"
+        "jvm_candidate_replay.py"
+    )
+    if not source_path.is_file():
+        pytest.skip("proven JVM runner is not available")
+
+    adapted, _ = MODULE.adapt_runner_source(
+        "jvm",
+        source_path.read_text(encoding="utf-8"),
+    )
+
+    assert "-Dapi.version=1.40" in adapted
+    assert "task['repo'] == 'neo4j/import-spec'" in adapted
+    assert "image = 'oracle-java-tools:17'" in adapted
+
+
 def test_native_runner_restores_release_placeholders():
     source_path = Path(
         "/data/v-peiyangliu/reviewbench-session-"
