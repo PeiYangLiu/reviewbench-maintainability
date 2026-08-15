@@ -236,9 +236,25 @@ REPOS = SESSION / "repos"
 EXPECTED_TASKS = 5
 x = f"rb-csharp-w3-a"
 y = f"rb-csharp-w3-b"
+class Evaluation:
+    def evaluate(self, candidate_phase):
+        if True:
+            if True:
+                if is_infra(candidate_phase["result"]):
+                    pass
+class Replay:
+    def evaluate_pair(self, task, model):
+        task_id = task["id"]
+        generation = self.generations[(task_id, model)]
+        lane = self.lane_results[task_id]
+        spec = self.specs[str(lane["index"])]
+        artifact = self.artifact_dir(task_id, model)
 """
     adapted, _ = MODULE.adapt_runner_source("csharp", source)
     assert adapted.index("_OPEN_CONFIG =") < adapted.index("MODELS =")
+    assert 'candidate_phase["stage"] == "prepare"' in adapted
+    assert 'task["repo"] == "dotnet/roslyn"' in adapted
+    assert 'spec["timeout"] = 120' in adapted
 
 
 def test_rust_runner_adaptation_replaces_completion_count():

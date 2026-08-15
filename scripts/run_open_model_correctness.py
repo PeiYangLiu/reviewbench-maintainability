@@ -1024,11 +1024,47 @@ def adapt_runner_source(
         if text.count('f"rb-csharp-w3-') != 2:
             raise ValueError("csharp container prefix count changed")
         text = text.replace('f"rb-csharp-w3-', 'f"rb-open-csharp-')
+        text = replace_required(
+            text,
+            '                if is_infra(candidate_phase["result"]):',
+            (
+                '                if (\n'
+                '                    is_infra(candidate_phase["result"])\n'
+                '                    and candidate_phase["stage"] == "prepare"\n'
+                "                ):"
+            ),
+            label="csharp Oracle timeout baseline diagnosis",
+        )
+        text = replace_required(
+            text,
+            (
+                "        task_id = task[\"id\"]\n"
+                "        generation = self.generations[(task_id, model)]\n"
+                "        lane = self.lane_results[task_id]\n"
+                "        spec = self.specs[str(lane[\"index\"])]\n"
+                "        artifact = self.artifact_dir(task_id, model)"
+            ),
+            (
+                "        task_id = task[\"id\"]\n"
+                "        generation = self.generations[(task_id, model)]\n"
+                "        lane = self.lane_results[task_id]\n"
+                "        spec = dict(self.specs[str(lane[\"index\"])])\n"
+                '        if task["repo"] == "dotnet/roslyn":\n'
+                "            spec[\"prepare_timeout\"] = int(\n"
+                "                spec.get(\"timeout\", 2400)\n"
+                "            )\n"
+                "            spec[\"timeout\"] = 120\n"
+                "        artifact = self.artifact_dir(task_id, model)"
+            ),
+            label="csharp Roslyn Oracle timeout",
+        )
         changes.extend(
             [
                 "configure lane/repo roots",
                 "configure task count",
                 "use an open-model-specific container prefix",
+                "diagnose Oracle-stage timeouts against exact start",
+                "separate Roslyn build and Oracle timeout budgets",
             ]
         )
     elif lane == "tsjs":
