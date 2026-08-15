@@ -121,6 +121,26 @@ def test_invoke_judge_rejects_silent_model_fallback(monkeypatch):
         )
 
 
+def test_invoke_judge_requires_returned_model_identity(monkeypatch):
+    monkeypatch.setattr(
+        MODULE.generator,
+        "post_json",
+        lambda *args, **kwargs: {
+            "choices": [{"message": {"content": "{}"}}],
+            "usage": {},
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="gateway returned <missing>"):
+        MODULE.invoke_judge(
+            "claude-sonnet-4.6",
+            "prompt",
+            "http://127.0.0.1:8787/v1/chat/completions",
+            128,
+            "v2",
+        )
+
+
 def test_repair_prompt_requires_every_v2_field():
     prompt = MODULE.build_repair_prompt(
         "original prompt",

@@ -241,10 +241,11 @@ def invoke_judge(
     }
     data = generator.post_json(endpoint, payload, {})
     actual_model = str(data.get("model") or "")
-    if actual_model and actual_model != model:
+    if actual_model != model:
         raise RuntimeError(
             f"judge model mismatch: requested {model}, gateway returned "
-            f"{actual_model}; refusing a silent fallback"
+            f"{actual_model or '<missing>'}; refusing an unattested or "
+            "silent fallback"
         )
     return generator.chat_text(data), data.get("usage") or {}
 
