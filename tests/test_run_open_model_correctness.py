@@ -221,6 +221,7 @@ def test_scripted_runner_adaptation_uses_dynamic_models_and_task_count():
     assert "MODELS.index(pair[1])" in adapted
     assert "while future_to_pair:" in adapted
     assert "task_queue.pop(0)" in adapted
+    assert "queue_key = (" in adapted
     assert "/tmp/reviewbench-scripted-work" in adapted
     assert 'repo.name == "celeritas-project__celeritas"' in adapted
     assert "scripted-shared-cache" in adapted

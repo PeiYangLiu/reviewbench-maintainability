@@ -1129,8 +1129,14 @@ def adapt_runner_source(
                 "                    str, list[tuple[dict[str, Any], str]]\n"
                 "                ] = {}\n"
                 "                for task, model in pairs:\n"
+                "                    queue_key = (\n"
+                '                        f"{task[\'id\']}:{model}"\n'
+                "                        if repo_name(task) ==\n"
+                '                        "celeritas-project/celeritas"\n'
+                '                        else task["id"]\n'
+                "                    )\n"
                 "                    task_queues.setdefault(\n"
-                '                        task["id"], []\n'
+                "                        queue_key, []\n"
                 "                    ).append((task, model))\n"
                 "                future_to_pair = {}\n"
                 "                for task_queue in task_queues.values():\n"
