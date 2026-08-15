@@ -280,6 +280,7 @@ def test_rust_runner_adaptation_replaces_completion_count():
     assert "root-owned worktree cleanup failed" in adapted
     assert "rust-server-sdk-d8ce9116b17982c6" in adapted
     assert "pinned_git_cache" in adapted
+    assert "if cached_db.is_dir()" in adapted
     assert "for model in selected_models" in adapted
     assert "                        [model]," in adapted
 

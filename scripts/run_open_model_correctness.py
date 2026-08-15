@@ -1618,6 +1618,19 @@ def adapt_runner_source(
                 "    commit = "
                 '"5c36592edc75b620482a92e6991147aee7baf2d8"\n'
                 "    source_root = LANE / \"cache/cargo/git\"\n"
+                "    cached_db = cargo_home / \"git/db\" / name\n"
+                "    if cached_db.is_dir():\n"
+                "        verified = run_host(\n"
+                "            [\n"
+                '                "git", "--git-dir", str(cached_db),\n'
+                '                "cat-file", "-e", '
+                'f"{commit}^{{commit}}",\n'
+                "            ],\n"
+                "            timeout=120,\n"
+                "        )\n"
+                "        if verified.returncode == 0:\n"
+                "            return [{\"name\": name, "
+                '"commit": commit}]\n'
                 "    for kind in (\"db\", \"checkouts\"):\n"
                 "        source = source_root / kind / name\n"
                 "        destination = cargo_home / \"git\" / kind / name\n"
@@ -1781,6 +1794,7 @@ def adapt_runner_source(
                 "remove root-owned per-attempt build state after evidence",
                 "remove root-owned worktree state between attempts",
                 "seed Materialize's pinned unavailable git dependency",
+                "reuse a verified attempt-local pinned Cargo cache",
                 "schedule isolated task-model pairs independently",
             ]
         )
