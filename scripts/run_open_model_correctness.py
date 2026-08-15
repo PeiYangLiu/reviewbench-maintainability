@@ -845,7 +845,31 @@ def adapt_runner_source(
             ),
             label="scripted task message",
         )
-        changes.append("configure task count")
+        text = replace_required(
+            text,
+            (
+                '        setup_template = cfg.get("setup_host_command")\n'
+                "        if setup_template:"
+            ),
+            (
+                '        setup_template = cfg.get("setup_host_command")\n'
+                '        if setup_template and "composer install " in '
+                'setup_template and "--no-blocking" not in setup_template:\n'
+                '            setup_template = setup_template.replace(\n'
+                '                "composer install ",\n'
+                '                "composer install --no-blocking ",\n'
+                '                1,\n'
+                '            )\n'
+                "        if setup_template:"
+            ),
+            label="scripted Composer policy compatibility",
+        )
+        changes.extend(
+            [
+                "configure task count",
+                "disable host-version Composer policy blocking",
+            ]
+        )
     elif lane == "csharp":
         text = replace_required(
             text,
@@ -1061,7 +1085,7 @@ def adapt_runner_source(
                 "    )\n"
                 "    if preserve_submodules:\n"
                 '        git(worktree, "clean", "-ffdx", "-e", '
-                '"third_party/", timeout=1800, check=True)\n'
+                '"/third_party/", timeout=1800, check=True)\n'
                 "    else:\n"
                 '        git(worktree, "clean", "-ffdx", '
                 "timeout=1800, check=True)\n"
@@ -1088,6 +1112,7 @@ def adapt_runner_source(
                 "derive safe arbitrary-model worktree names",
                 "use an open-model-specific container prefix",
                 "restore sanitized session paths before plan validation",
+                "anchor IREE submodule preservation to the repository root",
             ]
         )
     elif lane == "rust":
