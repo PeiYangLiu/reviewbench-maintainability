@@ -994,11 +994,30 @@ def adapt_runner_source(
             ),
             label="scripted Draconic Oracle mode",
         )
+        text = replace_required(
+            text,
+            (
+                "                pairs.append((task, model))\n"
+                "        return pairs"
+            ),
+            (
+                "                pairs.append((task, model))\n"
+                "        pairs.sort(\n"
+                "            key=lambda pair: (\n"
+                "                MODELS.index(pair[1]),\n"
+                '                int(pair[0]["_scripted_lane_index"]),\n'
+                "            )\n"
+                "        )\n"
+                "        return pairs"
+            ),
+            label="scripted repo-balanced scheduling",
+        )
         changes.extend(
             [
                 "configure task count",
                 "disable host-version Composer policy blocking",
                 "map Draconic candidate and baseline to the start contract",
+                "interleave repositories across worker submissions",
             ]
         )
     elif lane == "csharp":

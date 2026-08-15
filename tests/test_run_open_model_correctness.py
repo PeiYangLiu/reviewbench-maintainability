@@ -215,6 +215,12 @@ class Replay:
         command = format_command(
             cfg["test_host_command"],
         )
+    def selected_pairs(self):
+        pairs = []
+        for task in []:
+            for model in []:
+                pairs.append((task, model))
+        return pairs
 """
     adapted, _ = MODULE.adapt_runner_source("scripted", source)
     assert 'MODELS = tuple(_OPEN_CONFIG["models"])' in adapted
@@ -222,6 +228,7 @@ class Replay:
     assert "composer install --no-blocking" in adapted
     assert "Redot-Engine/DraconicEngine" in adapted
     assert 'test_template.replace(' in adapted
+    assert "MODELS.index(pair[1])" in adapted
     assert "claude-opus-4.8" not in adapted
 
 
