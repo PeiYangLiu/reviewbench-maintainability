@@ -27,6 +27,8 @@ GENERATION_FIELDS = (
     "finish_mode",
     "resumed_from_round",
     "duration_seconds",
+    "task_fingerprint",
+    "patch_sha256",
     "error",
 )
 
@@ -89,12 +91,27 @@ def copy_generation(
     records = []
     for model, source_path in model_paths.items():
         for item in summarizer.load_jsonl(source_path):
+            rounds = list(item.get("rounds") or [])
             record = {
                 key: item[key]
                 for key in GENERATION_FIELDS
                 if key in item
             }
-            record["round_count"] = len(item.get("rounds") or [])
+            response_models = [
+                str(raw["model"])
+                for round_record in rounds
+                if isinstance(
+                    raw := round_record.get("raw_api_response"),
+                    dict,
+                )
+                and raw.get("model")
+            ]
+            record["round_count"] = len(rounds)
+            record["response_rounds_with_model"] = len(response_models)
+            record["response_models"] = sorted(set(response_models))
+            record["response_model_attested"] = (
+                bool(rounds) and len(response_models) == len(rounds)
+            )
             patch_source = Path(str(item.get("patch_file") or ""))
             if patch_source.is_file():
                 relative = Path("patches") / model / f"{item['id']}.patch"
@@ -137,9 +154,16 @@ def normalize_correctness(
         {
             "id": task_id,
             "model": model,
+            "schema_version": value.get("schema_version"),
+            "lane": value.get("lane"),
+            "source_kind": value.get("source_kind"),
+            "status": value.get("status"),
+            "patch_sha256": value.get("patch_sha256"),
             "patch_apply": value.get("patch_apply") is True,
             "correctness_ok": value.get("correctness_ok") is True,
             "oracle_replayed": value.get("oracle_replayed") is True,
+            "scope_ok": value.get("scope_ok"),
+            "retryable": value.get("retryable") is True,
             "pass_to_pass_total": value.get("pass_to_pass_total"),
             "pass_to_pass_passed": value.get("pass_to_pass_passed"),
             "failed_tests": list(value.get("failed_tests") or []),
@@ -287,6 +311,10 @@ def main() -> int:
             **counts,
             "patches": sum(item.get("apply_ok") is True for item in generation),
             "traces": sum("trace_file" in item for item in generation),
+            "model_identity_attested": sum(
+                item.get("response_model_attested") is True
+                for item in generation
+            ),
         },
         "leaderboard": report.get("leaderboard") or {},
         "complete": True,
