@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Merge targeted generation retries without replacing successful samples."""
+"""Merge retries, replacing successful samples only via an explicit allowlist."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo-cache", type=Path, required=True)
     parser.add_argument("--base", type=Path, required=True)
     parser.add_argument("--retry", type=Path, action="append", default=[])
+    parser.add_argument("--replace-successful-ids-file", type=Path)
     parser.add_argument("--out-dir", type=Path, required=True)
     return parser.parse_args()
 
@@ -250,6 +251,7 @@ def merge_retries(
     retry_paths: list[Path],
     output: Path,
     repo_cache: Path | None = None,
+    replace_successful_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     if output.exists() and any(output.iterdir()):
         raise ValueError(f"output directory is not empty: {output}")
@@ -275,6 +277,23 @@ def merge_retries(
     if len(model_values) != 1 or not next(iter(model_values)):
         raise ValueError(f"base generation has inconsistent models: {model_values}")
     model = next(iter(model_values))
+    replace_successful_ids = set(replace_successful_ids or ())
+    unknown_replacements = replace_successful_ids - set(tasks_by_id)
+    if unknown_replacements:
+        raise ValueError(
+            "successful replacement allowlist contains unknown IDs: "
+            f"{sorted(unknown_replacements)[:5]}"
+        )
+    non_successful_replacements = {
+        task_id
+        for task_id in replace_successful_ids
+        if base.get(task_id, {}).get("apply_ok") is not True
+    }
+    if non_successful_replacements:
+        raise ValueError(
+            "successful replacement allowlist contains IDs without a "
+            f"successful base record: {sorted(non_successful_replacements)[:5]}"
+        )
 
     selected: dict[str, tuple[dict[str, Any], Path, str, int]] = {
         task_id: (record, base_path, "base", 0)
@@ -303,7 +322,11 @@ def merge_retries(
             )
         for task_id, record in retry.items():
             current = selected.get(task_id)
-            if current is not None and current[0].get("apply_ok") is True:
+            if (
+                current is not None
+                and current[0].get("apply_ok") is True
+                and task_id not in replace_successful_ids
+            ):
                 raise ValueError(
                     f"retry {index} attempts to replace successful ID {task_id}"
                 )
@@ -320,7 +343,17 @@ def merge_retries(
                 "failed": sum(
                     row.get("apply_ok") is not True for row in retry.values()
                 ),
+                "successful_replacements": len(
+                    set(retry) & replace_successful_ids
+                ),
             }
+        )
+
+    missing_replacements = replace_successful_ids - touched
+    if missing_replacements:
+        raise ValueError(
+            "successful replacement allowlist IDs were not supplied by a "
+            f"retry: {sorted(missing_replacements)[:5]}"
         )
 
     missing = set(tasks_by_id) - set(selected)
@@ -393,6 +426,7 @@ def merge_retries(
         task["id"]
         for task in tasks
         if task["id"] in recovered_ids
+        or task["id"] in replace_successful_ids
         or (
             canonical[task["id"]]
             .get("canonical_provenance", {})
@@ -432,6 +466,7 @@ def merge_retries(
         "base_results_sha256": file_sha256(base_path),
         "retry_overlays": overlay_manifest,
         "touched": len(touched),
+        "successful_replacements": len(replace_successful_ids),
         "recovered": len(recovered_ids),
         "evaluation_delta": len(evaluation_ids),
         "generated": sum(
@@ -458,6 +493,17 @@ def merge_retries(
 
 def main() -> int:
     args = parse_args()
+    replace_successful_ids = (
+        {
+            line.strip()
+            for line in args.replace_successful_ids_file.read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line.strip()
+        }
+        if args.replace_successful_ids_file
+        else set()
+    )
     result = merge_retries(
         tasks_path=args.tasks,
         oracles_path=args.oracles,
@@ -465,6 +511,7 @@ def main() -> int:
         base_path=args.base,
         retry_paths=args.retry,
         output=args.out_dir,
+        replace_successful_ids=replace_successful_ids,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

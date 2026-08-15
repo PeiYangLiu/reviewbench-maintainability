@@ -125,6 +125,74 @@ def test_merge_rejects_retry_of_success(tmp_path):
         )
 
 
+def test_merge_allows_explicit_successful_replacement(tmp_path):
+    task_row = task("one")
+    tasks_path = tmp_path / "tasks.jsonl"
+    oracles_path = tmp_path / "oracles.jsonl"
+    write_jsonl(tasks_path, [task_row])
+    write_jsonl(oracles_path, [{"id": "one"}])
+    base_path = tmp_path / "base/generation_results.jsonl"
+    retry_path = tmp_path / "retry/generation_results.jsonl"
+    base_row = generation(
+        task_row,
+        "model",
+        "generated",
+        base_path.parent,
+    )
+    retry_row = generation(
+        task_row,
+        "model",
+        "generated",
+        retry_path.parent,
+    )
+    Path(retry_row["patch_file"]).write_text(
+        "--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-old\n+new\n"
+    )
+    write_jsonl(base_path, [base_row])
+    write_jsonl(retry_path, [retry_row])
+
+    manifest = MODULE.merge_retries(
+        tasks_path=tasks_path,
+        oracles_path=oracles_path,
+        base_path=base_path,
+        retry_paths=[retry_path],
+        output=tmp_path / "out",
+        repo_cache=None,
+        replace_successful_ids={"one"},
+    )
+
+    row = MODULE.load_jsonl(tmp_path / "out/generation_results.jsonl")[0]
+    assert row["canonical_provenance"]["source_kind"] == "retry"
+    assert manifest["successful_replacements"] == 1
+    assert len(
+        MODULE.load_jsonl(tmp_path / "out/evaluation_delta/tasks.jsonl")
+    ) == 1
+
+
+def test_merge_requires_every_allowlisted_replacement(tmp_path):
+    task_row = task("one")
+    tasks_path = tmp_path / "tasks.jsonl"
+    oracles_path = tmp_path / "oracles.jsonl"
+    base_path = tmp_path / "base/generation_results.jsonl"
+    write_jsonl(tasks_path, [task_row])
+    write_jsonl(oracles_path, [{"id": "one"}])
+    write_jsonl(
+        base_path,
+        [generation(task_row, "model", "generated", base_path.parent)],
+    )
+
+    with pytest.raises(ValueError, match="were not supplied"):
+        MODULE.merge_retries(
+            tasks_path=tasks_path,
+            oracles_path=oracles_path,
+            base_path=base_path,
+            retry_paths=[],
+            output=tmp_path / "out",
+            repo_cache=None,
+            replace_successful_ids={"one"},
+        )
+
+
 def test_merge_accepts_partial_base_when_retries_complete_task_set(tmp_path):
     tasks = [task("one"), task("two"), task("three")]
     tasks_path = tmp_path / "tasks.jsonl"
