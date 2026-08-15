@@ -997,6 +997,107 @@ def adapt_runner_source(
         text = replace_required(
             text,
             (
+                "    work.parent.mkdir(parents=True, exist_ok=True)\n"
+                "    subprocess.check_call(\n"
+                "        [\n"
+                '            "git",\n'
+                '            "-c",\n'
+                '            "gc.auto=0",\n'
+                '            "-C",\n'
+                "            str(repo),\n"
+                '            "worktree",\n'
+                '            "add",\n'
+                '            "--force",\n'
+                '            "--detach",\n'
+                "            str(work),\n"
+                "            start_sha,\n"
+                "        ],\n"
+                "        stdout=subprocess.DEVNULL,\n"
+                "        stderr=subprocess.STDOUT,\n"
+                "    )"
+            ),
+            (
+                "    work.parent.mkdir(parents=True, exist_ok=True)\n"
+                '    if repo.name == "celeritas-project__celeritas":\n'
+                "        subprocess.check_call(\n"
+                "            [\n"
+                '                "git", "clone", "--local", '
+                '"--no-checkout",\n'
+                "                str(repo), str(work),\n"
+                "            ],\n"
+                "            stdout=subprocess.DEVNULL,\n"
+                "            stderr=subprocess.STDOUT,\n"
+                "        )\n"
+                "        subprocess.check_call(\n"
+                "            [\n"
+                '                "git", "-C", str(work), "checkout",\n'
+                '                "--detach", start_sha,\n'
+                "            ],\n"
+                "            stdout=subprocess.DEVNULL,\n"
+                "            stderr=subprocess.STDOUT,\n"
+                "        )\n"
+                "    else:\n"
+                "        subprocess.check_call(\n"
+                "            [\n"
+                '                "git",\n'
+                '                "-c",\n'
+                '                "gc.auto=0",\n'
+                '                "-C",\n'
+                "                str(repo),\n"
+                '                "worktree",\n'
+                '                "add",\n'
+                '                "--force",\n'
+                '                "--detach",\n'
+                "                str(work),\n"
+                "                start_sha,\n"
+                "            ],\n"
+                "            stdout=subprocess.DEVNULL,\n"
+                "            stderr=subprocess.STDOUT,\n"
+                "        )"
+            ),
+            label="scripted Celeritas standalone clone",
+        )
+        text = replace_required(
+            text,
+            (
+                "        work = self.work_root / pair_slug(task) "
+                '/ model / f"attempt-{attempt:03d}"'
+            ),
+            (
+                '        if repo_name(task) == '
+                '"celeritas-project/celeritas":\n'
+                "            work = (\n"
+                '                Path("/tmp/reviewbench-scripted-work")\n'
+                "                / hashlib.sha256(\n"
+                "                    (\n"
+                '                        f"{self.output_root}:{task[\'id\']}:"\n'
+                '                        f"{model}:{attempt}"\n'
+                "                    ).encode()\n"
+                "                ).hexdigest()[:20]\n"
+                "            )\n"
+                "        else:\n"
+                "            work = self.work_root / pair_slug(task) "
+                '/ model / f"attempt-{attempt:03d}"'
+            ),
+            label="scripted Celeritas short worktree",
+        )
+        text = replace_required(
+            text,
+            "        repo_lock = self.repo_locks[repo_name(task)]",
+            (
+                "        lock_key = (\n"
+                '            f"{task[\'id\']}:{model}"\n'
+                '            if repo_name(task) == '
+                '"celeritas-project/celeritas"\n'
+                "            else repo_name(task)\n"
+                "        )\n"
+                "        repo_lock = self.repo_locks[lock_key]"
+            ),
+            label="scripted Celeritas pair isolation",
+        )
+        text = replace_required(
+            text,
+            (
                 "                pairs.append((task, model))\n"
                 "        return pairs"
             ),
@@ -1165,6 +1266,7 @@ def adapt_runner_source(
                 "map Draconic candidate and baseline to the start contract",
                 "interleave repositories across worker submissions",
                 "admit only one active pair per task",
+                "use short standalone Celeritas pair clones",
                 "materialize one output-local shared task cache",
             ]
         )
