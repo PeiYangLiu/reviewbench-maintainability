@@ -840,6 +840,17 @@ def adapt_runner_source(
         )
         text = replace_required(
             text,
+            "    'zio/zio-redis',\n}",
+            (
+                "    'zio/zio-redis',\n"
+                "    'Constellation-Labs/tessellation',\n"
+                "    'softwaremill/elasticmq',\n"
+                "}"
+            ),
+            label="jvm Git-inspecting standalone clones",
+        )
+        text = replace_required(
+            text,
             (
                 "    submodules_exact = (\n"
                 "        submodules['exit_code'] == 0\n"
@@ -898,6 +909,7 @@ def adapt_runner_source(
                 "use an open-model-specific container prefix",
                 "pin nested Docker API negotiation",
                 "run Neo4j with the current plugin-compatible JDK",
+                "materialize Git-inspecting builds as standalone clones",
                 "allow IoTDB's unrelated unavailable submodule",
             ]
         )
