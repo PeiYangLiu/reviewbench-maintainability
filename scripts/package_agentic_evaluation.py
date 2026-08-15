@@ -99,20 +99,26 @@ def copy_generation(
                 for key in GENERATION_FIELDS
                 if key in item
             }
-            response_models = [
-                str(raw["model"])
+            response_rounds = [
+                raw
                 for round_record in rounds
                 if isinstance(
                     raw := round_record.get("raw_api_response"),
                     dict,
                 )
-                and raw.get("model")
+            ]
+            response_models = [
+                str(raw["model"])
+                for raw in response_rounds
+                if raw.get("model")
             ]
             record["round_count"] = len(rounds)
+            record["response_round_count"] = len(response_rounds)
             record["response_rounds_with_model"] = len(response_models)
             record["response_models"] = sorted(set(response_models))
             record["response_model_attested"] = (
-                bool(rounds) and len(response_models) == len(rounds)
+                bool(response_rounds)
+                and len(response_models) == len(response_rounds)
             )
             patch_source = Path(str(item.get("patch_file") or ""))
             if patch_source.is_file():

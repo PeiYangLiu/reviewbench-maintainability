@@ -76,8 +76,9 @@ def test_force_chat_routes_responses_model_and_checks_identity(monkeypatch):
 
     def fake_post_json(endpoint, payload, headers, **kwargs):
         captured["endpoint"] = endpoint
+        captured["payload"] = payload
         return {
-            "model": "gpt-5.5",
+            "model": "gpt-5.5-2026-04-23",
             "choices": [{"message": {"content": "OK"}}],
             "usage": {},
         }
@@ -97,6 +98,7 @@ def test_force_chat_routes_responses_model_and_checks_identity(monkeypatch):
 
     assert text == "OK"
     assert captured["endpoint"].endswith("/v1/chat/completions")
+    assert captured["payload"]["model"] == "gpt-5.5"
 
 
 def test_force_chat_rejects_silent_solver_fallback(monkeypatch):
@@ -190,21 +192,23 @@ def test_responses_model_requires_returned_identity(monkeypatch):
         MODULE.invoke_model("gpt-5.6-sol", "system", "prompt", args)
 
 
-def test_gpt_55_accepts_pinned_versioned_response_identity(monkeypatch):
+def test_gpt_55_requires_pinned_versioned_response_identity(monkeypatch):
+    captured = {}
+
     monkeypatch.setattr(
         MODULE,
         "copilot_token",
         lambda endpoint, refresh=False: "token",
     )
-    monkeypatch.setattr(
-        MODULE,
-        "post_json",
-        lambda *args, **kwargs: {
+    def fake_post_json(endpoint, payload, headers, **kwargs):
+        captured["payload"] = payload
+        return {
             "model": "gpt-5.5-2026-04-23",
             "output_text": "OK",
             "usage": {},
-        },
-    )
+        }
+
+    monkeypatch.setattr(MODULE, "post_json", fake_post_json)
     args = Namespace(
         force_chat=False,
         responses_endpoint="https://example.invalid/responses",
@@ -223,6 +227,35 @@ def test_gpt_55_accepts_pinned_versioned_response_identity(monkeypatch):
 
     assert text == "OK"
     assert data["model"] == "gpt-5.5-2026-04-23"
+    assert captured["payload"]["model"] == "gpt-5.5"
+
+
+def test_gpt_55_rejects_unversioned_response_identity(monkeypatch):
+    monkeypatch.setattr(
+        MODULE,
+        "copilot_token",
+        lambda endpoint, refresh=False: "token",
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "post_json",
+        lambda *args, **kwargs: {
+            "model": "gpt-5.5",
+            "output_text": "OK",
+            "usage": {},
+        },
+    )
+    args = Namespace(
+        force_chat=False,
+        responses_endpoint="https://example.invalid/responses",
+        token_endpoint="http://127.0.0.1:4141/token",
+        max_output_tokens=100,
+        request_timeout=30,
+        request_retries=0,
+    )
+
+    with pytest.raises(RuntimeError, match="solver model mismatch"):
+        MODULE.invoke_model("gpt-5.5", "system", "prompt", args)
 
 
 def test_custom_model_defaults_to_openai_compatible_chat(monkeypatch):

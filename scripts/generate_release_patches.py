@@ -30,7 +30,7 @@ MODEL_SPECS = {
     "gpt-5.5": {
         "provider": "responses",
         "reasoning_effort": "medium",
-        "response_models": {"gpt-5.5", "gpt-5.5-2026-04-23"},
+        "response_models": {"gpt-5.5-2026-04-23"},
     },
     "gpt-5.6-luna": {"provider": "responses", "reasoning_effort": "medium"},
     "gpt-5.6-sol": {"provider": "responses", "reasoning_effort": "medium"},
@@ -324,10 +324,11 @@ def invoke_model_envelope(
         model,
         {"provider": "chat", "reasoning_effort": None},
     )
+    request_model = str(spec.get("request_model") or model)
     accepted_response_models = set(spec.get("response_models") or {model})
     if spec["provider"] == "chat" or getattr(args, "force_chat", False):
         payload: dict[str, Any] = {
-            "model": model,
+            "model": request_model,
             "messages": [
                 {"role": "system", "content": instructions},
                 {"role": "user", "content": prompt},
@@ -355,7 +356,7 @@ def invoke_model_envelope(
         return chat_text(data), data.get("usage") or {}, data
 
     payload = {
-        "model": model,
+        "model": request_model,
         "stream": False,
         "instructions": instructions,
         "input": prompt,

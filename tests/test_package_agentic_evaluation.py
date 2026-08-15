@@ -52,7 +52,8 @@ def test_copy_generation_makes_patch_and_trace_paths_portable(tmp_path):
                                 "raw_api_response": {
                                     "model": "gpt-5.5-2026-04-23"
                                 },
-                            }
+                            },
+                            {"round": 2, "error": "transient request failure"},
                         ],
                     }
                 ),
@@ -73,7 +74,8 @@ def test_copy_generation_makes_patch_and_trace_paths_portable(tmp_path):
 
     assert records[0]["patch_file"] == "patches/gpt-5.5/task.patch"
     assert records[0]["trace_file"] == "traces/gpt-5.5/task.json"
-    assert records[0]["round_count"] == 1
+    assert records[0]["round_count"] == 2
+    assert records[0]["response_round_count"] == 1
     assert records[0]["patch_sha256"] == "canonical"
     assert records[0]["response_model_attested"] is True
     assert records[0]["response_models"] == ["gpt-5.5-2026-04-23"]
