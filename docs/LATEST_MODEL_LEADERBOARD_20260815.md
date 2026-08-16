@@ -50,25 +50,27 @@ generation_apply AND scope_ok AND correctness_ok AND maintainability_pass
 - correctness overlay 在高优先级 definitive rerun 覆盖前过早拒绝中间
   `infra_retry`；
 - C# 最终 pass 会被早期 retry 留下的 `infra_error=true` 覆盖。
+- Rust Alacritty 并行 replay 共用 Xvfb `:99`，导致 exact-start baseline
+  发生端口冲突。
 
 这些问题均已 fail-closed 修复；旧 408-task archives 继续保留，仅供审计，
 不得用于模型比较。
 
-## 跨代比较
+## Fresh 跨代 leaderboard
 
-GPT-5.5 vs GPT-5.6 Sol、Claude Opus 4.8 vs Opus 5 必须使用正在执行的
-fresh 402-task 同协议 correctness，不能引用旧冻结分数。统一 Sonnet 4.6
-重判的 maintainability 单项已恢复合理方向：
+GPT-5.5、GPT-5.6 Sol、Claude Opus 4.8、Claude Opus 5 重新执行了同一
+402-task scope、同一 correctness runner、同一 retry/infra 策略和同一
+Sonnet 4.6 judge。结果不再使用任何旧冻结分数：
 
-| Model | Maintainability pass /402 |
-|---|---:|
-| GPT-5.6 Sol | **192** |
-| GPT-5.5 | **175** |
-| Claude Opus 5 | **187** |
-| Claude Opus 4.8 | **146** |
+| Rank | Model | Generation | Scope | Correctness | Maintainability | Final Resolved | Rate |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 1 | GPT-5.6 Sol | 400 | 389 | 351 | 192 | **159/402** | 39.6% |
+| 2 | Claude Opus 5 | 398 | 387 | 350 | 187 | **157/402** | 39.1% |
+| 3 | GPT-5.5 | 399 | 389 | 344 | 175 | **144/402** | 35.8% |
+| 4 | Claude Opus 4.8 | 396 | 391 | 341 | 146 | **110/402** | 27.4% |
 
-该表不是 Final Resolved leaderboard；完整跨代榜必须等 fresh correctness
-全部达到 definitive 后发布。
+因此统一口径下不存在旧榜倒挂：GPT-5.6 Sol 高于 GPT-5.5，Claude
+Opus 5 高于 Opus 4.8。
 
 ## Artifacts
 
@@ -83,3 +85,13 @@ Audited combined release：
 fail-closed correctness overlay、逐题四门结果、汇总 report 和 checksums。
 根 `SHA256SUMS` 的 SHA-256 为
 `dd719331f3642b1c6f58b582a5f8a782295442c231eab70116a62f9fe5963d3f`。
+
+Fresh cross-generation release：
+
+```text
+/data/v-peiyangliu/reviewbench-openmodels/evaluation-20260815/
+  fresh4-corrected402-v1/
+```
+
+根 `SHA256SUMS` 的 SHA-256 为
+`9eedf590be9de4c7b0a8fadb48b40b2519a3205ecc1c4b696a1ced07f3597c14`。
