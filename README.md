@@ -10,7 +10,7 @@ The benchmark idea is to mine merged PRs where reviewers asked for maintainabili
 - [`docs/DATA_PROVENANCE.md`](docs/DATA_PROVENANCE.md): complete data lineage from mining through release and model evaluation
 - [`docs/PROGRESS_20260808.md`](docs/PROGRESS_20260808.md): current authoritative status, 414-task hard release, corrected three-model evaluation, and final artifact map
 - [`docs/OPEN_MODEL_EVALUATION.md`](docs/OPEN_MODEL_EVALUATION.md): Qwen/open-weight AMLT jobs, pinned model revisions, GPU assignments, complete artifact schema, and blob result paths
-- [`docs/LATEST_MODEL_LEADERBOARD_20260815.md`](docs/LATEST_MODEL_LEADERBOARD_20260815.md): audited 402-task latest-model leaderboard with canonical correctness and non-participant judging
+- [`docs/LATEST_MODEL_LEADERBOARD_20260815.md`](docs/LATEST_MODEL_LEADERBOARD_20260815.md): complete deduplicated 14-model leaderboard on the audited 402-task scope
 - [`docs/LATEST_MODEL_PARTIAL_LEADERBOARD_20260815.md`](docs/LATEST_MODEL_PARTIAL_LEADERBOARD_20260815.md): withdrawn 408-task snapshot retained for audit; do not use for comparison
 - [`docs/LATEST_MODEL_PARTIAL_LEADERBOARD_20260813.md`](docs/LATEST_MODEL_PARTIAL_LEADERBOARD_20260813.md): historical 381/378-task partial snapshot before legacy recovery
 - [`docs/WEEKLY_REPORT_20260811.md`](docs/WEEKLY_REPORT_20260811.md): current 414-hard latest-model evaluation report, live gate progress, risks, and delivery plan
