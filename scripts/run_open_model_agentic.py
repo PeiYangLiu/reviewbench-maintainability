@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,132 @@ import subprocess
 import sys
 import time
 import urllib.request
+
+
+def parse_lora_adapter(value: str) -> tuple[str, Path]:
+    """Parse a ``NAME=PATH`` LoRA adapter specification.
+
+    The name is what vLLM serves the adapter as, and therefore what the
+    generator must request. It is deliberately *not* derived from the path so
+    a run's recorded model identity stays a explicit, reviewed choice.
+    """
+    name, separator, raw_path = value.partition("=")
+    if not separator or not name or not raw_path:
+        raise ValueError(f"invalid --lora-adapter value: {value!r}")
+    return name, Path(raw_path)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def lora_provenance(name: str, path: Path, base_model: str, max_rank: int) -> dict:
+    """Validate a LoRA adapter against the base model and pin its identity.
+
+    Fails closed on the two mistakes that would silently invalidate an SFT
+    evaluation: attaching an adapter trained on a *different* base model, and
+    serving it with a rank cap below the trained rank (which vLLM rejects only
+    at load time, after the harness has already committed to the run's name).
+    """
+    config_path = path / "adapter_config.json"
+    if not config_path.is_file():
+        raise ValueError(f"LoRA adapter has no adapter_config.json: {path}")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    trained_base = str(config.get("base_model_name_or_path") or "")
+    if trained_base != base_model:
+        raise ValueError(
+            f"LoRA adapter {name!r} was trained on {trained_base!r} but is "
+            f"being served on {base_model!r}"
+        )
+    rank = int(config.get("r") or 0)
+    if rank <= 0:
+        raise ValueError(f"LoRA adapter {name!r} declares no rank")
+    if rank > max_rank:
+        raise ValueError(
+            f"LoRA adapter {name!r} has rank {rank} > --max-lora-rank {max_rank}"
+        )
+    weights = path / "adapter_model.safetensors"
+    if not weights.is_file():
+        raise ValueError(f"LoRA adapter has no adapter_model.safetensors: {path}")
+    return {
+        "name": name,
+        "path": str(path.resolve()),
+        "base_model_name_or_path": trained_base,
+        "r": rank,
+        "lora_alpha": config.get("lora_alpha"),
+        "target_modules": sorted(config.get("target_modules") or []),
+        "adapter_config_sha256": sha256_file(config_path),
+        "adapter_model_sha256": sha256_file(weights),
+    }
+
+
+def resolve_served_model_name(
+    requested: str | None,
+    model: str,
+    lora_name: str | None,
+) -> str:
+    """Return the model identity the generator must request.
+
+    With a LoRA adapter attached, vLLM serves the adapter under its own name
+    and continues to serve the untuned base under ``--model``. Requesting the
+    base name would therefore silently evaluate the *unadapted* model while the
+    run is recorded as an SFT run, so an explicit mismatch is rejected instead
+    of being honoured.
+    """
+    if lora_name is None:
+        return requested or model
+    if requested is not None and requested != lora_name:
+        raise ValueError(
+            f"--served-model-name {requested!r} would request the base model "
+            f"while LoRA adapter {lora_name!r} is attached; the served name "
+            "must be the adapter name"
+        )
+    return lora_name
+
+
+def build_server_command(args: argparse.Namespace, served_model_name: str) -> list[str]:
+    command = [
+        sys.executable,
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
+        args.model,
+        "--served-model-name",
+        args.model if args.lora_adapter else served_model_name,
+        "--tensor-parallel-size",
+        str(args.tensor_parallel_size),
+        "--port",
+        str(args.port),
+        "--max-model-len",
+        str(args.max_model_len),
+        "--gpu-memory-utilization",
+        str(args.gpu_memory_utilization),
+        "--dtype",
+        args.dtype,
+    ]
+    if args.revision:
+        command.extend(["--revision", args.revision])
+    if args.download_dir:
+        command.extend(["--download-dir", str(args.download_dir)])
+    if args.trust_remote_code:
+        command.append("--trust-remote-code")
+    if args.lora_adapter:
+        name, path = parse_lora_adapter(args.lora_adapter)
+        command.extend(
+            [
+                "--enable-lora",
+                "--max-lora-rank",
+                str(args.max_lora_rank),
+                "--lora-modules",
+                f"{name}={path.resolve()}",
+            ]
+        )
+    command.extend(args.vllm_extra_arg)
+    return command
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,6 +170,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ids-file", type=Path)
     parser.add_argument("--download-dir", type=Path)
     parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument(
+        "--lora-adapter",
+        metavar="NAME=PATH",
+        help="Serve a LoRA adapter under NAME in addition to the base model. "
+        "The generator then requests NAME, so recorded results belong to the "
+        "adapted model rather than the base weights.",
+    )
+    parser.add_argument("--max-lora-rank", type=int, default=32)
     parser.add_argument("--vllm-extra-arg", action="append", default=[])
     return parser.parse_args()
 
@@ -132,7 +267,21 @@ def restore_generation_checkpoint(
 
 def main() -> int:
     args = parse_args()
-    served_model_name = args.served_model_name or args.model
+    lora_name: str | None = None
+    lora_record: dict | None = None
+    if args.lora_adapter:
+        lora_name, lora_path = parse_lora_adapter(args.lora_adapter)
+        lora_record = lora_provenance(
+            lora_name,
+            lora_path,
+            args.model,
+            args.max_lora_rank,
+        )
+    served_model_name = resolve_served_model_name(
+        args.served_model_name,
+        args.model,
+        lora_name,
+    )
     args.out_dir.mkdir(parents=True, exist_ok=True)
     restored_files = restore_generation_checkpoint(
         args.resume_from,
@@ -149,33 +298,9 @@ def main() -> int:
     generator_script = args.generator_script or (
         Path(__file__).resolve().parent / "generate_agentic_patches.py"
     )
-    server_command = [
-        sys.executable,
-        "-m",
-        "vllm.entrypoints.openai.api_server",
-        "--model",
-        args.model,
-        "--served-model-name",
-        served_model_name,
-        "--tensor-parallel-size",
-        str(args.tensor_parallel_size),
-        "--port",
-        str(args.port),
-        "--max-model-len",
-        str(args.max_model_len),
-        "--gpu-memory-utilization",
-        str(args.gpu_memory_utilization),
-        "--dtype",
-        args.dtype,
-    ]
-    if args.revision:
-        server_command.extend(["--revision", args.revision])
     if args.download_dir:
         args.download_dir.mkdir(parents=True, exist_ok=True)
-        server_command.extend(["--download-dir", str(args.download_dir)])
-    if args.trust_remote_code:
-        server_command.append("--trust-remote-code")
-    server_command.extend(args.vllm_extra_arg)
+    server_command = build_server_command(args, served_model_name)
 
     started_at = dt.datetime.now(dt.timezone.utc)
     models_payload: dict = {}
@@ -253,6 +378,7 @@ def main() -> int:
         "model": args.model,
         "revision": args.revision,
         "served_model_name": served_model_name,
+        "lora_adapter": lora_record,
         "tensor_parallel_size": args.tensor_parallel_size,
         "max_model_len": args.max_model_len,
         "gpu_memory_utilization": args.gpu_memory_utilization,

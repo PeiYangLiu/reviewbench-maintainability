@@ -60,6 +60,16 @@ ids_args=()
 if [ -n "${GENERATION_IDS_FILE:-}" ]; then
   ids_args+=(--ids-file "$GENERATION_IDS_FILE")
 fi
+lora_args=()
+if [ -n "${LORA_ADAPTER:-}" ]; then
+  # LORA_ADAPTER is NAME=PATH. The harness serves the adapter under NAME and
+  # requests NAME, so generation_results.jsonl records the adapted model rather
+  # than the untuned base weights.
+  lora_args+=(--lora-adapter "$LORA_ADAPTER")
+  if [ -n "${MAX_LORA_RANK:-}" ]; then
+    lora_args+=(--max-lora-rank "$MAX_LORA_RANK")
+  fi
+fi
 vllm_args=(
   --vllm-extra-arg=--enable-prefix-caching
   --vllm-extra-arg=--max-num-seqs
@@ -129,4 +139,5 @@ python3 scripts/run_open_model_agentic.py \
   --download-dir "/scratch/hf-cache/${AMLT_JOB_NAME:-job}" \
   "${trust_args[@]}" \
   "${ids_args[@]}" \
+  "${lora_args[@]}" \
   "${vllm_args[@]}"

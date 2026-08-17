@@ -1,7 +1,12 @@
+import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
+
+import pytest
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "run_open_model_agentic.py"
@@ -99,3 +104,96 @@ def test_restore_generation_checkpoint_preserves_local_state(tmp_path):
 
     assert MODULE.restore_generation_checkpoint(source, destination) == 0
     assert local.read_text() == "local\n"
+
+
+def lora_adapter_dir(tmp_path, *, base="Qwen/Qwen3.6-27B", rank=32):
+    path = tmp_path / "adapter"
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "adapter_config.json").write_text(
+        json.dumps(
+            {
+                "base_model_name_or_path": base,
+                "r": rank,
+                "lora_alpha": 64,
+                "target_modules": ["q_proj", "v_proj"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (path / "adapter_model.safetensors").write_bytes(b"weights")
+    return path
+
+
+def server_args(tmp_path, **overrides):
+    values = {
+        "model": "Qwen/Qwen3.6-27B",
+        "revision": None,
+        "served_model_name": None,
+        "tensor_parallel_size": 8,
+        "port": 8000,
+        "max_model_len": 32768,
+        "gpu_memory_utilization": 0.9,
+        "dtype": "auto",
+        "download_dir": None,
+        "trust_remote_code": False,
+        "lora_adapter": None,
+        "max_lora_rank": 32,
+        "vllm_extra_arg": [],
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_lora_adapter_is_served_under_its_own_name(tmp_path):
+    path = lora_adapter_dir(tmp_path)
+    args = server_args(tmp_path, lora_adapter=f"stage1-full={path}")
+
+    served = MODULE.resolve_served_model_name(None, args.model, "stage1-full")
+    command = MODULE.build_server_command(args, served)
+
+    assert served == "stage1-full"
+    assert "--enable-lora" in command
+    assert f"stage1-full={path.resolve()}" in command
+    assert command[command.index("--max-lora-rank") + 1] == "32"
+    # the base model stays served under its own name so the adapter name is
+    # unambiguous evidence that the adapted weights answered
+    assert command[command.index("--served-model-name") + 1] == "Qwen/Qwen3.6-27B"
+
+
+def test_requesting_the_base_name_with_an_adapter_fails_closed():
+    with pytest.raises(ValueError, match="must be the adapter name"):
+        MODULE.resolve_served_model_name(
+            "Qwen/Qwen3.6-27B", "Qwen/Qwen3.6-27B", "stage1-full"
+        )
+
+
+def test_served_name_without_adapter_is_unchanged():
+    assert MODULE.resolve_served_model_name(None, "base", None) == "base"
+    assert MODULE.resolve_served_model_name("alias", "base", None) == "alias"
+
+
+def test_adapter_trained_on_another_base_is_rejected(tmp_path):
+    path = lora_adapter_dir(tmp_path, base="Qwen/Qwen3.6-35B-A3B")
+    with pytest.raises(ValueError, match="was trained on"):
+        MODULE.lora_provenance("stage1-full", path, "Qwen/Qwen3.6-27B", 32)
+
+
+def test_adapter_rank_above_the_cap_is_rejected(tmp_path):
+    path = lora_adapter_dir(tmp_path, rank=64)
+    with pytest.raises(ValueError, match="rank 64"):
+        MODULE.lora_provenance("stage1-full", path, "Qwen/Qwen3.6-27B", 32)
+
+
+def test_adapter_provenance_pins_weight_digest(tmp_path):
+    path = lora_adapter_dir(tmp_path)
+    record = MODULE.lora_provenance("stage1-full", path, "Qwen/Qwen3.6-27B", 32)
+
+    assert record["r"] == 32
+    assert record["adapter_model_sha256"] == hashlib.sha256(b"weights").hexdigest()
+    assert record["base_model_name_or_path"] == "Qwen/Qwen3.6-27B"
+
+
+def test_no_lora_flags_without_an_adapter(tmp_path):
+    command = MODULE.build_server_command(server_args(tmp_path), "base")
+    assert "--enable-lora" not in command
+    assert "--lora-modules" not in command
