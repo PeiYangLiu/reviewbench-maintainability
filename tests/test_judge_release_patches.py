@@ -257,3 +257,95 @@ def test_judge_protocol_fingerprint_changes_with_rubric_or_context():
         30_000,
         2048,
     )
+
+
+# ---------------------------------------------------------------------------
+# Unanimous judge panel (maintainability gate only; correctness is executed,
+# never judged)
+# ---------------------------------------------------------------------------
+
+
+def panel_member(judge, *, status="judged", passed=True, error=None):
+    member = {
+        "judge_model": judge,
+        "status": status,
+        "maintainability_pass": passed,
+    }
+    if error is not None:
+        member["error"] = error
+    return member
+
+
+def test_panel_passes_only_when_every_judge_passes():
+    panel = [
+        panel_member("claude-opus-5"),
+        panel_member("gpt-5.6-sol"),
+        panel_member("gemini-3.6-flash"),
+    ]
+    assert MODULE.combine_panel(panel) == ("judged", True)
+
+
+@pytest.mark.parametrize("dissenter", [0, 1, 2])
+def test_a_single_dissenting_judge_blocks_the_pass(dissenter):
+    panel = [
+        panel_member("claude-opus-5"),
+        panel_member("gpt-5.6-sol"),
+        panel_member("gemini-3.6-flash"),
+    ]
+    panel[dissenter]["maintainability_pass"] = False
+    assert MODULE.combine_panel(panel) == ("judged", False)
+
+
+def test_an_unresolved_judge_never_yields_a_pass():
+    # A judge that failed to return a parseable verdict must not be silently
+    # treated as either a pass or a considered failure.
+    panel = [
+        panel_member("claude-opus-5"),
+        panel_member("gpt-5.6-sol"),
+        panel_member("gemini-3.6-flash", status="judge_error", passed=False,
+                     error="gateway timeout"),
+    ]
+    assert MODULE.combine_panel(panel) == ("judge_error", False)
+
+
+def test_panel_fingerprint_differs_from_each_member_and_from_reordering():
+    panel = ["claude-opus-5", "gpt-5.6-sol", "gemini-3.6-flash"]
+    combined = MODULE.judge_protocol_fingerprint("v2", panel, 30000, 2048)
+    for member in panel:
+        assert combined != MODULE.judge_protocol_fingerprint(
+            "v2", member, 30000, 2048
+        )
+    # a single-member panel keeps the historical single-judge fingerprint so
+    # prior single-judge runs stay resumable
+    assert MODULE.judge_protocol_fingerprint(
+        "v2", ["claude-sonnet-4.6"], 30000, 2048
+    ) == MODULE.judge_protocol_fingerprint("v2", "claude-sonnet-4.6", 30000, 2048)
+
+
+def test_switching_to_a_panel_invalidates_single_judge_results():
+    # The resume path keys off this fingerprint, so a protocol change must
+    # force a full re-judge rather than reusing single-judge verdicts.
+    single = MODULE.judge_protocol_fingerprint("v2", "claude-sonnet-4.6", 30000, 2048)
+    panel = MODULE.judge_protocol_fingerprint(
+        "v2", ["claude-opus-5", "gpt-5.6-sol", "gemini-3.6-flash"], 30000, 2048
+    )
+    assert single != panel
+
+
+def test_duplicate_panel_member_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--tasks", str(tmp_path / "t.jsonl"),
+            "--repo-cache", str(tmp_path),
+            "--generation", "m=" + str(tmp_path / "g.jsonl"),
+            "--out", str(tmp_path / "o.jsonl"),
+            "--raw-dir", str(tmp_path / "raw"),
+            "--judge-model", "claude-opus-5",
+            "--judge-model", "claude-opus-5",
+        ],
+    )
+    with pytest.raises(ValueError, match="duplicate judge"):
+        MODULE.parse_args()

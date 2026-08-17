@@ -80,15 +80,21 @@ JUDGE_PROMPT_VERSION = "reviewbench-maintainability-judge/v2"
 
 def judge_protocol_fingerprint(
     rubric: str,
-    judge_model: str,
+    judge_model: str | list[str],
     max_context_chars: int,
     max_output_tokens: int | None,
 ) -> str:
+    panel = [judge_model] if isinstance(judge_model, str) else list(judge_model)
     payload = {
         "prompt_version": JUDGE_PROMPT_VERSION,
         "rubric": rubric,
         "rubric_instructions": RUBRICS[rubric],
-        "judge_model": judge_model,
+        # A single judge keeps its historical fingerprint shape; a panel is
+        # recorded as the ordered member list plus its decision rule so a
+        # unanimous verdict can never be confused with a single-judge one.
+        "judge_model": panel[0] if len(panel) == 1 else panel,
+        "judge_panel": panel,
+        "judge_decision_rule": "unanimous" if len(panel) > 1 else "single",
         "max_context_chars": max_context_chars,
         "max_output_tokens": max_output_tokens,
     }
@@ -115,7 +121,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--raw-dir", type=Path, required=True)
-    parser.add_argument("--judge-model", default="claude-opus-4.8")
+    parser.add_argument(
+        "--judge-model",
+        action="append",
+        default=None,
+        help="Judge model; repeat to form a panel. A panel only passes a "
+        "candidate when every member passes it (unanimous).",
+    )
     parser.add_argument("--rubric", choices=("v1", "v2"), default="v1")
     parser.add_argument(
         "--chat-endpoint",
@@ -125,7 +137,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-context-chars", type=int, default=30_000)
     parser.add_argument("--max-output-tokens", type=int, default=2048)
     parser.add_argument("--resume", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not args.judge_model:
+        args.judge_model = ["claude-opus-4.8"]
+    if len(set(args.judge_model)) != len(args.judge_model):
+        raise ValueError(
+            f"duplicate judge in panel: {args.judge_model}; a repeated member "
+            "would give one model multiple votes"
+        )
+    return args
 
 
 def parse_generation_args(values: list[str]) -> dict[str, Path]:
@@ -273,6 +293,71 @@ def build_repair_prompt(
     )
 
 
+def judge_with_one_model(
+    judge_model: str,
+    prompt: str,
+    raw_path: Path,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Obtain one judge's verdict, retrying only its own malformed output."""
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    last_error = ""
+    attempt_prompt = prompt
+    for attempt in range(1, 4):
+        text = ""
+        try:
+            text, usage = invoke_judge(
+                judge_model,
+                attempt_prompt,
+                args.chat_endpoint,
+                args.max_output_tokens,
+                args.rubric,
+            )
+            raw_path.write_text(text, encoding="utf-8")
+            raw_path.with_name(
+                f"{raw_path.stem}.attempt-{attempt}{raw_path.suffix}"
+            ).write_text(text, encoding="utf-8")
+            verdict = parse_verdict(text, args.rubric)
+            return {
+                "judge_model": judge_model,
+                "status": "judged",
+                "maintainability_pass": verdict_passes(verdict, args.rubric),
+                "attempt": attempt,
+                "raw_file": str(raw_path),
+                "usage": usage,
+                "verdict": verdict,
+            }
+        except Exception as exc:
+            last_error = str(exc)[:500]
+            if text:
+                attempt_prompt = build_repair_prompt(
+                    prompt,
+                    text,
+                    last_error,
+                    args.rubric,
+                )
+    return {
+        "judge_model": judge_model,
+        "status": "judge_error",
+        "maintainability_pass": False,
+        "error": last_error,
+        "raw_file": str(raw_path),
+    }
+
+
+def combine_panel(panel: list[dict[str, Any]]) -> tuple[str, bool]:
+    """Combine per-judge verdicts under the unanimous rule.
+
+    A candidate passes only when every judge returned a valid verdict *and*
+    every one of those verdicts passes. An unresolved judge therefore never
+    yields a pass, and is reported as ``judge_error`` so the completion marker
+    forces it to be resolved rather than silently scored as a failure.
+    """
+    if any(member["status"] != "judged" for member in panel):
+        return "judge_error", False
+    return "judged", all(member["maintainability_pass"] for member in panel)
+
+
 def judge_one(
     task: dict[str, Any],
     generation: dict[str, Any],
@@ -286,11 +371,14 @@ def judge_one(
         args.max_context_chars,
         args.max_output_tokens,
     )
+    judges = list(args.judge_model)
     base = {
         "id": task["id"],
         "repo": task.get("repo"),
         "solver_model": solver_model,
-        "judge_model": args.judge_model,
+        "judge_model": judges[0] if len(judges) == 1 else judges,
+        "judge_panel": judges,
+        "judge_decision_rule": "unanimous" if len(judges) > 1 else "single",
         "rubric": args.rubric,
         "judge_protocol_fingerprint": protocol_fingerprint,
         "task_fingerprint": agentic.task_fingerprint(task),
@@ -322,56 +410,47 @@ def judge_one(
             "error": str(exc)[:500],
         }
 
-    raw_path = (
-        args.raw_dir
-        / generator.safe_component(solver_model)
-        / f"{task['id']}.txt"
-    )
-    raw_path.parent.mkdir(parents=True, exist_ok=True)
-    last_error = ""
-    attempt_prompt = prompt
-    for attempt in range(1, 4):
-        text = ""
-        try:
-            text, usage = invoke_judge(
-                args.judge_model,
-                attempt_prompt,
-                args.chat_endpoint,
-                args.max_output_tokens,
-                args.rubric,
+    raw_root = args.raw_dir / generator.safe_component(solver_model)
+    panel = []
+    for judge_model in judges:
+        suffix = (
+            "" if len(judges) == 1 else f".{generator.safe_component(judge_model)}"
+        )
+        panel.append(
+            judge_with_one_model(
+                judge_model,
+                prompt,
+                raw_root / f"{task['id']}{suffix}.txt",
+                args,
             )
-            raw_path.write_text(text, encoding="utf-8")
-            raw_path.with_name(
-                f"{raw_path.stem}.attempt-{attempt}{raw_path.suffix}"
-            ).write_text(text, encoding="utf-8")
-            verdict = parse_verdict(text, args.rubric)
-            passed = verdict_passes(verdict, args.rubric)
-            return {
-                **base,
-                "status": "judged",
-                "maintainability_pass": passed,
-                "attempt": attempt,
-                "patch_file": str(patch_path),
-                "raw_file": str(raw_path),
-                "usage": usage,
-                "verdict": verdict,
-            }
-        except Exception as exc:
-            last_error = str(exc)[:500]
-            if text:
-                attempt_prompt = build_repair_prompt(
-                    prompt,
-                    text,
-                    last_error,
-                    args.rubric,
-                )
-    return {
+        )
+    status, passed = combine_panel(panel)
+    result = {
         **base,
-        "status": "judge_error",
-        "maintainability_pass": False,
-        "error": last_error,
-        "raw_file": str(raw_path),
+        "status": status,
+        "maintainability_pass": passed,
+        "patch_file": str(patch_path),
+        "panel": panel,
+        "panel_passes": {
+            member["judge_model"]: member["maintainability_pass"]
+            for member in panel
+        },
     }
+    if len(judges) == 1:
+        # Preserve the historical single-judge record shape.
+        member = panel[0]
+        for key in ("attempt", "raw_file", "usage", "verdict", "error"):
+            if key in member:
+                result[key] = member[key]
+    else:
+        errors = [
+            f"{member['judge_model']}: {member.get('error', '')}"
+            for member in panel
+            if member["status"] != "judged"
+        ]
+        if errors:
+            result["error"] = "; ".join(errors)[:500]
+    return result
 
 
 def write_results(
@@ -487,6 +566,14 @@ def write_completion_marker(
         "judge_protocol_fingerprint": protocol_fingerprint,
         "rubric": rubric,
         "judge_model": judge_model,
+        "judge_panel": (
+            [judge_model] if isinstance(judge_model, str) else list(judge_model)
+        ),
+        "judge_decision_rule": (
+            "single"
+            if isinstance(judge_model, str) or len(judge_model) == 1
+            else "unanimous"
+        ),
         "max_context_chars": max_context_chars,
         "max_output_tokens": max_output_tokens,
         "results_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),

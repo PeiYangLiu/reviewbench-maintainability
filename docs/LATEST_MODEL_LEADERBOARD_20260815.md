@@ -2,17 +2,45 @@
 
 更新时间：2026-08-15
 
+> ⚠️ **本页所有 Maintainability 与 Final Resolved 数值正在按新的三判合议规则
+> 重新计算。** 现有表格是旧的**单裁判** `claude-sonnet-4.6` 结果，在重判完成前
+> 不得用于比较。Generation / Scope / Correctness 三门不受影响（correctness 为
+> 真实执行，与裁判无关）。
+
 > 本榜替代已撤回的 408-task snapshot。计分只覆盖 **402 道可比较题**，
-> correctness 必须绑定 canonical patch，且 maintainability 统一由非参赛模型
-> `claude-sonnet-4.6` 重判。GPT/Opus 跨代模型只使用 fresh 402-task 结果，
-> 不混入旧冻结分数。
+> correctness 必须绑定 canonical patch，且 maintainability 由 **Opus 5 /
+> GPT-5.6 Sol / Gemini 3.6 Flash 三判合议、全票通过**才算通过。
+> GPT/Opus 跨代模型只使用 fresh 402-task 结果，不混入旧冻结分数。
 
 ## 计分口径
 
 ```text
 Final Resolved =
 generation_apply AND scope_ok AND correctness_ok AND maintainability_pass
+
+maintainability_pass =
+judge(Claude Opus 5) AND judge(GPT-5.6 Sol) AND judge(Gemini 3.6 Flash)
 ```
+
+### maintainability 三判合议规则
+
+- **裁判固定为三个、跨三家厂商**：`claude-opus-5`、`gpt-5.6-sol`、
+  `gemini-3.6-flash`；
+- **全票才算通过**：任一裁判判不通过，该题即不通过。单一裁判无法单独让一
+  道题通过，只能否决；
+- **未决即不通过**：任一裁判没有返回可解析判定时，该 pair 记为
+  `judge_error`（不是 pass、也不算模型失败），必须重跑解决，不得静默计分；
+- **每个裁判独立判分**，各自的原始响应与逐项 verdict 全部留存，
+  `panel_passes` 记录逐裁判结论，可复核分歧；
+- **裁判身份强校验**：每次调用必须返回精确请求的模型 ID，否则拒绝该次判定；
+- **协议指纹绑定裁判组**：`judge_protocol_fingerprint` 包含裁判成员列表与
+  合议规则，因此单裁判的历史判分不会被误当作三判结果复用；
+- 裁判组成员重复会被拒绝，避免同一模型获得多票。
+
+三个裁判本身也在榜上被评测。合议规则使自我偏好无法单独制造通过——一个裁判
+抬高自己仍需另外两家同意；但读者应知悉这一事实。**correctness 门是真实执行
+Oracle 测试，完全不涉及模型判分**，因此不受裁判选择影响，是判定真实能力的
+独立证据。
 
 - 固定分母：402；
 - generation、correctness、judgment 各 5,628 条，task/model pair 集合完全一致；
