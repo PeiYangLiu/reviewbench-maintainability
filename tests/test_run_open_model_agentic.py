@@ -197,3 +197,53 @@ def test_no_lora_flags_without_an_adapter(tmp_path):
     command = MODULE.build_server_command(server_args(tmp_path), "base")
     assert "--enable-lora" not in command
     assert "--lora-modules" not in command
+
+
+def job_script_arg_block():
+    """The LoRA/served-name argument block from the AMLT job script.
+
+    Extracted and executed as real bash so the mutual exclusion between
+    ``--served-model-name`` and ``--lora-adapter`` is verified as behaviour
+    rather than as a text pattern.
+    """
+    script = (Path(__file__).parents[1] / "scripts" / "run_open_model_job.sh").read_text(
+        encoding="utf-8"
+    )
+    start = script.index("lora_args=()")
+    end = script.index("vllm_args=(")
+    return script[start:end]
+
+
+def run_job_arg_block(**env):
+    block = job_script_arg_block()
+    probe = (
+        f'MODEL_ID="{env.pop("MODEL_ID", "Qwen/Qwen3.6-27B")}"\n'
+        + "".join(f'{key}="{value}"\n' for key, value in env.items())
+        + block
+        + '\nprintf "%s\\n" "SERVED:${served_args[*]-}" "LORA:${lora_args[*]-}"\n'
+    )
+    completed = subprocess.run(
+        ["bash", "-c", probe], text=True, capture_output=True, check=True
+    )
+    return dict(
+        line.split(":", 1) for line in completed.stdout.strip().splitlines()
+    )
+
+
+def test_job_script_requests_base_name_without_an_adapter():
+    result = run_job_arg_block()
+    assert result["SERVED"] == "--served-model-name Qwen/Qwen3.6-27B"
+    assert result["LORA"] == ""
+
+
+def test_job_script_never_requests_base_name_with_an_adapter():
+    # Regression: the job script used to pass --served-model-name
+    # unconditionally, which would have evaluated the untuned base weights and
+    # recorded them as the SFT model.
+    result = run_job_arg_block(
+        LORA_ADAPTER="sft-a=sft-adapters/stage1-full", MAX_LORA_RANK="32"
+    )
+    assert result["SERVED"] == ""
+    assert result["LORA"] == (
+        "--lora-adapter sft-a=sft-adapters/stage1-full --max-lora-rank 32"
+    )

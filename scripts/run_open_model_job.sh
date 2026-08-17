@@ -61,11 +61,14 @@ if [ -n "${GENERATION_IDS_FILE:-}" ]; then
   ids_args+=(--ids-file "$GENERATION_IDS_FILE")
 fi
 lora_args=()
+served_args=(--served-model-name "$MODEL_ID")
 if [ -n "${LORA_ADAPTER:-}" ]; then
   # LORA_ADAPTER is NAME=PATH. The harness serves the adapter under NAME and
   # requests NAME, so generation_results.jsonl records the adapted model rather
-  # than the untuned base weights.
+  # than the untuned base weights. Requesting MODEL_ID here would silently
+  # evaluate the base model, so the served name is left to the harness.
   lora_args+=(--lora-adapter "$LORA_ADAPTER")
+  served_args=()
   if [ -n "${MAX_LORA_RANK:-}" ]; then
     lora_args+=(--max-lora-rank "$MAX_LORA_RANK")
   fi
@@ -123,7 +126,7 @@ trap persist EXIT
 python3 scripts/run_open_model_agentic.py \
   --model "$MODEL_ID" \
   --revision "$MODEL_REVISION" \
-  --served-model-name "$MODEL_ID" \
+  "${served_args[@]}" \
   --tasks data/releases/hard/20260808/tasks.jsonl \
   --repo-cache "$AMLT_DATA_DIR" \
   --out-dir "$generation_root" \
