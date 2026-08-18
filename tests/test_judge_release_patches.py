@@ -2,6 +2,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -349,3 +350,120 @@ def test_duplicate_panel_member_is_rejected(monkeypatch, tmp_path):
     )
     with pytest.raises(ValueError, match="duplicate judge"):
         MODULE.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Truncation-aware output budget escalation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "finish_reason", "expected"),
+    [
+        ("", "stop", True),
+        ("   \n ", "stop", True),
+        ('{"addressed":"yes"}', "length", True),
+        ('{"addressed":"yes"}', "stop", False),
+    ],
+)
+def test_truncation_detection(text, finish_reason, expected):
+    assert MODULE.response_was_truncated(text, finish_reason) is expected
+
+
+def judge_args(tmp_path, **overrides):
+    values = {
+        "chat_endpoint": "http://127.0.0.1:8787/v1/chat/completions",
+        "rubric": "v2",
+        "max_output_tokens": 4096,
+        "max_output_token_ceiling": 16384,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_truncated_judge_is_retried_at_a_doubled_budget(tmp_path, monkeypatch):
+    # A reasoning judge that exhausts its budget must not be recorded as a
+    # failure: that would drop the hardest patches, not the wrong ones.
+    budgets = []
+
+    def fake_invoke(model, prompt, endpoint, maximum_tokens, rubric):
+        budgets.append(maximum_tokens)
+        if maximum_tokens < 8192:
+            return "", {"completion_tokens": maximum_tokens}, "length"
+        return (
+            '{"addressed":"yes","quality_1_to_5":5,'
+            '"introduces_new_debt":false,"reason":"ok"}',
+            {"completion_tokens": 900},
+            "stop",
+        )
+
+    monkeypatch.setattr(MODULE, "invoke_judge", fake_invoke)
+    result = MODULE.judge_with_one_model(
+        "claude-opus-5",
+        "prompt",
+        tmp_path / "raw.txt",
+        judge_args(tmp_path),
+    )
+
+    assert budgets == [4096, 8192]
+    assert result["status"] == "judged"
+    assert result["maintainability_pass"] is True
+    assert result["output_token_budget"] == 8192
+    assert result["output_token_budgets"] == [4096, 8192]
+
+
+def test_budget_escalation_respects_the_ceiling(tmp_path, monkeypatch):
+    budgets = []
+
+    def always_truncated(model, prompt, endpoint, maximum_tokens, rubric):
+        budgets.append(maximum_tokens)
+        return "", {}, "length"
+
+    monkeypatch.setattr(MODULE, "invoke_judge", always_truncated)
+    result = MODULE.judge_with_one_model(
+        "claude-opus-5",
+        "prompt",
+        tmp_path / "raw.txt",
+        judge_args(tmp_path, max_output_tokens=4096, max_output_token_ceiling=8192),
+    )
+
+    assert budgets == [4096, 8192, 8192]
+    assert result["status"] == "judge_error"
+    assert result["maintainability_pass"] is False
+
+
+def test_malformed_but_complete_output_is_repaired_not_escalated(
+    tmp_path, monkeypatch
+):
+    budgets = []
+    prompts = []
+
+    def fake_invoke(model, prompt, endpoint, maximum_tokens, rubric):
+        budgets.append(maximum_tokens)
+        prompts.append(prompt)
+        if len(budgets) == 1:
+            return "not json at all", {}, "stop"
+        return (
+            '{"addressed":"no","quality_1_to_5":2,'
+            '"introduces_new_debt":true,"reason":"x"}',
+            {},
+            "stop",
+        )
+
+    monkeypatch.setattr(MODULE, "invoke_judge", fake_invoke)
+    result = MODULE.judge_with_one_model(
+        "gpt-5.6-sol", "prompt", tmp_path / "raw.txt", judge_args(tmp_path)
+    )
+
+    # budget unchanged, and the second call carries a repair prompt
+    assert budgets == [4096, 4096]
+    assert prompts[1] != prompts[0]
+    assert result["status"] == "judged"
+    assert result["maintainability_pass"] is False
+
+
+def test_escalation_ceiling_is_part_of_the_protocol_fingerprint():
+    panel = ["claude-opus-5", "gpt-5.6-sol", "gemini-3.6-flash"]
+    a = MODULE.judge_protocol_fingerprint("v2", panel, 30000, 4096, 16384)
+    b = MODULE.judge_protocol_fingerprint("v2", panel, 30000, 4096, 8192)
+    assert a != b

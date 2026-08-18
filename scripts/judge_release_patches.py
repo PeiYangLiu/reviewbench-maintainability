@@ -83,6 +83,7 @@ def judge_protocol_fingerprint(
     judge_model: str | list[str],
     max_context_chars: int,
     max_output_tokens: int | None,
+    max_output_token_ceiling: int | None = None,
 ) -> str:
     panel = [judge_model] if isinstance(judge_model, str) else list(judge_model)
     payload = {
@@ -98,6 +99,10 @@ def judge_protocol_fingerprint(
         "max_context_chars": max_context_chars,
         "max_output_tokens": max_output_tokens,
     }
+    if max_output_token_ceiling is not None:
+        # The escalation ceiling changes how a truncated judge is resolved, so
+        # it is part of the protocol rather than a tuning knob.
+        payload["max_output_token_ceiling"] = max_output_token_ceiling
     return hashlib.sha256(
         json.dumps(
             payload,
@@ -136,6 +141,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--max-context-chars", type=int, default=30_000)
     parser.add_argument("--max-output-tokens", type=int, default=2048)
+    parser.add_argument(
+        "--max-output-token-ceiling",
+        type=int,
+        default=16384,
+        help="Upper bound when doubling the budget after a truncated judge "
+        "response.",
+    )
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
     if not args.judge_model:
@@ -249,7 +261,7 @@ def invoke_judge(
     endpoint: str,
     maximum_tokens: int,
     rubric: str = "v1",
-) -> tuple[str, dict[str, Any]]:
+) -> tuple[str, dict[str, Any], str]:
     payload = {
         "model": model,
         "messages": [
@@ -267,7 +279,23 @@ def invoke_judge(
             f"{actual_model or '<missing>'}; refusing an unattested or "
             "silent fallback"
         )
-    return generator.chat_text(data), data.get("usage") or {}
+    return (
+        generator.chat_text(data),
+        data.get("usage") or {},
+        str(((data.get("choices") or [{}])[0]).get("finish_reason") or ""),
+    )
+
+
+def response_was_truncated(text: str, finish_reason: str) -> bool:
+    """Whether the judge ran out of output budget rather than disagreeing.
+
+    Reasoning judges spend budget before emitting any visible text, so an
+    exhausted budget shows up as ``finish_reason == "length"`` and/or an empty
+    body. Retrying such a call at the same budget can only fail again, and
+    silently recording it would drop exactly the hardest patches -- the ones
+    that need the most deliberation -- from the panel.
+    """
+    return finish_reason == "length" or not text.strip()
 
 
 def build_repair_prompt(
@@ -299,24 +327,37 @@ def judge_with_one_model(
     raw_path: Path,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
-    """Obtain one judge's verdict, retrying only its own malformed output."""
+    """Obtain one judge's verdict, retrying only its own malformed output.
+
+    A truncated response is retried at a doubled budget rather than re-asked at
+    the same one: the same budget would truncate again, so the pair would be
+    dropped for being hard rather than for being wrong.
+    """
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     last_error = ""
     attempt_prompt = prompt
+    budget = args.max_output_tokens
+    budgets_used = []
     for attempt in range(1, 4):
         text = ""
+        budgets_used.append(budget)
         try:
-            text, usage = invoke_judge(
+            text, usage, finish_reason = invoke_judge(
                 judge_model,
                 attempt_prompt,
                 args.chat_endpoint,
-                args.max_output_tokens,
+                budget,
                 args.rubric,
             )
             raw_path.write_text(text, encoding="utf-8")
             raw_path.with_name(
                 f"{raw_path.stem}.attempt-{attempt}{raw_path.suffix}"
             ).write_text(text, encoding="utf-8")
+            if response_was_truncated(text, finish_reason):
+                raise ValueError(
+                    f"judge response truncated at {budget} output tokens "
+                    f"(finish_reason={finish_reason or '<missing>'})"
+                )
             verdict = parse_verdict(text, args.rubric)
             return {
                 "judge_model": judge_model,
@@ -325,11 +366,17 @@ def judge_with_one_model(
                 "attempt": attempt,
                 "raw_file": str(raw_path),
                 "usage": usage,
+                "output_token_budget": budget,
+                "output_token_budgets": budgets_used,
                 "verdict": verdict,
             }
         except Exception as exc:
             last_error = str(exc)[:500]
-            if text:
+            truncated = "truncated at" in last_error
+            if truncated:
+                budget = min(budget * 2, args.max_output_token_ceiling)
+                attempt_prompt = prompt
+            elif text:
                 attempt_prompt = build_repair_prompt(
                     prompt,
                     text,
@@ -342,6 +389,7 @@ def judge_with_one_model(
         "maintainability_pass": False,
         "error": last_error,
         "raw_file": str(raw_path),
+        "output_token_budgets": budgets_used,
     }
 
 
@@ -370,6 +418,7 @@ def judge_one(
         args.judge_model,
         args.max_context_chars,
         args.max_output_tokens,
+        args.max_output_token_ceiling,
     )
     judges = list(args.judge_model)
     base = {
@@ -635,6 +684,7 @@ def main() -> int:
                 args.judge_model,
                 args.max_context_chars,
                 args.max_output_tokens,
+                args.max_output_token_ceiling,
             )
             or (
                 generations[model][task["id"]].get("apply_ok") is True
@@ -724,6 +774,7 @@ def main() -> int:
         args.judge_model,
         args.max_context_chars,
         args.max_output_tokens,
+        args.max_output_token_ceiling,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if all(item["errors"] == 0 for item in summary.values()) else 1
