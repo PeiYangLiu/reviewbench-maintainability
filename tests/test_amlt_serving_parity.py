@@ -23,6 +23,16 @@ BOARD = CONFIGS / "amlt_openmodel_generation.yaml"
 MERGED_INTO_BOARD = [
     "amlt_openmodel_retries.yaml",
     "amlt_openmodel_uniform_transcript.yaml",
+    "amlt_openmodel_context_fit.yaml",
+]
+
+# Every config that regenerates rows for an already-serving model, paired with
+# the config that established how that model is served.
+PARITY_SOURCES = [
+    "amlt_openmodel_generation.yaml",
+    "amlt_openmodel_qwen_ladder.yaml",
+    "amlt_openmodel_kimi.yaml",
+    "amlt_openmodel_crossfamily.yaml",
 ]
 
 # Settings that must match the board for a regenerated row to remain
@@ -108,3 +118,51 @@ def test_guard_catches_a_downsized_backfill(tmp_path):
 
     _, pinned = serving(shrunk)
     assert pinned != board_serving()[model]
+
+
+def established_serving():
+    """How every model is served by the config that first established it."""
+    established = {}
+    for name in PARITY_SOURCES:
+        for job in load_jobs(CONFIGS / name):
+            model, pinned = serving(job)
+            if not pinned["MODEL_REVISION"]:
+                continue
+            established.setdefault(model, pinned)
+    return established
+
+
+def test_context_fit_regeneration_matches_each_model_established_serving():
+    """The regenerated rows replace rows in place, so serving must not drift.
+
+    This config spans the board, the size ladder and Kimi at once, and those
+    three are served at three different window sizes, so a single shared
+    setting here would silently retire whichever window it did not match.
+    """
+    established = established_serving()
+    mismatches = []
+    for job in load_jobs(CONFIGS / "amlt_openmodel_context_fit.yaml"):
+        model, pinned = serving(job)
+        assert model in established, f"{model} has no established serving config"
+        if pinned != established[model]:
+            mismatches.append((job["name"], model, established[model], pinned))
+    assert not mismatches, f"context-fit jobs drift from established serving: {mismatches}"
+
+
+def test_context_fit_drops_the_hand_set_transcript_budgets():
+    """Those budgets only existed to dodge the overflow the harness now handles."""
+    for job in load_jobs(CONFIGS / "amlt_openmodel_context_fit.yaml"):
+        env = job["submit_args"]["env"]
+        assert "MAX_TRANSCRIPT_CHARS" not in env, job["name"]
+        assert env["GENERATION_IDS_FILE"].startswith(
+            "configs/openmodel_scope_ids/context-fit/"
+        ), job["name"]
+
+
+def test_context_fit_scopes_exist_and_are_not_empty():
+    for job in load_jobs(CONFIGS / "amlt_openmodel_context_fit.yaml"):
+        scope = CONFIGS.parent / job["submit_args"]["env"]["GENERATION_IDS_FILE"]
+        assert scope.exists(), scope
+        ids = [line for line in scope.read_text().splitlines() if line.strip()]
+        assert ids, scope
+        assert len(ids) == len(set(ids)), f"duplicate ids in {scope}"
