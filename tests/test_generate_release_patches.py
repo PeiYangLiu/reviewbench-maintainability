@@ -285,3 +285,38 @@ def test_custom_model_defaults_to_openai_compatible_chat(monkeypatch):
     assert text == "OK"
     assert captured["payload"]["model"] == model
     assert "reasoning_effort" not in captured["payload"]
+
+
+# ---------------------------------------------------------------------------
+# Context-window overflow is the model's limit, not an infrastructure fault
+# ---------------------------------------------------------------------------
+
+
+def test_context_overflow_is_not_retried_as_transient():
+    # vLLM rejects a prompt longer than the model's context with HTTP 400.
+    # Retrying cannot help, and treating it as transient would let a real
+    # capability limit be re-labelled as flaky infrastructure.
+    assert 400 not in MODULE.RETRYABLE_HTTP_CODES
+
+
+def test_context_overflow_surfaces_as_a_hard_error(monkeypatch):
+    import urllib.error
+    import io
+
+    calls = []
+
+    def overflowing(request, timeout=None):
+        calls.append(request)
+        raise urllib.error.HTTPError(
+            "http://x", 400, "Bad Request", {},
+            io.BytesIO(
+                b'{"error":{"message":"This model\'s maximum context length '
+                b'is 40960 tokens, however you requested 41500 tokens"}}'
+            ),
+        )
+
+    monkeypatch.setattr(MODULE.urllib.request, "urlopen", overflowing)
+    with pytest.raises(RuntimeError, match="HTTP 400"):
+        MODULE.post_json("http://x", {"model": "m"}, {}, timeout=5, retries=4)
+    # surfaced on the first attempt rather than burning the retry budget
+    assert len(calls) == 1
