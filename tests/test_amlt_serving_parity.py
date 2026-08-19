@@ -77,6 +77,28 @@ def test_board_pins_a_tensor_parallel_size_for_every_model():
         assert pinned["MODEL_REVISION"], f"{model} has no MODEL_REVISION"
 
 
+def test_size_ladder_serves_every_rung_at_one_context_length():
+    """The ladder only isolates size if context length is held constant.
+
+    Giving a rung a shorter window because it would not otherwise fit turns the
+    ladder into a size-and-context comparison, and the shortfall would land on
+    the largest rung, which is the one the trend rests on.
+    """
+    jobs = load_jobs(CONFIGS / "amlt_openmodel_qwen_ladder.yaml")
+    lengths = {job["submit_args"]["env"]["MAX_MODEL_LEN"] for job in jobs}
+    assert len(lengths) == 1, f"ladder rungs serve different windows: {lengths}"
+
+    scopes = {job["submit_args"]["env"]["GENERATION_IDS_FILE"] for job in jobs}
+    per_model = {}
+    for job in jobs:
+        per_model.setdefault(job["submit_args"]["env"]["MODEL_ID"], set()).add(
+            job["submit_args"]["env"]["GENERATION_IDS_FILE"]
+        )
+    assert all(shards == scopes for shards in per_model.values()), (
+        f"ladder rungs cover different task sets: {per_model}"
+    )
+
+
 def test_guard_catches_a_downsized_backfill(tmp_path):
     board_job = load_jobs(BOARD)[0]
     model = board_job["submit_args"]["env"]["MODEL_ID"]
