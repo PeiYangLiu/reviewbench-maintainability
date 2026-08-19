@@ -14,7 +14,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import datetime as dt
 import hashlib
 import json
+import math
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import threading
@@ -50,6 +52,14 @@ Do not return Markdown, prose, SEARCH/REPLACE blocks, or a unified diff."""
 
 NATIVE_TOOL_MODELS = {"gemini-3.6-flash"}
 NATIVE_EDIT_DEADLINE = 24
+# Leave headroom so a trim that only just fits does not get rejected again by a
+# prompt whose token count moves slightly once the oldest events are dropped.
+CONTEXT_OVERFLOW_MARGIN_TOKENS = 256
+# Below this the transcript stops carrying usable history, so a task that still
+# does not fit is recorded as a failure instead of being asked to work blind.
+MIN_TRANSCRIPT_CHARS = 20_000
+# Each attempt trims strictly, so this only bounds pathological ratio estimates.
+MAX_CONTEXT_FIT_ATTEMPTS = 6
 NATIVE_TOOL_INSTRUCTIONS = """You are an expert software engineer working in a real Git worktree.
 
 Address the reviewer concern with the smallest complete, behavior-preserving
@@ -771,6 +781,123 @@ def native_tool_text(data: dict[str, Any]) -> str:
     )
 
 
+def parse_context_overflow(error: str) -> tuple[int, int] | None:
+    """Return (limit_tokens, prompt_tokens) when a server rejects an over-long prompt.
+
+    The deployment rejects these before the model runs, so the round carries no
+    signal about the model. It means the harness asked for more context than the
+    deployment was configured to hold.
+    """
+    if "maximum context length" not in error:
+        return None
+    limit = re.search(r"maximum context length is (\d+) tokens", error)
+    prompt = re.search(r"prompt contains at least (\d+) input tokens", error)
+    if not limit or not prompt:
+        return None
+    return int(limit.group(1)), int(prompt.group(1))
+
+
+def shrink_transcript_budget(
+    budget: int,
+    prompt_chars: int,
+    limit_tokens: int,
+    prompt_tokens: int,
+    output_tokens: int,
+) -> int | None:
+    """Trim just enough transcript to fit the window, or None if it cannot fit.
+
+    The trim is derived from the rejection itself: the deployment reports how
+    many tokens the prompt held, which calibrates a chars-per-token ratio for
+    this exact prompt rather than assuming a global one. Trimming the least
+    amount that fits keeps the surviving prompt as close as possible to what
+    every other model was shown.
+    """
+    overflow = prompt_tokens + output_tokens - limit_tokens
+    if overflow <= 0 or prompt_tokens <= 0 or budget <= 0 or prompt_chars <= 0:
+        return None
+    chars_per_token = prompt_chars / prompt_tokens
+    drop = math.ceil((overflow + CONTEXT_OVERFLOW_MARGIN_TOKENS) * chars_per_token)
+    shrunk = budget - drop
+    if shrunk < MIN_TRANSCRIPT_CHARS:
+        return None
+    return shrunk
+
+
+def render_round_prompt(
+    task: dict[str, Any],
+    before: str,
+    transcript: list[dict[str, Any]],
+    initial_context_chars: int,
+    transcript_budget: int,
+) -> str:
+    prompt = build_initial_prompt(task, before, initial_context_chars)
+    if transcript:
+        prompt += "\n\nTOOL TRANSCRIPT:\n" + render_tool_transcript(
+            transcript,
+            transcript_budget,
+        )
+    return prompt + "\n\nReturn the next JSON action only."
+
+
+def invoke_within_context_window(
+    model: str,
+    prompt: str,
+    args: argparse.Namespace,
+    native_messages: list[dict[str, Any]] | None,
+    native_tool_choice: dict[str, Any] | str | None,
+    round_result: dict[str, Any],
+    refit: Any,
+    transcript_budget: int,
+) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
+    """Invoke the model, trimming the transcript if the deployment rejects the prompt.
+
+    A prompt that exceeds the served window is rejected before the model sees
+    it, and resending it every round burns the round budget on a request that
+    can never succeed. Trimming the transcript to fit keeps the round a
+    measurement of the model rather than of the deployment's window.
+    """
+    budget = transcript_budget
+    shrinks: list[dict[str, int]] = []
+    for _ in range(MAX_CONTEXT_FIT_ATTEMPTS):
+        try:
+            result = invoke(
+                model,
+                prompt,
+                args,
+                native_messages=native_messages,
+                native_tool_choice=native_tool_choice,
+            )
+        except Exception as exc:
+            overflow = parse_context_overflow(str(exc))
+            if overflow is None or refit is None:
+                raise
+            limit_tokens, prompt_tokens = overflow
+            shrunk = shrink_transcript_budget(
+                budget,
+                len(prompt),
+                limit_tokens,
+                prompt_tokens,
+                args.max_output_tokens,
+            )
+            if shrunk is None:
+                raise
+            shrinks.append({"from": budget, "to": shrunk})
+            budget = shrunk
+            prompt = refit(budget)
+            continue
+        if shrinks:
+            round_result["transcript_shrinks"] = shrinks
+            round_result["transcript_budget_chars"] = budget
+            round_result["prompt_sha256"] = hashlib.sha256(
+                prompt.encode()
+            ).hexdigest()
+        return result
+    raise RuntimeError(
+        f"prompt did not fit the served context window after "
+        f"{MAX_CONTEXT_FIT_ATTEMPTS} transcript trims"
+    )
+
+
 def generate_one(
     task: dict[str, Any],
     model: str,
@@ -824,6 +951,7 @@ def generate_one(
         first_round = len(prior_rounds) + 1
 
     native_history = None
+    transcript_budget = args.max_transcript_chars
     if model in NATIVE_TOOL_MODELS:
         initial_prompt = build_initial_prompt(
             task,
@@ -851,17 +979,13 @@ def generate_one(
 
     for round_number in range(first_round, args.max_rounds + 1):
         if native_history is None:
-            prompt = build_initial_prompt(
+            prompt = render_round_prompt(
                 task,
                 before,
+                transcript,
                 args.initial_context_chars,
+                transcript_budget,
             )
-            if transcript:
-                prompt += "\n\nTOOL TRANSCRIPT:\n" + render_tool_transcript(
-                    transcript,
-                    args.max_transcript_chars,
-                )
-            prompt += "\n\nReturn the next JSON action only."
             prompt_payload = prompt
         else:
             prompt = ""
@@ -895,7 +1019,7 @@ def generate_one(
         text = ""
         api_response = None
         try:
-            text, usage, api_response = invoke(
+            text, usage, api_response = invoke_within_context_window(
                 model,
                 prompt,
                 args,
@@ -905,6 +1029,23 @@ def generate_one(
                     if native_history is not None
                     else None
                 ),
+                round_result=round_result,
+                refit=(
+                    None
+                    if native_history is not None
+                    else lambda budget: render_round_prompt(
+                        task,
+                        before,
+                        transcript,
+                        args.initial_context_chars,
+                        budget,
+                    )
+                ),
+                transcript_budget=transcript_budget,
+            )
+            transcript_budget = round_result.get(
+                "transcript_budget_chars",
+                transcript_budget,
             )
             action = parse_action(text, prefer_edit=not edited)
             round_result.update(

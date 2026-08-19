@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import subprocess
+from types import SimpleNamespace
 import sys
 
 import pytest
@@ -446,3 +447,138 @@ def test_git_diff_is_generated_by_git_and_applies(tmp_path):
     assert completed.returncode == 0, completed.stderr
     assert "-value = 1" in patch
     assert "+value = 2" in patch
+
+
+# The BSMPT board task was rejected 24 times in a row with this exact message:
+# a 120000-char transcript rendered a prompt one token over the served window,
+# and the harness resent it every round until the round budget ran out.
+BSMPT_REJECTION = (
+    "HTTP 400: {\"error\":{\"message\":\"This model's maximum context length is "
+    "65536 tokens. However, you requested 4096 output tokens and your prompt "
+    "contains at least 61441 input tokens, for a total of at least 65537 "
+    "tokens. Please reduce the length of the input prompt or the number of "
+    "requested output tokens.\"}}"
+)
+
+
+def test_parse_context_overflow_reads_the_served_window():
+    assert MODULE.parse_context_overflow(BSMPT_REJECTION) == (65536, 61441)
+
+
+def test_parse_context_overflow_ignores_unrelated_failures():
+    assert MODULE.parse_context_overflow("HTTP 500: upstream unavailable") is None
+    assert MODULE.parse_context_overflow("model did not return a valid JSON action") is None
+
+
+def test_shrink_transcript_budget_trims_only_what_overflows():
+    shrunk = MODULE.shrink_transcript_budget(
+        budget=120_000,
+        prompt_chars=150_000,
+        limit_tokens=65_536,
+        prompt_tokens=61_441,
+        output_tokens=4_096,
+    )
+    assert shrunk is not None
+    # One token over, so the trim stays far closer to the shared budget than to
+    # the hand-set 80000 the retry waves used.
+    assert 118_000 < shrunk < 120_000
+
+
+def test_shrink_transcript_budget_refuses_to_work_blind():
+    assert (
+        MODULE.shrink_transcript_budget(
+            budget=25_000,
+            prompt_chars=150_000,
+            limit_tokens=4_096,
+            prompt_tokens=60_000,
+            output_tokens=4_096,
+        )
+        is None
+    )
+
+
+def test_invoke_retries_within_the_window_instead_of_burning_the_round(monkeypatch):
+    calls = []
+
+    def fake_invoke(model, prompt, args, native_messages=None, native_tool_choice=None):
+        calls.append(len(prompt))
+        if len(calls) == 1:
+            raise RuntimeError(BSMPT_REJECTION)
+        return "{\"action\":\"finish\"}", {}, {"model": model}
+
+    monkeypatch.setattr(MODULE, "invoke", fake_invoke)
+    round_result = {"prompt_sha256": "stale"}
+    args = SimpleNamespace(max_output_tokens=4096)
+
+    text, _usage, _raw = MODULE.invoke_within_context_window(
+        "Qwen/Qwen3-Coder-Next-FP8",
+        "x" * 150_000,
+        args,
+        native_messages=None,
+        native_tool_choice=None,
+        round_result=round_result,
+        refit=lambda budget: "x" * budget,
+        transcript_budget=120_000,
+    )
+
+    assert text == '{"action":"finish"}'
+    assert len(calls) == 2
+    assert calls[1] < calls[0]
+    assert round_result["transcript_budget_chars"] < 120_000
+    assert round_result["transcript_shrinks"][0]["from"] == 120_000
+    assert round_result["prompt_sha256"] != "stale"
+
+
+def test_invoke_does_not_swallow_unrelated_errors(monkeypatch):
+    def fake_invoke(model, prompt, args, native_messages=None, native_tool_choice=None):
+        raise RuntimeError("HTTP 503: service unavailable")
+
+    monkeypatch.setattr(MODULE, "invoke", fake_invoke)
+    with pytest.raises(RuntimeError, match="503"):
+        MODULE.invoke_within_context_window(
+            "m",
+            "prompt",
+            SimpleNamespace(max_output_tokens=4096),
+            native_messages=None,
+            native_tool_choice=None,
+            round_result={},
+            refit=lambda budget: "p",
+            transcript_budget=120_000,
+        )
+
+
+def test_native_history_models_cannot_be_silently_trimmed(monkeypatch):
+    def fake_invoke(model, prompt, args, native_messages=None, native_tool_choice=None):
+        raise RuntimeError(BSMPT_REJECTION)
+
+    monkeypatch.setattr(MODULE, "invoke", fake_invoke)
+    with pytest.raises(RuntimeError, match="maximum context length"):
+        MODULE.invoke_within_context_window(
+            "gemini-3.6-flash",
+            "prompt",
+            SimpleNamespace(max_output_tokens=4096),
+            native_messages=[{"role": "user", "content": "hi"}],
+            native_tool_choice="auto",
+            round_result={},
+            refit=None,
+            transcript_budget=120_000,
+        )
+
+
+def test_untrimmed_rounds_keep_their_prompt_untouched(monkeypatch):
+    def fake_invoke(model, prompt, args, native_messages=None, native_tool_choice=None):
+        return "ok", {}, None
+
+    monkeypatch.setattr(MODULE, "invoke", fake_invoke)
+    round_result = {"prompt_sha256": "original"}
+    MODULE.invoke_within_context_window(
+        "m",
+        "prompt",
+        SimpleNamespace(max_output_tokens=4096),
+        native_messages=None,
+        native_tool_choice=None,
+        round_result=round_result,
+        refit=lambda budget: "p",
+        transcript_budget=120_000,
+    )
+    assert round_result == {"prompt_sha256": "original"}
