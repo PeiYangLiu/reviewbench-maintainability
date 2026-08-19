@@ -286,6 +286,9 @@ def invoke_judge(
     )
 
 
+CONTENT_FILTER_FINISH_REASONS = frozenset({"content_filter", "safety", "blocked"})
+
+
 def response_was_truncated(text: str, finish_reason: str) -> bool:
     """Whether the judge ran out of output budget rather than disagreeing.
 
@@ -294,8 +297,18 @@ def response_was_truncated(text: str, finish_reason: str) -> bool:
     body. Retrying such a call at the same budget can only fail again, and
     silently recording it would drop exactly the hardest patches -- the ones
     that need the most deliberation -- from the panel.
+
+    A safety refusal also returns an empty body, but more budget cannot fix it,
+    so it is deliberately excluded here and handled as its own terminal state.
     """
+    if finish_reason in CONTENT_FILTER_FINISH_REASONS:
+        return False
     return finish_reason == "length" or not text.strip()
+
+
+def response_was_content_filtered(text: str, finish_reason: str) -> bool:
+    """Whether the judge refused to evaluate this patch at all."""
+    return finish_reason in CONTENT_FILTER_FINISH_REASONS
 
 
 def build_repair_prompt(
@@ -353,6 +366,26 @@ def judge_with_one_model(
             raw_path.with_name(
                 f"{raw_path.stem}.attempt-{attempt}{raw_path.suffix}"
             ).write_text(text, encoding="utf-8")
+            if response_was_content_filtered(text, finish_reason):
+                # A safety refusal is terminal for this judge: neither a larger
+                # budget nor a reworded repair prompt changes the decision, and
+                # retrying would only burn attempts. It is surfaced as its own
+                # status so scope decisions can be made explicitly rather than
+                # by silently scoring the pair as a failure.
+                return {
+                    "judge_model": judge_model,
+                    "status": "content_filtered",
+                    "maintainability_pass": False,
+                    "attempt": attempt,
+                    "raw_file": str(raw_path),
+                    "usage": usage,
+                    "finish_reason": finish_reason,
+                    "output_token_budgets": budgets_used,
+                    "error": (
+                        f"judge refused to evaluate this patch "
+                        f"(finish_reason={finish_reason})"
+                    ),
+                }
             if response_was_truncated(text, finish_reason):
                 raise ValueError(
                     f"judge response truncated at {budget} output tokens "
@@ -400,7 +433,12 @@ def combine_panel(panel: list[dict[str, Any]]) -> tuple[str, bool]:
     every one of those verdicts passes. An unresolved judge therefore never
     yields a pass, and is reported as ``judge_error`` so the completion marker
     forces it to be resolved rather than silently scored as a failure.
+
+    A safety refusal is reported distinctly: it cannot be resolved by retrying,
+    so the pair needs an explicit scope decision instead of an endless rerun.
     """
+    if any(member["status"] == "content_filtered" for member in panel):
+        return "content_filtered", False
     if any(member["status"] != "judged" for member in panel):
         return "judge_error", False
     return "judged", all(member["maintainability_pass"] for member in panel)
@@ -581,7 +619,7 @@ def write_completion_marker(
         key
         for key, result in results.items()
         if result.get("status")
-        in {"judge_error", "input_error", "missing_patch"}
+        in {"judge_error", "input_error", "missing_patch", "content_filtered"}
     ]
     unresolved.extend(
         key
@@ -744,6 +782,11 @@ def main() -> int:
                 item["solver_model"] == model
                 and item.get("status")
                 in {"judge_error", "input_error", "missing_patch"}
+                for item in results.values()
+            ),
+            "content_filtered": sum(
+                item["solver_model"] == model
+                and item.get("status") == "content_filtered"
                 for item in results.values()
             ),
         }

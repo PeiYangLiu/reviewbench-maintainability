@@ -467,3 +467,75 @@ def test_escalation_ceiling_is_part_of_the_protocol_fingerprint():
     a = MODULE.judge_protocol_fingerprint("v2", panel, 30000, 4096, 16384)
     b = MODULE.judge_protocol_fingerprint("v2", panel, 30000, 4096, 8192)
     assert a != b
+
+
+# ---------------------------------------------------------------------------
+# Safety refusals are terminal, not budget problems
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("reason", ["content_filter", "safety", "blocked"])
+def test_content_filter_is_not_mistaken_for_truncation(reason):
+    assert MODULE.response_was_truncated("", reason) is False
+    assert MODULE.response_was_content_filtered("", reason) is True
+
+
+def test_content_filtered_judge_is_terminal_and_not_escalated(
+    tmp_path, monkeypatch
+):
+    # Escalating the budget cannot lift a safety refusal, so burning the
+    # remaining attempts on it only wastes calls.
+    calls = []
+
+    def refuses(model, prompt, endpoint, maximum_tokens, rubric):
+        calls.append(maximum_tokens)
+        return "", {}, "content_filter"
+
+    monkeypatch.setattr(MODULE, "invoke_judge", refuses)
+    result = MODULE.judge_with_one_model(
+        "claude-opus-5", "prompt", tmp_path / "raw.txt", judge_args(tmp_path)
+    )
+
+    assert calls == [4096]
+    assert result["status"] == "content_filtered"
+    assert result["maintainability_pass"] is False
+
+
+def test_panel_reports_content_filtered_distinctly():
+    panel = [
+        panel_member("claude-opus-5", status="content_filtered", passed=False),
+        panel_member("gpt-5.6-sol"),
+        panel_member("gemini-3.6-flash"),
+    ]
+    # Not "judge_error": no amount of retrying resolves it, so it needs an
+    # explicit scope decision instead.
+    assert MODULE.combine_panel(panel) == ("content_filtered", False)
+
+
+def test_content_filtered_pairs_block_the_completion_marker(tmp_path):
+    # Scoring a refusal as a maintainability failure would penalise the solver
+    # for the judge's refusal, so the run must not be marked complete.
+    out = tmp_path / "judgments.jsonl"
+    out.write_text("", encoding="utf-8")
+    MODULE.write_completion_marker(
+        out,
+        {"task": "fp-task"},
+        {"model"},
+        {
+            ("task", "model"): {
+                "status": "content_filtered",
+                "task_fingerprint": "fp-task",
+                "judge_protocol_fingerprint": "fp-proto",
+                "generation_fingerprint": "fp-gen",
+            }
+        },
+        "tasks-sha",
+        {"model": "gen-sha"},
+        {("task", "model"): "fp-gen"},
+        "fp-proto",
+        "v2",
+        ["claude-opus-5", "gpt-5.6-sol", "gemini-3.6-flash"],
+        30000,
+        4096,
+    )
+    assert not MODULE.completion_marker(out).exists()
