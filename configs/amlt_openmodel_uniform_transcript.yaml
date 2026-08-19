@@ -1,0 +1,76 @@
+# Generated with `amlt template -f ... -n 2 -y` under amlt 10.14.0.
+# Regenerates the board tasks that were produced under a reduced transcript
+# budget, so every model on the 402-task board sees the same prompt.
+#
+# Qwen3.6-27B's `qwen36-27b-bounded-remainder` run used
+# MAX_TRANSCRIPT_CHARS=100000 and Qwen3-Coder-Next's `context-retry3` used
+# 80000, while every other board entry used the 120000 default. The lower caps
+# measurably bound: the reduced-cap Qwen3.6-27B rounds top out at 47,268 prompt
+# tokens against 60,982 for the default-cap rounds. Only the tasks that
+# actually reached the lower ceiling are regenerated here; the rest produced
+# identical prompts under either budget.
+#
+# This matters most for the SFT comparison, where Qwen3.6-27B is the baseline
+# and the adapters were generated at the 120000 default: leaving it would hand
+# the adapters a systematic context advantage over their own baseline.
+description: ReviewBench 402-audited uniform-transcript backfill
+
+target:
+  service: singularity
+  name: msrresrchbasicvc
+  workspace_name: Workspace_NLC
+
+environment:
+  image: amlt-sing/acpt-torch2.7.1-py3.10-cuda12.6-ubuntu22.04
+  image_setup:
+    - python -m pip install "vllm==0.26.0" "hf_transfer==0.1.9" "numpy==2.2.6" "scipy==1.15.3"
+
+code:
+  local_dir: $CONFIG_DIR/..
+
+data:
+  local_dir: $REVIEWBENCH_OPENMODEL_REPO_CACHE
+  remote_dir: reviewbench-openmodels/repo-cache-minimal
+
+jobs:
+  - name: qwen36-27b-uniform-transcript
+    identity: managed
+    sku: 40G2-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: Qwen/Qwen3.6-27B
+        MODEL_REVISION: 6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/uniform-transcript-backfill/Qwen-Qwen3.6-27B.ids
+        TENSOR_PARALLEL_SIZE: "2"
+        MAX_MODEL_LEN: "65536"
+        GENERATION_WORKERS: "4"
+        MAX_NUM_SEQS: "4"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+
+  - name: qwen3-coder-next-uniform-transcript
+    identity: managed
+    sku: 40G2-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: Qwen/Qwen3-Coder-Next-FP8
+        MODEL_REVISION: da6e2ed27304dd39abadd9c82ef50e8de67bdd4c
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/uniform-transcript-backfill/Qwen-Qwen3-Coder-Next-FP8.ids
+        TENSOR_PARALLEL_SIZE: "2"
+        MAX_MODEL_LEN: "65536"
+        GENERATION_WORKERS: "4"
+        MAX_NUM_SEQS: "4"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
