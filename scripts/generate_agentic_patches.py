@@ -829,14 +829,19 @@ def render_round_prompt(
     transcript: list[dict[str, Any]],
     initial_context_chars: int,
     transcript_budget: int,
-) -> str:
+) -> tuple[str, int]:
+    """Render the round prompt and report how much transcript it actually carries.
+
+    The rendered transcript is usually shorter than the budget allows, so the
+    budget alone cannot say how much of the prompt is elastic. Trimming has to
+    be anchored to the rendered length or the first trims change nothing.
+    """
     prompt = build_initial_prompt(task, before, initial_context_chars)
+    rendered = ""
     if transcript:
-        prompt += "\n\nTOOL TRANSCRIPT:\n" + render_tool_transcript(
-            transcript,
-            transcript_budget,
-        )
-    return prompt + "\n\nReturn the next JSON action only."
+        rendered = render_tool_transcript(transcript, transcript_budget)
+        prompt += "\n\nTOOL TRANSCRIPT:\n" + rendered
+    return prompt + "\n\nReturn the next JSON action only.", len(rendered)
 
 
 def invoke_within_context_window(
@@ -848,16 +853,19 @@ def invoke_within_context_window(
     round_result: dict[str, Any],
     refit: Any,
     transcript_budget: int,
+    transcript_chars: int = 0,
 ) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
     """Invoke the model, trimming the transcript if the deployment rejects the prompt.
 
-    A prompt that exceeds the served window is rejected before the model sees
-    it, and resending it every round burns the round budget on a request that
-    can never succeed. Trimming the transcript to fit keeps the round a
-    measurement of the model rather than of the deployment's window.
+    A prompt over the served window is rejected before the model sees it, and
+    resending it every round burns the round budget on a request that can never
+    succeed. Trimming to fit keeps the round a measurement of the model rather
+    than of the deployment's window.
     """
     budget = transcript_budget
+    rendered_chars = transcript_chars
     shrinks: list[dict[str, int]] = []
+    last_rejection = ""
     for _ in range(MAX_CONTEXT_FIT_ATTEMPTS):
         try:
             result = invoke(
@@ -871,9 +879,13 @@ def invoke_within_context_window(
             overflow = parse_context_overflow(str(exc))
             if overflow is None or refit is None:
                 raise
+            last_rejection = str(exc)[:300]
             limit_tokens, prompt_tokens = overflow
+            # Anchor on what the prompt actually carries: the budget is usually
+            # looser than the rendered transcript, and subtracting from it would
+            # spend attempts on trims that leave the prompt unchanged.
             shrunk = shrink_transcript_budget(
-                budget,
+                min(budget, rendered_chars),
                 len(prompt),
                 limit_tokens,
                 prompt_tokens,
@@ -883,7 +895,11 @@ def invoke_within_context_window(
                 raise
             shrinks.append({"from": budget, "to": shrunk})
             budget = shrunk
-            prompt = refit(budget)
+            # Record before retrying so a round that never fits still teaches the
+            # following rounds not to repeat the same futile trims.
+            round_result["transcript_budget_chars"] = budget
+            round_result["transcript_shrinks"] = shrinks
+            prompt, rendered_chars = refit(budget)
             continue
         if shrinks:
             round_result["transcript_shrinks"] = shrinks
@@ -894,7 +910,8 @@ def invoke_within_context_window(
         return result
     raise RuntimeError(
         f"prompt did not fit the served context window after "
-        f"{MAX_CONTEXT_FIT_ATTEMPTS} transcript trims"
+        f"{MAX_CONTEXT_FIT_ATTEMPTS} transcript trims "
+        f"({shrinks[0]['from']} to {budget} chars); last rejection: {last_rejection}"
     )
 
 
@@ -979,7 +996,7 @@ def generate_one(
 
     for round_number in range(first_round, args.max_rounds + 1):
         if native_history is None:
-            prompt = render_round_prompt(
+            prompt, transcript_chars = render_round_prompt(
                 task,
                 before,
                 transcript,
@@ -988,6 +1005,7 @@ def generate_one(
             )
             prompt_payload = prompt
         else:
+            transcript_chars = 0
             prompt = ""
             force_edit = not edited and round_number >= NATIVE_EDIT_DEADLINE
             native_tool_choice = (
@@ -1042,6 +1060,7 @@ def generate_one(
                     )
                 ),
                 transcript_budget=transcript_budget,
+                transcript_chars=transcript_chars,
             )
             transcript_budget = round_result.get(
                 "transcript_budget_chars",
@@ -1114,6 +1133,10 @@ def generate_one(
                 append_native_turn(native_history, api_response, tool_result)
         except Exception as exc:
             round_result["error"] = str(exc)[:500]
+            transcript_budget = round_result.get(
+                "transcript_budget_chars",
+                transcript_budget,
+            )
             if api_response is not None:
                 round_result["raw_api_response"] = api_response
             if text:

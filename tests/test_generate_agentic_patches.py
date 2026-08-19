@@ -517,8 +517,9 @@ def test_invoke_retries_within_the_window_instead_of_burning_the_round(monkeypat
         native_messages=None,
         native_tool_choice=None,
         round_result=round_result,
-        refit=lambda budget: "x" * budget,
+        refit=lambda budget: ("x" * budget, budget),
         transcript_budget=120_000,
+        transcript_chars=120_000,
     )
 
     assert text == '{"action":"finish"}'
@@ -542,7 +543,7 @@ def test_invoke_does_not_swallow_unrelated_errors(monkeypatch):
             native_messages=None,
             native_tool_choice=None,
             round_result={},
-            refit=lambda budget: "p",
+            refit=lambda budget: ("p", 1),
             transcript_budget=120_000,
         )
 
@@ -578,7 +579,137 @@ def test_untrimmed_rounds_keep_their_prompt_untouched(monkeypatch):
         native_messages=None,
         native_tool_choice=None,
         round_result=round_result,
-        refit=lambda budget: "p",
+        refit=lambda budget: ("p", 1),
         transcript_budget=120_000,
     )
     assert round_result == {"prompt_sha256": "original"}
+
+
+CHARS_PER_TOKEN = 2.5
+KIMI_WINDOW = 32_768
+
+
+def deployment(window=KIMI_WINDOW, output=4_096):
+    """A fake deployment that rejects prompts the way vLLM does."""
+
+    def invoke(model, prompt, args, native_messages=None, native_tool_choice=None):
+        tokens = int(len(prompt) / CHARS_PER_TOKEN)
+        if tokens + output > window:
+            raise RuntimeError(
+                "HTTP 400: {\"error\":{\"message\":\"This model's maximum context "
+                f"length is {window} tokens. However, you requested {output} output "
+                f"tokens and your prompt contains at least {tokens} input tokens, "
+                f"for a total of at least {tokens + output} tokens.\"}}}}"
+            )
+        return '{"action":"finish"}', {"prompt_tokens": tokens}, None
+
+    return invoke
+
+
+def transcript_refit(base_chars, rendered):
+    """Re-render like the harness: the transcript shrinks only to the budget."""
+
+    def refit(budget):
+        rendered["chars"] = min(budget, rendered["chars"])
+        return "x" * (base_chars + rendered["chars"]), rendered["chars"]
+
+    return refit
+
+
+def test_trimming_is_anchored_to_the_rendered_transcript_not_the_budget():
+    """Kimi burned 29 rounds because the first trims changed nothing.
+
+    Its nominal budget was 120000 chars while the rendered transcript held far
+    less, so subtracting the overflow from the budget produced a number still
+    above the rendered length, which re-rendered byte-for-byte identically.
+    """
+    rendered = 60_000
+    args = dict(
+        prompt_chars=101_040,
+        limit_tokens=KIMI_WINDOW,
+        prompt_tokens=40_416,
+        output_tokens=4_096,
+    )
+    anchored_on_budget = MODULE.shrink_transcript_budget(120_000, **args)
+    anchored_on_rendered = MODULE.shrink_transcript_budget(rendered, **args)
+
+    assert anchored_on_budget > rendered, "this trim would re-render unchanged"
+    assert anchored_on_rendered < rendered, "this trim actually removes transcript"
+
+
+def test_every_trim_makes_the_prompt_strictly_shorter(monkeypatch):
+    """The loop must converge instead of spending attempts on identical prompts."""
+    rendered = {"chars": 60_000}
+    seen = []
+
+    invoke = deployment()
+
+    def counting_invoke(model, prompt, *a, **kw):
+        seen.append(len(prompt))
+        return invoke(model, prompt, *a, **kw)
+
+    monkeypatch.setattr(MODULE, "invoke", counting_invoke)
+    round_result = {}
+    text, _usage, _raw = MODULE.invoke_within_context_window(
+        "moonshotai/Kimi-K2.5",
+        "x" * 90_000,
+        SimpleNamespace(max_output_tokens=4_096),
+        native_messages=None,
+        native_tool_choice=None,
+        round_result=round_result,
+        refit=transcript_refit(30_000, rendered),
+        transcript_budget=120_000,
+        transcript_chars=60_000,
+    )
+
+    assert text == '{"action":"finish"}'
+    assert seen == sorted(seen, reverse=True), seen
+    assert len(set(seen)) == len(seen), "a trim left the prompt unchanged"
+    assert round_result["transcript_budget_chars"] < 60_000
+
+
+def test_a_round_that_trims_teaches_the_next_round(monkeypatch):
+    """Otherwise every later round repeats the same trims, as Kimi's rounds did."""
+    rendered = {"chars": 60_000}
+    calls = {"n": 0}
+    reject = deployment()
+
+    def flaky(model, prompt, *a, **kw):
+        calls["n"] += 1
+        reject(model, prompt, *a, **kw)
+        raise RuntimeError("HTTP 503: service unavailable")
+
+    monkeypatch.setattr(MODULE, "invoke", flaky)
+    round_result = {}
+    with pytest.raises(RuntimeError, match="503"):
+        MODULE.invoke_within_context_window(
+            "moonshotai/Kimi-K2.5",
+            "x" * 90_000,
+            SimpleNamespace(max_output_tokens=4_096),
+            native_messages=None,
+            native_tool_choice=None,
+            round_result=round_result,
+            refit=transcript_refit(30_000, rendered),
+            transcript_budget=120_000,
+            transcript_chars=60_000,
+        )
+    # The budget survives the failed round, so the next round starts trimmed.
+    assert round_result["transcript_budget_chars"] < 60_000
+
+
+def test_a_prompt_that_cannot_fit_is_refused_rather_than_sent_blind(monkeypatch):
+    """When the fixed part alone overflows, no transcript trim can rescue it."""
+    rendered = {"chars": 60_000}
+    monkeypatch.setattr(MODULE, "invoke", deployment())
+    with pytest.raises(RuntimeError, match="maximum context length"):
+        MODULE.invoke_within_context_window(
+            "moonshotai/Kimi-K2.5",
+            "x" * 150_000,
+            SimpleNamespace(max_output_tokens=4_096),
+            native_messages=None,
+            native_tool_choice=None,
+            round_result={},
+            refit=transcript_refit(120_000, rendered),
+            transcript_budget=120_000,
+            transcript_chars=60_000,
+        )
