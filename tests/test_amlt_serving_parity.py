@@ -24,10 +24,16 @@ MERGED_INTO_BOARD = [
     "amlt_openmodel_retries.yaml",
     "amlt_openmodel_uniform_transcript.yaml",
     "amlt_openmodel_context_fit.yaml",
+    "amlt_openmodel_context_fit_kimi.yaml",
 ]
 
 # Every config that regenerates rows for an already-serving model, paired with
 # the config that established how that model is served.
+CONTEXT_FIT_CONFIGS = [
+    "amlt_openmodel_context_fit.yaml",
+    "amlt_openmodel_context_fit_kimi.yaml",
+]
+
 PARITY_SOURCES = [
     "amlt_openmodel_generation.yaml",
     "amlt_openmodel_qwen_ladder.yaml",
@@ -141,7 +147,8 @@ def test_context_fit_regeneration_matches_each_model_established_serving():
     """
     established = established_serving()
     mismatches = []
-    for job in load_jobs(CONFIGS / "amlt_openmodel_context_fit.yaml"):
+    for name in CONTEXT_FIT_CONFIGS:
+      for job in load_jobs(CONFIGS / name):
         model, pinned = serving(job)
         assert model in established, f"{model} has no established serving config"
         if pinned != established[model]:
@@ -151,7 +158,8 @@ def test_context_fit_regeneration_matches_each_model_established_serving():
 
 def test_context_fit_drops_the_hand_set_transcript_budgets():
     """Those budgets only existed to dodge the overflow the harness now handles."""
-    for job in load_jobs(CONFIGS / "amlt_openmodel_context_fit.yaml"):
+    for name in CONTEXT_FIT_CONFIGS:
+      for job in load_jobs(CONFIGS / name):
         env = job["submit_args"]["env"]
         assert "MAX_TRANSCRIPT_CHARS" not in env, job["name"]
         assert env["GENERATION_IDS_FILE"].startswith(
@@ -160,7 +168,8 @@ def test_context_fit_drops_the_hand_set_transcript_budgets():
 
 
 def test_context_fit_scopes_exist_and_are_not_empty():
-    for job in load_jobs(CONFIGS / "amlt_openmodel_context_fit.yaml"):
+    for name in CONTEXT_FIT_CONFIGS:
+      for job in load_jobs(CONFIGS / name):
         scope = CONFIGS.parent / job["submit_args"]["env"]["GENERATION_IDS_FILE"]
         assert scope.exists(), scope
         ids = [line for line in scope.read_text().splitlines() if line.strip()]
