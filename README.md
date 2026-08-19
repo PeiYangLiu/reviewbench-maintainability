@@ -13,6 +13,7 @@ The benchmark idea is to mine merged PRs where reviewers asked for maintainabili
 - [`docs/LATEST_MODEL_LEADERBOARD_20260815.md`](docs/LATEST_MODEL_LEADERBOARD_20260815.md): complete deduplicated 14-model leaderboard on the audited 402-task scope
 - [`docs/LATEST_MODEL_PARTIAL_LEADERBOARD_20260815.md`](docs/LATEST_MODEL_PARTIAL_LEADERBOARD_20260815.md): withdrawn 408-task snapshot retained for audit; do not use for comparison
 - [`docs/LATEST_MODEL_PARTIAL_LEADERBOARD_20260813.md`](docs/LATEST_MODEL_PARTIAL_LEADERBOARD_20260813.md): historical 381/378-task partial snapshot before legacy recovery
+- [`docs/WEEKLY_REPORT_20260818.md`](docs/WEEKLY_REPORT_20260818.md): current weekly report — withdrawal of the 408-task board, the 402-task audit, and the unanimous three-judge panel
 - [`docs/WEEKLY_REPORT_20260811.md`](docs/WEEKLY_REPORT_20260811.md): current 414-hard latest-model evaluation report, live gate progress, risks, and delivery plan
 - [`docs/WEEKLY_REPORT_20260805.md`](docs/WEEKLY_REPORT_20260805.md): historical ICLR 2027-oriented weekly report before the hard-task Oracle campaign completed
 - [`docs/PROGRESS_20260728.md`](docs/PROGRESS_20260728.md): historical 475-task cumulative release snapshot
