@@ -1,16 +1,14 @@
 # 414-hard 最新模型 Audited Leaderboard
 
-更新时间：2026-08-15
+更新时间：2026-08-20
 
-> ⚠️ **本页所有 Maintainability 与 Final Resolved 数值正在按新的三判合议规则
-> 重新计算。** 现有表格是旧的**单裁判** `claude-sonnet-4.6` 结果，在重判完成前
-> 不得用于比较。Generation / Scope / Correctness 三门不受影响（correctness 为
-> 真实执行，与裁判无关）。
+> 本页数值为**三判合议终版**（2026-08-20 重判完成）。此前的单裁判
+> `claude-sonnet-4.6` 数值已全部作废。
 
-> 本榜替代已撤回的 408-task snapshot。计分只覆盖 **402 道可比较题**，
+> 本榜替代已撤回的 408-task snapshot。计分覆盖 **398 道可比较且可判题**，
 > correctness 必须绑定 canonical patch，且 maintainability 由 **Opus 5 /
 > GPT-5.6 Sol / Gemini 3.6 Flash 三判合议、全票通过**才算通过。
-> GPT/Opus 跨代模型只使用 fresh 402-task 结果，不混入旧冻结分数。
+> GPT/Opus 跨代模型只使用 fresh 结果，不混入旧冻结分数。
 
 ## 计分口径
 
@@ -42,8 +40,9 @@ judge(Claude Opus 5) AND judge(GPT-5.6 Sol) AND judge(Gemini 3.6 Flash)
 Oracle 测试，完全不涉及模型判分**，因此不受裁判选择影响，是判定真实能力的
 独立证据。
 
-- 固定分母：402；
-- generation、correctness、judgment 各 5,628 条，task/model pair 集合完全一致；
+- 固定分母：398（402 审计题减去 4 道无法在同一协议下判定的题）；
+- generation、correctness、judgment 各 5,628 条（402 题 × 14 模型），
+  task/model pair 集合完全一致；计分时统一收缩到 398 题；
 - generated candidate 的 correctness patch SHA-256 必须等于 canonical
   generation；
 - scored scope 内不允许 `infra_retry`、`apply_error` 或缺失 correctness；
@@ -58,24 +57,54 @@ GPT-5.6 Sol、Claude Opus 5 采用与 GPT-5.5、Claude Opus 4.8 同批执行的
 fresh 结果；其余 10 个模型采用 audited latest cohort。每个模型只出现一次。
 
 | Rank | Model | Generation | Scope | Correctness | Maintainability | Final Resolved | Rate |
-|---:|---|---:|---:|---:|---:|---:|---:|
-| 1 | GPT-5.6 Sol | 400 | 389 | 351 | 192 | **159/402** | 39.6% |
-| 2 | Claude Opus 5 | 398 | 387 | 350 | 187 | **157/402** | 39.1% |
-| 3 | GPT-5.6 Terra | 402 | 394 | 325 | 186 | **149/402** | 37.1% |
-| 4 | GPT-5.5 | 399 | 389 | 344 | 175 | **144/402** | 35.8% |
-| 5 | Gemini 3.6 Flash | 364 | 342 | 293 | 175 | **132/402** | 32.8% |
-| 6 | Claude Opus 4.8 | 396 | 391 | 341 | 146 | **110/402** | 27.4% |
-| 7 | GPT-5.6 Luna | 402 | 400 | 267 | 137 | **96/402** | 23.9% |
-| 8 | Qwen3.6-27B | 353 | 347 | 210 | 146 | **88/402** | 21.9% |
-| 9 | Claude Sonnet 5 | 402 | 395 | 327 | 118 | **78/402** | 19.4% |
-| 10 | Qwen3.6-35B-A3B | 335 | 333 | 186 | 79 | **45/402** | 11.2% |
-| 11 | MiniMax-M2.1 | 366 | 357 | 107 | 70 | **38/402** | 9.5% |
-| 12 | GPT-OSS-120B | 401 | 395 | 210 | 39 | **26/402** | 6.5% |
-| 13 | Devstral-2-123B | 377 | 368 | 155 | 47 | **20/402** | 5.0% |
-| 14 | Qwen3-Coder-Next-FP8 | 316 | 310 | 85 | 26 | **12/402** | 3.0% |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | GPT-5.6 Sol | 396 | 388 | 348 | 146 | **126/398** | 31.7% |
+| 2 | Claude Opus 5 | 397 | 388 | 349 | 138 | **118/398** | 29.6% |
+| 3 | Gemini 3.6 Flash | 360 | 342 | 289 | 137 | **115/398** | 28.9% |
+| 4 | GPT-5.5 | 395 | 387 | 341 | 131 | **111/398** | 27.9% |
+| 5 | GPT-5.6 Terra | 398 | 392 | 322 | 125 | **101/398** | 25.4% |
+| 6 | Claude Opus 4.8 | 392 | 389 | 339 | 101 | **88/398** | 22.1% |
+| 7 | GPT-5.6 Luna | 398 | 397 | 265 | 77 | **70/398** | 17.6% |
+| 8 | Claude Sonnet 5 | 398 | 392 | 324 | 71 | **58/398** | 14.6% |
+| 9 | Qwen3.6-27B | 349 | 344 | 207 | 66 | **54/398** | 13.6% |
+| 10 | Qwen3.6-35B-A3B | 331 | 329 | 184 | 30 | **26/398** | 6.5% |
+| 11 | MiniMax-M2.1 | 362 | 354 | 104 | 20 | **19/398** | 4.8% |
+| 12 | Devstral-2-123B | 374 | 365 | 153 | 15 | **15/398** | 3.8% |
+| 13 | GPT-OSS-120B | 397 | 391 | 208 | 12 | **12/398** | 3.0% |
+| 14 | Qwen3-Coder-Next-FP8 | 312 | 307 | 84 | 11 | **11/398** | 2.8% |
 
-Kimi K2.5 尚未完成全流程；Gemini 3.5 Flash 没有 fresh 402-task
-同协议结果，因此二者不伪装成可比行。
+Kimi K2.5 的生成已覆盖全部 402 题，但尚未走完 correctness 与判分，
+因此暂不列入；Gemini 3.5 Flash 没有同协议的 fresh 结果，同样不列入。
+二者都不伪装成可比行。
+
+## 计分范围为什么是 398 而不是 402
+
+审计口径的 402 题里，有 4 道题在三判协议下**得不到判定**，对全部 14 个模型
+一并排除，使「所有模型在同一协议下被判」这一不变量成立：
+
+| 题 | 未决 pair | 原因 |
+| --- | ---: | --- |
+| metasploit-framework ×3 | 29 | 三个裁判都触发安全拒答，重试无效 |
+| microsoft/FluidFramework ×1 | 1 | Opus 5 稳定超出 16384 升档上限 |
+
+两类都属于「协议给不出判决」，不是「判决不合心意」：
+
+- 安全拒答与预算耗尽被分开处理，重试对拒答无效（升档只对截断有效）；
+- 提高升档上限会改变 `judge_protocol_fingerprint`，为 1 个 pair 触发全部
+  5628 对重判，代价与收益不成比例；
+- 排除对所有模型一致，与既有 12 道题的排除方法论相同。
+
+排除前后**排名完全不变**，仅个别绝对值微调。
+
+## 一次被拦下的判分污染
+
+重判过程中判分网关中途停止服务，55 个 pair 收到 `Connection refused`。这些
+pair 全部集中在 4 个开源模型上——若被当作「未通过」计分，会系统性压低它们的
+分数。fail-closed 将其记为 `judge_error` 而非静默失败，网关恢复后重跑全部
+恢复为正常判定。
+
+需要注意：判分脚本的默认端点是 `127.0.0.1:4399`，而当前可用网关在
+`127.0.0.1:8787`，必须显式传 `--chat-endpoint`。
 
 ## 为什么旧榜无效
 
@@ -93,52 +122,50 @@ Kimi K2.5 尚未完成全流程；Gemini 3.5 Flash 没有 fresh 402-task
 这些问题均已 fail-closed 修复；旧 408-task archives 继续保留，仅供审计，
 不得用于模型比较。
 
-## Fresh 跨代 leaderboard
+## 代际顺序已恢复
 
-GPT-5.5、GPT-5.6 Sol、Claude Opus 4.8、Claude Opus 5 重新执行了同一
-402-task scope、同一 correctness runner、同一 retry/infra 策略和同一
-Sonnet 4.6 judge。结果不再使用任何旧冻结分数：
+撤榜的触发点是两处倒挂：GPT-5.5 高于 GPT-5.6、Opus 4.8 高于 Opus 5。
+在三判合议 + 398 题口径下，两处都不再存在：
 
-| Rank | Model | Generation | Scope | Correctness | Maintainability | Final Resolved | Rate |
-|---:|---|---:|---:|---:|---:|---:|---:|
-| 1 | GPT-5.6 Sol | 400 | 389 | 351 | 192 | **159/402** | 39.6% |
-| 2 | Claude Opus 5 | 398 | 387 | 350 | 187 | **157/402** | 39.1% |
-| 3 | GPT-5.5 | 399 | 389 | 344 | 175 | **144/402** | 35.8% |
-| 4 | Claude Opus 4.8 | 396 | 391 | 341 | 146 | **110/402** | 27.4% |
+| 对比 | 旧单裁判榜 | 三判合议终版 |
+| --- | --- | --- |
+| GPT-5.6 Sol vs GPT-5.5 | 倒挂 | **126 > 111** ✅ |
+| Claude Opus 5 vs Opus 4.8 | 倒挂 | **118 > 88** ✅ |
 
-因此统一口径下不存在旧榜倒挂：GPT-5.6 Sol 高于 GPT-5.5，Claude
-Opus 5 高于 Opus 4.8。
+这四个模型跑的是同一 scope、同一 correctness runner、同一 retry/infra 策略，
+不使用任何旧冻结分数，因此倒挂的消失来自判分口径修正，而非样本差异。
+
+单裁判不稳健有直接证据：三个裁判的判定一致率仅 **60.7%**（3206/5281），
+且宽严差异可达 3.3 倍——对 Qwen3.6-27B，Gemini 判过 256 题，Opus 5 只判过
+77 题。任何单裁判结论都不足以支撑跨代比较。
 
 ## Artifacts
 
-完整 14-model deduplicated release：
+三判合议判分（终版）：
+
+```text
+/data/v-peiyangliu/reviewbench-openmodels/judging-20260820-panel3/
+  complete14-402/judgments.jsonl
+```
+
+fail-closed correctness overlay（含 context-fit 重跑）：
+
+```text
+/data/v-peiyangliu/reviewbench-openmodels/correctness-20260820-merged/
+```
+
+context-fit 重跑后的 canonical generations：
+
+```text
+/data/v-peiyangliu/reviewbench-openmodels/generation-20260820-contextfit/
+```
+
+基础 14-model release（scope、oracles、原始 generations）：
 
 ```text
 /data/v-peiyangliu/reviewbench-openmodels/evaluation-20260815/
   complete14-corrected402-v1/
 ```
 
-根 `SHA256SUMS` 的 SHA-256 为
-`abe93c3357934bde5ab10205e9fa6bc87cbcd07497eb1eb8d63b0fee1c534fa6`。
-
-Audited combined release：
-
-```text
-/data/v-peiyangliu/reviewbench-openmodels/evaluation-20260815/
-  latest12-corrected402-v1/
-```
-
-其中包含冻结 scope、402-task canonical generations、attested judgments、
+其中包含冻结 scope、canonical generations、attested judgments、
 fail-closed correctness overlay、逐题四门结果、汇总 report 和 checksums。
-根 `SHA256SUMS` 的 SHA-256 为
-`dd719331f3642b1c6f58b582a5f8a782295442c231eab70116a62f9fe5963d3f`。
-
-Fresh cross-generation release：
-
-```text
-/data/v-peiyangliu/reviewbench-openmodels/evaluation-20260815/
-  fresh4-corrected402-v1/
-```
-
-根 `SHA256SUMS` 的 SHA-256 为
-`9eedf590be9de4c7b0a8fadb48b40b2519a3205ecc1c4b696a1ced07f3597c14`。
