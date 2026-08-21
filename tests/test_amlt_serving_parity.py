@@ -138,6 +138,51 @@ def established_serving():
     return established
 
 
+def test_sft_ladder_adapters_are_served_like_their_own_baseline():
+    """An adapter is measured against its base rung, so serving must not differ.
+
+    A rank or window difference between an adapter and its baseline would show
+    up as an effect of fine-tuning, which is the one thing this comparison is
+    supposed to isolate.
+    """
+    rungs = {}
+    for job in load_jobs(CONFIGS / "amlt_openmodel_qwen_ladder.yaml"):
+        model, pinned = serving(job)
+        rungs.setdefault(model, pinned)
+
+    mismatches = []
+    for job in load_jobs(CONFIGS / "amlt_openmodel_sft_ladder.yaml"):
+        model, pinned = serving(job)
+        assert model in rungs, f"{model} has no baseline rung"
+        if pinned != rungs[model]:
+            mismatches.append((job["name"], rungs[model], pinned))
+    assert not mismatches, f"adapters drift from their baseline rung: {mismatches}"
+
+
+def test_sft_ladder_adapters_are_served_under_their_own_name():
+    """Serving an adapter under the base name would score the wrong model."""
+    for job in load_jobs(CONFIGS / "amlt_openmodel_sft_ladder.yaml"):
+        env = job["submit_args"]["env"]
+        adapter = env["LORA_ADAPTER"]
+        served, _, path = adapter.partition("=")
+        assert served and path, adapter
+        assert served != env["MODEL_ID"], f"{job['name']} serves the base name"
+        assert (CONFIGS.parent / path).is_dir(), path
+        assert env["MAX_LORA_RANK"], job["name"]
+
+
+def test_sft_ladder_covers_the_same_scope_as_the_baseline_ladder():
+    def scopes(name):
+        return {
+            job["submit_args"]["env"]["GENERATION_IDS_FILE"]
+            for job in load_jobs(CONFIGS / name)
+        }
+
+    assert scopes("amlt_openmodel_sft_ladder.yaml") == scopes(
+        "amlt_openmodel_qwen_ladder.yaml"
+    )
+
+
 def test_context_fit_regeneration_matches_each_model_established_serving():
     """The regenerated rows replace rows in place, so serving must not drift.
 
