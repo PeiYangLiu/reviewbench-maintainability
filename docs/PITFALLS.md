@@ -494,3 +494,104 @@
   task、patch、rubric、judge model、context 和 output-budget fingerprint。
 - **发布**：manifest 逐 wave 保存 attestation mode，论文和复现说明不得混用两种
   provenance 强度。
+
+### P64. Harness 只按字符截断，会撞死在服务窗口上并烧光轮次
+- **现象**：BSMPT 一题 32 轮里有 24 轮被 vLLM 拒绝，prompt 61,441 token +
+  4,096 输出 = 65,537，**只超出 1 个 token**。全榜共 85 轮这样被浪费，涉及
+  12 个 model-task pair，且这 12 对**全部只在第 32 轮才勉强完成**。
+- **根因**：prompt 由 `initial_context_chars`(30,000) 与
+  `max_transcript_chars`(120,000) 两个**字符**上限拼装，与 `max_model_len` 的
+  **token** 预算无关，可以合法地超出窗口。超限被记成一轮错误后继续，下一轮
+  transcript 只会更长，必然再撞。
+- **只打自建模型**：85 轮全部属于 65,536 窗口下自服务的 4 个开源模型，8 个 API
+  模型 0 轮。看起来像模型能力差异，实为部署窗口差异。
+- **解决**：`invoke_within_context_window()` 按服务端报回的超出量裁剪 transcript
+  并重试该轮。裁剪量由这次拒绝本身标定（用报回的 token 数算该 prompt 的
+  chars/token 比），实测只裁 **0.5%**，而人工设定的 retry 预算裁掉 **33%**。
+- **代码/测试**：`scripts/generate_agentic_patches.py`、
+  `tests/test_generate_agentic_patches.py`（含 BSMPT 真实报错文本回归）。
+
+### P65. 收缩预算必须锚定「实际渲染长度」，不是名义预算
+- **现象**：P64 修复后，Kimi 一题仍连烧 29 轮，报 `did not fit after 6 trims`。
+- **根因**：收缩时从**名义预算** 120,000 里减，但实际渲染的 transcript 往往远
+  小于该值（如 60,000）。把预算从 120,000 降到 106,860 **完全不改变 prompt**
+  ——渲染结果逐字节相同。6 次尝试全在空转，刚降到接近实际长度就用完次数。且
+  失败轮次不保留已降预算，下一轮从头再空转。
+- **解决**：锚定到 `min(budget, rendered_chars)`，保证每次裁剪真正缩短 prompt；
+  失败轮次也持久化已降预算；耗尽错误带上裁剪区间与原始拒绝内容。
+- **验证**：同一题修复后 **1 步**裁到位（120,000 → 68,044），零耗尽、零拒绝。
+- **教训**：修复本身也要拿真实数据验证。第一版 8 个单测全绿，仍在生产空转 29 轮。
+
+### P66. 补跑必须与原榜**同服务配置**，否则产出不可互换
+- **现象**：Coder 补跑改用 `40G2-A100`/TP=2（原榜 `40G4-A100`/TP=4）后 OOM：
+  A100 无原生 FP8，vLLM 回退 Marlin 内核重打包 MoE 权重，显存翻倍。
+- **更深的问题**：即使塞得下也不能用。TP 数改变归约顺序进而改变数值，产出的行
+  与它要替换的榜上行不可互换。
+- **不变量**：榜内**允许**并发度（`MAX_NUM_SEQS`/`GENERATION_WORKERS`）不同——
+  既有 retry wave 本就混用 10/4/2，且生成未固定种子；但 **sku 与 TP 从未变过**。
+- **解决**：`tests/test_amlt_serving_parity.py` 逐项校验
+  `MODEL_REVISION / TENSOR_PARALLEL_SIZE / MAX_MODEL_LEN / sku`，并故意不锁并发度。
+- **附带**：尺寸阶梯另有一条——各档必须**同窗口**。32B 在 2 卡上 KV cache 只剩
+  4.22 GiB（需 5.0 GiB），vLLM 建议「把 `max_model_len` 降到 34560」**不可采纳**：
+  只给一档缩窗口会把尺寸效应与上下文效应混在一起，且恰好混在支撑趋势线的那档。
+  正解是加卡到 TP=4，窗口不动。
+
+### P67. 判分脚本默认端点与实际可用网关不一致
+- **现象**：55 个 pair 判分失败，三个裁判齐报 `Connection refused`。我 curl
+  `8787` 得到 200，据此判断「网关已恢复」，重试后毫无变化。
+- **根因**：`judge_release_patches.py` 默认 `--chat-endpoint` 是
+  `127.0.0.1:**4399**`，该端口已停；`8787` 是另一个可用网关。我拿 8787 的 200
+  去证明 4399 可用，白费两轮重试。
+- **解决**：显式传 `--chat-endpoint http://127.0.0.1:8787/v1/chat/completions`。
+- **fail-closed 的价值**：这 55 个 pair 全部集中在 4 个开源模型上。若被当作
+  「未通过」计分会系统性压低它们的分数；记为 `judge_error` 使其无法进入榜单。
+- **教训**：验证服务可用性必须打**脚本实际使用的**那个地址。
+
+### P68. 同一 lane 并发跑在同一输出目录会互删 worktree
+- **现象**：`native` lane 出现大量 `infra_retry`（阶梯 143 条、SFT 31 条），报
+  `fatal: cannot change to '.../native-worktrees/...'`。lane 只要还有未解决的
+  infra 就拒绝报成功，driver 因此永远收敛不了。
+- **根因**：我先后用三种方式拉起 lane，都指向同一 `--output`。证据是
+  `lanes.done` 里 tsjs/jvm/rust 各出现两次。两个进程共用同一套 worktree 命名，
+  互相删除对方的目录。
+- **解决**：driver 按 lane 加 `flock`，同一输出目录同一 lane 只允许一个进程；
+  自造的 infra 行必须**清掉重跑**，不能继承。
+- **另一半**：各 lane 有**不同的并发硬上限**（scripted 6 / csharp 4 / native 4 /
+  rust 8；gopy·tsjs·jvm ≥10）。统一传 10 会被参数校验直接拒绝——快速失败，无害，
+  但要读 lane 自己的日志才看得到，外层 traceback 只说 `lane runners failed`。
+- **教训**：并行的前提是各任务**真正独立**。load 冲到 940（256 核的近 4 倍）时，
+  争抢会把构建失败伪装成 infra 失败。
+
+### P69. SFT 截断丢弃 prompt 头部 = 丢掉系统提示，静默训废两轮
+- **现象**：27B 两个 adapter 微调后与基座**几乎完全一致**（round-1 `edit` 占比
+  17%→16%），在一个 75% 都是 edit 的数据集上训了 2 个 epoch 却纹丝不动。
+  Qwen3 4B–32B 则行为**坍缩**：`edit` 从 77% 掉到 1%，`finish` 涨到 92%，陷入
+  `read → finish → read → finish` 死循环，出补丁率从 400/402 跌到 114/402。
+- **根因**：`train_sft.py` 超长时从 token 序列**尾部**切
+  （`prompt_ids[-budget:]`），而 chat 模板的 `<|im_start|>system` 与整个动作协议
+  规范都在**开头**。实际训练用 `MAX_LENGTH=8192`（配置里写死，非脚本默认 32768），
+  全量 2,921 样本中 **1,372 条（47.0%）**丢失系统提示——近一半训练信号来自
+  推理时永不出现的无头输入。
+- **排查中被否定的三个假设**（都有反证，勿重复走）：
+  1. 「数据教了不改就交卷」→ 893 个 finish 目标 **100% 都在 edit 之后**；
+  2. 「训练/推理 prompt 格式错位」→ 四个格式标记 100% 一致；
+  3. 「系统提示不同」→ 逐字节相同，都是 1022 字符。
+- **解决**：截断改为**保留头部、压缩正文中段**（与评测 harness 一致）；
+  `MAX_LENGTH` 提到 **24576**（实测 p100=42,384；24576 下仅 1.1% 需压缩）；
+  并加 `_assert_prompt_survived()`：样本若丢失系统提示直接抛异常。
+- **为什么必须报错**：这个 bug 静默了两轮训练、两个模型家族，无任何迹象。宁可
+  任务失败，也不要产出一个看起来正常、实际学错的 adapter。
+- **代码**：`reviewbench-sft/scripts/train_sft.py`、`reviewbench-sft/configs/*.yaml`。
+
+### P70. 「作业 failed」与「lane 退出码非 0」都不能直接当失败
+- **作业层**：vLLM 生成作业退出码非 0 往往只是**失败计数**导致。SFT 阶梯 10 个
+  作业全报 failed，实际每个都跑完了 201 题；Kimi v14 四分片全报 failed，实际
+  377 题全部完成。必须查 `generation_summary.json` 或数 trace，不能看状态。
+- **lane 层**：`gopy exit=1` 的真实含义常是「还有 `INFRA_RETRY_REQUIRED` 未解决」
+  ——fail-closed 拒绝在基础设施重试未清零时报成功，需要再跑一轮而非判定失败。
+- **反向也成立**：`amlt results list` 里有产出不等于跑完。Coder 首轮补跑有
+  124.7 kB 产出，实为 vLLM 启动失败，`open_model_manifest.json` 里
+  `models_response: {}` 才是真相。
+- **推论**：「剩余题清单」若按*假定*已完成推算，会漏题。Kimi v14 的 377 题
+  remainder 就是这么算的，导致 **8 道审计题从未被任何一轮生成过**，直到逐题
+  核对实际产出才发现。
