@@ -595,3 +595,82 @@
 - **推论**：「剩余题清单」若按*假定*已完成推算，会漏题。Kimi v14 的 377 题
   remainder 就是这么算的，导致 **8 道审计题从未被任何一轮生成过**，直到逐题
   核对实际产出才发现。
+
+### P71. 线性注意力模型缺融合内核 → 慢 16 倍且不报错
+- **现象**：Qwen3.6-27B 单 epoch 估算 **231 小时**，同规模稠密模型只要 24 小时。
+- **根因**：该模型 `layer_types` 里 48/64 层是 `linear_attention`。transformers
+  的分发是 `chunk_gated_delta_rule or torch_chunk_gated_delta_rule`，镜像没装
+  `fla` 就走纯 PyTorch 回退：**强制 fp32** + 每层 `seq_len/64 = 384` 次串行
+  Python 循环，每次前向 48×384 ≈ 1.8 万次串行迭代，梯度检查点还要重算一遍。
+- **解决**：`image_setup` 装 `flash-linear-attention==0.5.2`（纯 Triton wheel，
+  只依赖 einops）。1634.9 s/it → **166.7 s/it**。`causal-conv1d` 故意不装——
+  它的回退是普通 cuDNN 卷积，不慢，但要现场编译 nvcc。
+- **门**：`assert_linear_attention_kernel` 检测到 linear_attention 层却没有 fla
+  内核就抛异常。慢 16 倍不会自己报错，只会看起来「在跑」。
+
+### P72. LoRA target_modules 按后缀匹配，混合架构会静默漏挂
+- **现象**：Qwen3.6-27B 的 LoRA 只挂上了 16/64 层的注意力。
+- **根因**：线性注意力层 `Qwen3_5GatedDeltaNet` 的投影层叫 `in_proj_qkv` /
+  `in_proj_z` / `out_proj`，而 target_modules 写的是 `q_proj/k_proj/v_proj/o_proj`。
+  PEFT 按后缀匹配，**一个都匹配不上**，那 48 层只有 MLP 挂了 LoRA。PEFT 不会
+  因为某些层没匹配上而报错。
+- **解决**：补上线性注意力的投影名。修复后可训练参数占比与稠密模型对齐
+  （27B 217.6M / 0.8025% vs 32B 268.4M / 0.8127%），这个比值就是最好的校验。
+- **注意**：`in_proj_a` / `in_proj_b` 不要加——输出维度只有 `num_v_heads`，
+  是每头一个标量门。视觉塔用 `linear_fc1/fc2`、`proj`、`qkv`，不会被误伤。
+
+### P73. 可抢占算力上的长任务必须按步存档
+- **现象**：14B 在 **503/517 步（97%）**被抢占，14 小时全部报废，产出目录只剩
+  一个日志文件。32B 卡死在第 33 步，5 小时后才被发现。
+- **根因**：`save_strategy="epoch"` + `EPOCHS=1` 等于**只在最末尾存一次**，且
+  没有任何续跑逻辑。
+- **解决**：`save_strategy="steps"` + `save_total_limit=2` + 启动时
+  `get_last_checkpoint` 自动续跑，SAVE_STEPS 按各模型速度设成 35–45 分钟一次。
+- **配套**：PyTorch 2.6 把 `torch.load` 的 `weights_only` 默认改成 `True`，而
+  DeepSpeed 的 checkpoint engine 没有覆盖它，导致**存档能写、永远读不回来**
+  （`UnpicklingError: ZeroStageEnum was not an allowed global`）。需要
+  `allow_deepspeed_checkpoint_globals()` 注册 `ZeroStageEnum` 与 `LossScaler`。
+
+### P74. 「续跑失败就隔离检查点」会误杀好档
+- **现象**：一次 OOM 导致 checkpoint-180（35% 进度）被当成损坏档隔离，实际那个
+  检查点完全正常，错的是 GPU 规格。
+- **根因**：把「加载失败」一律当成「文件损坏」。OOM、Triton 编译失败、NCCL
+  错误都会让加载失败，但检查点本身是好的。
+- **解决**：只有 `UnpicklingError` / `EOFError` / `KeyError` 这类**真正的反序列化
+  损坏**才隔离；环境类错误保留检查点并提示换 SKU 重跑。顺带修了 8 个 rank
+  同时改名的竞态。
+
+### P75. `amlt rerun` 会把 series 限定的 SKU 降级
+- **现象**：32B 报 `total capacity of 15.77 GiB`（被调度到 V100 16G）；
+  27B-nothink 报 `PassManager::run failed`（fla 的 Triton 内核编译不出 sm_70）。
+- **根因**：`NDAMv4:G8` 这类写法**首次提交解析正确**，但存储后退化成 `G8`，
+  rerun 时就没有机型约束了。
+
+  | 提交时写的 | 存储后 | 后果 |
+  | --- | --- | --- |
+  | `NDAMv4:G8` | `G8` | 调度到 V100 16G |
+  | `NDH100v5:G8` | `G8` | 同上 |
+  | `80G8-A100-IB-NvLink` | 不变 | ✅ |
+
+- **解决**：一律用显式 SKU 形式，不要用 `Series:G8`。
+- **相关**：这与 P70 是同一族问题——**作业面板不可轻信**。被抢占（SIGTERM）后
+  容器已死，`amlt status` 仍显示 `running`；32B 卡死 5 小时才被发现，是靠对比
+  两次读数发现**步数一模一样**才察觉的。监控要看日志里的步数推进。
+
+### P76. `accepts_loss_kwargs` 会让两个模型族的有效学习率不同
+- **现象**：Qwen3 族与 Qwen3.6-27B 在完全相同的超参下，梯度尺度差 `grad_accum`
+  倍（本例 8 倍）。
+- **根因**：自定义 Trainer 的 `compute_loss` 忽略 `num_items_in_batch` 时，HF
+  是否代为除以 grad_accum 取决于模型的 `accepts_loss_kwargs`：
+
+  | 模型族 | `accepts_loss_kwargs` | Trainer 是否除以 grad_accum |
+  | --- | --- | --- |
+  | Qwen3（4B–32B） | True（forward 有 `**kwargs`） | **否** |
+  | Qwen3.6-27B | False（类属性显式关闭） | **是** |
+
+  DeepSpeed 侧 Trainer 传了 `scale_wrt_gas=False` 也不缩放，净效果是 Qwen3 族
+  按 8 个 micro-batch **求和**而非平均。
+- **影响边界**：同族内部一致，所以「每个模型对比自己的基线」这个口径仍然成立；
+  但**跨族的绝对数值不可直接比**。
+- **修法**：`self.model_accepts_loss_kwargs = False`（HF 文档建议）。注意修完
+  之后新旧结果不可直接比较，要么整批重训，要么明确标注口径切换点。
