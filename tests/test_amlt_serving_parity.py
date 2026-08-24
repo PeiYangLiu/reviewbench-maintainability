@@ -138,6 +138,12 @@ def established_serving():
     return established
 
 
+SFT_LADDER_CONFIGS = [
+    "amlt_openmodel_sft_ladder.yaml",
+    "amlt_openmodel_sft_mixed.yaml",
+]
+
+
 def test_sft_ladder_adapters_are_served_like_their_own_baseline():
     """An adapter is measured against its base rung, so serving must not differ.
 
@@ -151,7 +157,8 @@ def test_sft_ladder_adapters_are_served_like_their_own_baseline():
         rungs.setdefault(model, pinned)
 
     mismatches = []
-    for job in load_jobs(CONFIGS / "amlt_openmodel_sft_ladder.yaml"):
+    for name in SFT_LADDER_CONFIGS:
+      for job in load_jobs(CONFIGS / name):
         model, pinned = serving(job)
         assert model in rungs, f"{model} has no baseline rung"
         if pinned != rungs[model]:
@@ -161,7 +168,8 @@ def test_sft_ladder_adapters_are_served_like_their_own_baseline():
 
 def test_sft_ladder_adapters_are_served_under_their_own_name():
     """Serving an adapter under the base name would score the wrong model."""
-    for job in load_jobs(CONFIGS / "amlt_openmodel_sft_ladder.yaml"):
+    for name in SFT_LADDER_CONFIGS:
+      for job in load_jobs(CONFIGS / name):
         env = job["submit_args"]["env"]
         adapter = env["LORA_ADAPTER"]
         served, _, path = adapter.partition("=")
