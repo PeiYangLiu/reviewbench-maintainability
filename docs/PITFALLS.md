@@ -674,3 +674,33 @@
   但**跨族的绝对数值不可直接比**。
 - **修法**：`self.model_accepts_loss_kwargs = False`（HF 文档建议）。注意修完
   之后新旧结果不可直接比较，要么整批重训，要么明确标注口径切换点。
+
+### P77. correctness lane 的 worktree 会撑爆磁盘，且失败看起来像 infra
+- **现象**：4B 的 correctness 跑到 53/402 后停滞，load 掉到 1.36，lane 全停但
+  产出远未完成，10 分钟无写入。外层只报 `lane runners failed`。
+- **根因**：`/data` **100% 满**（3.5T 用掉 3.3T，仅剩 8.6G）。lane 日志里才有
+  真正的错误：`OSError: [Errno 28] No space left on device`。
+- **体积来源**：每条 correctness lane 会为「每个模型 × 每道题」创建 git worktree
+  并跑真实构建，产物是 `*-worktrees` / `*-artifacts` / `*-cache` /
+  `*-shared-cache` / `*-worker-state`。单次运行动辄上百 GB：
+
+  | 运行 | 清理前 | 清理后 |
+  | --- | ---: | ---: |
+  | infra-rerun406 | 211G | 29G |
+  | sftmix (8B) | 143G | 5.3G |
+  | ladder | 106G | 7.2G |
+  | sft27b | 74G | 7.3G |
+
+  合计回收 **300+ GB**，可用空间 8.6G → 621G。
+- **关键区分**：这些目录是**可再生的中间产物**，结果文件（`*.jsonl`、
+  `correctness-normalized/`、`judging/`）很小且已并入 release，删缓存不损失结论。
+  清理前务必确认结果已落到正式 release（本例：release 5,628 条 + merged overlay
+  5,628 条），清理后复查行数。
+- **两个操作细节**：
+  1. 构建产物常带只读位，`rm -rf` 会报 `Permission denied`，需先
+     `chmod -R u+w` 再删；
+  2. **磁盘满时写入的 jsonl 可能被截断**，重启前要逐行 `json.loads` 校验并丢弃
+     损坏行，否则后续统计会带着半条记录跑。
+- **与 P68/P70 同族**：磁盘满、worktree 互删、被抢占——三者都会让 lane 以
+  「看起来像 infra 失败」的方式停下。**必须读 lane 自己的日志**
+  （`run/modern/correctness/logs/<lane>.log`），外层 traceback 只说「失败了」。
