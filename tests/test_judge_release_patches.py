@@ -539,3 +539,73 @@ def test_content_filtered_pairs_block_the_completion_marker(tmp_path):
         4096,
     )
     assert not MODULE.completion_marker(out).exists()
+
+
+def test_judge_identity_accepts_a_dated_snapshot_of_the_same_model():
+    """A gateway returns the canonical name, a deployment adds a release date."""
+    assert MODULE.judge_identity_matches("gpt-5.6-sol", "gpt-5.6-sol")
+    assert MODULE.judge_identity_matches("gpt-5.6-sol", "gpt-5.6-sol-2026-07-09")
+    assert MODULE.judge_identity_matches("gpt-5.5", "gpt-5.5-2026-04-24")
+
+
+def test_judge_identity_still_refuses_a_different_model():
+    """The pin exists to catch a silent fallback, and must keep catching it."""
+    assert not MODULE.judge_identity_matches("gpt-5.6-sol", "")
+    assert not MODULE.judge_identity_matches("gpt-5.6-sol", "gpt-5.6-terra")
+    assert not MODULE.judge_identity_matches("gpt-5.5", "gpt-5.5-mini")
+    assert not MODULE.judge_identity_matches("gpt-5.5", "gpt-5.5-turbo-2026-04-24")
+    assert not MODULE.judge_identity_matches("claude-opus-5", "claude-sonnet-5")
+    # A suffix that is not a date must not be mistaken for a snapshot label.
+    assert not MODULE.judge_identity_matches("gpt-5.6-sol", "gpt-5.6-sol-preview")
+
+
+def test_patch_resolves_next_to_the_results_file_when_the_path_is_off_host(tmp_path):
+    """A cluster-recorded absolute path does not exist once artifacts come back."""
+    results = tmp_path / "generation_results.jsonl"
+    results.write_text("", encoding="utf-8")
+    patches = tmp_path / "patches"
+    patches.mkdir()
+    (patches / "task-1.patch").write_text("diff", encoding="utf-8")
+    generation = {
+        "id": "task-1",
+        "patch_file": "/scratch/amlt_code/outputs/run/patches/task-1.patch",
+        "__results_path": str(results),
+    }
+
+    resolved = MODULE.resolve_patch_file(generation)
+
+    assert resolved == patches / "task-1.patch"
+
+
+def test_patch_prefers_the_recorded_path_when_it_exists(tmp_path):
+    results = tmp_path / "generation_results.jsonl"
+    results.write_text("", encoding="utf-8")
+    recorded = tmp_path / "elsewhere.patch"
+    recorded.write_text("diff", encoding="utf-8")
+    (tmp_path / "patches").mkdir()
+    (tmp_path / "patches" / "task-1.patch").write_text("other", encoding="utf-8")
+
+    resolved = MODULE.resolve_patch_file(
+        {
+            "id": "task-1",
+            "patch_file": str(recorded),
+            "__results_path": str(results),
+        }
+    )
+
+    assert resolved == recorded
+
+
+def test_a_genuinely_absent_patch_is_still_reported_missing(tmp_path):
+    results = tmp_path / "generation_results.jsonl"
+    results.write_text("", encoding="utf-8")
+    assert (
+        MODULE.resolve_patch_file(
+            {
+                "id": "task-1",
+                "patch_file": "/scratch/gone/task-1.patch",
+                "__results_path": str(results),
+            }
+        )
+        is None
+    )

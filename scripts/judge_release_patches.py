@@ -255,6 +255,47 @@ def build_prompt(
     )
 
 
+def resolve_patch_file(generation: dict[str, Any]) -> Path | None:
+    """Locate a candidate patch, tolerating a path recorded on another host.
+
+    A run executed on a cluster records `patch_file` as an absolute path inside
+    that job's scratch, which does not exist once the artifacts are pulled back.
+    The patch itself travels next to the results file, so the sibling
+    `patches/<task id>.patch` is tried as well. Returning None here keeps the
+    pair recorded as `missing_patch` rather than silently judged.
+    """
+    supplied = str(generation.get("patch_file") or "")
+    results_path = generation.get("__results_path")
+    candidates: list[Path] = []
+    if supplied:
+        candidates.append(Path(supplied))
+    if results_path:
+        root = Path(results_path).parent
+        if supplied and not Path(supplied).is_absolute():
+            candidates.append(root / supplied)
+        candidates.append(root / "patches" / f"{generation['id']}.patch")
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def judge_identity_matches(requested: str, returned: str) -> bool:
+    """True when `returned` is the model that was asked for.
+
+    The check exists to refuse a silent fallback to a *different* judge, not to
+    freeze one dated snapshot. A gateway answers with the canonical name while a
+    direct deployment answers with the same name plus a release date, and both
+    are the requested model. Anything else -- a different family, a different
+    size, an empty identity -- still fails, and the panel fails closed with it.
+    """
+    if not returned:
+        return False
+    if returned == requested:
+        return True
+    suffix = returned[len(requested):]
+    return returned.startswith(requested) and bool(
+        re.fullmatch(r"-\d{4}-\d{2}-\d{2}", suffix)
+    )
+
+
 def invoke_judge(
     model: str,
     prompt: str,
@@ -273,7 +314,7 @@ def invoke_judge(
     }
     data = generator.post_json(endpoint, payload, {})
     actual_model = str(data.get("model") or "")
-    if actual_model != model:
+    if not judge_identity_matches(model, actual_model):
         raise RuntimeError(
             f"judge model mismatch: requested {model}, gateway returned "
             f"{actual_model or '<missing>'}; refusing an unattested or "
@@ -478,8 +519,8 @@ def judge_one(
             "maintainability_pass": False,
             "generation_error": generation.get("error"),
         }
-    patch_path = Path(str(generation["patch_file"]))
-    if not patch_path.exists():
+    patch_path = resolve_patch_file(generation)
+    if patch_path is None:
         return {
             **base,
             "status": "missing_patch",
@@ -687,7 +728,10 @@ def main() -> int:
     tasks_by_id = {task["id"]: task for task in tasks}
     generation_paths = parse_generation_args(args.generation)
     generations = {
-        model: {item["id"]: item for item in load_jsonl(path)}
+        model: {
+            item["id"]: {**item, "__results_path": str(path)}
+            for item in load_jsonl(path)
+        }
         for model, path in generation_paths.items()
     }
     missing = {

@@ -136,8 +136,11 @@ python3 scripts/run_open_model_agentic.py \
   --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.90}" \
   --workers "$GENERATION_WORKERS" \
   --max-rounds 32 \
-  --max-output-tokens "${MAX_OUTPUT_TOKENS:-4096}" \
+  --max-output-tokens "${MAX_OUTPUT_TOKENS:-8192}" \
   --max-transcript-chars "${MAX_TRANSCRIPT_CHARS:-120000}" \
+  --protocol "${PROTOCOL:-agentic-line-edit/v2}" \
+  --max-tool-result-chars "${MAX_TOOL_RESULT_CHARS:-24000}" \
+  --edit-deadline "${EDIT_DEADLINE:-0}" \
   --server-timeout 7200 \
   --download-dir "/scratch/hf-cache/${AMLT_JOB_NAME:-job}" \
   "${trust_args[@]}" \

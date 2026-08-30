@@ -30,7 +30,17 @@ MODEL_SPECS = {
     "gpt-5.5": {
         "provider": "responses",
         "reasoning_effort": "medium",
-        "response_models": {"gpt-5.5-2026-04-23"},
+        # The pin exists to refuse a silent fallback to a *different* model, not
+        # to freeze one snapshot forever. `gpt-5.5-2026-04-23` is no longer
+        # served on any route; the gateway answers with the canonical name and
+        # the direct chat route with the current snapshot. Both are gpt-5.5, so
+        # both are accepted, and the per-round `served_by` headers record which
+        # deployment actually answered.
+        "response_models": {
+            "gpt-5.5",
+            "gpt-5.5-2026-04-23",
+            "gpt-5.5-2026-04-24",
+        },
     },
     "gpt-5.6-luna": {"provider": "responses", "reasoning_effort": "medium"},
     "gpt-5.6-sol": {"provider": "responses", "reasoning_effort": "medium"},
@@ -56,6 +66,15 @@ SEARCH_REPLACE_RE = re.compile(
     re.DOTALL,
 )
 RETRYABLE_HTTP_CODES = {408, 409, 429, 500, 502, 503, 504}
+# Response headers that say which deployment actually served a request. A
+# gateway hides the upstream behind a canonical model name, so these are the
+# only record of the serving configuration a result belongs to (P66).
+ATTESTATION_HEADERS = (
+    "x-llmgw-backend",
+    "x-llmgw-cluster",
+    "x-llmgw-upstream-model",
+    "x-llmgw-protocol",
+)
 TOKEN_LOCK = threading.Lock()
 TOKEN_CACHE: str | None = None
 
@@ -259,7 +278,19 @@ def post_json(
         )
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
+                data = json.loads(response.read().decode("utf-8"))
+                served = {
+                    key: response.headers[key]
+                    for key in ATTESTATION_HEADERS
+                    if response.headers.get(key)
+                }
+                if served and isinstance(data, dict):
+                    # A gateway normalizes the model name it echoes back, so the
+                    # echoed name alone cannot say which deployment answered.
+                    # These headers can, and a run that cannot be traced to a
+                    # serving configuration is not comparable to one that can.
+                    data["served_by"] = served
+                return data
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             if exc.code not in RETRYABLE_HTTP_CODES or attempt == retries - 1:
@@ -319,7 +350,16 @@ def invoke_model_envelope(
     instructions: str,
     prompt: str,
     args: argparse.Namespace,
+    conversation: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    """Invoke one model, optionally carrying a multi-turn conversation.
+
+    `conversation` replaces the single user message with an alternating
+    user/assistant history so a model's own past turns stay in the assistant
+    role. The system prompt still travels in the envelope's own slot
+    (`messages[0]` for chat, `instructions` for responses), so switching to a
+    conversation changes only how the history is framed, never the instructions.
+    """
     spec = MODEL_SPECS.get(
         model,
         {"provider": "chat", "reasoning_effort": None},
@@ -331,7 +371,11 @@ def invoke_model_envelope(
             "model": request_model,
             "messages": [
                 {"role": "system", "content": instructions},
-                {"role": "user", "content": prompt},
+                *(
+                    conversation
+                    if conversation is not None
+                    else [{"role": "user", "content": prompt}]
+                ),
             ],
             "max_tokens": args.max_output_tokens,
             "stream": False,
@@ -359,12 +403,20 @@ def invoke_model_envelope(
         "model": request_model,
         "stream": False,
         "instructions": instructions,
-        "input": prompt,
+        "input": conversation if conversation is not None else prompt,
         "max_output_tokens": args.max_output_tokens,
         "reasoning": {"effort": spec["reasoning_effort"]},
     }
     for auth_attempt in range(2):
-        token = copilot_token(args.token_endpoint, refresh=auth_attempt > 0)
+        # An empty token endpoint means this responses endpoint needs no bearer
+        # token of ours -- a local gateway that holds its own credentials.
+        # Minting one anyway would make the run depend on a service it never
+        # talks to.
+        token = (
+            copilot_token(args.token_endpoint, refresh=auth_attempt > 0)
+            if getattr(args, "token_endpoint", "")
+            else ""
+        )
         headers = {
             "Authorization": f"Bearer {token}",
             "copilot-integration-id": "vscode-chat",
@@ -372,6 +424,8 @@ def invoke_model_envelope(
             "editor-plugin-version": "copilot-chat/0.26.7",
             "x-github-api-version": "2025-04-01",
         }
+        if not token:
+            headers.pop("Authorization", None)
         try:
             data = post_json(
                 args.responses_endpoint,

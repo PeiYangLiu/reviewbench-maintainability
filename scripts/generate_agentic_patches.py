@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import sys
 import threading
 import time
 from typing import Any
@@ -52,12 +53,52 @@ Do not return Markdown, prose, SEARCH/REPLACE blocks, or a unified diff."""
 
 NATIVE_TOOL_MODELS = {"gemini-3.6-flash"}
 NATIVE_EDIT_DEADLINE = 24
+# v2 has no function-calling `tool_choice` to force an edit with, so the
+# equivalent is a message. Kept opt-in and off by default: it changes the bytes
+# the model is shown, and the published v2 board was produced without it.
+EDIT_DEADLINE_NOTICE = (
+    "You have used {used} of {total} rounds and have not edited the file yet. "
+    "Exploration is over. Return an edit action for the editable file now, "
+    "using what you already know."
+)
+PROTOCOL_V1 = "agentic-line-edit/v1"
+PROTOCOL_V2 = "agentic-line-edit/v2"
+# v2 with each tool result wrapped the way Qwen's chat template wraps a
+# `role: tool` message, and carrying the round budget inside that wrapper.
+#
+# The wrapper is not cosmetic. Qwen3 decides which assistant turns keep their
+# thinking block by finding the last user message whose content does *not*
+# start with `<tool_response>`; with bare tool results every one of them counts
+# as a fresh user query, so only the final turn keeps thinking. The training
+# side measured 1/5 turns surviving unwrapped against 5/5 wrapped.
+#
+# It is a separate protocol rather than a flag because the bytes differ, and a
+# run whose artifacts do not say which shape was sent is exactly the silent
+# train/inference mismatch that has already cost this line two SFT rounds.
+PROTOCOL_V2_TOOL_RESPONSE = "agentic-line-edit/v2-tool-response"
+PROTOCOLS = (PROTOCOL_V2, PROTOCOL_V2_TOOL_RESPONSE, PROTOCOL_V1)
+CONVERSATION_PROTOCOLS = (PROTOCOL_V2, PROTOCOL_V2_TOOL_RESPONSE)
+TOOL_RESPONSE_OPEN = "<tool_response>"
+TOOL_RESPONSE_CLOSE = "</tool_response>"
+# `mt_train_v5` was rendered from teacher rollouts capped at 16 rounds, so the
+# banner's denominator is part of the trained format, not a runtime knob.
+TOOL_RESPONSE_TRAINED_ROUNDS = 16
 # Leave headroom so a trim that only just fits does not get rejected again by a
 # prompt whose token count moves slightly once the oldest events are dropped.
 CONTEXT_OVERFLOW_MARGIN_TOKENS = 256
 # Below this the transcript stops carrying usable history, so a task that still
 # does not fit is recorded as a failure instead of being asked to work blind.
 MIN_TRANSCRIPT_CHARS = 20_000
+# v2 trims the content of an over-long single tool result instead of dropping
+# whole rounds: the action that follows still has to be predicted from
+# something, and the head of a read/find result holds the lines that were asked
+# for. Kept identical to the training-side builder so both sides carry the same
+# bytes for the same step.
+MAX_TOOL_RESULT_CHARS = 24_000
+TOOL_RESULT_TRUNCATION_SUFFIX = '..."<truncated>"}'
+# A cap this low still carries roughly a screen of source, so a task that cannot
+# fit even here is refused rather than asked to work from stubs.
+MIN_TOOL_RESULT_CHARS = 2_000
 # Each attempt trims strictly, so this only bounds pathological ratio estimates.
 MAX_CONTEXT_FIT_ATTEMPTS = 6
 NATIVE_TOOL_INSTRUCTIONS = """You are an expert software engineer working in a real Git worktree.
@@ -193,11 +234,46 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--max-rounds", type=int, default=32)
+    parser.add_argument(
+        "--allow-untrained-round-budget",
+        action="store_true",
+        help=(
+            "run the tool-response protocol with a round budget the training "
+            "data never used"
+        ),
+    )
     parser.add_argument("--max-output-tokens", type=int, default=8192)
     parser.add_argument("--request-timeout", type=int, default=300)
     parser.add_argument("--request-retries", type=int, default=6)
     parser.add_argument("--initial-context-chars", type=int, default=30_000)
     parser.add_argument("--max-transcript-chars", type=int, default=120_000)
+    parser.add_argument(
+        "--protocol",
+        choices=PROTOCOLS,
+        default=PROTOCOL_V2,
+        help=(
+            "Wire protocol for the action history. v2 carries prior turns as "
+            "alternating assistant/user messages; v1 flattens them into a "
+            "TOOL TRANSCRIPT block inside the user message and exists only to "
+            "reproduce the frozen v1 leaderboard."
+        ),
+    )
+    parser.add_argument(
+        "--max-tool-result-chars",
+        type=int,
+        default=MAX_TOOL_RESULT_CHARS,
+        help="v2 only: cap on one serialized tool result before truncation.",
+    )
+    parser.add_argument(
+        "--edit-deadline",
+        type=int,
+        default=0,
+        help=(
+            "v2 only: from this round on, tell a model that has not edited yet "
+            "to stop exploring and edit. 0 disables it. Off by default because "
+            "it changes the prompt, and the published v2 board ran without it."
+        ),
+    )
     parser.add_argument(
         "--chat-endpoint",
         default="http://127.0.0.1:4399/v1/chat/completions",
@@ -292,6 +368,236 @@ def render_tool_transcript(
         ]
     selected.reverse()
     return notice + "\n" + "\n".join(selected)
+
+
+def serialize_tool_result(payload: Any) -> str:
+    """Serialize one tool result exactly as the flattened transcript does.
+
+    v1 and v2 have to carry the same bytes for the same step, and so does the
+    training-side conversation builder. Key order and escaping are pinned here
+    because a difference in either is invisible in a diff but shows up as a
+    train/inference mismatch.
+    """
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def truncate_tool_content(text: str, maximum_chars: int) -> str:
+    if maximum_chars <= 0 or len(text) <= maximum_chars:
+        return text
+    return text[:maximum_chars] + TOOL_RESULT_TRUNCATION_SUFFIX
+
+
+def capped_content_length(length: int, maximum_chars: int) -> int:
+    if maximum_chars <= 0 or length <= maximum_chars:
+        return length
+    return maximum_chars + len(TOOL_RESULT_TRUNCATION_SUFFIX)
+
+
+def append_conversation_assistant(
+    events: list[dict[str, str]],
+    content: str,
+) -> None:
+    """Record what the model itself produced, verbatim.
+
+    The action is not re-serialized from the parsed object: the model's own
+    bytes, thinking block included, are what a later turn is conditioned on,
+    and normalizing them here would show the model a history it never wrote.
+    """
+    events.append({"role": "assistant", "content": content})
+
+
+def append_conversation_user(
+    events: list[dict[str, Any]],
+    content: str,
+    banner: str = "",
+) -> None:
+    """Append a tool result, folding it into a preceding user turn.
+
+    A round whose response never reached the parser leaves no assistant turn,
+    so appending would put two user messages back to back. Roles are kept
+    strictly alternating instead, because that is the shape the training-side
+    builder validates and the shape every served chat template expects.
+
+    The payload is stored unrendered so that a later cap can shorten the tool
+    result without cutting through the wrapper around it.
+    """
+    part = {"banner": banner, "payload": content}
+    if events and events[-1]["role"] == "user":
+        events[-1]["parts"].append(part)
+        return
+    events.append({"role": "user", "parts": [part]})
+
+
+def tool_round_banner(protocol: str, round_number: int, max_rounds: int) -> str:
+    """Return the round-budget banner for the round the model produces next.
+
+    `round_number` is the 1-based round the model has just answered, so the
+    first tool result announces round 2. That numbering is pinned against the
+    training data, where a teacher rollout capped at 16 rounds renders the
+    first tool result as `ROUND 2 OF 16`.
+    """
+    if protocol != PROTOCOL_V2_TOOL_RESPONSE:
+        return ""
+    return f"ROUND {round_number + 1} OF {max_rounds}"
+
+
+def render_tool_result_part(part: dict[str, str], tool_result_chars: int) -> str:
+    """Render one tool result, applying the cap to the payload only.
+
+    Truncating the rendered block instead would drop the closing tag off the
+    end of an over-long result, leaving the model a wrapper it was never
+    trained on -- and leaving it well-formed enough that nothing would notice.
+    """
+    payload = truncate_tool_content(part["payload"], tool_result_chars)
+    banner = part.get("banner") or ""
+    if not banner:
+        return payload
+    return (
+        f"{TOOL_RESPONSE_OPEN}\n{banner}\n{payload}\n{TOOL_RESPONSE_CLOSE}"
+    )
+
+
+def render_user_event(event: dict[str, Any], tool_result_chars: int) -> str:
+    """Render one user turn, applying the cap the way its protocol requires.
+
+    Unwrapped results are joined first and capped as a unit, which is what v2
+    has always done and what every published v2 artifact was produced with.
+    Wrapped results have to be capped individually instead, because a single
+    cap across the join would cut through a wrapper.
+    """
+    parts = event["parts"]
+    if not any(part.get("banner") for part in parts):
+        return truncate_tool_content(
+            "\n".join(part["payload"] for part in parts),
+            tool_result_chars,
+        )
+    return "\n".join(
+        render_tool_result_part(part, tool_result_chars) for part in parts
+    )
+
+
+def conversation_messages(
+    task: dict[str, Any],
+    before: str,
+    events: list[dict[str, str]],
+    initial_context_chars: int,
+    tool_result_chars: int,
+    edit_notice: str = "",
+) -> list[dict[str, str]]:
+    """Build the full v2 message list for one round.
+
+    The system prompt is `AGENT_INSTRUCTIONS` unchanged and the first user
+    message is the initial prompt unchanged, so the only difference from v1 is
+    where the history lives.
+
+    `edit_notice`, when set, rides on the trailing user turn rather than the
+    system prompt: the system prompt is byte-pinned against the training data,
+    and a per-round deadline is not a standing instruction anyway.
+    """
+    messages = [
+        {"role": "system", "content": AGENT_INSTRUCTIONS},
+        {
+            "role": "user",
+            "content": build_initial_prompt(task, before, initial_context_chars),
+        },
+    ]
+    for event in events:
+        if event["role"] == "user":
+            content = render_user_event(event, tool_result_chars)
+        else:
+            content = event["content"]
+        messages.append({"role": event["role"], "content": content})
+    if edit_notice:
+        if messages[-1]["role"] == "user":
+            messages[-1] = {
+                "role": "user",
+                "content": messages[-1]["content"] + "\n" + edit_notice,
+            }
+        else:
+            messages.append({"role": "user", "content": edit_notice})
+    return messages
+
+
+def serialize_conversation(messages: list[dict[str, str]]) -> str:
+    return json.dumps(
+        {"messages": messages},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def conversation_tool_chars(
+    events: list[dict[str, Any]],
+    tool_result_chars: int,
+) -> int:
+    return sum(
+        len(render_user_event(event, tool_result_chars))
+        for event in events
+        if event["role"] == "user"
+    )
+
+
+def overflow_drop_chars(
+    prompt_chars: int,
+    limit_tokens: int,
+    prompt_tokens: int,
+    output_tokens: int,
+) -> int | None:
+    """Return how many prompt characters have to go, or None if none do.
+
+    The ratio is calibrated from the rejection itself rather than from a global
+    assumption: the deployment reports the token count of this exact prompt.
+    """
+    overflow = prompt_tokens + output_tokens - limit_tokens
+    if overflow <= 0 or prompt_tokens <= 0 or prompt_chars <= 0:
+        return None
+    chars_per_token = prompt_chars / prompt_tokens
+    return math.ceil(
+        (overflow + CONTEXT_OVERFLOW_MARGIN_TOKENS) * chars_per_token
+    )
+
+
+def shrink_tool_result_cap(
+    events: list[dict[str, str]],
+    tool_result_chars: int,
+    drop_chars: int,
+) -> int | None:
+    """Return the largest cap that removes at least `drop_chars`, or None.
+
+    Lowering the cap only shortens results that are already over it, so a cap
+    picked by subtraction can leave the prompt byte-identical and burn an
+    attempt on nothing (P65). The reduction is solved for exactly instead: the
+    returned cap is guaranteed to remove at least the requested characters, and
+    None means no cap above the floor can, which is a refusal rather than a
+    silent retry.
+    """
+    if drop_chars <= 0 or tool_result_chars <= MIN_TOOL_RESULT_CHARS:
+        return None
+    user_events = [event for event in events if event["role"] == "user"]
+    if not user_events:
+        return None
+
+    def rendered(candidate: int) -> int:
+        return sum(
+            len(render_user_event(event, candidate)) for event in user_events
+        )
+
+    current = rendered(tool_result_chars)
+
+    def removed(candidate: int) -> int:
+        return current - rendered(candidate)
+
+    if removed(MIN_TOOL_RESULT_CHARS) < drop_chars:
+        return None
+    low, high = MIN_TOOL_RESULT_CHARS, tool_result_chars - 1
+    while low < high:
+        middle = (low + high + 1) // 2
+        if removed(middle) >= drop_chars:
+            low = middle
+        else:
+            high = middle - 1
+    return low
 
 
 def decode_object(text: str) -> Any:
@@ -585,6 +891,55 @@ def resume_agent_state(
     return current, transcript, edited, rounds
 
 
+def conversation_events_from_rounds(
+    rounds: list[dict[str, Any]],
+    protocol: str = PROTOCOL_V2,
+    max_rounds: int = 0,
+) -> list[dict[str, Any]]:
+    """Rebuild a v2 conversation from a resumed trace.
+
+    A resumed run has to show the model the same history the interrupted run
+    showed it, so the assistant turns come from the recorded response text
+    rather than from the parsed action. Traces that predate the raw-response
+    field fall back to the canonical action, which is what the model produced
+    up to formatting.
+
+    The round budget is rebuilt from each round's recorded number so a resumed
+    run announces the same banner the interrupted one did.
+    """
+    events: list[dict[str, Any]] = []
+    for index, round_result in enumerate(rounds, start=1):
+        text = str(round_result.get("raw_response") or "")
+        action = round_result.get("action")
+        if not text and isinstance(action, dict):
+            text = json.dumps(action, ensure_ascii=False)
+        if text:
+            append_conversation_assistant(events, text)
+        recorded = round_result.get("round")
+        banner = tool_round_banner(
+            protocol,
+            recorded if isinstance(recorded, int) else index,
+            max_rounds,
+        )
+        if round_result.get("error"):
+            append_conversation_user(
+                events,
+                serialize_tool_result(
+                    {"tool_error": str(round_result["error"])[:500]}
+                ),
+                banner,
+            )
+            continue
+        tool_result = round_result.get("tool_result")
+        if tool_result is not None:
+            append_conversation_user(
+                events,
+                serialize_tool_result(tool_result),
+                banner,
+            )
+    return events
+
+
 def git_diff(path: str, before: str, after: str) -> str:
     with tempfile.TemporaryDirectory(prefix="reviewbench-agentic-") as directory:
         root = Path(directory)
@@ -632,8 +987,9 @@ def invoke(
     args: argparse.Namespace,
     native_messages: list[dict[str, Any]] | None = None,
     native_tool_choice: dict[str, Any] | str | None = None,
+    conversation: list[dict[str, str]] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
-    if model in NATIVE_TOOL_MODELS:
+    if conversation is None and model in NATIVE_TOOL_MODELS:
         payload = {
             "model": model,
             "messages": native_messages
@@ -673,13 +1029,69 @@ def invoke(
         request_retries=args.request_retries,
         force_chat=args.force_chat,
     )
+    history = None
+    if conversation is not None:
+        # The envelope owns the system slot: chat puts it in messages[0] and
+        # responses puts it in `instructions`. Splitting it off here keeps one
+        # copy on the wire and makes an altered system prompt a hard failure
+        # rather than a second system message the model silently averages over.
+        head = conversation[0] if conversation else {}
+        if head.get("role") != "system" or head.get("content") != AGENT_INSTRUCTIONS:
+            raise RuntimeError(
+                "conversation must begin with the unmodified AGENT_INSTRUCTIONS "
+                "system message"
+            )
+        history = conversation[1:]
     text, usage, data = api.invoke_model_envelope(
         model,
         AGENT_INSTRUCTIONS,
         prompt,
         invoke_args,
+        conversation=history,
     )
+    if conversation is not None:
+        reject_undeclared_tool_calls(data)
     return text, usage, data
+
+
+def undeclared_tool_calls(data: dict[str, Any] | None) -> list[Any]:
+    """Return tool calls a response carries that the request never asked for."""
+    choices = (data or {}).get("choices") or []
+    message = (choices[0].get("message") or {}) if choices else {}
+    return list(message.get("tool_calls") or [])
+
+
+def reject_undeclared_tool_calls(data: dict[str, Any] | None) -> None:
+    """Fail the round when the answer came from the deployment, not the model.
+
+    v2 sends no `tools`, so a response holding `tool_calls` came from something
+    the deployment injected. The model then spends its turn calling that tool
+    and returns empty content, which is indistinguishable from a model that
+    could not produce an action. The same condition more often surfaces as a
+    bare `finish_reason: error` with empty content and no tool calls at all
+    (P78). Both are named here so a deployment condition is never recorded as a
+    capability result.
+    """
+    calls = undeclared_tool_calls(data)
+    if calls:
+        names = sorted(
+            str((call.get("function") or {}).get("name") or "")
+            for call in calls
+            if isinstance(call, dict)
+        )
+        raise RuntimeError(
+            "deployment returned tool calls for tools this request never "
+            f"declared ({names or len(calls)}); the round measures the "
+            "deployment, not the model"
+        )
+    choices = (data or {}).get("choices") or []
+    if not choices:
+        return
+    if str(choices[0].get("finish_reason") or "") == "error":
+        raise RuntimeError(
+            "deployment reported finish_reason=error with no content; the "
+            "round measures the deployment, not the model"
+        )
 
 
 def native_assistant_message(data: dict[str, Any]) -> dict[str, Any] | None:
@@ -815,8 +1227,14 @@ def shrink_transcript_budget(
     overflow = prompt_tokens + output_tokens - limit_tokens
     if overflow <= 0 or prompt_tokens <= 0 or budget <= 0 or prompt_chars <= 0:
         return None
-    chars_per_token = prompt_chars / prompt_tokens
-    drop = math.ceil((overflow + CONTEXT_OVERFLOW_MARGIN_TOKENS) * chars_per_token)
+    drop = overflow_drop_chars(
+        prompt_chars,
+        limit_tokens,
+        prompt_tokens,
+        output_tokens,
+    )
+    if drop is None:
+        return None
     shrunk = budget - drop
     if shrunk < MIN_TRANSCRIPT_CHARS:
         return None
@@ -915,6 +1333,71 @@ def invoke_within_context_window(
     )
 
 
+def invoke_conversation_within_context_window(
+    model: str,
+    conversation: list[dict[str, str]],
+    args: argparse.Namespace,
+    round_result: dict[str, Any],
+    events: list[dict[str, str]],
+    refit: Any,
+    tool_result_chars: int,
+) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
+    """Invoke the model on a conversation, shrinking tool results if it will not fit.
+
+    v1 dropped the oldest transcript events; v2 keeps every round and shortens
+    the over-long results inside them instead. Early rounds are what a later
+    edit is positioned against, so dropping them loses the facts the model is
+    reasoning from, while the head of an over-long read still holds the lines
+    that were asked for. This also matches the training-side builder, which
+    truncates a single result rather than discarding a turn.
+    """
+    cap = tool_result_chars
+    shrinks: list[dict[str, int]] = []
+    last_rejection = ""
+    for _ in range(MAX_CONTEXT_FIT_ATTEMPTS):
+        try:
+            result = invoke(model, "", args, conversation=conversation)
+        except Exception as exc:
+            overflow = parse_context_overflow(str(exc))
+            if overflow is None or refit is None:
+                raise
+            last_rejection = str(exc)[:300]
+            limit_tokens, prompt_tokens = overflow
+            drop = overflow_drop_chars(
+                len(serialize_conversation(conversation)),
+                limit_tokens,
+                prompt_tokens,
+                args.max_output_tokens,
+            )
+            shrunk = (
+                None
+                if drop is None
+                else shrink_tool_result_cap(events, cap, drop)
+            )
+            if shrunk is None:
+                raise
+            shrinks.append({"from": cap, "to": shrunk})
+            cap = shrunk
+            # Record before retrying so a round that never fits still teaches
+            # the following rounds not to repeat the same futile trims.
+            round_result["tool_result_chars"] = cap
+            round_result["tool_result_shrinks"] = shrinks
+            conversation = refit(cap)
+            continue
+        if shrinks:
+            round_result["tool_result_shrinks"] = shrinks
+            round_result["tool_result_chars"] = cap
+            round_result["prompt_sha256"] = hashlib.sha256(
+                serialize_conversation(conversation).encode()
+            ).hexdigest()
+        return result
+    raise RuntimeError(
+        f"conversation did not fit the served context window after "
+        f"{MAX_CONTEXT_FIT_ATTEMPTS} tool-result trims "
+        f"({shrinks[0]['from']} to {cap} chars); last rejection: {last_rejection}"
+    )
+
+
 def generate_one(
     task: dict[str, Any],
     model: str,
@@ -923,6 +1406,7 @@ def generate_one(
 ) -> dict[str, Any]:
     started = time.monotonic()
     task_id = str(task["id"])
+    protocol = getattr(args, "protocol", PROTOCOL_V1)
     editable_path = validate_repo_path(str((task.get("locality") or {}).get("path") or ""))
     model_root = args.out_dir / api.safe_component(model)
     patch_root = model_root / "patches"
@@ -937,12 +1421,16 @@ def generate_one(
         "path": editable_path,
         "start_sha": task.get("start_sha"),
         "model": model,
-        "protocol": "agentic-line-edit/v1",
+        "protocol": protocol,
         "task_fingerprint": task_fingerprint(task),
         "status": "failed",
         "apply_ok": False,
         "rounds": [],
     }
+    if protocol in CONVERSATION_PROTOCOLS and (getattr(args, "edit_deadline", 0) or 0):
+        # A run with the deadline on is not interchangeable with one without it,
+        # so the setting travels with the result rather than only the CLI.
+        result["edit_deadline"] = int(args.edit_deadline)
     try:
         before = read_at_start(task, args.repo_cache, editable_path)
     except Exception as exc:
@@ -969,7 +1457,15 @@ def generate_one(
 
     native_history = None
     transcript_budget = args.max_transcript_chars
-    if model in NATIVE_TOOL_MODELS:
+    tool_result_chars = getattr(args, "max_tool_result_chars", MAX_TOOL_RESULT_CHARS)
+    conversation_events: list[dict[str, Any]] = []
+    if protocol in CONVERSATION_PROTOCOLS:
+        conversation_events = conversation_events_from_rounds(
+            result["rounds"],
+            protocol,
+            args.max_rounds,
+        )
+    elif model in NATIVE_TOOL_MODELS:
         initial_prompt = build_initial_prompt(
             task,
             before,
@@ -995,7 +1491,29 @@ def generate_one(
             append_native_turn(native_history, response, prior_result)
 
     for round_number in range(first_round, args.max_rounds + 1):
-        if native_history is None:
+        conversation = None
+        if protocol in CONVERSATION_PROTOCOLS:
+            transcript_chars = 0
+            prompt = ""
+            deadline = getattr(args, "edit_deadline", 0) or 0
+            edit_notice = (
+                EDIT_DEADLINE_NOTICE.format(
+                    used=round_number - 1,
+                    total=args.max_rounds,
+                )
+                if deadline and not edited and round_number >= deadline
+                else ""
+            )
+            conversation = conversation_messages(
+                task,
+                before,
+                conversation_events,
+                args.initial_context_chars,
+                tool_result_chars,
+                edit_notice,
+            )
+            prompt_payload = serialize_conversation(conversation)
+        elif native_history is None:
             prompt, transcript_chars = render_round_prompt(
                 task,
                 before,
@@ -1034,38 +1552,64 @@ def generate_one(
         }
         if native_history is not None and force_edit:
             round_result["forced_tool"] = "edit"
+        if conversation is not None and edit_notice:
+            round_result["edit_deadline_applied"] = True
         text = ""
         api_response = None
         try:
-            text, usage, api_response = invoke_within_context_window(
-                model,
-                prompt,
-                args,
-                native_messages=native_history,
-                native_tool_choice=(
-                    native_tool_choice
-                    if native_history is not None
-                    else None
-                ),
-                round_result=round_result,
-                refit=(
-                    None
-                    if native_history is not None
-                    else lambda budget: render_round_prompt(
-                        task,
-                        before,
-                        transcript,
-                        args.initial_context_chars,
-                        budget,
+            if conversation is not None:
+                text, usage, api_response = (
+                    invoke_conversation_within_context_window(
+                        model,
+                        conversation,
+                        args,
+                        round_result=round_result,
+                        events=conversation_events,
+                        refit=lambda cap: conversation_messages(
+                            task,
+                            before,
+                            conversation_events,
+                            args.initial_context_chars,
+                            cap,
+                            edit_notice,
+                        ),
+                        tool_result_chars=tool_result_chars,
                     )
-                ),
-                transcript_budget=transcript_budget,
-                transcript_chars=transcript_chars,
-            )
-            transcript_budget = round_result.get(
-                "transcript_budget_chars",
-                transcript_budget,
-            )
+                )
+                tool_result_chars = round_result.get(
+                    "tool_result_chars",
+                    tool_result_chars,
+                )
+            else:
+                text, usage, api_response = invoke_within_context_window(
+                    model,
+                    prompt,
+                    args,
+                    native_messages=native_history,
+                    native_tool_choice=(
+                        native_tool_choice
+                        if native_history is not None
+                        else None
+                    ),
+                    round_result=round_result,
+                    refit=(
+                        None
+                        if native_history is not None
+                        else lambda budget: render_round_prompt(
+                            task,
+                            before,
+                            transcript,
+                            args.initial_context_chars,
+                            budget,
+                        )
+                    ),
+                    transcript_budget=transcript_budget,
+                    transcript_chars=transcript_chars,
+                )
+                transcript_budget = round_result.get(
+                    "transcript_budget_chars",
+                    transcript_budget,
+                )
             action = parse_action(text, prefer_edit=not edited)
             round_result.update(
                 {
@@ -1129,6 +1673,13 @@ def generate_one(
                         break
             round_result["tool_result"] = tool_result
             transcript.append({"assistant_action": action, "tool_result": tool_result})
+            if conversation is not None:
+                append_conversation_assistant(conversation_events, text)
+                append_conversation_user(
+                    conversation_events,
+                    serialize_tool_result(tool_result),
+                    tool_round_banner(protocol, round_number, args.max_rounds),
+                )
             if native_history is not None and api_response is not None:
                 append_native_turn(native_history, api_response, tool_result)
         except Exception as exc:
@@ -1142,6 +1693,20 @@ def generate_one(
             if text:
                 round_result["raw_response"] = text[:20_000]
             transcript.append({"tool_error": round_result["error"]})
+            if conversation is not None:
+                if text:
+                    append_conversation_assistant(
+                        conversation_events,
+                        round_result["raw_response"],
+                    )
+                # A round the model never answered leaves no assistant turn, so
+                # this folds into the preceding user turn rather than repeating
+                # an identical request that would burn the round budget.
+                append_conversation_user(
+                    conversation_events,
+                    serialize_tool_result({"tool_error": round_result["error"]}),
+                    tool_round_banner(protocol, round_number, args.max_rounds),
+                )
             if native_history is not None and api_response is not None:
                 append_native_turn(
                     native_history,
@@ -1200,10 +1765,11 @@ def load_results(path: Path) -> dict[str, dict[str, Any]]:
 def reusable_result(
     item: dict[str, Any],
     task: dict[str, Any] | None = None,
+    protocol: str = PROTOCOL_V1,
 ) -> bool:
     if (
         item.get("apply_ok") is not True
-        or item.get("protocol") != "agentic-line-edit/v1"
+        or item.get("protocol") != protocol
         or not Path(str(item.get("patch_file") or "")).is_file()
     ):
         return False
@@ -1234,8 +1800,14 @@ def previous_result_for_retry(
     item: dict[str, Any] | None,
     restart_failed: bool,
     task: dict[str, Any] | None = None,
+    protocol: str = PROTOCOL_V1,
 ) -> dict[str, Any] | None:
     if not item:
+        return None
+    # A trace recorded under a different protocol was produced from a different
+    # input format, so resuming it would splice two protocols into one run and
+    # make the resulting rounds attributable to neither.
+    if item.get("protocol") != protocol:
         return None
     if (
         task is not None
@@ -1286,6 +1858,7 @@ def write_completion_marker(
     records: dict[str, dict[str, Any]],
     tasks_sha256: str,
     attestation_mode: str = "runtime",
+    protocol: str | None = None,
 ) -> None:
     task_ids = set(tasks)
     if set(records) != task_ids:
@@ -1297,10 +1870,17 @@ def write_completion_marker(
     ):
         completion_marker(path).unlink(missing_ok=True)
         return
+    protocols = sorted({str(record.get("protocol") or "") for record in records.values()})
+    # A model whose rows span two protocols was fed two different input formats,
+    # so its row is not attributable to either and must not be attested.
+    if len(protocols) != 1 or (protocol is not None and protocols != [protocol]):
+        completion_marker(path).unlink(missing_ok=True)
+        return
     marker = {
         "schema_version": "reviewbench-generation-complete/v1",
         "attestation_mode": attestation_mode,
         "model": model,
+        "protocol": protocols[0],
         "tasks": len(task_ids),
         "tasks_sha256": tasks_sha256,
         "results_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -1324,8 +1904,51 @@ def write_completion_marker(
     )
 
 
+def exit_code_for_summary(
+    summary: dict[str, dict[str, int]],
+    requested_tasks: int,
+) -> int:
+    """Fail the job only when it did not attempt everything it was given.
+
+    A task the model could not solve is the measurement, not an error: this
+    benchmark exists to count those. Exiting non-zero for them marks every job
+    "failed" on the cluster, which hides the jobs that failed for real and
+    trains everyone to ignore the status column.
+    """
+    incomplete = {
+        model: item
+        for model, item in summary.items()
+        if item["tasks"] < requested_tasks
+    }
+    if incomplete:
+        print(
+            "did not attempt every task: "
+            + json.dumps(incomplete, ensure_ascii=False, sort_keys=True),
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def main() -> int:
     args = parse_args()
+    if (
+        args.protocol == PROTOCOL_V2_TOOL_RESPONSE
+        and args.max_rounds != TOOL_RESPONSE_TRAINED_ROUNDS
+        and not args.allow_untrained_round_budget
+    ):
+        # The banner announces `OF {max_rounds}`, and the training data was
+        # rendered at 16. Any other value asks the model to extrapolate a
+        # budget ratio it never saw, which is not something a run should do by
+        # accident just because the default is 32.
+        print(
+            f"--protocol {PROTOCOL_V2_TOOL_RESPONSE} expects --max-rounds "
+            f"{TOOL_RESPONSE_TRAINED_ROUNDS} to match the training data; "
+            f"got {args.max_rounds}. Pass --allow-untrained-round-budget to "
+            "override.",
+            file=sys.stderr,
+        )
+        return 2
     all_tasks = api.load_tasks(args.tasks, None, None)
     tasks = api.load_tasks(args.tasks, set(args.ids) if args.ids else None, args.limit)
     order = {task["id"]: index for index, task in enumerate(all_tasks)}
@@ -1345,6 +1968,7 @@ def main() -> int:
         if not reusable_result(
             results[model].get(task["id"], {}),
             task,
+            args.protocol,
         )
     ]
     models_with_jobs = {model for _, model in jobs}
@@ -1363,6 +1987,7 @@ def main() -> int:
                     results[model].get(task["id"]),
                     args.restart_failed,
                     task,
+                    args.protocol,
                 ),
             ): (task, model)
             for task, model in jobs
@@ -1380,7 +2005,7 @@ def main() -> int:
                     ),
                     "start_sha": task.get("start_sha"),
                     "model": model,
-                    "protocol": "agentic-line-edit/v1",
+                    "protocol": args.protocol,
                     "task_fingerprint": task_fingerprint(task),
                     "status": "failed",
                     "apply_ok": False,
@@ -1417,9 +2042,14 @@ def main() -> int:
             tasks_by_id,
             items,
             tasks_sha256,
+            protocol=args.protocol,
         )
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0 if all(item["failed"] == 0 for item in summary.values()) else 1
+    # A task the model could not solve is the measurement, not an error: this
+    # benchmark exists to count those. Exiting non-zero for them marks every
+    # job "failed" on the cluster, which hides the jobs that failed for real
+    # and trains everyone to ignore the status column.
+    return exit_code_for_summary(summary, len(tasks))
 
 
 if __name__ == "__main__":

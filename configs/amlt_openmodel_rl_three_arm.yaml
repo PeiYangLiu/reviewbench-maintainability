@@ -1,0 +1,113 @@
+# RL three-arm evaluation: SFT start -> RFT round 1 -> RFT round 2.
+#
+# The three adapters share a base and a revision and differ only in training
+# data, so this config differs between arms only in LORA_ADAPTER. That is the
+# whole point: the RL session needs to attribute a delta to the training round,
+# and anything else moving would make the delta unattributable -- the mistake
+# recorded as P80, which they cited themselves when asking for all three arms in
+# one time window.
+#
+# Serving matches amlt_openmodel_v2_base_ladder.yaml's Qwen3-8B rung, so the
+# untuned base row measured in that run is a valid fourth reference point
+# without re-running it.
+#
+# MAX_OUTPUT_TOKENS is 8192 (P82): at 4096 the Qwen family lost 10-35% of rounds
+# to mid-action truncation, which would land hardest on whichever arm writes the
+# longest reasoning -- likely the most-trained one, i.e. exactly backwards.
+description: ReviewBench RL three-arm evaluation (SFT / RFT-1 / RFT-2) under v2
+
+target:
+  service: singularity
+  name: msrresrchbasicvc
+  workspace_name: Workspace_NLC
+
+environment:
+  image: amlt-sing/acpt-torch2.7.1-py3.10-cuda12.6-ubuntu22.04
+  image_setup:
+    - python -m pip install "vllm==0.26.0" "hf_transfer==0.1.9" "numpy==2.2.6" "scipy==1.15.3"
+
+code:
+  local_dir: $CONFIG_DIR/..
+
+data:
+  local_dir: $REVIEWBENCH_OPENMODEL_REPO_CACHE
+  remote_dir: reviewbench-openmodels/repo-cache-minimal
+
+jobs:
+  - name: rl-arm-sft
+    identity: managed
+    sku: 40G2-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: Qwen/Qwen3-8B
+        MODEL_REVISION: b968826d9c46dd6066d109eabc6255188de91218
+        LORA_ADAPTER: rl-sft-qwen3-8b=rl-adapters/qwen3-8b
+        MAX_LORA_RANK: "32"
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/audited-402.ids
+        PROTOCOL: agentic-line-edit/v2
+        MAX_TOOL_RESULT_CHARS: "24000"
+        MAX_OUTPUT_TOKENS: "8192"
+        TENSOR_PARALLEL_SIZE: "2"
+        MAX_MODEL_LEN: "40960"
+        GENERATION_WORKERS: "10"
+        MAX_NUM_SEQS: "10"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+
+  - name: rl-arm-rft1
+    identity: managed
+    sku: 40G2-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: Qwen/Qwen3-8B
+        MODEL_REVISION: b968826d9c46dd6066d109eabc6255188de91218
+        LORA_ADAPTER: rl-rft-qwen3-8b=rl-adapters/rft-qwen3-8b
+        MAX_LORA_RANK: "32"
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/audited-402.ids
+        PROTOCOL: agentic-line-edit/v2
+        MAX_TOOL_RESULT_CHARS: "24000"
+        MAX_OUTPUT_TOKENS: "8192"
+        TENSOR_PARALLEL_SIZE: "2"
+        MAX_MODEL_LEN: "40960"
+        GENERATION_WORKERS: "10"
+        MAX_NUM_SEQS: "10"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+
+  - name: rl-arm-rft2
+    identity: managed
+    sku: 40G2-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: Qwen/Qwen3-8B
+        MODEL_REVISION: b968826d9c46dd6066d109eabc6255188de91218
+        LORA_ADAPTER: rl-rft2-qwen3-8b=rl-adapters/rft2-qwen3-8b
+        MAX_LORA_RANK: "32"
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/audited-402.ids
+        PROTOCOL: agentic-line-edit/v2
+        MAX_TOOL_RESULT_CHARS: "24000"
+        MAX_OUTPUT_TOKENS: "8192"
+        TENSOR_PARALLEL_SIZE: "2"
+        MAX_MODEL_LEN: "40960"
+        GENERATION_WORKERS: "10"
+        MAX_NUM_SEQS: "10"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True

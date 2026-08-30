@@ -132,8 +132,16 @@ start/golden 三次稳定验证。
 
 ### Agentic line-edit 协议
 
-`scripts/generate_agentic_patches.py` 使用 `agentic-line-edit/v1`。每轮模型只返回
-一个 JSON action：
+`scripts/generate_agentic_patches.py` 支持两个协议版本，由 `--protocol` 选择，
+默认 `agentic-line-edit/v2`。两者的动作集合、host 校验和 patch 生成方式完全相同，
+**区别只在历史怎么送达模型**：
+
+| 协议 | 历史形态 | 适用范围 |
+|---|---|---|
+| `agentic-line-edit/v1` | 拼成文本塞进 user 的 `TOOL TRANSCRIPT:` 块 | 仅用于复现冻结的 v1 榜单 |
+| `agentic-line-edit/v2` | 标准多轮 `assistant` / `user` 消息 | 当前默认 |
+
+每轮模型只返回一个 JSON action：
 
 - `read`：读取 `start_sha` 下任意仓库文件，锚点文件则读取当前已编辑版本；
 - `find`：在文件中做 literal search；
@@ -148,7 +156,50 @@ host 会直接固化最后状态，`finish` 只是提前停止动作，不是额
 公平比较必须对全部题、全部模型重新运行 agentic generation、correctness 和
 盲裁，不能只补跑旧协议失败项。
 
-306 题最终结果：
+#### v2 的消息形态
+
+```text
+system     AGENT_INSTRUCTIONS          （1022 字符，与 v1 逐字节相同）
+user       build_initial_prompt(...)   （不含 TOOL TRANSCRIPT，无额外后缀）
+assistant  模型上一轮的原始输出         （含 <think>，不做规范化）
+user       {"lines":...}               （工具结果，role 为 user）
+assistant  ...
+```
+
+四条不变量：
+
+1. **不使用 `role: tool`。** OpenAI 规范要求 `role: tool` 必须带 `tool_call_id`
+   且紧跟含 `tool_calls` 的 assistant，实测 6 个 API 模型在网关四条路由上全部
+   400。榜上 14 个模型有 8 个走 API，这条路走不通。
+2. **system 槽位只出现一次。** chat 走 `messages[0]`，responses 走 `instructions`。
+   `invoke()` 会校验会话首条是未被修改的 `AGENT_INSTRUCTIONS`，否则直接失败——
+   改过系统提示正是训练侧前两轮报废的原因。
+3. **工具结果序列化与 v1 逐字节相同**：
+   `json.dumps(result, ensure_ascii=False, sort_keys=True)`，被拒绝的调用用
+   `{"tool_error": ...}`（截断 500 字符）。换的是信封，不是内容。
+4. **`prompt_sha256` 改为对序列化后的整个 messages 序列取哈希**，可事后逐轮重建
+   核对。
+
+#### v2 的预算裁剪：截断内容，不丢轮次
+
+v1 在超出服务窗口时丢弃最早的 transcript 事件；v2 **保留每一轮**，只截断轮内
+过长的单个工具结果（默认 24,000 字符，`--max-tool-result-chars`）。理由是后续
+动作总要基于某个结果来定位，丢掉早期轮次等于丢掉模型正在依据的事实；而超长
+read 的头部恰好就是它要的那几行。训练侧采用同一做法。
+
+裁剪量按 P64 的方式由拒绝本身标定，但新的 cap **精确求解**而非做减法：降低
+cap 只会缩短本就超过 cap 的结果，靠减法得到的 cap 可能让 prompt 逐字节不变、
+白烧一次尝试（P65）。`shrink_tool_result_cap()` 保证每次裁剪至少移除所需字符数，
+无解时返回 `None` 让该轮 fail-closed，而不是静默重试。
+
+#### 协议之间不得混用
+
+- `--resume` 只复用同协议的结果，跨协议的 trace 一律重跑；
+- `previous_result_for_retry()` 拒绝跨协议续跑，避免一条 trace 里拼进两种输入格式；
+- 某个模型的行若跨两个协议，`write_completion_marker()` 直接删除完成标记——
+  这一行不归属任何一个口径，不能被认证。
+
+306 题最终结果（`agentic-line-edit/v1`）：
 
 | 模型 | Generated | Correctness | Maintainability | Resolved@1 | Hard |
 |---|---:|---:|---:|---:|---:|

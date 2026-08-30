@@ -16,6 +16,13 @@ import sys
 import time
 import urllib.request
 
+# The generator is a sibling module and owns the protocol vocabulary, so it is
+# imported rather than mirrored: a launcher that offered a protocol the
+# generator does not implement would fail only once a job was already running.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import generate_agentic_patches as agentic  # noqa: E402
+
 
 def parse_lora_adapter(value: str) -> tuple[str, Path]:
     """Parse a ``NAME=PATH`` LoRA adapter specification.
@@ -163,8 +170,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", default="auto")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--max-rounds", type=int, default=32)
-    parser.add_argument("--max-output-tokens", type=int, default=4096)
+    parser.add_argument("--max-output-tokens", type=int, default=8192)
     parser.add_argument("--max-transcript-chars", type=int, default=120_000)
+    parser.add_argument(
+        "--protocol",
+        choices=agentic.PROTOCOLS,
+        default=agentic.PROTOCOL_V2,
+        help="Action-history wire protocol passed to the generator.",
+    )
+    parser.add_argument(
+        "--max-tool-result-chars",
+        type=int,
+        default=agentic.MAX_TOOL_RESULT_CHARS,
+    )
+    parser.add_argument(
+        "--edit-deadline",
+        type=int,
+        default=0,
+        help="v2 only: round from which a model that has not edited is told to.",
+    )
     parser.add_argument("--server-timeout", type=int, default=3600)
     parser.add_argument("--generator-script", type=Path)
     parser.add_argument("--ids-file", type=Path)
@@ -340,6 +364,12 @@ def main() -> int:
                 str(args.max_output_tokens),
                 "--max-transcript-chars",
                 str(args.max_transcript_chars),
+                "--protocol",
+                args.protocol,
+                "--max-tool-result-chars",
+                str(args.max_tool_result_chars),
+                "--edit-deadline",
+                str(args.edit_deadline),
                 "--request-timeout",
                 "600",
                 "--request-retries",

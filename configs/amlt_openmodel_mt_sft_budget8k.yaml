@@ -1,0 +1,199 @@
+# Multi-turn SFT adapters evaluated under the protocol they were trained on.
+#
+# The first two SFT rounds were lost to train/inference mismatch, so the two
+# settings that caused it are pinned explicitly here:
+#
+#   1. PROTOCOL=agentic-line-edit/v2 -- these adapters were trained on
+#      alternating assistant/user conversations. Serving them under v1's
+#      flattened TOOL TRANSCRIPT would reproduce exactly the mismatch this
+#      round exists to remove.
+#   2. MODEL_REVISION -- PEFT does not record the base revision in
+#      adapter_config.json, so a wrong base loads silently and only shows up as
+#      bad numbers. Every revision below is copied from the adapter's own
+#      TRAIN_META.json and verified to match the rung it is compared against.
+#
+# Base rungs are served exactly as amlt_openmodel_qwen_ladder.yaml serves them
+# (same sku, TP, MAX_MODEL_LEN=40960), so each adapter is comparable to its own
+# base rung. Qwen3.6-27B follows amlt_openmodel_generation.yaml, which is its
+# board configuration.
+#
+# MAX_MODEL_LEN stays at the ladder's 40960 even for the adapters trained at
+# 16384: shrinking the served window for some rows only would mix a context
+# effect into a training effect. The training-side truncation share is recorded
+# in the delivery note (1.0% at 24576, 10.0% at 16384) and belongs in the
+# writeup, not in the serving config.
+description: ReviewBench multi-turn SFT adapters re-measured at an 8192 output budget
+
+target:
+  service: singularity
+  name: msrresrchbasicvc
+  workspace_name: Workspace_NLC
+
+environment:
+  image: amlt-sing/acpt-torch2.7.1-py3.10-cuda12.6-ubuntu22.04
+  image_setup:
+    - python -m pip install "vllm==0.26.0" "hf_transfer==0.1.9" "numpy==2.2.6" "scipy==1.15.3"
+
+code:
+  local_dir: $CONFIG_DIR/..
+
+data:
+  local_dir: $REVIEWBENCH_OPENMODEL_REPO_CACHE
+  remote_dir: reviewbench-openmodels/repo-cache-minimal
+
+jobs:
+  - name: b8k-sft-qwen3-14b
+    identity: managed
+    sku: 40G2-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: Qwen/Qwen3-14B
+        MODEL_REVISION: 40c069824f4251a91eefaf281ebe4c544efd3e18
+        LORA_ADAPTER: qwen3-14b-mtsft=sft-adapters-mt/qwen3-14b
+        MAX_LORA_RANK: "32"
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/audited-402.ids
+        PROTOCOL: agentic-line-edit/v2
+        MAX_TOOL_RESULT_CHARS: "24000"
+        MAX_OUTPUT_TOKENS: "8192"
+        TENSOR_PARALLEL_SIZE: "2"
+        MAX_MODEL_LEN: "40960"
+        GENERATION_WORKERS: "10"
+        MAX_NUM_SEQS: "10"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+
+  - name: b8k-sft-qwen3-4b
+    identity: managed
+    sku: 40G2-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: Qwen/Qwen3-4B
+        MODEL_REVISION: 1cfa9a7208912126459214e8b04321603b3df60c
+        LORA_ADAPTER: qwen3-4b-mtsft=sft-adapters-mt/qwen3-4b
+        MAX_LORA_RANK: "32"
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/audited-402.ids
+        PROTOCOL: agentic-line-edit/v2
+        MAX_TOOL_RESULT_CHARS: "24000"
+        MAX_OUTPUT_TOKENS: "8192"
+        TENSOR_PARALLEL_SIZE: "2"
+        MAX_MODEL_LEN: "40960"
+        GENERATION_WORKERS: "10"
+        MAX_NUM_SEQS: "10"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+
+  - name: b8k-sft-qwen3-8b
+    identity: managed
+    sku: 40G2-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: Qwen/Qwen3-8B
+        MODEL_REVISION: b968826d9c46dd6066d109eabc6255188de91218
+        LORA_ADAPTER: qwen3-8b-mtsft=sft-adapters-mt/qwen3-8b
+        MAX_LORA_RANK: "32"
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/audited-402.ids
+        PROTOCOL: agentic-line-edit/v2
+        MAX_TOOL_RESULT_CHARS: "24000"
+        MAX_OUTPUT_TOKENS: "8192"
+        TENSOR_PARALLEL_SIZE: "2"
+        MAX_MODEL_LEN: "40960"
+        GENERATION_WORKERS: "10"
+        MAX_NUM_SEQS: "10"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+
+  - name: b8k-sft-qwen3-8b-nothink
+    identity: managed
+    sku: 40G2-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: Qwen/Qwen3-8B
+        MODEL_REVISION: b968826d9c46dd6066d109eabc6255188de91218
+        LORA_ADAPTER: qwen3-8b-nothink-mtsft=sft-adapters-mt/qwen3-8b-nothink
+        MAX_LORA_RANK: "32"
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/audited-402.ids
+        PROTOCOL: agentic-line-edit/v2
+        MAX_TOOL_RESULT_CHARS: "24000"
+        MAX_OUTPUT_TOKENS: "8192"
+        TENSOR_PARALLEL_SIZE: "2"
+        MAX_MODEL_LEN: "40960"
+        GENERATION_WORKERS: "10"
+        MAX_NUM_SEQS: "10"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+
+  - name: b8k-sft-qwen3-32b
+    identity: managed
+    sku: 40G4-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: Qwen/Qwen3-32B
+        MODEL_REVISION: 9216db5781bf21249d130ec9da846c4624c16137
+        LORA_ADAPTER: qwen3-32b-mtsft=sft-adapters-mt/qwen3-32b
+        MAX_LORA_RANK: "32"
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/audited-402.ids
+        PROTOCOL: agentic-line-edit/v2
+        MAX_TOOL_RESULT_CHARS: "24000"
+        MAX_OUTPUT_TOKENS: "8192"
+        TENSOR_PARALLEL_SIZE: "4"
+        MAX_MODEL_LEN: "40960"
+        GENERATION_WORKERS: "10"
+        MAX_NUM_SEQS: "10"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+
+  - name: b8k-sft-qwen36-27b-nothink
+    identity: managed
+    sku: 40G2-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: Qwen/Qwen3.6-27B
+        MODEL_REVISION: 6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+        LORA_ADAPTER: qwen36-27b-nothink-mtsft=sft-adapters-mt/qwen36-27b-nothink
+        MAX_LORA_RANK: "32"
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/audited-402.ids
+        PROTOCOL: agentic-line-edit/v2
+        MAX_TOOL_RESULT_CHARS: "24000"
+        MAX_OUTPUT_TOKENS: "8192"
+        TENSOR_PARALLEL_SIZE: "2"
+        MAX_MODEL_LEN: "65536"
+        GENERATION_WORKERS: "10"
+        MAX_NUM_SEQS: "10"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True

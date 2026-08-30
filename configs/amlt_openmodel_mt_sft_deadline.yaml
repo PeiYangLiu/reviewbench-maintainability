@@ -1,0 +1,87 @@
+# Does the multi-turn SFT collapse come from a missing stopping policy?
+#
+# Measured on the v2 runs: the adapters produce better patches than their bases
+# when they produce one at all (maintainability|generated 2.5% vs 0.3-1.0%), but
+# generation halves because they never stop exploring. The failure is specific:
+# of 209/196/245/203 failed tasks, 209/196/244/201 contain **zero** edit actions.
+# They explore for all 32 rounds and never touch the file.
+#
+# Round-splitting the training trajectories supervises "what to do this round"
+# and drops "when to stop", so this asks whether supplying the missing signal at
+# inference recovers the loss. EDIT_DEADLINE=24 mirrors NATIVE_EDIT_DEADLINE,
+# which the harness already applies on the function-calling path.
+#
+# Everything else is copied from amlt_openmodel_mt_sft.yaml, so the only
+# difference from those rows is the deadline. The v2 board and the SFT table
+# were both produced with EDIT_DEADLINE unset and are unaffected.
+description: ReviewBench multi-turn SFT with an edit deadline (stopping-policy probe)
+
+target:
+  service: singularity
+  name: msrresrchbasicvc
+  workspace_name: Workspace_NLC
+
+environment:
+  image: amlt-sing/acpt-torch2.7.1-py3.10-cuda12.6-ubuntu22.04
+  image_setup:
+    - python -m pip install "vllm==0.26.0" "hf_transfer==0.1.9" "numpy==2.2.6" "scipy==1.15.3"
+
+code:
+  local_dir: $CONFIG_DIR/..
+
+data:
+  local_dir: $REVIEWBENCH_OPENMODEL_REPO_CACHE
+  remote_dir: reviewbench-openmodels/repo-cache-minimal
+
+jobs:
+  - name: deadline-qwen3-8b
+    identity: managed
+    sku: 40G2-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: Qwen/Qwen3-8B
+        MODEL_REVISION: b968826d9c46dd6066d109eabc6255188de91218
+        LORA_ADAPTER: qwen3-8b-mtsft=sft-adapters-mt/qwen3-8b
+        MAX_LORA_RANK: "32"
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/audited-402.ids
+        PROTOCOL: agentic-line-edit/v2
+        MAX_TOOL_RESULT_CHARS: "24000"
+        EDIT_DEADLINE: "24"
+        TENSOR_PARALLEL_SIZE: "2"
+        MAX_MODEL_LEN: "40960"
+        GENERATION_WORKERS: "10"
+        MAX_NUM_SEQS: "10"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+
+  - name: deadline-qwen3-32b
+    identity: managed
+    sku: 40G4-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: Qwen/Qwen3-32B
+        MODEL_REVISION: 9216db5781bf21249d130ec9da846c4624c16137
+        LORA_ADAPTER: qwen3-32b-mtsft=sft-adapters-mt/qwen3-32b
+        MAX_LORA_RANK: "32"
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/audited-402.ids
+        PROTOCOL: agentic-line-edit/v2
+        MAX_TOOL_RESULT_CHARS: "24000"
+        EDIT_DEADLINE: "24"
+        TENSOR_PARALLEL_SIZE: "4"
+        MAX_MODEL_LEN: "40960"
+        GENERATION_WORKERS: "10"
+        MAX_NUM_SEQS: "10"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True

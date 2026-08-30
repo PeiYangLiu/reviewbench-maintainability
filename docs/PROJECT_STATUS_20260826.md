@@ -231,7 +231,7 @@ finish 21.8%），但**推理时 1,925 轮里 0 次探索动作**。
 
 ---
 
-## 五、协议改造（进行中）
+## 五、协议改造（评测侧已实现）
 
 ### 5.1 为什么要改
 
@@ -247,6 +247,10 @@ user: ...TOOL TRANSCRIPT:
 **这个协议已废掉过一个模型**：Gemini 3.6 曾 149 题连续 32 轮返回空 content，
 切到结构化路径后立即正常。harness 因此为它开了特例
 （`NATIVE_TOOL_MODELS = {"gemini-3.6-flash"}`），其余 13 个模型仍在文本路径。
+
+> **2026-08-26 更正**：这个归因是错的。实测证明修好 Gemini 的是**函数调用本身**，
+> 不是结构化历史——网关给它注入了未声明的工具，函数调用给了那些调用一个合法落点。
+> 详见 P78 与 §5.7。协议改造的其余理由（角色分离、4.65 倍编码冗余）不受影响。
 
 榜单数据也支持这个判断：Gemini correctness 比 Sol/Opus 5 低约 60 题，
 **maintainability 却基本持平**（137 vs 146/138）。
@@ -314,9 +318,9 @@ Qwen 本地 tokenizer 验证，对 API 模型不成立。
 
 | 路径 | 系统提示 | 协议 | 现状 |
 |---|---|---|---|
-| 文本拼接 | `AGENT_INSTRUCTIONS`(1022) | JSON 动作 | 13 个模型 |
-| native 函数调用 | `NATIVE_TOOL_INSTRUCTIONS`(598) | function calling | 仅 Gemini |
-| **结构化 JSON（待建）** | **`AGENT_INSTRUCTIONS` 不变** | **JSON + 结构化历史** | 目标 |
+| 文本拼接 | `AGENT_INSTRUCTIONS`(1022) | JSON 动作 | `--protocol .../v1`，仅复现旧榜 |
+| native 函数调用 | `NATIVE_TOOL_INSTRUCTIONS`(598) | function calling | v1 内部，仅 Gemini |
+| **结构化 JSON** | **`AGENT_INSTRUCTIONS` 不变** | **JSON + 结构化历史** | **已实现，默认** |
 
 保留三个不变量：`prompt_sha256`（改为对序列化 messages 取哈希）、
 模型身份强校验、fail-closed。
@@ -326,6 +330,75 @@ Qwen 本地 tokenizer 验证，对 API 模型不成立。
 
 序列化：`json.dumps(..., ensure_ascii=False, sort_keys=True)`，
 与现有 `render_tool_transcript` 逐字节相同，**双方天然对齐，无需改动**。
+
+### 5.6 已完成（2026-08-26）
+
+`scripts/generate_agentic_patches.py` 新增 `--protocol`，默认
+`agentic-line-edit/v2`；v1 保留、可复现旧榜。
+
+- **格式**：`system(AGENT_INSTRUCTIONS 原样) / user(初始 prompt，无后缀) /
+  assistant(模型原始输出) / user(工具结果 JSON) / ...`，无 `role: tool`；
+- **system 槽位强校验**：会话首条必须是未修改的 `AGENT_INSTRUCTIONS`，否则
+  该轮直接失败（照训练侧第二轮报废的原因写的）；
+- **裁剪**：新 cap 精确求解而非做减法——降 cap 只缩短超过 cap 的结果，
+  减法可能得到让 prompt 逐字节不变的值（P65），无解时 fail-closed；
+- **跨协议不混用**：`--resume` 不复用异协议结果，异协议 trace 不续跑，
+  某模型的行若跨两协议则删除完成标记；
+- **真实数据验证**：一条 12 轮 claude-opus-5 真实 trace，**每轮记录的
+  `prompt_sha256` 都能从前序轮次精确重建**，角色严格交替，历史每轮增长恰好
+  2 条消息。690 单测全绿（v2 新增 17 个）。
+
+### 5.7 重跑前必须先解决的两件事
+
+**（1）Gemini 在 v2 下不具备可跑性，原因在上游而非协议**（详见 P78）。
+
+冒烟实测：`gemini-3.6-flash` 一题 12/12 轮空响应，而**第 1 轮根本没有历史**。
+根因分两层：上游用 HTTP **200** 承载内部失败（`finish_reason: "error"`、
+content 为空，偶尔还带回请求未声明的 `tool_calls`），而 llm-gateway 只看
+状态码，把它当成功透传。
+
+**已修**（两侧）：
+
+- `llm-gateway` 新增 `content_free_failure()`，识别 2xx 里的无补全响应，
+  同路由重试 → 换路由 → 全失败返回 503；**刻意不 trip 熔断**，因为路由是通的，
+  park 掉会让仅有的两条 gemini 路由同时出局（第一版就这么翻过车）；
+- harness 把这类轮次记为 `deployment reported finish_reason=error...`，
+  不再记成「模型没返回合法 JSON」。
+
+**但残留是单个部署的问题**：修完后 gemini-3.6-flash 仍只有 4/8、单次 18.8 秒。
+但**同后端、同提示词、同协议**换个型号立刻正常：
+
+| 模型 | genaiapi | Copilot 直连 | 耗时 |
+|---|---:|---:|---:|
+| gemini-3.6-flash | **4/8** | **1/6** | 18.8s |
+| gemini-3.7-flash | **8/8** | **6/6** | 3.2s |
+| gemini-3.5-flash | **8/8** | **5/6** | 6.7s |
+
+harness 端到端复核：3.7-flash 与 3.5-flash 各 2/2 生成。
+**`gemini-3.6-flash` 这个部署处于降级状态，与 v2 协议无关。**
+
+同时这也让 §5.1 的归因**存疑但未定论**：2026-08-11 那 149 题的 32 轮空 content
+与本次症状同形，可能同源（部署问题）而非文本拼接协议所致。未复核前，不宜再把
+它当作「文本拼接压制模型」的证据；但协议改造的其余理由（角色分离、4.65 倍
+编码冗余）不受影响。
+
+**（2）GPT 系已可跑通，但快照身份需要在榜单里声明**（详见 P79）。
+
+llm-gateway 的 `/v1/responses` 三点都满足：接受多轮 `input` 数组、返回裸模型名、
+**不需要已停用的 4399 token endpoint**。实测 gpt-5.6-sol / gpt-5.5 各 2/2 生成。
+
+用法：
+
+```bash
+--responses-endpoint http://127.0.0.1:4000/v1/responses --token-endpoint ""
+```
+
+但网关对所有后端统一模型名，`data["model"]` 只是回声。因此**不放宽身份校验**，
+改为逐轮记录网关归属头（`served_by`：backend / cluster / upstream_model /
+protocol），这比字符串比对强。
+
+**仍需声明**：主榜测过的 `gpt-5.5-2026-04-23` 快照在任何路由上都已不可达
+（现为 `-04-24`），重跑 gpt-5.5 测的是另一个快照。
 
 ---
 
@@ -409,28 +482,35 @@ Qwen 本地 tokenizer 验证，对 API 模型不成立。
 
 ## 八、待决问题与风险
 
-1. **SFT 有效性尚无定论**——4B/8B 信噪比不足，需等 27B。
-2. **thinking 形态冲突未解**——建议统一**加上** `<think>` 而非剥掉；
+1. **gemini-3.6-flash 部署降级**——4/8 成功、18.8 秒，而同后端同提示词的
+   3.7-flash 8/8、3.5-flash 8/8（P78）。是这个部署的问题，不是协议也不是模型族。
+   等它恢复后重测即可；网关侧的重试与故障转移已就位。
+2. **gpt-5.5 的主榜快照已不可达**——`-2026-04-23` 在任何路由上都没有了，
+   重跑测的是 `-04-24`。必须在榜单里显式声明，不能靠放宽校验糊过去（P79）。
+3. **SFT 有效性尚无定论**——4B/8B 信噪比不足，需等 27B。
+4. **thinking 形态冲突未解**——建议统一**加上** `<think>` 而非剥掉；
    `nothink` 消融版可做反向验证，无需额外训练。
-3. **5 道题环境损坏**——在基座四档与两个 SFT adapter 上均 infra 失败，
+5. **5 道题环境损坏**——在基座四档与两个 SFT adapter 上均 infra 失败，
    属题目本身问题，已排除计分。
-4. **maintainability 天花板低**——4B/8B 区间只有 1–2 分，几乎测不出差异。
-5. **73% 的题只有一个 P2P 测试**——correctness 判定强度有限，
+6. **maintainability 天花板低**——4B/8B 区间只有 1–2 分，几乎测不出差异。
+7. **73% 的题只有一个 P2P 测试**——correctness 判定强度有限，
    `changed_lines_covered` 只能部分缓解。
-6. **训练/评测窗口偏移**——训练 24,576、评测 40,960。实测数据 p50 仅 6,004、
+8. **训练/评测窗口偏移**——训练 24,576、评测 40,960。实测数据 p50 仅 6,004、
    p90 15,499，影响面应有限但无实验证据。
 
 ---
 
 ## 九、下一步
 
-1. 实现协议改造第三条路径，先用 Gemini 做回归验证（它现在就走结构化路径，
-   切到 JSON 版后结果不应大幅变化）；
-2. 14 模型全量重跑 → correctness → 三判判分 → 发布 v2 榜，
+1. ~~实现协议改造第三条路径~~ **已完成**（§5.6）。回归验证已用 `claude-opus-5`、
+   `gpt-5.6-sol`、`gemini-3.7-flash`、`gemini-3.5-flash` 跑通；
+2. 等 `gemini-3.6-flash` 部署恢复（P78），其余 13 个模型不受阻可先跑；
+   gpt-5.5 的快照变更需在榜单里声明（P79）；
+3. 14 模型全量重跑 → correctness → 三判判分 → 发布 v2 榜，
    v1 标注「不同协议，不可比」存档；
-3. 27B SFT 训完后走完整评测，与主榜基线 Qwen3.6-27B（Final 54/398）同口径对比；
-4. Kimi K2.5 补完 correctness 与判分，列入榜单；
-5. 整理 SFT 阶梯与基座阶梯为独立附表，明确标注与主榜不可比的三点
+4. 27B SFT 训完后走完整评测，与主榜基线 Qwen3.6-27B（Final 54/398）同口径对比；
+5. Kimi K2.5 补完 correctness 与判分，列入榜单；
+6. 整理 SFT 阶梯与基座阶梯为独立附表，明确标注与主榜不可比的三点
    （模型代际、上下文窗口、可回放题集）。
 
 ---

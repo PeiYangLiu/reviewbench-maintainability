@@ -228,3 +228,443 @@ def test_context_fit_scopes_exist_and_are_not_empty():
         ids = [line for line in scope.read_text().splitlines() if line.strip()]
         assert ids, scope
         assert len(ids) == len(set(ids)), f"duplicate ids in {scope}"
+
+
+# The v2 protocol rerun regenerates every self-hosted board row. Its rows do not
+# merge into the v1 board -- they build a separate v2 board -- but the whole
+# point of the rerun is to attribute the v1/v2 difference to the protocol, which
+# only holds if nothing else moved. So it is pinned against wherever each model's
+# serving configuration was established.
+V2_PROTOCOL_CONFIG = "amlt_openmodel_v2_protocol.yaml"
+V2_SERVING_SOURCES = [
+    "amlt_openmodel_generation.yaml",
+    "amlt_openmodel_crossfamily.yaml",
+]
+
+
+def v2_reference_serving():
+    """How each self-hosted model is served by the run v2 is compared against."""
+    established = {}
+    for name in V2_SERVING_SOURCES:
+        for job in load_jobs(CONFIGS / name):
+            model, pinned = serving(job)
+            previous = established.setdefault(model, pinned)
+            assert previous == pinned, (
+                f"{model} is served two ways across {V2_SERVING_SOURCES}: "
+                f"{previous} vs {pinned}"
+            )
+    return established
+
+
+def test_v2_rerun_changes_the_protocol_and_nothing_else():
+    established = v2_reference_serving()
+    jobs = load_jobs(CONFIGS / V2_PROTOCOL_CONFIG)
+    mismatches = []
+    for job in jobs:
+        model, pinned = serving(job)
+        assert model in established, f"{model} has no established serving config"
+        if pinned != established[model]:
+            mismatches.append(
+                (
+                    job["name"],
+                    model,
+                    {
+                        key: (established[model][key], pinned[key])
+                        for key in pinned
+                        if pinned[key] != established[model][key]
+                    },
+                )
+            )
+    assert not mismatches, (
+        "v2 rerun serves a model differently from the run it is compared against "
+        f"(established value, v2 value): {mismatches}"
+    )
+    assert {job["submit_args"]["env"]["MODEL_ID"] for job in jobs} == set(established)
+
+
+def test_v2_rerun_declares_the_protocol_on_every_job():
+    """A job that leaves PROTOCOL implicit would silently inherit a default."""
+    for job in load_jobs(CONFIGS / V2_PROTOCOL_CONFIG):
+        env = job["submit_args"]["env"]
+        assert env.get("PROTOCOL") == "agentic-line-edit/v2", job["name"]
+        assert env.get("MAX_TOOL_RESULT_CHARS") == "24000", job["name"]
+
+
+def test_v2_rerun_covers_the_audited_scope_for_every_model():
+    scopes = {
+        job["submit_args"]["env"].get("GENERATION_IDS_FILE")
+        for job in load_jobs(CONFIGS / V2_PROTOCOL_CONFIG)
+    }
+    assert scopes == {"configs/openmodel_scope_ids/audited-402.ids"}
+    ids = (CONFIGS / "openmodel_scope_ids" / "audited-402.ids").read_text().split()
+    assert len(ids) == len(set(ids)) == 402
+
+
+# Multi-turn SFT adapters. PEFT does not record the base revision in
+# adapter_config.json, so a config that names the wrong revision loads a
+# different base without any error -- it only shows up as bad numbers. Each
+# adapter ships a TRAIN_META.json recording what it was actually trained on,
+# and that is the authority here.
+MT_SFT_CONFIG = "amlt_openmodel_mt_sft.yaml"
+ADAPTER_ROOT = CONFIGS.parent / "sft-adapters-mt"
+# Each adapter is compared against its own base rung, so it must be served the
+# way that rung is served. Qwen3.6-27B's baseline is its board row, not a ladder
+# rung, so it draws from the board config.
+MT_SFT_REFERENCE = [
+    "amlt_openmodel_qwen_ladder.yaml",
+    "amlt_openmodel_generation.yaml",
+]
+
+
+def adapter_dir(job):
+    """Return the adapter path from a NAME=PATH LORA_ADAPTER value."""
+    value = job["submit_args"]["env"]["LORA_ADAPTER"]
+    _, _, path = value.partition("=")
+    return CONFIGS.parent / path
+
+
+def test_mt_sft_pins_the_base_revision_each_adapter_was_trained_on():
+    import json
+
+    for job in load_jobs(CONFIGS / MT_SFT_CONFIG):
+        env = job["submit_args"]["env"]
+        meta_path = adapter_dir(job) / "TRAIN_META.json"
+        if not meta_path.exists():
+            pytest.skip(f"adapter payload not staged: {meta_path}")
+        meta = json.loads(meta_path.read_text())
+        assert env["MODEL_ID"] == meta["base_model"], job["name"]
+        assert env["MODEL_REVISION"] == meta["base_revision"], (
+            f"{job['name']} would load a different base than it was trained on: "
+            f"config {env['MODEL_REVISION']} vs TRAIN_META {meta['base_revision']}"
+        )
+
+
+def test_mt_sft_adapter_payloads_match_their_recorded_hash():
+    import hashlib
+    import json
+
+    for job in load_jobs(CONFIGS / MT_SFT_CONFIG):
+        directory = adapter_dir(job)
+        meta_path = directory / "TRAIN_META.json"
+        weights = directory / "adapter_model.safetensors"
+        if not meta_path.exists() or not weights.exists():
+            pytest.skip(f"adapter payload not staged: {directory}")
+        expected = json.loads(meta_path.read_text()).get("adapter_sha256")
+        if not expected:
+            continue
+        digest = hashlib.sha256(weights.read_bytes()).hexdigest()
+        assert digest == expected, f"{job['name']} adapter payload does not match"
+
+
+def test_mt_sft_serves_each_adapter_like_its_base_rung():
+    reference = {}
+    for name in MT_SFT_REFERENCE:
+        for job in load_jobs(CONFIGS / name):
+            if job["submit_args"]["env"].get("LORA_ADAPTER"):
+                continue
+            model, pinned = serving(job)
+            reference.setdefault(model, pinned)
+    mismatches = []
+    for job in load_jobs(CONFIGS / MT_SFT_CONFIG):
+        model, pinned = serving(job)
+        base = reference.get(model)
+        assert base, f"{model} has no base rung to compare against"
+        differing = {
+            key: (base[key], pinned[key])
+            for key in ("sku", "TENSOR_PARALLEL_SIZE", "MAX_MODEL_LEN", "MODEL_REVISION")
+            if base[key] != pinned[key]
+        }
+        if differing:
+            mismatches.append((job["name"], model, differing))
+    assert not mismatches, (
+        "an adapter is served differently from the base rung it is compared "
+        f"against (base value, adapter value): {mismatches}"
+    )
+
+
+def test_mt_sft_runs_the_protocol_the_adapters_were_trained_on():
+    """v1 would reproduce the train/inference mismatch that voided two rounds."""
+    for job in load_jobs(CONFIGS / MT_SFT_CONFIG):
+        env = job["submit_args"]["env"]
+        assert env.get("PROTOCOL") == "agentic-line-edit/v2", job["name"]
+        assert env.get("MAX_TOOL_RESULT_CHARS") == "24000", job["name"]
+        assert env.get("MAX_LORA_RANK") == "32", job["name"]
+        assert (
+            env.get("GENERATION_IDS_FILE")
+            == "configs/openmodel_scope_ids/audited-402.ids"
+        ), job["name"]
+
+
+# The v2 base ladder is the control for the SFT adapters: same protocol, same
+# period, same serving. If it drifts from either the v1 ladder's serving or the
+# adapter jobs' serving, "SFT helped/hurt" stops being a one-variable claim.
+V2_BASE_LADDER = "amlt_openmodel_v2_base_ladder.yaml"
+
+
+def test_v2_base_ladder_matches_the_v1_ladder_serving():
+    reference = {}
+    for job in load_jobs(CONFIGS / "amlt_openmodel_qwen_ladder.yaml"):
+        model, pinned = serving(job)
+        reference.setdefault(model, pinned)
+    for job in load_jobs(CONFIGS / V2_BASE_LADDER):
+        model, pinned = serving(job)
+        assert pinned == reference[model], (
+            f"{job['name']} is served differently from the v1 ladder rung it "
+            f"replaces: {reference[model]} vs {pinned}"
+        )
+
+
+def test_each_adapter_has_a_base_row_under_the_same_protocol():
+    base = {}
+    for job in load_jobs(CONFIGS / V2_BASE_LADDER):
+        env = job["submit_args"]["env"]
+        assert env["PROTOCOL"] == "agentic-line-edit/v2", job["name"]
+        assert not env.get("LORA_ADAPTER"), f"{job['name']} is not a base row"
+        model, pinned = serving(job)
+        base[model] = pinned
+    missing = []
+    for job in load_jobs(CONFIGS / MT_SFT_CONFIG):
+        model, pinned = serving(job)
+        if model not in base:
+            # Qwen3.6-27B's control is its board row, not a ladder rung.
+            continue
+        if pinned != base[model]:
+            missing.append((job["name"], model, base[model], pinned))
+    assert not missing, (
+        f"adapter and its v2 base row are served differently: {missing}"
+    )
+
+
+# The deadline probe must differ from its SFT rows in exactly one setting, or it
+# cannot attribute a recovered generation rate to the stopping signal.
+DEADLINE_CONFIG = "amlt_openmodel_mt_sft_deadline.yaml"
+
+
+def test_deadline_probe_changes_only_the_edit_deadline():
+    sft = {}
+    for job in load_jobs(CONFIGS / MT_SFT_CONFIG):
+        env = job["submit_args"]["env"]
+        sft[env["LORA_ADAPTER"]] = (job["sku"], dict(env))
+    for job in load_jobs(CONFIGS / DEADLINE_CONFIG):
+        env = job["submit_args"]["env"]
+        sku, base_env = sft[env["LORA_ADAPTER"]]
+        assert job["sku"] == sku, job["name"]
+        differing = {
+            key
+            for key in set(base_env) | set(env)
+            if base_env.get(key) != env.get(key)
+        }
+        assert differing == {"EDIT_DEADLINE"}, (
+            f"{job['name']} differs from its SFT row in more than the deadline: "
+            f"{sorted(differing)}"
+        )
+        assert env["EDIT_DEADLINE"] == "24"
+
+
+def test_published_runs_left_the_deadline_off():
+    """The v2 board and the SFT table were produced without the nudge."""
+    for name in (
+        "amlt_openmodel_v2_protocol.yaml",
+        "amlt_openmodel_v2_base_ladder.yaml",
+        MT_SFT_CONFIG,
+    ):
+        for job in load_jobs(CONFIGS / name):
+            env = job["submit_args"]["env"]
+            assert not env.get("EDIT_DEADLINE"), f"{name}:{job['name']}"
+
+
+def test_output_budget_defaults_cover_observed_generations():
+    """4096 truncated 10-35% of rounds on prose-first models (P82).
+
+    The budget shares `max_model_len` with the prompt, so it cannot simply be
+    maximised: measured prompt_tokens reach 61,425 against a 65,536 window,
+    leaving 4,111. 8192 covers every observed generation (longest content was
+    12,555 chars, ~3-4k tokens) while leaving the prompt its p99 headroom.
+    """
+    import re
+
+    runner = (CONFIGS.parent / "scripts" / "run_open_model_job.sh").read_text()
+    match = re.search(r"--max-output-tokens \"\$\{MAX_OUTPUT_TOKENS:-(\d+)\}\"", runner)
+    assert match, "runner no longer sets a default output budget"
+    assert int(match.group(1)) >= 8192, (
+        "output budget below 8192 truncates prose-first models mid-action (P82)"
+    )
+
+    launcher = (CONFIGS.parent / "scripts" / "run_open_model_agentic.py").read_text()
+    match = re.search(
+        r'add_argument\("--max-output-tokens", type=int, default=(\d+)\)', launcher
+    )
+    assert match and int(match.group(1)) >= 8192
+
+
+# Frozen v1-era configs are records of what actually ran and must not be
+# edited. `amlt_openmodel_retries.yaml` pins 1024/2048, which truncates even
+# harder than the 4096 that produced P82 -- noted there, not fixed here.
+FROZEN_V1_CONFIGS = {"amlt_openmodel_retries.yaml"}
+
+
+# A budget below 8192 truncates high-reasoning models (P82), but raising it
+# also spends the shared `max_model_len` on output the model does not use
+# (P88), so a low budget is a deliberate choice a config has to declare.
+DECLARED_LOW_BUDGET_CONFIGS = {"amlt_openmodel_rl_three_arm_budget4k.yaml"}
+
+
+def test_no_current_config_pins_a_truncating_output_budget_by_accident():
+    """8192 is the default; anything lower must be an explicit control.
+
+    The first version of this guard simply banned <8192. That was too strong:
+    for a model that truncates at ~0% the extra budget is pure cost, and the
+    guard would have blocked the control run that measured it. What must not
+    happen is a config drifting back to 4096 unnoticed.
+    """
+    for path in sorted(CONFIGS.glob("amlt_openmodel_*.yaml")):
+        if path.name in FROZEN_V1_CONFIGS:
+            continue
+        declared = path.name in DECLARED_LOW_BUDGET_CONFIGS
+        for job in load_jobs(path):
+            budget = job["submit_args"]["env"].get("MAX_OUTPUT_TOKENS")
+            if budget is None:
+                continue
+            if declared:
+                assert int(budget) < 8192, (
+                    f"{path.name} is registered as a low-budget control but "
+                    f"{job['name']} pins {budget}"
+                )
+                continue
+            assert int(budget) >= 8192, f"{path.name}:{job['name']} pins {budget}"
+
+
+def test_a_low_budget_config_explains_itself():
+    """A control that does not say why it is low is indistinguishable from a
+    regression, which is the failure this whole guard exists to prevent."""
+    for name in DECLARED_LOW_BUDGET_CONFIGS:
+        text = (CONFIGS / name).read_text(encoding="utf-8")
+        assert "P88" in text, f"{name} must cite why a low budget is correct"
+
+
+def test_budget8k_rerun_changes_only_the_output_budget():
+    """The P82 re-run must isolate the budget, or it cannot be attributed."""
+    base = {}
+    for job in load_jobs(CONFIGS / "amlt_openmodel_v2_protocol.yaml"):
+        env = job["submit_args"]["env"]
+        base[env["MODEL_ID"]] = (job["sku"], dict(env))
+    jobs = load_jobs(CONFIGS / "amlt_openmodel_v2_budget8k.yaml")
+    assert len(jobs) == len(base)
+    for job in jobs:
+        env = job["submit_args"]["env"]
+        sku, base_env = base[env["MODEL_ID"]]
+        assert job["sku"] == sku, job["name"]
+        differing = {
+            key
+            for key in set(base_env) | set(env)
+            if base_env.get(key) != env.get(key)
+        }
+        assert differing == {"MAX_OUTPUT_TOKENS"}, (
+            f"{job['name']} differs from its 4096 row in more than the budget: "
+            f"{sorted(differing)}"
+        )
+        assert env["MAX_OUTPUT_TOKENS"] == "8192"
+
+
+# The RL arms differ only in training data, so the config must differ only in
+# the adapter. The RL session asked for all three in one time window citing P80;
+# this is the machine-checkable half of that request.
+RL_CONFIG = "amlt_openmodel_rl_three_arm.yaml"
+
+
+def test_rl_arms_differ_only_in_the_adapter():
+    jobs = load_jobs(CONFIGS / RL_CONFIG)
+    assert len(jobs) == 3, "the three-arm comparison needs exactly three arms"
+    envs = [job["submit_args"]["env"] for job in jobs]
+    assert len({job["sku"] for job in jobs}) == 1
+    keys = set().union(*(set(e) for e in envs))
+    differing = {k for k in keys if len({e.get(k) for e in envs}) > 1}
+    assert differing == {"LORA_ADAPTER"}, (
+        f"RL arms differ in more than the adapter: {sorted(differing)}"
+    )
+
+
+def test_rl_arms_match_the_qwen3_8b_base_rung():
+    """The untuned base row from the v2 ladder is the fourth reference point."""
+    base = None
+    for job in load_jobs(CONFIGS / "amlt_openmodel_v2_base_ladder.yaml"):
+        if job["submit_args"]["env"]["MODEL_ID"] == "Qwen/Qwen3-8B":
+            base = serving(job)[1]
+    assert base
+    for job in load_jobs(CONFIGS / RL_CONFIG):
+        pinned = serving(job)[1]
+        assert pinned == base, (
+            f"{job['name']} is served differently from the Qwen3-8B base rung: "
+            f"{base} vs {pinned}"
+        )
+
+
+def test_rl_arms_use_the_untruncated_output_budget():
+    """At 4096 the longest-reasoning arm would lose the most rounds (P82)."""
+    for job in load_jobs(CONFIGS / RL_CONFIG):
+        env = job["submit_args"]["env"]
+        assert env["MAX_OUTPUT_TOKENS"] == "8192", job["name"]
+        assert env["PROTOCOL"] == "agentic-line-edit/v2", job["name"]
+
+
+def test_sft_budget8k_rerun_changes_only_the_output_budget():
+    """The SFT 'no effect' verdict was measured at 4096 and needs re-measuring."""
+    base = {}
+    for job in load_jobs(CONFIGS / MT_SFT_CONFIG):
+        env = job["submit_args"]["env"]
+        base[env["LORA_ADAPTER"]] = (job["sku"], dict(env))
+    jobs = load_jobs(CONFIGS / "amlt_openmodel_mt_sft_budget8k.yaml")
+    assert len(jobs) == len(base)
+    for job in jobs:
+        env = job["submit_args"]["env"]
+        sku, base_env = base[env["LORA_ADAPTER"]]
+        assert job["sku"] == sku, job["name"]
+        differing = {
+            key
+            for key in set(base_env) | set(env)
+            if base_env.get(key) != env.get(key)
+        }
+        assert differing == {"MAX_OUTPUT_TOKENS"}, job["name"]
+        assert env["MAX_OUTPUT_TOKENS"] == "8192"
+
+
+def test_rl_three_arm_budget_control_changes_only_the_output_budget():
+    """The 8192 run costs these arms prompt room for no truncation gain (P88).
+
+    The control has to differ in exactly one field or it cannot attribute the
+    difference to the budget.
+    """
+    base = {}
+    for job in load_jobs(CONFIGS / "amlt_openmodel_rl_three_arm.yaml"):
+        env = job["submit_args"]["env"]
+        base[env["LORA_ADAPTER"]] = (job["sku"], dict(env))
+    jobs = load_jobs(CONFIGS / "amlt_openmodel_rl_three_arm_budget4k.yaml")
+    assert len(jobs) == len(base) == 3
+    for job in jobs:
+        env = job["submit_args"]["env"]
+        sku, base_env = base[env["LORA_ADAPTER"]]
+        assert job["sku"] == sku, job["name"]
+        differing = {
+            key
+            for key in set(base_env) | set(env)
+            if base_env.get(key) != env.get(key)
+        }
+        assert differing == {"MAX_OUTPUT_TOKENS"}, job["name"]
+        assert env["MAX_OUTPUT_TOKENS"] == "4096"
+        assert env["MAX_MODEL_LEN"] == base_env["MAX_MODEL_LEN"]
+
+
+def test_sampling_noise_replicates_are_identical_to_each_other():
+    """Their whole purpose is to differ in nothing at all.
+
+    Arm-vs-arm claims are only readable against a measured noise floor, and a
+    replicate set that differs in any field measures something else.
+    """
+    jobs = load_jobs(CONFIGS / "amlt_openmodel_sampling_noise.yaml")
+    assert len(jobs) == 3
+    environments = [job["submit_args"]["env"] for job in jobs]
+    first = environments[0]
+    for env in environments[1:]:
+        assert env == first
+    assert len({job["sku"] for job in jobs}) == 1
+    assert len({job["name"] for job in jobs}) == 3

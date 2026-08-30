@@ -169,6 +169,34 @@ SEARCH/REPLACE results remain frozen as the non-agentic baseline; agentic
 results must be generated and evaluated separately rather than filling only
 the baseline's protocol failures.
 
+#### Action history: `agentic-line-edit/v2`
+
+`--protocol` selects how prior rounds reach the model. The actions, host
+validation, and patch construction are identical in both versions; only the
+framing of the history differs.
+
+| Protocol | History | Use |
+|---|---|---|
+| `agentic-line-edit/v2` (default) | alternating `assistant` / `user` messages | current runs |
+| `agentic-line-edit/v1` | flattened into a `TOOL TRANSCRIPT:` block in the user message | reproducing the frozen v1 leaderboard only |
+
+v2 puts a model's own past actions in the `assistant` role, which is the format
+these models were post-trained on, and stops re-encoding the whole prefix every
+round. Tool results ride in `user` messages rather than `role: tool`: the
+OpenAI schema requires a tool message to carry a `tool_call_id` and follow an
+assistant turn with `tool_calls`, and all six API-served models reject the bare
+form, so `role: tool` would split the leaderboard into two wire formats.
+
+`AGENT_INSTRUCTIONS` travels unchanged in the envelope's own system slot, and a
+conversation that does not begin with it is refused rather than sent. Tool
+results are serialized exactly as v1 serialized them, so the same step carries
+the same bytes under either protocol and in the training-side conversation
+builder. When a prompt exceeds the served window, v2 truncates over-long
+individual tool results instead of dropping rounds, and solves for the largest
+cap that actually frees the required space rather than subtracting from a
+nominal budget. Results from different protocols are never resumed, reused, or
+attested together.
+
 The complete 306-task agentic evaluation is available at
 [`data/releases/reserves/20260721/evaluations/agentic-three-model-20260725`](data/releases/reserves/20260721/evaluations/agentic-three-model-20260725/):
 
