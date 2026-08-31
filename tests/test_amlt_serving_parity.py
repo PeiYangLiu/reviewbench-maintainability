@@ -739,3 +739,26 @@ def test_banner_ablation_changes_only_the_served_format():
         assert differing == {"PROTOCOL", "MAX_ROUNDS"}, job["name"]
         assert env["PROTOCOL"] == "agentic-line-edit/v2"
         assert env["MAX_ROUNDS"] == "32"
+
+
+def test_the_two_ablation_arms_differ_only_in_the_round_cap():
+    """The first ablation moved format and cap together, so it cannot attribute.
+
+    This pair holds the format fixed and moves only the cap, which is what
+    separates "the banner mattered" from "the extra rounds mattered".
+    """
+    wide = {
+        job["submit_args"]["env"]["MODEL_ID"]: job
+        for job in load_jobs(CONFIGS / "amlt_openmodel_native_banner_ablation.yaml")
+    }
+    narrow = load_jobs(CONFIGS / "amlt_openmodel_native_banner_ablation_r16.yaml")
+    assert len(narrow) == 2
+    for job in narrow:
+        env = job["submit_args"]["env"]
+        other = wide[env["MODEL_ID"]]["submit_args"]["env"]
+        differing = {
+            key for key in set(env) | set(other) if env.get(key) != other.get(key)
+        }
+        assert differing == {"MAX_ROUNDS"}, job["name"]
+        assert env["MAX_ROUNDS"] == "16"
+        assert env["PROTOCOL"] == "agentic-line-edit/v2"
