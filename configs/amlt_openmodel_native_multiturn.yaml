@@ -1,0 +1,132 @@
+# Native multi-turn full-finetune checkpoints from the SFT session, evaluated
+# against their own base models in the same time window.
+#
+# These are the first models trained on whole trajectories rather than one
+# sample per round, and the first served the `<tool_response>` wrapper with the
+# round budget inside it, so they need PROTOCOL=v2-tool-response and
+# MAX_ROUNDS=16 -- the harness refuses to start if those disagree.
+#
+# The two base rungs are re-run here rather than cited from the earlier ladder:
+# an upstream serving change between runs is exactly what P80 records, and a
+# delta against a number measured days ago cannot be attributed to training.
+#
+# MAX_OUTPUT_TOKENS is 8192 against a 40960 window. That cost the mt-SFT
+# adapters 8-11 tasks (P88) because they burn all 32 rounds and sit against the
+# window; if native multi-turn really teaches the model to stop, the cost goes
+# away on its own. It is held identical across all four jobs either way.
+description: "ReviewBench native multi-turn checkpoints against their own bases"
+
+target:
+  service: singularity
+  name: msrresrchbasicvc
+  workspace_name: Workspace_NLC
+
+environment:
+  image: amlt-sing/acpt-torch2.7.1-py3.10-cuda12.6-ubuntu22.04
+  image_setup:
+    - python -m pip install "vllm==0.26.0" "hf_transfer==0.1.9" "numpy==2.2.6" "scipy==1.15.3"
+
+code:
+  local_dir: $CONFIG_DIR/..
+
+data:
+  local_dir: $REVIEWBENCH_OPENMODEL_REPO_CACHE
+  remote_dir: reviewbench-openmodels/repo-cache-minimal
+
+jobs:
+  - name: native-qwen3-8b
+    identity: managed
+    sku: 40G2-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: "/mnt/output/projects/reviewbench-sft/resumable/native-8b-clean-ctx24576/final"
+        MODEL_REVISION: ""
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/audited-402.ids
+        PROTOCOL: agentic-line-edit/v2-tool-response
+        MAX_ROUNDS: "16"
+        MAX_TOOL_RESULT_CHARS: "24000"
+        MAX_OUTPUT_TOKENS: "8192"
+        TENSOR_PARALLEL_SIZE: "2"
+        MAX_MODEL_LEN: "40960"
+        GENERATION_WORKERS: "10"
+        MAX_NUM_SEQS: "10"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  - name: base-qwen3-8b
+    identity: managed
+    sku: 40G2-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: "Qwen/Qwen3-8B"
+        MODEL_REVISION: "b968826d9c46dd6066d109eabc6255188de91218"
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/audited-402.ids
+        PROTOCOL: agentic-line-edit/v2-tool-response
+        MAX_ROUNDS: "16"
+        MAX_TOOL_RESULT_CHARS: "24000"
+        MAX_OUTPUT_TOKENS: "8192"
+        TENSOR_PARALLEL_SIZE: "2"
+        MAX_MODEL_LEN: "40960"
+        GENERATION_WORKERS: "10"
+        MAX_NUM_SEQS: "10"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  - name: native-qwen3-14b
+    identity: managed
+    sku: 40G2-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: "/mnt/output/projects/reviewbench-sft/resumable/full-Qwen-Qwen3-14B-mt_native_v6-ctx24576-ddafa40072d4c/final"
+        MODEL_REVISION: ""
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/audited-402.ids
+        PROTOCOL: agentic-line-edit/v2-tool-response
+        MAX_ROUNDS: "16"
+        MAX_TOOL_RESULT_CHARS: "24000"
+        MAX_OUTPUT_TOKENS: "8192"
+        TENSOR_PARALLEL_SIZE: "2"
+        MAX_MODEL_LEN: "40960"
+        GENERATION_WORKERS: "10"
+        MAX_NUM_SEQS: "10"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  - name: base-qwen3-14b
+    identity: managed
+    sku: 40G2-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: "Qwen/Qwen3-14B"
+        MODEL_REVISION: "40c069824f4251a91eefaf281ebe4c544efd3e18"
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/audited-402.ids
+        PROTOCOL: agentic-line-edit/v2-tool-response
+        MAX_ROUNDS: "16"
+        MAX_TOOL_RESULT_CHARS: "24000"
+        MAX_OUTPUT_TOKENS: "8192"
+        TENSOR_PARALLEL_SIZE: "2"
+        MAX_MODEL_LEN: "40960"
+        GENERATION_WORKERS: "10"
+        MAX_NUM_SEQS: "10"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True

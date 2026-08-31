@@ -1131,3 +1131,25 @@ RL 三臂在 402 题上的配对检验是第一个警告:
   只有 +21 / +24 这一档才稳稳超出噪声。
 - **11% 的题会在两次跑之间翻转**,所以边际计数会同时掩盖大量相互抵消的翻转。
   **报 delta 必须同时报配对不一致数**,只报边际计数等于没报。
+
+### P90. 在串行 lane 循环还没跑到的时候手工并行启动同一个 lane,会开出两个 runner
+
+我最初用一个 `for L in gopy scripted tsjs csharp jvm rust native` 的串行循环跑 7 个 lane。
+跑到一半嫌慢,又手工并行起了 rust 和 native。
+
+问题是**那个串行循环还活着**。它跑完 jvm 之后照着列表继续,
+于是在 rust/native 已经跑了 7 个多小时的时候,**又起了一个 native runner**,
+两个进程写同一个 `native.jsonl`。
+
+这次没出事(runner 有 `repo-process-locks`,`native.jsonl` 283 行零重复零损坏),
+**但那是运气**——我并不是因为知道有锁才这么干的。
+
+- **做法**:手工并行接管某个 lane 之前,**先把串行驱动杀掉**,
+  或者一开始就不要用「循环 + 中途插手」这种混合模式。
+- **查法**:`ps -eo pid,etime,cmd | grep "[n]ative_runner.py"`,
+  看到两个 `etime` 差很多的同名进程就是这个问题。
+  杀**新**的那个(旧的进度更多),再核对结果文件有没有重复的 `(id, model)`。
+- 顺带:并行跑多个 lane 会让磁盘消耗成倍上升。
+  三个 lane 并行时 55 分钟吃掉 128G,离看门狗阈值只剩 25 分钟。
+  现在有一个守卫在 `<100G` 时 `SIGSTOP` 掉最耗盘的 native lane、`>=140G` 再 `SIGCONT`——
+  用暂停而不是杀,checkpoint 和在飞的 worktree 都不用重做。

@@ -1,0 +1,56 @@
+# RL three-arm evaluation: SFT start -> RFT round 1 -> RFT round 2.
+#
+# The three adapters share a base and a revision and differ only in training
+# data, so this config differs between arms only in LORA_ADAPTER. That is the
+# whole point: the RL session needs to attribute a delta to the training round,
+# and anything else moving would make the delta unattributable -- the mistake
+# recorded as P80, which they cited themselves when asking for all three arms in
+# one time window.
+#
+# Serving matches amlt_openmodel_v2_base_ladder.yaml's Qwen3-8B rung, so the
+# untuned base row measured in that run is a valid fourth reference point
+# without re-running it.
+#
+# MAX_OUTPUT_TOKENS is 8192 (P82): at 4096 the Qwen family lost 10-35% of rounds
+# to mid-action truncation, which would land hardest on whichever arm writes the
+# longest reasoning -- likely the most-trained one, i.e. exactly backwards.
+description: "Probe whether the SFT project output mount is readable from this project"
+
+target:
+  service: singularity
+  name: msrresrchbasicvc
+  workspace_name: Workspace_NLC
+
+environment:
+  image: amlt-sing/acpt-torch2.7.1-py3.10-cuda12.6-ubuntu22.04
+  image_setup:
+    - python -m pip install "vllm==0.26.0" "hf_transfer==0.1.9" "numpy==2.2.6" "scipy==1.15.3"
+
+code:
+  local_dir: $CONFIG_DIR/..
+
+data:
+  local_dir: $REVIEWBENCH_OPENMODEL_REPO_CACHE
+  remote_dir: reviewbench-openmodels/repo-cache-minimal
+
+jobs:
+  - name: probe-sft-mount
+    identity: managed
+    sku: 8C7
+    process_count_per_node: 1
+    command:
+      - set +e
+      - R=$$AMLT_OUTPUT_DIR/probe.txt
+      - echo "AMLT_OUTPUT_DIR=$$AMLT_OUTPUT_DIR" > $$R
+      - echo "--- /mnt ---" >> $$R
+      - ls /mnt >> $$R 2>&1
+      - echo "--- /mnt/output ---" >> $$R
+      - ls /mnt/output >> $$R 2>&1
+      - echo "--- /mnt/output/projects ---" >> $$R
+      - ls /mnt/output/projects >> $$R 2>&1
+      - echo "--- sft resumable ---" >> $$R
+      - ls /mnt/output/projects/reviewbench-sft/resumable >> $$R 2>&1
+      - echo "--- 8b final ---" >> $$R
+      - ls /mnt/output/projects/reviewbench-sft/resumable/native-8b-clean-ctx24576/final >> $$R 2>&1
+      - echo PROBE_DONE >> $$R
+      - cat $$R

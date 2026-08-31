@@ -2,7 +2,25 @@
 set -euo pipefail
 
 : "${MODEL_ID:?MODEL_ID is required}"
-: "${MODEL_REVISION:?MODEL_REVISION is required}"
+# A local weight directory has no revision to pin, and demanding one there only
+# invites a made-up value that later reads as provenance. Hugging Face ids still
+# require it, so the check is kept for them.
+case "$MODEL_ID" in
+  /*)
+    if [ -n "${MODEL_REVISION:-}" ]; then
+      echo "MODEL_ID is a local path; MODEL_REVISION must be empty" >&2
+      exit 2
+    fi
+    if [ ! -f "$MODEL_ID/config.json" ]; then
+      echo "no model at $MODEL_ID (config.json missing)" >&2
+      exit 2
+    fi
+    MODEL_REVISION=""
+    ;;
+  *)
+    : "${MODEL_REVISION:?MODEL_REVISION is required}"
+    ;;
+esac
 : "${TENSOR_PARALLEL_SIZE:?TENSOR_PARALLEL_SIZE is required}"
 : "${MAX_MODEL_LEN:?MAX_MODEL_LEN is required}"
 : "${GENERATION_WORKERS:?GENERATION_WORKERS is required}"
@@ -135,7 +153,7 @@ python3 scripts/run_open_model_agentic.py \
   --max-model-len "$MAX_MODEL_LEN" \
   --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.90}" \
   --workers "$GENERATION_WORKERS" \
-  --max-rounds 32 \
+  --max-rounds "${MAX_ROUNDS:-32}" \
   --max-output-tokens "${MAX_OUTPUT_TOKENS:-8192}" \
   --max-transcript-chars "${MAX_TRANSCRIPT_CHARS:-120000}" \
   --protocol "${PROTOCOL:-agentic-line-edit/v2}" \

@@ -305,6 +305,7 @@ def test_v2_rerun_covers_the_audited_scope_for_every_model():
 # different base without any error -- it only shows up as bad numbers. Each
 # adapter ships a TRAIN_META.json recording what it was actually trained on,
 # and that is the authority here.
+NATIVE_MULTITURN_CONFIG = "amlt_openmodel_native_multiturn.yaml"
 MT_SFT_CONFIG = "amlt_openmodel_mt_sft.yaml"
 ADAPTER_ROOT = CONFIGS.parent / "sft-adapters-mt"
 # Each adapter is compared against its own base rung, so it must be served the
@@ -668,3 +669,73 @@ def test_sampling_noise_replicates_are_identical_to_each_other():
         assert env == first
     assert len({job["sku"] for job in jobs}) == 1
     assert len({job["name"] for job in jobs}) == 3
+
+
+def test_native_multiturn_pairs_each_checkpoint_with_its_own_base():
+    """A tuned model is only readable against its base in the same window (P80)."""
+    jobs = {job["name"]: job for job in load_jobs(CONFIGS / NATIVE_MULTITURN_CONFIG)}
+    assert set(jobs) == {
+        "native-qwen3-8b",
+        "base-qwen3-8b",
+        "native-qwen3-14b",
+        "base-qwen3-14b",
+    }
+    for size in ("8b", "14b"):
+        tuned = jobs[f"native-qwen3-{size}"]["submit_args"]["env"]
+        base = jobs[f"base-qwen3-{size}"]["submit_args"]["env"]
+        assert jobs[f"native-qwen3-{size}"]["sku"] == jobs[f"base-qwen3-{size}"]["sku"]
+        differing = {
+            key
+            for key in set(tuned) | set(base)
+            if tuned.get(key) != base.get(key)
+        }
+        assert differing == {"MODEL_ID", "MODEL_REVISION"}, size
+
+
+def test_native_multiturn_uses_the_trained_protocol_and_round_budget():
+    """The wrapper and `OF 16` are part of the trained format, not preferences."""
+    for job in load_jobs(CONFIGS / NATIVE_MULTITURN_CONFIG):
+        env = job["submit_args"]["env"]
+        assert env["PROTOCOL"] == "agentic-line-edit/v2-tool-response", job["name"]
+        assert env["MAX_ROUNDS"] == "16", job["name"]
+        assert env["MAX_OUTPUT_TOKENS"] == "8192", job["name"]
+
+
+def test_a_local_checkpoint_pins_no_revision_and_a_hub_id_always_does():
+    """A revision on a local directory is a made-up value that reads as provenance."""
+    for job in load_jobs(CONFIGS / NATIVE_MULTITURN_CONFIG):
+        env = job["submit_args"]["env"]
+        model = env["MODEL_ID"]
+        revision = env.get("MODEL_REVISION", "")
+        if model.startswith("/"):
+            assert revision == "", job["name"]
+        else:
+            assert len(revision) == 40, job["name"]
+            assert set(revision) <= set("0123456789abcdef"), job["name"]
+
+
+def test_banner_ablation_changes_only_the_served_format():
+    """It must differ from the trained format in the format alone.
+
+    The point is to tell "learned when to stop" apart from "is being told how
+    much budget is left"; any other difference makes the answer unreadable.
+    """
+    trained = {
+        job["submit_args"]["env"]["MODEL_ID"]: job
+        for job in load_jobs(CONFIGS / NATIVE_MULTITURN_CONFIG)
+        if job["name"].startswith("native-")
+    }
+    ablation = load_jobs(CONFIGS / "amlt_openmodel_native_banner_ablation.yaml")
+    assert len(ablation) == 2
+    for job in ablation:
+        env = job["submit_args"]["env"]
+        base = trained[env["MODEL_ID"]]
+        assert job["sku"] == base["sku"], job["name"]
+        differing = {
+            key
+            for key in set(env) | set(base["submit_args"]["env"])
+            if env.get(key) != base["submit_args"]["env"].get(key)
+        }
+        assert differing == {"PROTOCOL", "MAX_ROUNDS"}, job["name"]
+        assert env["PROTOCOL"] == "agentic-line-edit/v2"
+        assert env["MAX_ROUNDS"] == "32"
