@@ -811,3 +811,46 @@ def test_every_serving_config_drops_the_cuda_mismatched_video_decoder():
         if "pip install" not in text or "vllm==" not in text:
             continue
         assert "uninstall -y torchcodec" in text, path.name
+
+
+def test_native_multiturn_replicates_are_identical_within_an_arm():
+    """The maintainability gain rests on 5-7 tasks from single runs.
+
+    Replicating the RL arms turned "no difference at p=0.46" into "round two is
+    significantly worse at p=0.001" (P101), so the one positive result reported
+    on this line gets the same treatment.
+    """
+    jobs = [
+        job
+        for name in (
+            "amlt_openmodel_native_multiturn_replicates_8b.yaml",
+            "amlt_openmodel_native_multiturn_replicates_14b.yaml",
+        )
+        for job in load_jobs(CONFIGS / name)
+    ]
+    assert len(jobs) == 12
+    by_model = {}
+    for job in jobs:
+        by_model.setdefault(job["submit_args"]["env"]["MODEL_ID"], []).append(job)
+    assert len(by_model) == 4
+    for model, group in by_model.items():
+        assert len(group) == 3, model
+        first = group[0]
+        for other in group[1:]:
+            assert other["submit_args"]["env"] == first["submit_args"]["env"], model
+            assert other["sku"] == first["sku"], model
+        assert len({job["name"] for job in group}) == 3, model
+
+
+def test_native_multiturn_replicates_match_the_single_run_they_check():
+    original = {
+        job["submit_args"]["env"]["MODEL_ID"]: job["submit_args"]["env"]
+        for job in load_jobs(CONFIGS / NATIVE_MULTITURN_CONFIG)
+    }
+    for name in (
+        "amlt_openmodel_native_multiturn_replicates_8b.yaml",
+        "amlt_openmodel_native_multiturn_replicates_14b.yaml",
+    ):
+        for job in load_jobs(CONFIGS / name):
+            env = job["submit_args"]["env"]
+            assert env == original[env["MODEL_ID"]], job["name"]
