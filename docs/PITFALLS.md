@@ -1424,3 +1424,31 @@ native lane(C/C++)以 4 并发跑时,磁盘被 4 个 worktree 吃掉 **108G**:
 - **操作规范**:任何两个臂的比较,输出必须是三元组
   `(只有 A 过, 只有 B 过, p)`,**边际计数只能作为附注**。
   已在 `summarize_four_gate.py` 之外补一个配对比较脚本承担这件事。
+
+### P100. `pip install vllm` 会拉进一个和镜像 CUDA 版本不匹配的视频解码器
+
+九个副本作业全部 failed,产物只有 4KB 的 `vllm-server.log`。根因:
+
+```
+OSError: libnvrtc.so.13: cannot open shared object file
+```
+
+vllm 启动时 `import` 链会走到 `vllm.multimodal.video` → `torchcodec`,
+而 **torchcodec 当前构建链接 CUDA 13,镜像是 `cuda12.6`**。
+服务在加载任何权重之前就死了。
+
+- **难点在于它不是配置漂移**:镜像、SKU、env 与几小时前**成功**的那次
+  完全一致(守卫测试能证明)。变的是 pip 在**安装时**解析到的依赖版本。
+  也就是说**同一份配置在不同时间会有不同行为**,这类问题守卫测试抓不到。
+- **修法**:这条线上没有任何东西解码视频,直接卸掉:
+  ```yaml
+  - python -m pip install "vllm==0.26.0" ...
+  - python -m pip uninstall -y torchcodec || true
+  ```
+  比钉 CUDA 版本简单,也比钉 torchcodec 版本稳。
+- **加了守卫**:任何安装 vllm 的配置都必须带这条卸载(`test_every_serving_config_drops_the_cuda_mismatched_video_decoder`)。
+  它当场抓到了 5 个我漏改的配置——它们的 pip 行缩进是 2 空格而不是 4,
+  所以第一轮字符串替换没命中。
+- **教训**:批量改配置后**先跑守卫再提交作业**。
+  我第一次用「按行插入」的脚本改那 5 个文件,把 YAML 改坏了,
+  是守卫测试(9 个 FAILED)拦下来的,不是我自己看出来的。

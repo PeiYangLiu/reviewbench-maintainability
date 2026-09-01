@@ -796,3 +796,18 @@ def test_rl_replicates_match_the_original_three_arm_run():
     for job in load_jobs(CONFIGS / "amlt_openmodel_rl_three_arm_replicates.yaml"):
         env = job["submit_args"]["env"]
         assert env == original[env["LORA_ADAPTER"]]["submit_args"]["env"], job["name"]
+
+
+def test_every_serving_config_drops_the_cuda_mismatched_video_decoder():
+    """vllm imports a video decoder at startup and torchcodec kills the server.
+
+    Its current build links libnvrtc.so.13 against an image shipping CUDA 12.6,
+    so the server dies before loading weights and the job fails with no output.
+    Nine replicate jobs were lost to this. Nothing here decodes video, so the
+    dependency has to be gone from every config that installs vllm.
+    """
+    for path in sorted(CONFIGS.glob("amlt_openmodel_*.yaml")):
+        text = path.read_text(encoding="utf-8")
+        if "pip install" not in text or "vllm==" not in text:
+            continue
+        assert "uninstall -y torchcodec" in text, path.name
