@@ -762,3 +762,37 @@ def test_the_two_ablation_arms_differ_only_in_the_round_cap():
         assert differing == {"MAX_ROUNDS"}, job["name"]
         assert env["MAX_ROUNDS"] == "16"
         assert env["PROTOCOL"] == "agentic-line-edit/v2"
+
+
+def test_rl_replicates_differ_only_in_job_name_within_an_arm():
+    """Three runs of one arm must be identical or they measure something else.
+
+    A single run put the arms at 34/33/40 correct while three runs of one
+    unchanged adapter spanned 29-39, so these replicates are the only thing
+    that can say whether the arm ordering is real.
+    """
+    jobs = load_jobs(CONFIGS / "amlt_openmodel_rl_three_arm_replicates.yaml")
+    assert len(jobs) == 9
+    by_arm = {}
+    for job in jobs:
+        arm = job["submit_args"]["env"]["LORA_ADAPTER"]
+        by_arm.setdefault(arm, []).append(job)
+    assert len(by_arm) == 3
+    for arm, group in by_arm.items():
+        assert len(group) == 3, arm
+        first = group[0]
+        for other in group[1:]:
+            assert other["submit_args"]["env"] == first["submit_args"]["env"], arm
+            assert other["sku"] == first["sku"], arm
+        assert len({job["name"] for job in group}) == 3, arm
+
+
+def test_rl_replicates_match_the_original_three_arm_run():
+    """They have to be comparable with the single run already measured."""
+    original = {
+        job["submit_args"]["env"]["LORA_ADAPTER"]: job
+        for job in load_jobs(CONFIGS / "amlt_openmodel_rl_three_arm.yaml")
+    }
+    for job in load_jobs(CONFIGS / "amlt_openmodel_rl_three_arm_replicates.yaml"):
+        env = job["submit_args"]["env"]
+        assert env == original[env["LORA_ADAPTER"]]["submit_args"]["env"], job["name"]
