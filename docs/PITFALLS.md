@@ -1291,3 +1291,26 @@ native lane(C/C++)以 4 并发跑时,磁盘被 4 个 worktree 吃掉 **108G**:
   不是按 CPU 核数。这批里 iree 单个就要 67G,4 并发的最坏情况超过 200G。
 - 同类风险的还有 openvino、llvm 这种巨型 C++ 仓库。
   gopy/tsjs/jvm 的 worktree 都在 GB 级,只有 native 是几十 GB 级。
+
+### P96. 两批 correctness 同时跑会把盘打穿,且残留是 root 所有、本机删不掉
+
+眼看 6/7 个 lane 跑完、盘还有 203G,我又起了第二批 correctness(RL 三臂 + 噪声重复臂)。
+**35 分钟后剩 26G,再过一会儿只剩 1.1G。**
+
+两批各自的看门狗都只看总剩余空间,互相不知道对方存在,于是**两边同时暂停**、
+谁也腾不出空间给谁。
+
+- **修法**:同一时间只跑一批 correctness。第二批的 `prepare` 很便宜,
+  可以先备好、等第一批结束再 `run`。
+- **删残留时会撞到第二个坑**:worktree 里有一部分文件是**容器内以 root 建的**
+  (`ls -ln` 显示 uid 0),本机用户 `chmod`/`rm` 一律 Permission denied,
+  `rm -rf` 会删掉一半然后卡住,看起来像"删不干净"。
+
+  **解法**:用同一个 oracle 镜像以 root 进去删。
+  ```
+  docker run --rm --user 0:0 -v /data:/data <oracle-image> \
+    bash -lc "rm -rf <path>"
+  ```
+  这次 59G 的残留就是这么清掉的。
+- **教训**:磁盘余量看着够,不代表**峰值**够。native lane 单个 worktree 就能到 67G(P95),
+  两批并行的峰值是各自峰值之和,而不是平均值之和。
