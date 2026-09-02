@@ -72,3 +72,37 @@ def test_self_preference_is_distinguishable_from_family_style():
     sib_v, sib_c = MODULE.veto_rates(votes, "sp")["sp_sib"]
     assert self_v / self_c == 0.0
     assert sib_v / sib_c == 1.0
+
+
+def test_a_judge_whose_removal_moves_no_rank_is_identified_as_replaceable():
+    """Dissent counts say how often a judge objects; this says whether it lands.
+
+    gemini dissents 4 times out of 5136 and moves no model's rank, so its third
+    of the judging budget is free to reassign.
+    """
+    votes = _votes(
+        {
+            ("strong", f"t{i}"): {"a": True, "b": True, "rubber": True}
+            for i in range(10)
+        }
+        | {
+            ("weak", f"t{i}"): {"a": i < 3, "b": i < 3, "rubber": True}
+            for i in range(10)
+        }
+    )
+    full = collections.Counter({"strong": 10, "weak": 3})
+    after = MODULE.board_without(votes, "rubber")
+    assert after["strong"] == 10 and after["weak"] == 3
+    assert MODULE.rank_shift(full, after) == 0
+
+
+def test_removing_a_dissenting_judge_reorders_the_board():
+    """The one that actually objects is the one whose removal is visible."""
+    votes = _votes(
+        {("x", f"t{i}"): {"strict": False, "b": True, "c": True} for i in range(10)}
+        | {("y", f"t{i}"): {"strict": True, "b": True, "c": i < 2} for i in range(10)}
+    )
+    full = collections.Counter({"x": 0, "y": 2})
+    after = MODULE.board_without(votes, "strict")
+    assert after["x"] == 10
+    assert MODULE.rank_shift(full, after) > 0

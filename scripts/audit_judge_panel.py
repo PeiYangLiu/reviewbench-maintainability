@@ -73,6 +73,31 @@ def marginal_influence(votes: dict, panel_size: int = 3) -> dict:
     return out
 
 
+def board_without(votes: dict, judge: str, panel_size: int = 3) -> collections.Counter:
+    """Per-solver unanimous count with one judge removed.
+
+    Solo-veto counts say how often a judge dissents; this says whether that
+    dissent reaches the board. gemini dissents 4 times and moves no model's
+    rank, so its third of the judging budget buys nothing -- a fact available
+    from a recount, which nobody had run.
+    """
+    out: collections.Counter = collections.Counter()
+    for (solver, _), d in votes.items():
+        if len(d) != panel_size:
+            continue
+        if all(v for j, v in d.items() if j != judge):
+            out[solver] += 1
+    return out
+
+
+def rank_shift(before: collections.Counter, after: collections.Counter) -> int:
+    def order(c):
+        return [m for m, _ in sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+    base, moved = order(before), order(after)
+    return sum(1 for i, m in enumerate(base) if moved.index(m) != i)
+
+
 def veto_rates(votes: dict, judge: str, panel_size: int = 3) -> dict:
     """Per-solver veto rate, counted only where the co-judges agreed to pass.
 
@@ -142,6 +167,23 @@ def main() -> None:
             else ""
         )
         print(f"{j:26s} {d['without']:11d} {d['delta']:+7d} {d['solo_veto']:9d}{flag}")
+
+    full: collections.Counter = collections.Counter()
+    for (solver, _), d in votes.items():
+        if len(d) == 3 and all(d.values()):
+            full[solver] += 1
+    print(f"\n移除某判官后,榜单的实际变化:\n")
+    print(f"{'judge':26s} {'排名变化':>10s} {'总分':>8s} {'变化':>8s}")
+    base_total = sum(full.values())
+    for j in sorted(infl["judges"]):
+        after = board_without(votes, j)
+        moved = rank_shift(full, after)
+        total = sum(after.values())
+        flag = "   <-- 贡献为零,可直接替换" if moved == 0 else ""
+        print(
+            f"{j:26s} {moved:6d}/{len(full):<3d} {total:8d} "
+            f"{100*(total-base_total)/max(base_total,1):+7.1f}%{flag}"
+        )
 
     lenient = leniency(votes)
     print("\n宽松度(该判官通过率 - 另两人均值),已控制被判模型质量:\n")
