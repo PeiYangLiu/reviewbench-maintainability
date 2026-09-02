@@ -22,6 +22,14 @@ import os
 
 BASELINE_FAILED = "baseline failed"
 
+# status has five values and only one means the harness failed rather than the
+# model: infra_retry. Scoring it as a failure turns "we never measured this"
+# into "every model failed", which is how three tasks whose oracle needs an
+# unavailable container came to look like the hardest in the set.
+# candidate_missing and scope_error stay failures -- the model genuinely did
+# not produce a usable patch.
+NO_VERDICT = ("infra_retry",)
+
 
 def load(root: str, pattern: str = "correctness-normalized/*.jsonl"):
     status: dict = collections.defaultdict(dict)
@@ -34,19 +42,23 @@ def load(root: str, pattern: str = "correctness-normalized/*.jsonl"):
             except json.JSONDecodeError:
                 continue
             task = r.get("id")
-            status[task][r.get("model")] = r.get("status") == "pass"
+            raw = r.get("status")
+            status[task][r.get("model")] = None if raw in NO_VERDICT else raw == "pass"
             rows[task].append(r)
             lane[task] = r.get("lane")
     return status, rows, lane
 
 
 def classify(models: dict, min_models: int) -> str:
-    if len(models) < min_models:
+    scored = {m: v for m, v in models.items() if v is not None}
+    if not scored:
+        return "no_verdict"
+    if len(scored) < min_models:
         return "under_covered"
-    passes = sum(models.values())
+    passes = sum(scored.values())
     if passes == 0:
         return "none_passed"
-    if passes == len(models):
+    if passes == len(scored):
         return "all_passed"
     return "discriminating"
 
@@ -86,7 +98,7 @@ def main() -> None:
 
     total = sum(kinds.values())
     print(f"{args.root}: {total} tasks\n")
-    for kind in ("discriminating", "all_passed", "none_passed", "under_covered"):
+    for kind in ("discriminating", "all_passed", "none_passed", "under_covered", "no_verdict"):
         if kinds[kind]:
             print(f"  {kind:16s} {kinds[kind]:4d}  {100*kinds[kind]/total:5.1f}%")
 

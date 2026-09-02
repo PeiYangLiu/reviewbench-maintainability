@@ -55,3 +55,24 @@ def test_load_reads_status_and_lane_together(tmp_path):
     assert status["t1"] == {"a": True, "b": False}
     assert lane["t1"] == "jvm"
     assert len(rows["t1"]) == 2
+
+
+def test_an_infra_retry_is_not_counted_as_a_model_failure():
+    """infra_retry means the harness broke, so no verdict exists to count.
+
+    Three mfscreener tasks returned infra_retry for every model across nine
+    runs and never once produced pass or fail. Reading that as unanimous
+    failure made them the hardest-looking tasks in the set.
+    """
+    assert MODULE.classify({f"m{i}": None for i in range(11)}, 8) == "no_verdict"
+
+
+def test_a_model_that_produced_no_patch_still_counts_as_failing():
+    """candidate_missing and scope_error are the model's fault, not the rig's."""
+    assert "candidate_missing" not in MODULE.NO_VERDICT
+    assert "scope_error" not in MODULE.NO_VERDICT
+    assert MODULE.NO_VERDICT == ("infra_retry",)
+
+
+def test_partial_infra_noise_falls_back_to_the_real_verdicts():
+    assert MODULE.classify({"a": True, "b": False, "c": None}, 2) == "discriminating"

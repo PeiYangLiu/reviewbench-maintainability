@@ -2974,8 +2974,64 @@ in 60 seconds. This typically happens when some processes are hanging...
   362  真正有判别力
   ```
 
-- **建议**:修复或移除这 3 道题。
-  它们是同一个 PR 的三条 review comment,**很可能是同一个 oracle 配置问题**。
+- **【当场自我纠正】它们不是「无人通过」,是「从未产生过结果」。**
+
+  我一开始写的是 `status == "pass"`,把所有非 pass 都算成了失败。
+  实际上 `status` 有**五个**取值:
+
+  ```
+  correctness-8k:  pass 2275 | fail 1369 | candidate_missing 279
+                   scope_error 90 | infra_retry 35
+  ```
+
+  查这 3 道题在**全部 9 个 correctness 跑**里的 status:
+
+  ```
+  infra_retry        174 条
+  candidate_missing    9 条
+  pass / fail          0 条    ← 一次都没有
+  ```
+
+  **`infra_retry` 的意思就是「跑挂了,不是模型的错」——
+  系统一直知道,是我的脚本没读这个字段。**
+
+- **根因**(这部分不变):
+
+  ```
+  oracle 命令:  gradlew ... integrationTest --tests '*PortfolioControllerIT*'
+  p2p:         0/9
+  ```
+
+  **`...IT` = Integration Test,要 Testcontainers 拉起数据库,
+  评测容器里起不来。**jvm lane 里只有这 3 道题用集成测试。
+
+- **修正后的分布**:
+
+  ```
+  discriminating   344   93.5%
+  all_passed        13    3.5%
+  none_passed        8    2.2%   ← 真难题(基线干净)
+  no_verdict         3    0.8%   ← 这 3 道,从未测出结果
+  ```
+
+  **jvm lane 的 none_passed 从 3 变成 0** —— 它一道真正的难题都没有。
+
+- **关键区分**:五个 status 里**只有 `infra_retry` 是「我们的系统挂了」**,
+  `candidate_missing`(没交补丁)和 `scope_error`(改错文件)
+  **都是模型的问题,算失败是对的**。工具只排除前者。
+
+- **建议**:这 3 道题的 oracle 换成不依赖容器的测试子集,或移出题库。
+
+- **这次纠正本身是教训,而且是今晚第三次同一形态**:
+  - P106:判官拒判(`verdict` 为空)被当成失败;
+  - P107:scope 违规(`patch_apply=False`)被当成「补丁打不上」;
+  - **本次:`infra_retry` 被当成 `fail`。**
+
+  **一个多值字段被当成布尔量用 —— 三次,同一个晚上。**
+
+  判据:**写 `x == "某值"` 之前,先把该字段的取值分布打出来看一眼。**
+  这次是 `collections.Counter(status)` 一行的事,
+  而它把「benchmark 有 3 道坏题」改成了「我的脚本漏读了一个状态」。
 
 - **教训**:
   1. **「无人通过」是一个混合桶,必须再分一层。**
