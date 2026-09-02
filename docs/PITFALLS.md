@@ -3489,7 +3489,7 @@ in 60 seconds. This typically happens when some processes are hanging...
 
 ---
 
-### P130. `subprocess.run(timeout=)` 杀掉的是 docker 客户端,不是容器
+### P130. ~~`subprocess.run(timeout=)` 杀掉的是 docker 客户端,不是容器~~ ⚠️ 根因判错,见文末更正
 
 - **起因**:查 P129 的时候顺手看了一眼 `docker ps`,
   发现 4 个容器分别 Up 了 **8 天和 12 天**:
@@ -3529,9 +3529,47 @@ in 60 seconds. This typically happens when some processes are hanging...
   > 否则你只是把自己的眼睛闭上了。
 
 - **已做**:4 个孤儿容器已清理。
-- **未做**:harness 里补 `except subprocess.TimeoutExpired: docker kill <name>`。
-  这需要改被 `run_open_model_correctness.py` 打补丁生成的 runner,
-  改动面比较大,**先记在这里,不在正在跑的作业上动它。**
+
+---
+
+#### ⚠️ 更正(同日):根因不是这个,超时清理本来就有
+
+准备动手补 `docker kill` 时先去读了代码,**发现它已经在那儿了**:
+
+```python
+# native_runner.py:820-890
+cleanup_container(name)                    # 启动前:清掉同名残留
+...
+except subprocess.TimeoutExpired:
+    os.killpg(process.pid, signal.SIGTERM)
+    cleanup_container(name)                # 超时:收尸
+...
+cleanup_container(name)                    # 结束后:再收一次
+```
+
+`native` / `jvm` / `rust` / `csharp` 四个用具名容器的 runner **全都有**。
+(`gopy` / `scripted` 那两个「0 次清理」是我 grep 到了
+`git diff --name-only` 里的 `--name`,**它们根本不用具名容器。**)
+
+**我当初 grep 的是 `run_open_model_correctness.py` —— 那是补丁器,
+不是干活的 runner。在生成器里找不到运行时的代码,这不奇怪。**
+
+- **真正的根因**:容器活得比 driver 长。
+  driver 被杀/被停时,`cleanup_container` 那几行**根本没机会执行**,
+  容器就留在 daemon 里了。**这正是 P129 那条线**,不是独立的第二个缺陷。
+
+- **所以真实的判据是**:
+
+  > **收尾代码只在你还活着的时候有用。**
+  > 「进程退出时清理资源」这个模式,在进程被 SIGKILL/SIGSTOP 时全部失效 ——
+  > 而看门狗、OOM killer、timeout 恰恰都用这类信号。
+  > **需要一个不依赖当事进程还活着的清理路径**(启动时扫一遍孤儿,
+  > 或者由外部收割),而不是把清理都挂在 `finally` 上。
+
+- **我从这次学到的**:
+  **「grep 不到」不等于「不存在」,尤其当代码是生成出来的时候。**
+  先确认自己 grep 的是不是那个真正会被执行的文件 ——
+  这次要不是准备动手改才去读代码,这个错误判断会一直留在文档里。
 
 ---
 
