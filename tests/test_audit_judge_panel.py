@@ -1,3 +1,4 @@
+import json
 import collections
 import importlib.util
 from pathlib import Path
@@ -106,3 +107,55 @@ def test_removing_a_dissenting_judge_reorders_the_board():
     after = MODULE.board_without(votes, "strict")
     assert after["x"] == 10
     assert MODULE.rank_shift(full, after) > 0
+
+
+def _write_verdicts(tmp_path, judge, rows):
+    d = tmp_path / f"{judge}__solver"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "judgements.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
+    )
+
+
+def test_a_judge_reusing_one_reason_is_flagged_as_not_reading(tmp_path):
+    """Near-duplicate reasons mean a template, which is a different fault."""
+    _write_verdicts(
+        tmp_path,
+        "lazy",
+        [
+            {"verdict": {"quality_1_to_5": 5, "addressed": "yes", "reason": "Looks fine."}}
+            for _ in range(20)
+        ],
+    )
+    shape = MODULE.verdict_shape(str(tmp_path / "*" / "judgements.jsonl"))
+    top = shape["lazy"]["reasons"].most_common(1)[0][1]
+    assert top == 20
+
+
+def test_contradictory_fields_are_counted(tmp_path):
+    """Calling a patch fully addressed at 1/5 means the fields disagree."""
+    _write_verdicts(
+        tmp_path,
+        "sloppy",
+        [{"verdict": {"quality_1_to_5": 1, "addressed": "yes", "reason": f"r{i}"}} for i in range(5)]
+        + [{"verdict": {"quality_1_to_5": 5, "addressed": "no", "reason": f"s{i}"}} for i in range(5)],
+    )
+    shape = MODULE.verdict_shape(str(tmp_path / "*" / "judgements.jsonl"))
+    assert shape["sloppy"]["contradict"] == 10
+
+
+def test_a_calibrated_judge_uses_the_middle_grade(tmp_path):
+    """The collapsed middle is what separates miscalibration from not reading."""
+    _write_verdicts(
+        tmp_path,
+        "calibrated",
+        [
+            {"verdict": {"quality_1_to_5": (i % 5) + 1, "addressed": ["yes", "partial", "no"][i % 3],
+                         "reason": f"reason {i}"}}
+            for i in range(30)
+        ],
+    )
+    shape = MODULE.verdict_shape(str(tmp_path / "*" / "judgements.jsonl"))
+    d = shape["calibrated"]
+    assert d["addressed"]["partial"] / d["n"] > 0.3
+    assert d["contradict"] < d["n"]

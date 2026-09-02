@@ -73,6 +73,49 @@ def marginal_influence(votes: dict, panel_size: int = 3) -> dict:
     return out
 
 
+def verdict_shape(pattern: str) -> dict:
+    """Distribution of each judge's raw verdict fields.
+
+    Separates a judge that is not reading from one that reads with the wrong
+    scale, which need opposite fixes. A near-duplicate reason rate or verdict
+    fields that contradict each other point at the first; a collapsed middle
+    grade points at the second. gemini reads (0.4% duplicate reasons) but
+    awards 5/5 on 57% of patches against opus-5's 3%, and uses the middle
+    "partial" grade on 8% against the others' 32-34%.
+    """
+    per: dict = collections.defaultdict(
+        lambda: {
+            "n": 0,
+            "quality": collections.Counter(),
+            "addressed": collections.Counter(),
+            "reasons": collections.Counter(),
+            "contradict": 0,
+        }
+    )
+    for path in sorted(glob.glob(pattern)):
+        who = Path(path).parent.name.split("__")[0]
+        for line in open(path, encoding="utf-8"):
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            v = record.get("verdict")
+            if not isinstance(v, dict):
+                continue
+            d = per[who]
+            d["n"] += 1
+            d["quality"][v.get("quality_1_to_5")] += 1
+            addressed = str(v.get("addressed"))
+            d["addressed"][addressed] += 1
+            d["reasons"][str(v.get("reason") or "")[:60]] += 1
+            q = v.get("quality_1_to_5")
+            if isinstance(q, int) and (
+                (addressed == "yes" and q <= 2) or (addressed == "no" and q >= 4)
+            ):
+                d["contradict"] += 1
+    return per
+
+
 def board_without(votes: dict, judge: str, panel_size: int = 3) -> collections.Counter:
     """Per-solver unanimous count with one judge removed.
 
@@ -200,6 +243,23 @@ def main() -> None:
             f"{j:26s} 判自己 {100*own:+6.1f}pp  判别人 {100*mean_o:+6.1f}pp "
             f"(sd {100*sd:4.1f})  z={z:+.2f}"
         )
+
+    shape = verdict_shape(args.judgements)
+    if shape:
+        print("\n判定分布(区分「没在读」和「读了但刻度不对」):\n")
+        print(f"{'judge':26s} {'满分5占比':>9s} {'中间档':>7s} {'理由重复':>8s} {'自相矛盾':>8s}")
+        for who in sorted(shape):
+            d = shape[who]
+            n = max(d["n"], 1)
+            top = d["reasons"].most_common(1)[0][1] if d["reasons"] else 0
+            mid = d["addressed"].get("partial", 0)
+            note = ""
+            if 100 * d["quality"].get(5, 0) / n > 40 and 100 * mid / n < 15:
+                note = "  <-- 中间档塌缩,刻度问题而非部署问题"
+            print(
+                f"{who:26s} {100*d['quality'].get(5,0)/n:8.0f}% {100*mid/n:6.0f}% "
+                f"{100*top/n:7.1f}% {100*d['contradict']/n:7.1f}%{note}"
+            )
 
     for spec in args.family:
         judge, _, siblings = spec.partition("=")
