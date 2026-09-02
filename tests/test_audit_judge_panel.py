@@ -159,3 +159,32 @@ def test_a_calibrated_judge_uses_the_middle_grade(tmp_path):
     d = shape["calibrated"]
     assert d["addressed"]["partial"] / d["n"] > 0.3
     assert d["contradict"] < d["n"]
+
+
+def test_a_candidate_is_measured_by_dissent_not_by_its_pass_rate():
+    """A judge can be lenient overall and still stop what the others waved through.
+
+    deepseek-v3.2 passes more often than gpt-5.6-sol yet vetoed 20 of the 161
+    tasks both incumbents approved, where gemini vetoed 1. Distribution shape
+    would have rejected it.
+    """
+    votes = _votes(
+        {("m", f"t{i}"): {"a": True, "b": True} for i in range(10)}
+    )
+    lenient_but_useful = {f"t{i}": i >= 3 for i in range(10)}
+    rubber_stamp = {f"t{i}": True for i in range(10)}
+    assert MODULE.would_dissent(votes, lenient_but_useful, ("a", "b"))["vetoed"] == 3
+    assert MODULE.would_dissent(votes, rubber_stamp, ("a", "b"))["vetoed"] == 0
+
+
+def test_dissent_only_counts_tasks_the_incumbents_both_accepted():
+    """Rejecting what they already rejected adds nothing to the panel."""
+    votes = _votes(
+        {
+            ("m", "agreed"): {"a": True, "b": True},
+            ("m", "disputed"): {"a": True, "b": False},
+        }
+    )
+    result = MODULE.would_dissent(votes, {"agreed": False, "disputed": False}, ("a", "b"))
+    assert result["both_ok"] == 1
+    assert result["vetoed"] == 1

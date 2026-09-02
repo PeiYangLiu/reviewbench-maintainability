@@ -133,6 +133,25 @@ def board_without(votes: dict, judge: str, panel_size: int = 3) -> collections.C
     return out
 
 
+def would_dissent(votes: dict, candidate: dict, incumbents: tuple[str, str]) -> dict:
+    """How often a candidate judge rejects what both incumbents accepted.
+
+    This is the question a substitute has to answer, and the verdict
+    distribution cannot answer it. Distribution shape describes a judge's own
+    habits; solo vetoes describe its relationship to the others. deepseek-v3.2
+    passes 13 points more often than gpt-5.6-sol overall and still vetoed 20 of
+    the 161 tasks sol and opus-5 both approved, against gemini's 1.
+    """
+    both_ok = [
+        task
+        for (solver, task), d in votes.items()
+        if all(d.get(j) for j in incumbents)
+    ]
+    covered = [t for t in both_ok if t in candidate]
+    vetoed = [t for t in covered if candidate[t] is False]
+    return {"both_ok": len(both_ok), "covered": len(covered), "vetoed": len(vetoed)}
+
+
 def rank_shift(before: collections.Counter, after: collections.Counter) -> int:
     def order(c):
         return [m for m, _ in sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))]
