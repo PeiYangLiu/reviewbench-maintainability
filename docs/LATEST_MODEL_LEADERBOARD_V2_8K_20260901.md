@@ -160,7 +160,30 @@ Qwen3-Coder-Next(12)、Devstral-2-123B(13)、gpt-oss-120b(14)。
 
 ---
 
-## 六、【补充 09-02】有效题数是 399,不是 402
+## 六、【补充 09-02】有效题数是 365,不是 402
+
+分两部分,互不重叠:
+
+| | 题数 | 原因 |
+| --- | ---: | --- |
+| 标称 | 402 | |
+| 从未评过 correctness | **−34** | `published_legacy` 那一档的 correctness **对所有模型都没跑过**;`correctness-8k/legacy/correctness/` 是空的 |
+| 判官无法评 | **−3** | 见 6.2 |
+| **实际有判别力** | **365** | |
+
+**这 34 题在 `correctness-8k` / `correctness-native` / `correctness-rl6`
+三个跑里是同一批** —— 已逐题核对集合相等。它们分布在 34 个不同仓库,
+每仓库 1 题,属于 `published_legacy` 档(preflight 里写着
+`modern_runner_tasks: 368 / published_legacy_tasks: 34 / tasks: 402`)。
+
+**对排名的影响:没有。**所有模型缺的是同一批题,分母等比缩小。
+**对绝对值的影响:有。**`Final 120 / 402 = 29.9%` 实际是 `120 / 365 = 32.9%`。
+
+三个 correctness 目录里都躺着流水线自己写的
+`correctness.complete.json → {"complete": false}`(4048/4422)。
+**这个字段一直在,是我没看**(P109)。
+
+### 6.2 判官无法评的那 3 题
 
 判官面板中的 `claude-opus-5` **拒绝评估 `rapid7/metasploit-framework` 的补丁**
 (渗透测试框架触发内容过滤)。题库里有 3 道题来自该仓库,

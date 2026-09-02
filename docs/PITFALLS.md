@@ -1941,3 +1941,43 @@ in 60 seconds. This typically happens when some processes are hanging...
      **`break` 出监控循环是最危险的一行。**
   3. **分母必须印在表上。**这条和 P106 是同一条:
      丢掉的量如果不出现在输出里,它就永远不会被发现。
+
+- **续:查到最后发现连已发布的主榜也一样。**
+  顺着 completeness 字段把所有 correctness 目录扫了一遍:
+
+  ```
+  correctness-8k       complete=false   4048 / 4422   (每模型 368/402)
+  correctness-8k-api2  complete=false   1104 / 1206   (每模型 368/402)
+  correctness-native   complete=false   2944 / 3216
+  correctness-rl6      complete=false   1818 / 2412
+  ```
+
+  **每一个跑都缺同样的 34 题**(逐题核对过集合相等)。
+  原因在 preflight 里写着:
+
+  ```
+  modern_runner_tasks: 368   published_legacy_tasks: 34   tasks: 402
+  ```
+
+  那 34 题属于 `published_legacy` 档,要从 `<output>/legacy/correctness/`
+  读取,而**那个目录在所有跑里都是空的** —— legacy lane 对当前这批模型
+  从来没跑过。34 题分布在 34 个不同仓库,每仓库 1 题。
+
+  于是 benchmark 的真实有效题数是:
+
+  ```
+  402  标称
+  -34  从未评过 correctness(所有模型一致)
+  -3   判官无法评(P106,与上者无重叠)
+  ---
+  365  实际有判别力
+  ```
+
+  **排名不受影响**(所有模型等比缩小),
+  但 `120 / 402 = 29.9%` 实际是 `120 / 365 = 32.9%`,
+  而且**「402 题」这个数字出现在每一份对外文档里**。已在榜单第六节披露。
+
+- **这条最刺人的地方**:`--allow-incomplete` 是我自己传的。
+  流水线的 `finalize` 默认拒绝在数据不全时出板,
+  **它要求你显式说「我知道不全」才放行**;我说了,然后忘了。
+  **一个需要显式确认的开关,只在你当场记得为什么按它的时候才是保护。**
