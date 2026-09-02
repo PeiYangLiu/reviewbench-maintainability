@@ -3650,3 +3650,32 @@ cleanup_container(name)                    # 结束后:再收一次
 
   > **在拿到结果之前先跑一遍分析流程,
   > 这样你还没有一个想要相信的结论。**
+
+- **顺着这个改动,当场在主榜上抓到一个更严重的**:
+  用**榜单文档里记载的那条命令**重跑今天的主榜,得到的是
+
+  ```
+  claude-opus-5     judged 370   Maint 160   Correct  13   FINAL   9
+  claude-opus-4.8   judged 385   Maint 106   Correct  15   FINAL   6
+  gemini-3.6-flash  judged 288   Maint  93   Correct   8   FINAL   4
+  ```
+
+  已发布的值是 **291/120**、**310/80**、**198/59**。
+  这三个模型的逐题 correctness 正是 P114 里被我毁掉的那批
+  (`correctness-8k-api2`:1104 → 45 行),
+  **而 45 行不是 0 行,所以「no data」那道检查不会触发。**
+
+- **补的第二道**:把 correctness 的**分母**印进行里。
+
+  ```
+  model              judged  scored  Maint  Correct  FINAL
+  gpt-5.6-sol           397     360    149      314    109
+  claude-opus-5         370      14    160       13      9     ← 一眼可见
+  ```
+
+  `scored 14` 挨着 `scored 360`,**这一行自己就露馅了**,
+  不需要读者去看脚注里的告警。
+
+  > **一个分子没有分母就没法自检。**
+  > 「13 分之 13」和「368 分之 291」在只印分子时长得一样,
+  > 而只有后者是个结果。

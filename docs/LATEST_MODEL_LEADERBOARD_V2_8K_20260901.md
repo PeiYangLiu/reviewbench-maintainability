@@ -117,6 +117,21 @@ python3 .../scripts/summarize_four_gate.py \
   --correctness correctness-8k --correctness correctness-8k-api2
 ```
 
+> ⚠️ **今天照这条命令跑,前三名的数字是错的** —— 因为 `correctness-8k-api2`
+> 的逐题数据被毁了(1104 → 45 行,见 6.1.1)。会得到:
+>
+> ```
+> model              judged  scored  Maint  Correct  FINAL
+> claude-opus-5         370      14    160       13      9    ← 应为 291 / 120
+> claude-opus-4.8       385      15    106       15      6    ← 应为 310 /  80
+> gemini-3.6-flash      288       8     93        8      4    ← 应为 198 /  59
+> ```
+>
+> **看 `scored` 这一列**:别人是 360,这三个是 14/15/8。
+> 本表的数字是在数据丢失前算出并固化的,**恢复作业已排队**
+> (`correctness-8k-api2-restored`,等两条 native lane 结束后自动开始)。
+> 恢复完成前,**这条命令只能用来复现其余 11 个模型**。
+
 「加权票数」= 通过 correctness 的题上,三个判官投的赞成票总数(每题 0–3)。
 
 ### 5.1 两种口径下 14 个模型有 9 个排名不同
