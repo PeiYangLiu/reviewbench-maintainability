@@ -1870,3 +1870,74 @@ in 60 seconds. This typically happens when some processes are hanging...
   「读过 vs 没读过」的通过率在 8 个臂上方向不一致
   (native-14b 是 8.4% vs 20.5%,r16-14b 是 15.9% vs 12.6%)。
   **写下来是为了不让别人再走一遍。**
+
+---
+
+### P109. 两块「已完成」的评测板其实都不完整,而流水线自己写了 `"complete": false`
+
+- **起因**:清理陈旧 todo 时顺手数了一下 correctness 的记录条数,
+  发现和预期对不上。查下去发现**两批都没跑完**,
+  而**我已经把它们当成 FINAL 发出去了**。
+
+- **缺口**:
+
+  ```
+  correctness-native (SFT 8 臂)  2944 / 3216   每臂 368/402,缺 34 题
+  correctness-rl6    (RL 6 臂)   1818 / 2412   每臂 303/402,缺 99 题
+  ```
+
+  两个目录里都躺着流水线自己写的
+  `correctness.complete.json → {"complete": false, ...}`。**我没看过。**
+
+  我给 RL 的那份 handoff 标题是
+  「最终交付:六个臂的完整四门(**402 题 correctness 全部跑完**)」,
+  正文写「**七个 lane 全部完成并 finalize**」。
+  实际上 `correctness-rl6/native.jsonl` 是 **0 行** —— 整个 C/C++ lane 一条都没有。
+
+- **两个不同的根因**:
+
+  1. **RL 侧**:native lane **从来没启动过**。
+     `native_runner.py` 在目录里,但没有 checkpoint、没有 artifacts、没有 summary。
+     `run-report.json` 里只有 `rust` 一个 lane。
+  2. **SFT 侧**:driver 被磁盘看门狗 `SIGSTOP` 后**再没被唤醒**。
+
+     ```
+     18:04:01 LOW DISK 52G - pausing correctness driver
+     PID 39464  STAT=Tl  已停 1 天 7 小时
+     ```
+
+     看门狗脚本长这样:
+
+     ```bash
+     if [ "$avail" -lt 60 ]; then
+       for p in $(pgrep -f "..."); do kill -STOP "$p"; done
+       break        # ← 暂停完就自己退出了,没有任何恢复逻辑
+     fi
+     ```
+
+     **它暂停了作业,然后杀死了自己**,于是没有任何东西会再把作业放回来。
+     磁盘早就回到 210G 了,作业还停着。
+     (这比 P94 的滞回死锁更糙:P94 至少还有个恢复阈值。)
+
+- **为什么汇总表看不出来**:一个 lane 全空,
+  效果只是**让每个臂的分母一起变小**。所有臂等比缩小,
+  排序不变、相对关系不变、看起来完全正常 ——
+  **而分母根本没印在表上。**
+
+- **修复**:
+  1. RL 的 native lane 已启动(`--jobs 2`,P95)。
+  2. SFT 的 driver **不能同时恢复** —— 两批 correctness 并行会打爆磁盘(P96,已中过两次)。
+     写了接续脚本:等 rl6 跑完再 `SIGCONT`,
+     并且**带滞回且不退出**(<70G 暂停,≥150G 恢复,循环不 break)。
+  3. 已向 RL/SFT 发更正,说明原结论(`SFT→RFT-2` maint p=0.031)
+     在补齐 65 题后**可能不成立** —— 那是 6 比 0,再多一个反例就过 0.05。
+
+- **教训**:
+  1. **任何标着 FINAL 的东西,发之前 `cat` 一眼 completeness 文件。**
+     流水线已经算好了这个字段,专门用来回答「跑完没有」,
+     而我在标题里写下「402 题全部跑完」时没去读它。
+  2. **看门狗只有暂停没有恢复,等于把作业永久杀掉,还不留痕迹。**
+     任何 `kill -STOP` 都必须配一个会一直活着的 `SIGCONT` 路径。
+     **`break` 出监控循环是最危险的一行。**
+  3. **分母必须印在表上。**这条和 P106 是同一条:
+     丢掉的量如果不出现在输出里,它就永远不会被发现。

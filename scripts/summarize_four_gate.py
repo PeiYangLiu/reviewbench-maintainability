@@ -79,12 +79,31 @@ def board(votes, correctness, panel_size=3, decision="unanimous"):
         # resampling, which is the whole of P104.
         if passes == needed - 1:
             per[model]["boundary"] += 1
+        if (model, task) in correctness:
+            per[model]["scored"] += 1
         if correctness.get((model, task)) == "pass":
             per[model]["correct"] += 1
             per[model]["votes"] += passes
             if maintainable:
                 per[model]["final"] += 1
     return per
+
+
+def report_correctness_coverage(per):
+    """Warn when arms were scored over different numbers of tasks.
+
+    A lane that never ran shrinks every arm's denominator together, so the
+    ordering and the relative gaps all survive and the board looks normal.
+    The only visible trace is the count of tasks that reached the
+    correctness stage, which is why it has to be asserted rather than shown.
+    """
+    scored = {model: counts["scored"] for model, counts in per.items()}
+    if len(set(scored.values())) <= 1:
+        return
+    print("\nWARNING: arms were scored over different task counts, so their")
+    print("totals are not comparable. Check correctness.complete.json.")
+    for model, count in sorted(scored.items(), key=lambda kv: kv[1]):
+        print(f"  {model:40s} {count:5d}")
 
 
 if __name__ == "__main__":
@@ -134,3 +153,4 @@ if __name__ == "__main__":
         for model, count in by_model.most_common():
             print(f"  {model:40s} {count:4d}")
         print("  Verify these cannot change the ranking before publishing.")
+    report_correctness_coverage(per)

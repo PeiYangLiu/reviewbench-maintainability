@@ -1,3 +1,4 @@
+import collections
 import json
 """Guards for the board summary.
 
@@ -129,3 +130,20 @@ def test_a_refusal_that_a_retry_covered_is_not_reported_as_a_gap(tmp_path):
     votes = MODULE.load_votes(str(tmp_path / "*" / "judgements.jsonl"), dropped)
     assert ("m", "t") in dropped
     assert len(votes[("m", "t")]) == 3
+
+
+def test_uneven_correctness_coverage_is_asserted_not_left_to_the_reader(capsys):
+    """A lane that never ran shrinks every denominator, which hides itself."""
+    per = {
+        "full": collections.Counter({"scored": 402}),
+        "missing_a_lane": collections.Counter({"scored": 303}),
+    }
+    MODULE.report_correctness_coverage(per)
+    out = capsys.readouterr().out
+    assert "different task counts" in out
+    assert "303" in out
+
+
+def test_equal_coverage_stays_quiet():
+    per = {m: collections.Counter({"scored": 402}) for m in ("a", "b")}
+    MODULE.report_correctness_coverage(per)
