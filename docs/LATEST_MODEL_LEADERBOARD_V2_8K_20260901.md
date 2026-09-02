@@ -244,8 +244,13 @@ correctness-8k-api2   correctness-normalized: 1104 → 45 行
 ### 6.3 oracle 坏掉的 3 题(09-02 查出)
 
 `rajadilipkolli/mfscreener` PR 333 的三道题(同一 PR 的三条 review comment),
-**11 个模型 100% 撞上「基线自己就挂」** —— 它们的 oracle 在
-**未打补丁的起点上就跑不过**,任何补丁都不可能通过。
+它们在**全部 9 个 correctness 跑**里的 status 是
+`infra_retry` 174 条、`candidate_missing` 9 条、**`pass`/`fail` 零条** ——
+**从来没有产生过有效结果**,而不是「所有模型都失败了」。
+
+根因:oracle 跑 `gradlew integrationTest`(`PortfolioControllerIT`),
+要 Testcontainers 拉起数据库,评测容器里起不来 ——
+jvm lane 里只有这 3 道题用集成测试。
 
 **交叉验证**:这 3 道题在 SFT 八臂和 RL 六臂的跑里同样 **3/3 无人通过**。
 三批不同的模型、三次独立的跑,结论一致 —— **是题坏了。**
