@@ -1725,3 +1725,16 @@ in 60 seconds. This typically happens when some processes are hanging...
   这里一个 `if not isinstance(...)` 同时吞掉了「真失败」和「测量失败」,
   而它们一个该记 0 分、一个该告警。
   静默丢弃在数据量小时永远看起来是对的。
+
+- **顺手审计了其余分析脚本**,同类模式共 3 处,只有本条是缺陷:
+  - `compare_arms_paired.py` —— **安全**。它也丢短面板,但 `compare()` 用
+    `set(a) & set(b)` 取交集,**丢题在两臂对称**,配对检验不受影响
+    (`test_only_tasks_scored_for_both_arms_are_compared` 已锁)。
+    **所有训练侧结论不受本条影响。**
+  - `summarize_generation_health.py` 的 `truncation()` —— **安全**。
+    它把「报告过截断与否的轮数」单独作分母返回并打印(`scored_rounds`),
+    **分母与分子匹配**,未知量是可见的。
+
+  区别在于:**那两处要么对称丢弃、要么把分母一起报出来;
+  只有 `summarize_four_gate.py` 是不对称地丢、且分母不出现在输出里。**
+  ——**判据不是「有没有丢数据」,而是「丢掉的量在输出里看不看得见」。**
