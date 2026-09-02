@@ -30,6 +30,8 @@ _DIAGNOSTIC = re.compile(
 )
 _TEST_NAME = re.compile(r"^[\w.]+#\w+$|^test[\w_]*$", re.I)
 
+EXPECTED_LANES = ("native", "gopy", "jvm", "scripted", "tsjs", "rust", "csharp")
+
 
 def broke_the_build(record: dict) -> bool:
     """True when the patch stopped the code compiling rather than failing tests.
@@ -94,7 +96,7 @@ def classify(record: dict) -> str:
     return "unclassified"
 
 
-def tally(paths) -> dict:
+def tally(paths, lanes=None) -> dict:
     per: dict = collections.defaultdict(collections.Counter)
     for path in paths:
         for line in open(path, encoding="utf-8"):
@@ -103,7 +105,27 @@ def tally(paths) -> dict:
             except json.JSONDecodeError:
                 continue
             per[record.get("model")][classify(record)] += 1
+            if lanes is not None:
+                lanes[record.get("lane")] += 1
     return per
+
+
+def report_lane_coverage(lanes, expected=EXPECTED_LANES) -> None:
+    """Warn when a lane is absent, because every percentage here is relative.
+
+    Failure classes are not spread evenly across languages: build breaks are
+    94% of C/C++ regressions and 0% of Go, Python and Java ones. Drop the
+    native lane and build_broken falls from 20.6% to 8.1% with no other sign
+    that anything changed, which reads as the model writing better code.
+    """
+    missing = [lane for lane in expected if not lanes.get(lane)]
+    if not missing:
+        return
+    print(
+        f"\nWARNING: no rows for lane(s) {', '.join(missing)}. Failure classes are"
+        "\nlanguage-specific, so these percentages are not comparable against a run"
+        "\nthat has them. Check correctness.complete.json."
+    )
 
 
 def main() -> None:
@@ -114,7 +136,8 @@ def main() -> None:
     paths = [p for root in args.roots for p in sorted(glob.glob(os.path.join(root, args.glob)))]
     if not paths:
         raise SystemExit(f"no files matched {args.glob!r} under {args.roots}")
-    per = tally(paths)
+    lanes: collections.Counter = collections.Counter()
+    per = tally(paths, lanes)
 
     print(f"{'model':34s}" + "".join(f"{b:>14s}" for b in BUCKETS) + f"{'n':>7s}")
     print("-" * (34 + 14 * len(BUCKETS) + 7))
@@ -143,6 +166,7 @@ def main() -> None:
         "did not recognise, not a distinct failure mode, so the share above is\n"
         "a lower bound."
     )
+    report_lane_coverage(lanes)
 
 
 if __name__ == "__main__":

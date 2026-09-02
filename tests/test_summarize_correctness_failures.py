@@ -1,3 +1,4 @@
+import collections
 import importlib.util
 import json
 from pathlib import Path
@@ -144,3 +145,15 @@ def test_php_parse_errors_count_as_build_breaks():
     assert MODULE.broke_the_build(
         {"failed_tests": ["Parse error: syntax error, unexpected 'foreach' (T_FOREACH)"]}
     )
+
+
+def test_a_missing_lane_is_announced_because_the_percentages_shift(capsys):
+    """Dropping native moves build_broken from 20.6% to 8.1% with no other sign."""
+    MODULE.report_lane_coverage(collections.Counter({"gopy": 10, "jvm": 5}))
+    out = capsys.readouterr().out
+    assert "native" in out and "not comparable" in out
+
+
+def test_full_lane_coverage_stays_quiet(capsys):
+    MODULE.report_lane_coverage(collections.Counter({lane: 1 for lane in MODULE.EXPECTED_LANES}))
+    assert capsys.readouterr().out == ""
