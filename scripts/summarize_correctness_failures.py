@@ -58,6 +58,11 @@ def classify(record: dict) -> str:
         return "regressed"
     if "P2P" in cause:
         return "tests_failed"
+    # The legacy lane records the failed tests and the pass-to-pass counts but
+    # writes no root cause, so falling through would file a plain test failure
+    # under "we did not look".
+    if record.get("failed_tests") and record.get("pass_to_pass_total"):
+        return "tests_failed"
     return "unclassified"
 
 

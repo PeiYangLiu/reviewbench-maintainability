@@ -97,3 +97,24 @@ def test_a_genuine_apply_failure_still_lands_in_apply_fail():
         )
         == "apply_fail"
     )
+
+
+def test_a_failure_with_test_evidence_but_no_root_cause_is_still_a_test_failure():
+    """The legacy lane fills failed_tests and the P2P counts but not the cause."""
+    assert (
+        MODULE.classify(
+            {
+                "status": "fail",
+                "failure_root_cause": None,
+                "failed_tests": ["TestDefaultGenesis"],
+                "pass_to_pass_passed": 7,
+                "pass_to_pass_total": 17,
+            }
+        )
+        == "tests_failed"
+    )
+
+
+def test_a_failure_with_no_evidence_at_all_stays_unclassified():
+    """Guessing here would hide a lane that reports nothing."""
+    assert MODULE.classify({"status": "fail", "failure_root_cause": None}) == "unclassified"
