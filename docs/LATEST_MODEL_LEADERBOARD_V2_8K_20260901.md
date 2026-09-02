@@ -219,6 +219,27 @@ python3 scripts/run_open_model_correctness.py finalize --tasks ... --oracles ...
 `legacy/correctness/` 中(按 task+model 定键,本身有效),
 **下次重跑 modern lane 时会被自动合并**。详见 P110。
 
+### 6.1.1 ⚠️ 事故:api2 的逐题数据被我毁掉了(正在恢复)
+
+写下上面那段之后,我为了"验证 legacy 行能否合并"又对
+`correctness-8k-api2` 跑了一次 `finalize`。它如期抛了
+`FileNotFoundError`,但**在抛异常之前已经把结果目录重写了**:
+
+```
+correctness-8k-api2   correctness-normalized: 1104 → 45 行
+```
+
+`claude-opus-5` / `claude-opus-4.8` / `gemini-3.6-flash` 三个模型的
+**逐题 correctness 数据丢失**。
+
+- **本榜的数字不受影响** —— 表中的 Correct(291 / 310 / 198)
+  和 Final 是在丢失前算出并已固化在本文档里的;
+- **但这三个模型的逐题分析暂时无法复现**;
+- **已排队恢复**:staged 输入完好(402 × 3),重跑 lane 即可。
+
+`finalize` 已加守卫:源行数少于现有结果时直接拒绝执行。
+`correctness-8k`(4,048 行)处于同样风险中,现已被拦住。详见 P114。
+
 ### 6.2 判官无法评的那 3 题
 
 判官面板中的 `claude-opus-5` **拒绝评估 `rapid7/metasploit-framework` 的补丁**
