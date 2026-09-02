@@ -1961,6 +1961,24 @@ in 60 seconds. This typically happens when some processes are hanging...
   2. **看门狗只有暂停没有恢复,等于把作业永久杀掉,还不留痕迹。**
      任何 `kill -STOP` 都必须配一个会一直活着的 `SIGCONT` 路径。
      **`break` 出监控循环是最危险的一行。**
+
+     正确的写法(`/tmp/native_guard.sh`,本次补跑在用):
+
+     ```bash
+     while true; do
+       pids=$(pgrep -f "native_runner.py --jobs")
+       [ -z "$pids" ] && { echo "作业已结束,守卫退出"; break; }   # ← 只有这一个退出条件
+       free=...
+       if [ "$free" -lt 70 ] && [[ "$st" != T* ]]; then kill -STOP ...
+       elif [ "$free" -ge 130 ] && [[ "$st" == T* ]]; then kill -CONT ...
+       fi
+       sleep 120
+     done
+     ```
+
+     三个要点:**①滞回**(70 停 / 130 放,避免在阈值附近抖动);
+     **②唯一的退出条件是「被守护的作业已经不在了」**,而不是「我做完了一次干预」;
+     **③每次干预都写日志**,否则暂停是静默的(这正是它当初停了 31 小时没人发现的原因)。
   3. **分母必须印在表上。**这条和 P106 是同一条:
      丢掉的量如果不出现在输出里,它就永远不会被发现。
 
