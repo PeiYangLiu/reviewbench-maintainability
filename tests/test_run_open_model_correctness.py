@@ -788,3 +788,71 @@ def test_finalize_proceeds_when_the_sources_can_rebuild_what_exists(tmp_path):
 def test_a_first_finalize_with_no_previous_results_is_allowed(tmp_path):
     root = _seed(tmp_path, normalized=0, modern=500)
     MODULE.refuse_if_rerun_would_lose_rows(root)
+
+
+def _seed_statuses(root, normalized, modern):
+    """Write a normalized dir and a modern dir keyed by (model, task)."""
+    import json as _json
+
+    for name, rows in (("correctness-normalized", normalized), ("modern/correctness", modern)):
+        directory = root / name
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "native.jsonl").write_text(
+            "".join(
+                _json.dumps({"model": m, "id": t, "status": s}) + "\n"
+                for (m, t), s in rows.items()
+            ),
+            encoding="utf-8",
+        )
+    return root
+
+
+def test_finalize_refuses_when_a_verdict_became_an_infrastructure_error(tmp_path):
+    """Row counts cannot see this: the same 520 rows, 306 of them undecided.
+
+    Resuming the native lane next to another native lane put four C++ builds on
+    one box, and the rerun turned 274 fails and 32 passes into infra_retry.
+    Finalizing that would have cut the lane from 42 passes to 10 with every
+    count unchanged.
+    """
+    root = _seed_statuses(
+        tmp_path,
+        normalized={("m", "t1"): "pass", ("m", "t2"): "fail"},
+        modern={("m", "t1"): "infra_retry", ("m", "t2"): "fail"},
+    )
+    with pytest.raises(ValueError, match="infra_retry"):
+        MODULE.refuse_if_rerun_would_undecide_results(root)
+
+
+def test_finalize_allows_a_rerun_that_keeps_every_verdict(tmp_path):
+    """A rerun is normal; only losing a decided result is not."""
+    root = _seed_statuses(
+        tmp_path,
+        normalized={("m", "t1"): "pass", ("m", "t2"): "fail"},
+        modern={("m", "t1"): "fail", ("m", "t2"): "pass"},
+    )
+    MODULE.refuse_if_rerun_would_undecide_results(root)
+
+
+def test_a_pair_that_is_simply_absent_does_not_trip_the_guard(tmp_path):
+    """Partial lane runs are legitimate; the row-count guard covers those."""
+    root = _seed_statuses(
+        tmp_path,
+        normalized={("m", "t1"): "pass", ("m", "t2"): "fail"},
+        modern={("m", "t2"): "fail"},
+    )
+    MODULE.refuse_if_rerun_would_undecide_results(root)
+
+
+def test_the_guard_survives_raw_rows_spelling_the_status_in_capitals(tmp_path):
+    """Raw lane rows say PASS and normalized rows say pass.
+
+    Comparing them literally made a healthy refinalize look like 306 lost
+    verdicts, which is the exact failure the guard exists to report.
+    """
+    root = _seed_statuses(
+        tmp_path,
+        normalized={("m", "t1"): "pass"},
+        modern={("m", "t1"): "PASS"},
+    )
+    MODULE.refuse_if_rerun_would_undecide_results(root)

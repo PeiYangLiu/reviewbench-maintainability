@@ -3128,6 +3128,84 @@ def refuse_if_rerun_would_lose_rows(output: Path) -> None:
         )
 
 
+UNDECIDED_STATUSES = {"infra_retry"}
+"""Statuses that mean our infrastructure failed, not that the model did.
+
+`candidate_missing` and `scope_error` are verdicts about the model and belong
+on the failing side; only this set means the task never got a fair run.
+"""
+
+
+def _decided_by_pair(directory: Path) -> dict:
+    """Map (model, task) to its status, for the rows that reached a verdict.
+
+    Raw lane rows spell the status ``PASS`` and normalized rows spell it
+    ``pass``, so compare case-insensitively or a healthy rerun reads as a
+    regression.
+    """
+    decided = {}
+    for path in sorted(directory.glob("*.jsonl")):
+        with open(path, encoding="utf-8") as stream:
+            for line in stream:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                status = row.get("status") or row.get("raw_status") or ""
+                if str(status).lower() in {"pass", "fail"}:
+                    decided[(row.get("model"), row.get("id"))] = str(status).lower()
+    return decided
+
+
+def refuse_if_rerun_would_undecide_results(output: Path) -> None:
+    """Stop a finalize that would turn decided results into infrastructure errors.
+
+    Row counts do not catch this. Resuming the native lane while another native
+    lane was running put four C++ builds on one box; the rerun wrote the same
+    520 rows and turned 274 fails and 32 passes into infra_retry, which is our
+    failure, not the model's. Finalizing that would have replaced 42 passes with
+    10 while every count stayed identical.
+
+    Only an explicit undecided status counts. The lanes do not share a schema --
+    ``scripted`` and ``tsjs`` rows carry ``correctness_ok`` and no ``status`` at
+    all -- so a missing field says nothing about the verdict and must not be
+    read as one.
+    """
+    normalized = output / "correctness-normalized"
+    if not normalized.is_dir():
+        return
+    before = _decided_by_pair(normalized)
+    if not before:
+        return
+    undecided = []
+    for name in ("modern/correctness", "legacy/correctness"):
+        directory = output / name
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.jsonl")):
+            with open(path, encoding="utf-8") as stream:
+                for line in stream:
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    if "status" not in row:
+                        continue
+                    status = str(row.get("status") or "").lower()
+                    pair = (row.get("model"), row.get("id"))
+                    if pair in before and status in UNDECIDED_STATUSES:
+                        undecided.append((pair, status))
+    if undecided:
+        sample = ", ".join(
+            f"{m}/{t}" for (m, t), _ in sorted(undecided)[:3] if m
+        )
+        raise ValueError(
+            f"refusing to finalize {output}: {len(undecided)} pair(s) that "
+            f"already had a verdict now report an undecided status such as "
+            f"infra_retry (e.g. {sample}). A rerun under contention produces "
+            f"this; row counts stay the same. Restore the sources or rerun the "
+            f"lane on a quiet box before finalizing."
+        )
+
+
 def finalize(
     *,
     tasks_path: Path,
@@ -3136,6 +3214,7 @@ def finalize(
     allow_incomplete: bool,
 ) -> dict[str, Any]:
     refuse_if_rerun_would_lose_rows(output)
+    refuse_if_rerun_would_undecide_results(output)
     inputs = json.loads(
         (output / "input-manifest.json").read_text(encoding="utf-8")
     )
