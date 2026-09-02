@@ -27,6 +27,7 @@ BUCKETS = (
     "passed",
     "regressed",
     "tests_failed",
+    "out_of_scope",
     "no_patch",
     "apply_fail",
     "infra",
@@ -42,6 +43,11 @@ def classify(record: dict) -> str:
     cause = str(record.get("failure_root_cause") or "")
     if "did not finish with a patch" in cause:
         return "no_patch"
+    # Editing outside the anchor is the model misreading the task, not the
+    # patch failing to apply. Both set patch_apply false, and folding them
+    # together sends the reader to diff tooling for a capability problem.
+    if record.get("scope_ok") is False or ("anchor" in cause and "400" in cause):
+        return "out_of_scope"
     if record.get("patch_apply") is False:
         return "apply_fail"
     if "prepare" in cause:

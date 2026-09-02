@@ -70,3 +70,30 @@ def test_every_record_lands_in_exactly_one_declared_bucket(tmp_path):
     per = MODULE.tally([str(path)])
     assert set(per["m"]) <= set(MODULE.BUCKETS)
     assert sum(per["m"].values()) == len(records)
+
+
+def test_editing_outside_the_anchor_is_not_reported_as_an_apply_failure():
+    """Both set patch_apply false; only one is about the model's judgement."""
+    assert (
+        MODULE.classify(
+            {
+                "status": "fail",
+                "scope_ok": False,
+                "patch_apply": False,
+                "failure_root_cause": (
+                    "candidate must change only the anchor path and at most 400 lines"
+                ),
+            }
+        )
+        == "out_of_scope"
+    )
+
+
+def test_a_genuine_apply_failure_still_lands_in_apply_fail():
+    assert (
+        MODULE.classify(
+            {"status": "fail", "scope_ok": True, "patch_apply": False,
+             "failure_root_cause": "git apply returned 1"}
+        )
+        == "apply_fail"
+    )
