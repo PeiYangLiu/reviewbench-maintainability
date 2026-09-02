@@ -138,6 +138,15 @@ def main() -> int:
         metavar="ARM_A:ARM_B",
         help="two arm names to compare, before and after",
     )
+    parser.add_argument(
+        "--floor",
+        action="append",
+        default=[],
+        metavar="ARM_A:ARM_B",
+        help="replicates of one configuration, to show what rerunning the same "
+        "thing produces. Reported through the identical test, because a floor "
+        "measured one way cannot bound a comparison measured another.",
+    )
     args = parser.parse_args()
 
     maint = load_maintainability(args.judgements, metric=args.metric)
@@ -147,6 +156,28 @@ def main() -> int:
         f"{'comparison':38s} {'gate':6s} {'A':>4s} {'B':>4s} "
         f"{'onlyA':>6s} {'onlyB':>6s} {'p':>8s}"
     )
+    floor_p = []
+    if args.floor:
+        print("noise floor -- replicates of one configuration:")
+        print(header)
+        print("-" * len(header))
+        for spec in args.floor:
+            left, _, right = spec.partition(":")
+            first, second = maint.get(left, {}), maint.get(right, {})
+            if not first or not second:
+                continue
+            count_a, count_b, only_a, only_b, p = compare(first, second)
+            floor_p.append(p)
+            print(
+                f"{spec:38s} {'maint':6s} {count_a:4d} {count_b:4d} "
+                f"{only_a:6d} {only_b:6d} {p:8.4f}"
+            )
+        if floor_p:
+            print(
+                f"  -> rerunning the same configuration gives p as low as "
+                f"{min(floor_p):.4f}; a comparison must beat that on the same "
+                f"test, not on totals.\n"
+            )
     print(header)
     print("-" * len(header))
     for spec in args.pair:

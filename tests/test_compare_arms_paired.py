@@ -91,3 +91,29 @@ def test_binarising_at_unanimous_can_hide_a_real_difference():
     _, _, ba, bb, p_binary = MODULE.compare(base_binary, tuned_binary)
     assert (ba, bb) == (0, 0)
     assert p_binary == 1.0
+
+
+def test_the_floor_is_reported_through_the_same_test_as_the_comparison(capsys):
+    """A floor in one unit cannot bound a comparison in another.
+
+    Totals said the 8B wire-format gap of 15 votes beat a 7-vote floor; the
+    paired test on the same data said p=0.83, indistinguishable from noise.
+    The 15 votes were scattered in both directions.
+    """
+    identical = {f"t{i}": i % 4 for i in range(40)}
+    shifted = {f"t{i}": (i % 4) + (1 if i % 8 == 0 else 0) for i in range(40)}
+    a, b, only_a, only_b, p = MODULE.compare(identical, shifted)
+    assert only_a == 0 and only_b == 5
+    assert b - a == 5
+    # The direction test sees five one-way moves, not a five-vote total.
+    assert p < 0.1
+
+
+def test_symmetric_churn_does_not_become_significant_from_a_total_gap():
+    """Votes can differ in total while every direction cancels out."""
+    before = {f"t{i}": 2 for i in range(40)}
+    after = {f"t{i}": 3 if i < 12 else (1 if i < 22 else 2) for i in range(40)}
+    a, b, only_a, only_b, p = MODULE.compare(before, after)
+    assert b - a == 2
+    assert only_a == 10 and only_b == 12
+    assert p > 0.5
