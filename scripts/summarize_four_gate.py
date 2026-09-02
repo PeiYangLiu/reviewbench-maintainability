@@ -142,23 +142,29 @@ if __name__ == "__main__":
     correctness = load_correctness(args.correctness)
     per = board(votes, correctness, decision=args.decision)
     print(
-        f"{'model':40s} {'judged':>7s} {'Maint':>6s} {'Correct':>8s} "
-        f"{'FINAL':>6s} {'votes':>6s} {'bndry':>6s}"
+        f"{'model':40s} {'judged':>7s} {'scored':>7s} {'Maint':>6s} "
+        f"{'Correct':>8s} {'FINAL':>6s} {'votes':>6s} {'bndry':>6s}"
     )
-    print("-" * 86)
+    print("-" * 94)
     for final, model, counts in sorted(
         ((c["final"], m, c) for m, c in per.items()), reverse=True
     ):
         ratio = counts["boundary"] / counts["maint"] if counts["maint"] else 0.0
         # A model whose correctness never ran scores 0 on both gates, which is
         # exactly what a model that failed every task scores. Print the gates
-        # it cannot answer rather than a zero that reads as a result.
+        # it cannot answer rather than a zero that reads as a result, and keep
+        # the denominator in the row: 13 correct out of 13 scored is visibly
+        # not the same claim as 291 out of 368, and only one of them is a
+        # result. The published board's top three arms read 13/15/8 once their
+        # per-task rows were lost, and the footnote alone did not stop that
+        # from looking like a score.
         if counts["scored"]:
             gates = f"{counts['correct']:8d} {counts['final']:6d}"
         else:
             gates = f"{'no data':>8s} {'no data':>6s}"
         print(
-            f"{model:40s} {counts['judged']:7d} {counts['maint']:6d} "
+            f"{model:40s} {counts['judged']:7d} {counts['scored']:7d} "
+            f"{counts['maint']:6d} "
             f"{gates} "
             f"{counts['votes']:6d} {100 * ratio:5.0f}%"
         )

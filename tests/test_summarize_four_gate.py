@@ -184,3 +184,30 @@ def test_a_model_with_no_correctness_rows_is_not_shown_as_zero(capsys):
     out = capsys.readouterr().out
     assert "no correctness rows at all" in out
     assert "never_ran" in out
+
+
+def test_a_gutted_arm_is_separable_from_a_complete_one_by_its_denominator():
+    """A numerator without its denominator cannot be sanity-checked.
+
+    After the api2 per-task rows were lost, the published top model would have
+    printed Correct 13 against a real 291, and 13 out of 13 looks like a score.
+    `scored` is what separates it from 291 out of 368, so the board prints it
+    in the row rather than only in a footnote.
+    """
+    votes = {}
+    correctness = {}
+    for i in range(20):
+        votes[("whole", f"t{i}")] = {"a": True, "b": True, "c": True}
+        correctness[("whole", f"t{i}")] = "pass"
+    votes[("gutted", "t0")] = {"a": True, "b": True, "c": True}
+    correctness[("gutted", "t0")] = "pass"
+    for i in range(1, 20):
+        votes[("gutted", f"t{i}")] = {"a": True, "b": True, "c": True}
+    per = MODULE.board(votes, correctness)
+
+    assert per["whole"]["correct"] == 20
+    assert per["gutted"]["correct"] == 1
+    # Both arms were judged on all 20 tasks, so `judged` hides the gap.
+    assert per["whole"]["judged"] == per["gutted"]["judged"] == 20
+    # Only the correctness denominator shows it.
+    assert (per["whole"]["scored"], per["gutted"]["scored"]) == (20, 1)
