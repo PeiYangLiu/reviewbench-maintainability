@@ -201,8 +201,23 @@ python3 scripts/run_open_model_correctness.py finalize --tasks ... --oracles ...
 **关键:最后一步不要再传 `--allow-incomplete`。**
 `finalize` 默认就会在数据不全时拒绝出板 —— 那正是本次事故被绕过的保护。
 
-未执行的原因:目前磁盘只剩 ~200G,`correctness-rl6` 的 native lane 正在跑;
-两批 correctness 并行会把盘打爆(P96,已中过两次)。
+**执行结果(09-02 凌晨)**:
+
+| 目录 | legacy 行已生成 | 能否合并进榜 |
+| --- | --- | --- |
+| `correctness-rl6`(RL 六臂) | ✅ | ✅ |
+| `correctness-native`(SFT 八臂) | ✅ | ✅ |
+| **`correctness-8k`(本榜)** | ✅ | ❌ **不能** |
+| `correctness-8k-api2`(本榜) | ✅ | ❌ **不能** |
+
+**本榜那两个跑的 `modern/` 工作目录在跑完后为回收磁盘清掉了**,
+而 `finalize` 需要其中的 `runner-provenance.json` 作完整性锚点。
+该文件没有副本(`preflight.json` 只留了 sha256,扫遍全部 correctness
+目录无一匹配),**没有跳过它的开关,也不应该伪造一个**。
+
+所以**本榜永久停在 368/402**。已生成的 legacy 行留在
+`legacy/correctness/` 中(按 task+model 定键,本身有效),
+**下次重跑 modern lane 时会被自动合并**。详见 P110。
 
 ### 6.2 判官无法评的那 3 题
 

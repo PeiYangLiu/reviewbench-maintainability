@@ -1981,3 +1981,49 @@ in 60 seconds. This typically happens when some processes are hanging...
   流水线的 `finalize` 默认拒绝在数据不全时出板,
   **它要求你显式说「我知道不全」才放行**;我说了,然后忘了。
   **一个需要显式确认的开关,只在你当场记得为什么按它的时候才是保护。**
+
+---
+
+### P110. 为回收磁盘清掉 `modern/` 工作目录,等于让那次跑永远不能再补数据
+
+- **背景**:P109 查出所有 correctness 跑都缺同一批 34 题(`published_legacy` 档)。
+  补齐的工具是现成的(`run_legacy_*_correctness.py`),
+  它们只往 `<output>/legacy/correctness/<lane>.jsonl` 写行,
+  再由 `run_open_model_correctness.py finalize` 合并进 `correctness-normalized/`。
+
+- **实际补齐结果**:
+
+  | 目录 | legacy 行已生成 | 能否 finalize |
+  | --- | --- | --- |
+  | `correctness-rl6`(RL 六臂) | ✅ | ✅ 有 `runner-provenance.json` |
+  | `correctness-native`(SFT 八臂) | ✅ | ✅ 有 |
+  | **`correctness-8k`(已发布主榜)** | ✅ | ❌ **不能** |
+  | `correctness-8k-api2` | ✅ | ❌ **不能** |
+
+- **原因**:主榜那两个跑的 `modern/` 目录是**空的**。
+  跑完之后为了回收磁盘(P96 的教训:磁盘被打爆过两次)清掉了工作目录,
+  而 `finalize` 需要 `modern/correctness/runner-provenance.json`
+  作为完整性锚点来算 manifest。文件没了,finalize 直接抛
+  `FileNotFoundError`,**而且没有跳过它的开关 —— 这是对的**。
+
+- **能不能绕过**:
+  - `correctness-raw/` 里 4048 行原始记录**都还在**,可以还原 `modern/correctness/*.jsonl`;
+  - 但 `runner-provenance.json` 本身没有副本。
+    `preflight.json` 里只留了它的 sha256(`ab8d6711...`),
+    我扫了全部 20 多个 correctness 目录的同名文件,**没有一个哈希对得上**。
+  - **所以只能伪造 —— 不做。**用假的 provenance 去过完整性校验,
+    和 P109 里那个 `--allow-incomplete` 是同一类动作,
+    区别只是这次我知道后果。
+
+- **结论**:主榜那次跑**永久停在 368/402**。
+  已生成的 legacy 行留在 `legacy/correctness/` 里(它们按 task+model 定键,
+  本身有效),**下次重跑 modern lane 时会自动被 finalize 合并** —— 但不是现在。
+
+- **教训**:
+  1. **「跑完了就清工作目录」是不可逆的。**它换来的磁盘是一次性的,
+     失去的是这次跑**以后再也不能增补任何数据**的能力 ——
+     而你不知道三周后会不会发现少了一个 lane(P109 就是)。
+  2. **清理之前,至少留下完整性锚点**(`runner-provenance.json` 只有几 KB)。
+     留 4048 行原始记录却不留那几 KB,是最亏的一种取舍。
+  3. 判据:**清理时问「这个目录还能不能被 finalize」**,
+     而不是「这些文件还有没有用」。
