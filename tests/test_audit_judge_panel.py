@@ -188,3 +188,37 @@ def test_dissent_only_counts_tasks_the_incumbents_both_accepted():
     result = MODULE.would_dissent(votes, {"agreed": False, "disputed": False}, ("a", "b"))
     assert result["both_ok"] == 1
     assert result["vetoed"] == 1
+
+
+def test_same_family_control_manufactures_favoritism_that_is_not_there():
+    """A judge that is uniformly strict looks biased when compared to its kin.
+
+    The kin model's patches are worse, so the judge vetoes them more, and a
+    same-family comparison reads that quality gap as favoritism. Holding the
+    reference judge fixed removes it.
+    """
+    # The judge is uniformly 20pp stricter than the reference on everyone.
+    own_judge = {f"t{i}": i >= 2 for i in range(10)}      # 80% pass
+    own_ref = {f"t{i}": True for i in range(10)}          # 100% pass
+    kin_judge = {f"t{i}": i >= 6 for i in range(10)}      # 40% -- worse patches
+    kin_ref = {f"t{i}": i >= 4 for i in range(10)}        # 60% pass
+
+    raw_gap = sum(own_judge.values()) / 10 - sum(kin_judge.values()) / 10
+    assert raw_gap == 0.4, "the naive same-family comparison sees a 40pp gap"
+
+    result = MODULE.self_favoritism(
+        {"self": (own_judge, own_ref)}, {"kin": (kin_judge, kin_ref)}
+    )
+    assert abs(result["favoritism"]) < 1e-9, "against a fixed reference it vanishes"
+
+
+def test_self_favoritism_still_reports_a_real_effect():
+    """Removing the confound must not blind the measure to genuine bias."""
+    own_judge = {f"t{i}": True for i in range(10)}        # passes itself always
+    own_ref = {f"t{i}": i >= 5 for i in range(10)}        # neutral says 50%
+    other_judge = {f"t{i}": i >= 5 for i in range(10)}
+    other_ref = {f"t{i}": i >= 5 for i in range(10)}
+    result = MODULE.self_favoritism(
+        {"self": (own_judge, own_ref)}, {"other": (other_judge, other_ref)}
+    )
+    assert result["favoritism"] == 0.5

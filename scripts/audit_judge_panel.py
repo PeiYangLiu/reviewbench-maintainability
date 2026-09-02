@@ -152,6 +152,40 @@ def would_dissent(votes: dict, candidate: dict, incumbents: tuple[str, str]) -> 
     return {"both_ok": len(both_ok), "covered": len(covered), "vetoed": len(vetoed)}
 
 
+def self_favoritism(own: dict, others: dict) -> dict:
+    """Self-favoritism as a difference-in-differences against a neutral judge.
+
+    ``own`` and ``others`` map a solver to ``(judge_votes, reference_votes)``
+    for the same tasks, where the reference is a judge with no stake in the
+    board -- not in the evaluated set and neither is its family.
+
+    The obvious control is the same-family model, and it is the wrong one. It
+    holds style fixed but not patch quality, and quality is what the benchmark
+    measures: a judge vetoes its own patches less partly because they really are
+    better. Measured against a neutral reference, claude-opus-5 came out at
+    +2.8pp (p=0.44, CI [-3.7, +9.2]), excluding the 13.8pp that the same-family
+    control had implied.
+    """
+
+    def gap(pairs):
+        n = sum(len(j) for j, _ in pairs.values())
+        if not n:
+            raise ValueError("no overlapping judged tasks")
+        judge = sum(sum(j.values()) for j, _ in pairs.values())
+        ref = sum(sum(r[t] for t in j) for j, r in pairs.values())
+        return (judge - ref) / n, n
+
+    own_gap, own_n = gap(own)
+    other_gap, other_n = gap(others)
+    return {
+        "own": own_gap,
+        "others": other_gap,
+        "favoritism": own_gap - other_gap,
+        "n_own": own_n,
+        "n_others": other_n,
+    }
+
+
 def rank_shift(before: collections.Counter, after: collections.Counter) -> int:
     def order(c):
         return [m for m, _ in sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))]
