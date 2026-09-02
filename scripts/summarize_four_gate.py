@@ -60,11 +60,18 @@ def board(votes, correctness, panel_size=3, decision="unanimous"):
             continue
         per[model]["judged"] += 1
         needed = panel_size if decision == "unanimous" else panel_size // 2 + 1
-        maintainable = sum(judges.values()) >= needed
+        passes = sum(judges.values())
+        maintainable = passes >= needed
         if maintainable:
             per[model]["maint"] += 1
+        # One vote short of the threshold. The ratio of these to scoring tasks
+        # says how stable `final` is: above 100% the score swings widely on
+        # resampling, which is the whole of P104.
+        if passes == needed - 1:
+            per[model]["boundary"] += 1
         if correctness.get((model, task)) == "pass":
             per[model]["correct"] += 1
+            per[model]["votes"] += passes
             if maintainable:
                 per[model]["final"] += 1
     return per
@@ -89,12 +96,17 @@ if __name__ == "__main__":
     votes = load_votes(args.judgements)
     correctness = load_correctness(args.correctness)
     per = board(votes, correctness, decision=args.decision)
-    print(f"{'model':40s} {'judged':>7s} {'Maint':>6s} {'Correct':>8s} {'FINAL':>6s}")
-    print("-" * 72)
+    print(
+        f"{'model':40s} {'judged':>7s} {'Maint':>6s} {'Correct':>8s} "
+        f"{'FINAL':>6s} {'votes':>6s} {'bndry':>6s}"
+    )
+    print("-" * 86)
     for final, model, counts in sorted(
         ((c["final"], m, c) for m, c in per.items()), reverse=True
     ):
+        ratio = counts["boundary"] / counts["maint"] if counts["maint"] else 0.0
         print(
             f"{model:40s} {counts['judged']:7d} {counts['maint']:6d} "
-            f"{counts['correct']:8d} {counts['final']:6d}"
+            f"{counts['correct']:8d} {counts['final']:6d} "
+            f"{counts['votes']:6d} {100 * ratio:5.0f}%"
         )

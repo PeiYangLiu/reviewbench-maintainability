@@ -52,3 +52,34 @@ def test_a_short_panel_is_excluded_rather_than_counted_as_a_failure():
     assert board["m"]["short_panel"] == 1
     assert board["m"]["judged"] == 0
     assert board["m"]["final"] == 0
+
+
+def test_boundary_tasks_are_counted_so_score_stability_is_visible():
+    """One vote short is the population that makes `final` unstable (P104).
+
+    A model with more boundary tasks than scoring ones swings widely on
+    resampling, so the ratio has to be on the board rather than inferred.
+    """
+    board = MODULE.board(
+        {
+            ("m", "t0"): {"a": True, "b": True, "c": True},
+            ("m", "t1"): {"a": True, "b": True, "c": False},
+            ("m", "t2"): {"a": True, "b": True, "c": False},
+        },
+        {("m", t): "pass" for t in ("t0", "t1", "t2")},
+    )
+    assert board["m"]["maint"] == 1
+    assert board["m"]["boundary"] == 2
+    assert board["m"]["final"] == 1
+    assert board["m"]["votes"] == 3 + 2 + 2
+
+
+def test_votes_separate_models_that_tie_on_the_strict_gate():
+    """Two models can both score zero unanimously and differ a lot by votes."""
+    almost = {("a", f"t{i}"): {"x": True, "y": True, "z": False} for i in range(5)}
+    nowhere = {("b", f"t{i}"): {"x": False, "y": False, "z": False} for i in range(5)}
+    correctness = {(m, f"t{i}"): "pass" for m in ("a", "b") for i in range(5)}
+    board = MODULE.board({**almost, **nowhere}, correctness)
+    assert board["a"]["final"] == board["b"]["final"] == 0
+    assert board["a"]["votes"] == 10
+    assert board["b"]["votes"] == 0
