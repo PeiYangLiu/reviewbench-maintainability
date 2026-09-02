@@ -3486,3 +3486,49 @@ in 60 seconds. This typically happens when some processes are hanging...
   **如果不是今天为了别的事去看进程表,它会一直躺着 ——
   没有任何告警会告诉你「一个进程正处于 T 状态」。**
   监控看的是「有没有失败」,而它既没失败也没成功。
+
+---
+
+### P130. `subprocess.run(timeout=)` 杀掉的是 docker 客户端,不是容器
+
+- **起因**:查 P129 的时候顺手看了一眼 `docker ps`,
+  发现 4 个容器分别 Up 了 **8 天和 12 天**:
+
+  ```
+  rb-open-jvm-d80e7e0b8b00afd3     Up 8 days    CPU 0.03%   MEM 1.9MiB
+  rb-open-jvm-323a1ec9808167fd     Up 8 days    CPU 0.04%   MEM 1.9MiB
+  rb-open-jvm-fc648e252a6742e2     Up 8 days    CPU 0.04%   MEM 1.9MiB
+  rb-open-native-83b293c923fb8c34  Up 12 days   CPU 0.00%   MEM 0.7MiB
+  ```
+
+  **CPU 全是 0%。**它们不是在跑得慢,是挂死了,然后没人收尸。
+
+- **根因**:harness 是这样调 docker 的 ——
+
+  ```python
+  subprocess.run(["docker", "run", "--rm", "--name", name, ...], timeout=T)
+  ```
+
+  `timeout` 到了,Python 杀掉的是 **`docker` 这个客户端进程**。
+  **容器在 daemon 里继续跑。**`--rm` 也救不了 ——
+  它只在容器**自己退出**时才清理,而这个容器永远不会退出。
+
+  `run_open_model_correctness.py` 里 grep 不到任何
+  `TimeoutExpired` / `docker kill` / `docker rm` —— **没有收尸的那一步。**
+
+- **为什么一直没被发现**:每个泄漏的容器只占 2MB 内存、0% CPU。
+  **它不会把机器拖垮,只会安静地占着挂载进去的 worktree 目录。**
+  两周才漏 4 个,任何看「有没有失败」的监控都看不到它 ——
+  和 P129 一样,**它既没失败也没成功。**
+
+- **判据**:
+
+  > **杀掉一个客户端不等于停掉它请求的工作。**
+  > 凡是「本地进程 + 远端/守护进程」的组合(docker、k8s、任何 RPC),
+  > 本地超时都必须**显式地去停远端那一半**,
+  > 否则你只是把自己的眼睛闭上了。
+
+- **已做**:4 个孤儿容器已清理。
+- **未做**:harness 里补 `except subprocess.TimeoutExpired: docker kill <name>`。
+  这需要改被 `run_open_model_correctness.py` 打补丁生成的 runner,
+  改动面比较大,**先记在这里,不在正在跑的作业上动它。**
