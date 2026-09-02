@@ -58,6 +58,12 @@ def load_correctness(dirs):
                 except json.JSONDecodeError:
                     continue
                 model = record.get("generation_model") or record.get("model")
+                # infra_retry means the harness broke rather than the model, so
+                # the pair has no verdict: skipping it here keeps it out of both
+                # the numerator and the `scored` denominator. candidate_missing
+                # and scope_error stay, since those are the model failing.
+                if record.get("status") == "infra_retry":
+                    continue
                 status[(model, record.get("id"))] = record.get("status")
     return status
 

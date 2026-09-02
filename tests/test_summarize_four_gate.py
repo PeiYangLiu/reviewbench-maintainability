@@ -147,3 +147,21 @@ def test_uneven_correctness_coverage_is_asserted_not_left_to_the_reader(capsys):
 def test_equal_coverage_stays_quiet():
     per = {m: collections.Counter({"scored": 402}) for m in ("a", "b")}
     MODULE.report_correctness_coverage(per)
+
+
+def test_infra_retry_leaves_the_pair_out_of_both_numerator_and_denominator(tmp_path):
+    """A harness failure produced no verdict, so it cannot count either way."""
+    directory = tmp_path / "correctness-normalized"
+    directory.mkdir(parents=True)
+    (directory / "gopy.jsonl").write_text(
+        "\n".join(
+            json.dumps({"model": "m", "id": t, "status": s})
+            for t, s in (("ok", "pass"), ("broke", "infra_retry"), ("bad", "fail"))
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    corr = MODULE.load_correctness([str(tmp_path)])
+    assert corr[("m", "ok")] == "pass"
+    assert corr[("m", "bad")] == "fail"
+    assert ("m", "broke") not in corr

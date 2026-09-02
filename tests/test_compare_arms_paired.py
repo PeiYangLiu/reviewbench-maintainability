@@ -1,3 +1,4 @@
+import json
 """Guards for the paired arm comparison.
 
 This exists because marginal counts nearly buried a real effect: three runs of
@@ -117,3 +118,29 @@ def test_symmetric_churn_does_not_become_significant_from_a_total_gap():
     assert b - a == 2
     assert only_a == 10 and only_b == 12
     assert p > 0.5
+
+
+def test_a_harness_failure_is_not_scored_against_the_model(tmp_path):
+    """infra_retry means no verdict exists; counting it as failure blames the model.
+
+    candidate_missing and scope_error stay failures because the model really
+    did not produce a usable patch.
+    """
+    (tmp_path / "gopy.jsonl").write_text(
+        "\n".join(
+            json.dumps({"model": "m", "id": t, "status": s})
+            for t, s in (
+                ("ok", "pass"),
+                ("broke", "infra_retry"),
+                ("nopatch", "candidate_missing"),
+                ("outside", "scope_error"),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    corr = MODULE.load_correctness([str(tmp_path)])
+    assert corr["m"]["ok"] is True
+    assert "broke" not in corr["m"]
+    assert corr["m"]["nopatch"] is False
+    assert corr["m"]["outside"] is False

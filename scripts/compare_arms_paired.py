@@ -85,6 +85,12 @@ def load_correctness(roots: list[str]) -> dict[str, dict[str, bool]]:
                 except json.JSONDecodeError:
                     continue
                 status = str(record.get("status") or "").lower()
+                # infra_retry means the harness broke, not the model, so the
+                # task has no verdict and must not count against either arm.
+                # candidate_missing and scope_error stay failures -- the model
+                # really did fail to produce a usable patch.
+                if status == "infra_retry":
+                    continue
                 passed = status == "pass" or record.get("correctness_ok") is True
                 result[record.get("model")][record.get("id")] = passed
     return result
