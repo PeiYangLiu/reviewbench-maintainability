@@ -183,6 +183,27 @@ Qwen3-Coder-Next(12)、Devstral-2-123B(13)、gpt-oss-120b(14)。
 `correctness.complete.json → {"complete": false}`(4048/4422)。
 **这个字段一直在,是我没看**(P109)。
 
+### 6.1 补齐这 34 题的办法(工具已存在,尚未执行)
+
+不需要新写代码。两个适配器专门为这一档而写,
+它们**只**填 `run_open_model_correctness.py finalize` 已经会读、
+但目前没人写的那个扩展点 `<output>/legacy/correctness/<lane>.jsonl`:
+
+```bash
+# native(6)/ rust(1)/ jvm(6)/ tsjs(4)
+python3 scripts/run_legacy_reserve_correctness.py replay --output <correctness-dir> ...
+# gopy(15)/ scripted(4)
+python3 scripts/run_legacy_gopy_scripted_correctness.py replay --output <correctness-dir> ...
+# 然后重新 finalize —— 这次不要传 --allow-incomplete
+python3 scripts/run_open_model_correctness.py finalize --tasks ... --oracles ... --output <correctness-dir>
+```
+
+**关键:最后一步不要再传 `--allow-incomplete`。**
+`finalize` 默认就会在数据不全时拒绝出板 —— 那正是本次事故被绕过的保护。
+
+未执行的原因:目前磁盘只剩 ~200G,`correctness-rl6` 的 native lane 正在跑;
+两批 correctness 并行会把盘打爆(P96,已中过两次)。
+
 ### 6.2 判官无法评的那 3 题
 
 判官面板中的 `claude-opus-5` **拒绝评估 `rapid7/metasploit-framework` 的补丁**
