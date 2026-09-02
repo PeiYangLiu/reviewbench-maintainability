@@ -63,3 +63,31 @@ def test_only_tasks_scored_for_both_arms_are_compared():
     count_a, count_b, only_a, only_b, _ = MODULE.compare(a, b)
     assert (count_a, count_b) == (1, 0)
     assert (only_a, only_b) == (1, 0)
+
+
+def test_graded_scores_are_compared_by_magnitude_not_by_truth():
+    """A task where one arm scores 2 and the other 3 is a win, not a tie."""
+    a = {"t0": 2, "t1": 3, "t2": 1}
+    b = {"t0": 3, "t1": 3, "t2": 0}
+    total_a, total_b, only_a, only_b, _ = MODULE.compare(a, b)
+    assert (total_a, total_b) == (6, 6)
+    assert (only_a, only_b) == (1, 1)
+
+
+def test_binarising_at_unanimous_can_hide_a_real_difference():
+    """This is why the metric matters: same data, opposite readings.
+
+    Every task moves from two votes to three-or-two, so the graded view sees
+    consistent movement while the unanimous view sees almost nothing.
+    """
+    base = {f"t{i}": 1 for i in range(20)}
+    tuned = {f"t{i}": 2 for i in range(20)}
+    _, _, only_a, only_b, p_graded = MODULE.compare(base, tuned)
+    assert (only_a, only_b) == (0, 20)
+    assert p_graded < 0.001
+
+    base_binary = {k: int(v >= 3) for k, v in base.items()}
+    tuned_binary = {k: int(v >= 3) for k, v in tuned.items()}
+    _, _, ba, bb, p_binary = MODULE.compare(base_binary, tuned_binary)
+    assert (ba, bb) == (0, 0)
+    assert p_binary == 1.0

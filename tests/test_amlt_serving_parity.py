@@ -854,3 +854,26 @@ def test_native_multiturn_replicates_match_the_single_run_they_check():
         for job in load_jobs(CONFIGS / name):
             env = job["submit_args"]["env"]
             assert env == original[env["MODEL_ID"]], job["name"]
+
+
+def test_qwen27b_replicates_are_identical_and_match_the_board():
+    """The 27B variance estimate has to be served exactly as the board was.
+
+    The 8B/14B class cannot support a maintainability conclusion -- unanimous
+    counts of 0-9 against a within-arm span of 8 (P103). 27B scores 85 with a
+    93% boundary ratio against 375% at 14B, and these runs measure whether that
+    better ratio actually yields a usable variance.
+    """
+    board = {
+        job["submit_args"]["env"]["MODEL_ID"]: job
+        for job in load_jobs(CONFIGS / "amlt_openmodel_v2_budget8k.yaml")
+    }
+    jobs = load_jobs(CONFIGS / "amlt_openmodel_qwen27b_replicates.yaml")
+    assert len(jobs) == 3
+    first = jobs[0]["submit_args"]["env"]
+    assert first["MODEL_ID"] == "Qwen/Qwen3.6-27B"
+    for job in jobs:
+        assert job["submit_args"]["env"] == first, job["name"]
+        assert job["sku"] == board[first["MODEL_ID"]]["sku"], job["name"]
+    assert first == board["Qwen/Qwen3.6-27B"]["submit_args"]["env"]
+    assert len({job["name"] for job in jobs}) == 3

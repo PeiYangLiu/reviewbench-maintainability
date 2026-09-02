@@ -1,0 +1,117 @@
+# v2 protocol rerun for the six self-hosted leaderboard models.
+#
+# Every serving knob is copied verbatim from the frozen v1 board configs
+# (amlt_openmodel_generation.yaml, amlt_openmodel_crossfamily.yaml): same sku,
+# same TENSOR_PARALLEL_SIZE, same MAX_MODEL_LEN, same MODEL_REVISION. P66 is the
+# reason -- changing the tensor-parallel degree changes reduction order and
+# therefore the numbers, so a v2 row produced under a different serving
+# configuration would not be comparable to anything, including its own v1 row.
+#
+# The only deliberate difference from v1 is PROTOCOL: prior rounds now travel as
+# alternating assistant/user messages instead of a flattened TOOL TRANSCRIPT
+# block. MAX_TRANSCRIPT_CHARS is left at its v1 value but is inert under v2,
+# which caps individual tool results at MAX_TOOL_RESULT_CHARS instead of
+# dropping whole rounds.
+#
+# Output budget raised from 4096 to 8192 (P82). At 4096, 9.9-35.5% of rounds on
+# prose-first models stopped mid-sentence before the JSON action appeared and
+# were recorded as "model returned no valid action" -- a budget fault booked as
+# a capability result. 8192 covers every observed generation (longest content
+# 12,555 chars) while leaving the prompt its p99 headroom inside max_model_len.
+#
+# Scope is the audited 402 tasks, identical to the board.
+# 30 GPUs total across the six jobs, inside the 64-GPU per-cluster ceiling.
+description: "ReviewBench Qwen3.6-27B baseline, three replicates for a variance estimate"
+
+target:
+  service: singularity
+  name: msrresrchbasicvc
+  workspace_name: Workspace_NLC
+
+environment:
+  image: amlt-sing/acpt-torch2.7.1-py3.10-cuda12.6-ubuntu22.04
+  image_setup:
+    # vllm imports a video decoder at startup, and torchcodec's current build
+    # links libnvrtc.so.13 while this image ships CUDA 12.6 -- the server dies
+    # before loading any weights. The dependency is unused here (no video), so
+    # it is removed rather than pinned to a matching CUDA.
+    - python -m pip install "vllm==0.26.0" "hf_transfer==0.1.9" "numpy==2.2.6" "scipy==1.15.3"
+    - python -m pip uninstall -y torchcodec || true
+
+code:
+  local_dir: $CONFIG_DIR/..
+
+data:
+  local_dir: $REVIEWBENCH_OPENMODEL_REPO_CACHE
+  remote_dir: reviewbench-openmodels/repo-cache-minimal
+
+jobs:
+  - name: b8k-qwen36-27b-r1
+    identity: managed
+    sku: 40G2-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: Qwen/Qwen3.6-27B
+        MODEL_REVISION: 6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/audited-402.ids
+        PROTOCOL: agentic-line-edit/v2
+        MAX_TOOL_RESULT_CHARS: "24000"
+        MAX_OUTPUT_TOKENS: "8192"
+        TENSOR_PARALLEL_SIZE: "2"
+        MAX_MODEL_LEN: "65536"
+        GENERATION_WORKERS: "10"
+        MAX_NUM_SEQS: "10"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  - name: b8k-qwen36-27b-r2
+    identity: managed
+    sku: 40G2-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: Qwen/Qwen3.6-27B
+        MODEL_REVISION: 6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/audited-402.ids
+        PROTOCOL: agentic-line-edit/v2
+        MAX_TOOL_RESULT_CHARS: "24000"
+        MAX_OUTPUT_TOKENS: "8192"
+        TENSOR_PARALLEL_SIZE: "2"
+        MAX_MODEL_LEN: "65536"
+        GENERATION_WORKERS: "10"
+        MAX_NUM_SEQS: "10"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  - name: b8k-qwen36-27b-r3
+    identity: managed
+    sku: 40G2-A100
+    process_count_per_node: 1
+    sla_tier: standard
+    command:
+      - bash scripts/run_open_model_job.sh
+    submit_args:
+      env:
+        MODEL_ID: Qwen/Qwen3.6-27B
+        MODEL_REVISION: 6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+        GENERATION_IDS_FILE: configs/openmodel_scope_ids/audited-402.ids
+        PROTOCOL: agentic-line-edit/v2
+        MAX_TOOL_RESULT_CHARS: "24000"
+        MAX_OUTPUT_TOKENS: "8192"
+        TENSOR_PARALLEL_SIZE: "2"
+        MAX_MODEL_LEN: "65536"
+        GENERATION_WORKERS: "10"
+        MAX_NUM_SEQS: "10"
+        DISABLE_CUSTOM_ALL_REDUCE: "1"
+        HF_HUB_ENABLE_HF_TRANSFER: "1"
+        TOKENIZERS_PARALLELISM: "false"
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True

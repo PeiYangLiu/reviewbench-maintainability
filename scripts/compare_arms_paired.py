@@ -34,8 +34,18 @@ def load_judge_module():
     return module
 
 
-def load_maintainability(pattern: str, panel: int = 3) -> dict[str, dict[str, bool]]:
-    """Unanimous panel verdicts, keyed by arm then task."""
+def load_maintainability(
+    pattern: str, panel: int = 3, metric: str = "unanimous"
+) -> dict[str, dict[str, int]]:
+    """Panel verdicts keyed by arm then task.
+
+    `unanimous` reproduces the published board. `votes` returns how many judges
+    passed the patch, and that difference decides whether an effect is visible
+    at all: binarising at "all three" throws away every task one vote short,
+    which at 14B is 15 tasks against 4 that score. Three identical runs then
+    swing between 1 and 9 (CV 0.71) while the vote count holds at 127-137
+    (CV 0.03), and the same comparison moves from p=0.21 to p=1e-6.
+    """
     judge = load_judge_module()
     votes: dict[tuple[str, str], dict[str, bool]] = collections.defaultdict(dict)
     for path in sorted(glob.glob(pattern)):
@@ -51,11 +61,13 @@ def load_maintainability(pattern: str, panel: int = 3) -> dict[str, dict[str, bo
             votes[key][record.get("judge_model")] = judge.verdict_passes(
                 verdict, record.get("rubric") or "v2"
             )
-    result: dict[str, dict[str, bool]] = collections.defaultdict(dict)
+    result: dict[str, dict[str, int]] = collections.defaultdict(dict)
     for (arm, task), panel_votes in votes.items():
         # A short panel is missing data, not a rejection.
-        if len(panel_votes) >= panel:
-            result[arm][task] = sum(panel_votes.values()) >= panel
+        if len(panel_votes) < panel:
+            continue
+        passes = sum(panel_votes.values())
+        result[arm][task] = passes if metric == "votes" else int(passes >= panel)
     return result
 
 
@@ -92,13 +104,14 @@ def exact_two_sided(only_a: int, only_b: int) -> float:
     return min(1.0, 2 * tail / 2**total)
 
 
-def compare(a: dict[str, bool], b: dict[str, bool]) -> tuple[int, int, int, int, float]:
+def compare(a: dict[str, int], b: dict[str, int]) -> tuple[int, int, int, int, float]:
+    """Totals and the paired directional test, for binary or graded scores."""
     shared = set(a) & set(b)
-    only_a = sum(1 for task in shared if a[task] and not b[task])
-    only_b = sum(1 for task in shared if b[task] and not a[task])
+    only_a = sum(1 for task in shared if a[task] > b[task])
+    only_b = sum(1 for task in shared if b[task] > a[task])
     return (
-        sum(1 for task in shared if a[task]),
-        sum(1 for task in shared if b[task]),
+        sum(a[task] for task in shared),
+        sum(b[task] for task in shared),
         only_a,
         only_b,
         exact_two_sided(only_a, only_b),
@@ -108,6 +121,15 @@ def compare(a: dict[str, bool], b: dict[str, bool]) -> tuple[int, int, int, int,
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--judgements", default="judge-sftrl/*/judgements.jsonl")
+    parser.add_argument(
+        "--metric",
+        choices=("unanimous", "votes"),
+        default="unanimous",
+        help=(
+            "unanimous matches the published board; votes grades 0-3 and is "
+            "what iteration should use -- it cut the replicate variance 23x"
+        ),
+    )
     parser.add_argument("--correctness", action="append", default=[])
     parser.add_argument(
         "--pair",
@@ -118,7 +140,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    maint = load_maintainability(args.judgements)
+    maint = load_maintainability(args.judgements, metric=args.metric)
     corr = load_correctness(args.correctness) if args.correctness else {}
 
     header = (
