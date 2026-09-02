@@ -186,6 +186,32 @@ def self_favoritism(own: dict, others: dict) -> dict:
     }
 
 
+def each_judge_ranks_first(scores: dict) -> dict:
+    """Who each judge puts at the top, judging alone.
+
+    ``scores`` maps judge -> {solver: pass_count}. Asking how many points of
+    self-favoritism a judge has needs an agreed-on neutral yardstick, and three
+    different yardsticks gave three different answers here. Asking who each
+    judge ranks first needs no yardstick: claude-opus-5 ranked itself first and
+    gpt-5.6-sol ranked itself first, while the neutral judge scored them 233 to
+    228 (paired p=0.74). Two out of two judges picked themselves, and the top
+    spot was a tie.
+    """
+    picks = {}
+    for judge, board in scores.items():
+        if not board:
+            raise ValueError(f"{judge} scored nothing")
+        top = max(board.items(), key=lambda kv: (kv[1], kv[0] == judge))
+        picks[judge] = {"top": top[0], "score": top[1], "picked_self": top[0] == judge}
+    contestants = [j for j in scores if j in next(iter(scores.values()))]
+    selfies = [j for j in contestants if picks[j]["picked_self"]]
+    return {
+        "picks": picks,
+        "judges_on_the_board": len(contestants),
+        "picked_themselves": len(selfies),
+    }
+
+
 def rank_shift(before: collections.Counter, after: collections.Counter) -> int:
     def order(c):
         return [m for m, _ in sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))]

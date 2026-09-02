@@ -222,3 +222,32 @@ def test_self_favoritism_still_reports_a_real_effect():
         {"self": (own_judge, own_ref)}, {"other": (other_judge, other_ref)}
     )
     assert result["favoritism"] == 0.5
+
+
+def test_it_counts_how_many_judges_crown_themselves():
+    """The question that needed no contested yardstick.
+
+    Both judges sitting on the board ranked themselves first; the neutral judge
+    outside it did not.
+    """
+    scores = {
+        "opus": {"opus": 186, "gpt": 162, "qwen": 90},
+        "gpt": {"opus": 186, "gpt": 234, "qwen": 90},
+        "neutral": {"opus": 233, "gpt": 228, "qwen": 222},
+    }
+    out = MODULE.each_judge_ranks_first(scores)
+    assert out["picks"]["opus"]["picked_self"] is True
+    assert out["picks"]["gpt"]["picked_self"] is True
+    assert out["picks"]["neutral"]["picked_self"] is False
+    assert (out["picked_themselves"], out["judges_on_the_board"]) == (2, 2)
+
+
+def test_a_judge_that_does_not_crown_itself_is_not_counted():
+    """Sitting on the board is not the finding; crowning yourself is."""
+    scores = {
+        "lenient": {"lenient": 100, "other": 325},
+        "other": {"lenient": 100, "other": 200},
+    }
+    out = MODULE.each_judge_ranks_first(scores)
+    assert out["picks"]["lenient"]["top"] == "other"
+    assert out["picked_themselves"] == 1
