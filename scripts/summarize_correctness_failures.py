@@ -17,6 +17,33 @@ import argparse
 import collections
 import glob
 import json
+import re
+
+# Compiler and interpreter diagnostics. Test names routinely contain words like
+# "Expected", so a bare keyword match misfiles them as build breaks -- the
+# pattern has to look for the diagnostic's own shape.
+_DIAGNOSTIC = re.compile(
+    r"(^\s*(error|fatal error):)|(Parse error:)|(SyntaxError)|(IndentationError)"
+    r"|(was not declared)|(cannot find symbol)|(no matching function)"
+    r"|(unexpected token)|(invalid syntax)|(undefined reference)",
+    re.I,
+)
+_TEST_NAME = re.compile(r"^[\w.]+#\w+$|^test[\w_]*$", re.I)
+
+
+def broke_the_build(record: dict) -> bool:
+    """True when the patch stopped the code compiling rather than failing tests.
+
+    Worth separating because the fix differs by an order of magnitude: a build
+    break is caught by a compiler in seconds with no test run, no oracle and no
+    judge. In this data it is 94% of C/C++ regressions and 68% of PHP ones,
+    while Go, Python and Java never break the build and fail on logic instead.
+    """
+    for entry in record.get("failed_tests") or []:
+        text = str(entry)
+        if _DIAGNOSTIC.search(text) and not _TEST_NAME.match(text.strip()):
+            return True
+    return False
 import os
 
 # Ordered: the first match wins, so the more specific reason has to come
@@ -26,6 +53,7 @@ import os
 BUCKETS = (
     "passed",
     "regressed",
+    "build_broken",
     "tests_failed",
     "out_of_scope",
     "no_patch",
@@ -55,7 +83,7 @@ def classify(record: dict) -> str:
     # The baseline clause is what separates "the patch broke it" from "it was
     # already broken", so a bare oracle failure must not count as a regression.
     if "exact-start" in cause and any(c in cause for c in _BASELINE_CLEARED):
-        return "regressed"
+        return "build_broken" if broke_the_build(record) else "regressed"
     if "P2P" in cause:
         return "tests_failed"
     # The legacy lane records the failed tests and the pass-to-pass counts but

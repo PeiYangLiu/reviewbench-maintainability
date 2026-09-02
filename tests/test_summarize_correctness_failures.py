@@ -118,3 +118,29 @@ def test_a_failure_with_test_evidence_but_no_root_cause_is_still_a_test_failure(
 def test_a_failure_with_no_evidence_at_all_stays_unclassified():
     """Guessing here would hide a lane that reports nothing."""
     assert MODULE.classify({"status": "fail", "failure_root_cause": None}) == "unclassified"
+
+
+def test_a_patch_that_stops_the_code_compiling_is_split_from_a_logic_regression():
+    """A compiler catches one in seconds; the other needs the whole test run."""
+    record = {
+        "status": "fail",
+        "failure_root_cause": "candidate failed the frozen P2P Oracle while exact-start diagnostic passed",
+        "failed_tests": ["error: 'command_' was not declared in this scope"],
+    }
+    assert MODULE.classify(record) == "build_broken"
+
+
+def test_a_test_name_containing_expected_is_not_mistaken_for_a_compiler_error():
+    """JVM test ids like Cli#producesExpectedRdf would otherwise misfile."""
+    record = {
+        "status": "fail",
+        "failure_root_cause": "candidate failed the frozen P2P Oracle while exact-start diagnostic passed",
+        "failed_tests": ["MappingTemplatePublicCli#rmlCsvExampleProducesExpectedRdf"],
+    }
+    assert MODULE.classify(record) == "regressed"
+
+
+def test_php_parse_errors_count_as_build_breaks():
+    assert MODULE.broke_the_build(
+        {"failed_tests": ["Parse error: syntax error, unexpected 'foreach' (T_FOREACH)"]}
+    )
