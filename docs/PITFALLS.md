@@ -3565,3 +3565,50 @@ in 60 seconds. This typically happens when some processes are hanging...
 
 - 顺带:这也说明 P114 的守卫**不能**简单推广到「所有中间文件都不许变短」。
   守卫要挂在**不可逆**的那一步上,而不是挂在所有看起来危险的地方。
+
+---
+
+### P132. 「这个门是 0 分」和「这个门没数据」在榜上长得一模一样
+
+- **起因**:RL 的 native lane 还在跑,我提前拿 `summarize_four_gate.py`
+  验证一下收尾流程能不能跑通(免得几小时后才发现路径不对)。
+  第一次跑出来 **20 个模型的 Correct 全是 0**。
+
+- **第一反应是工具坏了。不是,是我把 `--correctness` 指到了
+  `correctness-rl6/correctness-normalized`,而脚本内部会自己拼
+  `correctness-normalized/`,于是它什么也没读到。**
+
+- **但真正的问题是:它什么也没读到,却照样出了一张完整的榜。**
+
+  ```
+  qwen3-32b-mtsft     judged 222   Maint 5   Correct 0   FINAL 0
+  ```
+
+  这一行和「这个模型一题都没做对」**完全无法区分**。
+  分子分母都在,数字也对齐,**只是它们描述的是一件没发生过的事**。
+
+- **改法**:`scored == 0` 的模型,两个门印 `no data` 而不是 `0`,
+  并在末尾显式列出所有这样的模型。
+
+  ```
+  qwen3-32b-mtsft     judged 222   Maint 5   Correct no data   FINAL no data
+
+  WARNING: 16 model(s) have no correctness rows at all
+           -- their gates say 'no data', not zero
+  ```
+
+- **判据**:
+
+  > **一个能表示「失败」的取值,不能同时用来表示「没测」。**
+  > 这和 P106(判官拒判被当成模型没交卷)、
+  > P107/P122(多值字段折叠成布尔量)是同一个错误的第三种长相 ——
+  > **把「未知」编码成了一个具体的坏结果。**
+
+- **为什么这次是提前发现的**:因为我在数据还没跑完的时候
+  **先空跑了一遍收尾流程**。
+  如果等 native lane 跑完再跑,看到的是一张「看起来正常、
+  只是某些 arm 分低」的榜 —— **那时候我多半会去解释那个低分,
+  而不是怀疑它根本没数据。**
+
+  > **在拿到结果之前先跑一遍分析流程,
+  > 这样你还没有一个想要相信的结论。**
