@@ -165,3 +165,22 @@ def test_infra_retry_leaves_the_pair_out_of_both_numerator_and_denominator(tmp_p
     assert corr[("m", "ok")] == "pass"
     assert corr[("m", "bad")] == "fail"
     assert ("m", "broke") not in corr
+
+
+def test_a_model_with_no_correctness_rows_is_not_shown_as_zero(capsys):
+    """Zero gates and absent gates read identically on a board.
+
+    An arm whose correctness lane never ran scores 0 on Correct and FINAL,
+    which is exactly what an arm that failed every task scores. The RL board
+    had six such arms because their data lived in a second directory.
+    """
+    per = {
+        "ran": {"judged": 10, "maint": 5, "correct": 4, "final": 3,
+                "votes": 12, "boundary": 1, "scored": 10},
+        "never_ran": {"judged": 10, "maint": 5, "correct": 0, "final": 0,
+                      "votes": 12, "boundary": 1, "scored": 0},
+    }
+    MODULE.report_correctness_coverage(per)
+    out = capsys.readouterr().out
+    assert "no correctness rows at all" in out
+    assert "never_ran" in out

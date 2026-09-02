@@ -104,6 +104,15 @@ def report_correctness_coverage(per):
     correctness stage, which is why it has to be asserted rather than shown.
     """
     scored = {model: counts["scored"] for model, counts in per.items()}
+    missing = sorted(m for m, n in scored.items() if not n)
+    if missing:
+        print(
+            f"\nWARNING: {len(missing)} model(s) have no correctness rows at "
+            f"all -- their gates say 'no data', not zero:"
+        )
+        for model in missing:
+            print(f"  {model}")
+        print("  Point --correctness at the run that covers them.")
     if len(set(scored.values())) <= 1:
         return
     print("\nWARNING: arms were scored over different task counts, so their")
@@ -141,9 +150,16 @@ if __name__ == "__main__":
         ((c["final"], m, c) for m, c in per.items()), reverse=True
     ):
         ratio = counts["boundary"] / counts["maint"] if counts["maint"] else 0.0
+        # A model whose correctness never ran scores 0 on both gates, which is
+        # exactly what a model that failed every task scores. Print the gates
+        # it cannot answer rather than a zero that reads as a result.
+        if counts["scored"]:
+            gates = f"{counts['correct']:8d} {counts['final']:6d}"
+        else:
+            gates = f"{'no data':>8s} {'no data':>6s}"
         print(
             f"{model:40s} {counts['judged']:7d} {counts['maint']:6d} "
-            f"{counts['correct']:8d} {counts['final']:6d} "
+            f"{gates} "
             f"{counts['votes']:6d} {100 * ratio:5.0f}%"
         )
     # A refusal that a retry later covered leaves a full panel, so compare
