@@ -2374,3 +2374,69 @@ in 60 seconds. This typically happens when some processes are hanging...
 - **已固化**:`scripts/summarize_correctness_failures.py` 新增
   `build_broken` 桶(3 条守卫测试,其中一条锁住
   「JVM 测试名含 Expected 不能误判为编译错误」这个假阳性)。
+
+---
+
+### P114. 我自己毁掉了 1,104 条评测结果 —— 一个「失败」的命令在抛异常之前已经写完了
+
+- **经过**:P110 查明 `correctness-8k` / `correctness-8k-api2` 的 `modern/`
+  工作目录在跑完后被清掉了(为回收磁盘),所以 `finalize` 缺
+  `runner-provenance.json`,**无法再补数据**。
+
+  我把这个结论写进了榜单和 PITFALLS。**然后我又跑了一次 finalize。**
+
+  它如期抛了 `FileNotFoundError: runner-provenance.json`,
+  我看到 traceback,就当它"失败了、什么都没做"。
+
+  **它在抛异常之前,已经把 `correctness-normalized/` 和 `correctness-raw/`
+  重写完了。**
+
+  ```
+  correctness-8k-api2   normalized: 1104 → 45     ← 只剩我刚补的 legacy 行
+                        raw:        1104 → 45
+  ```
+
+  claude-opus-5 / claude-opus-4.8 / gemini-3.6-flash 三个模型的**逐题
+  correctness 数据没了**。这三个是主榜的第 1、第 5、第 7 名。
+
+- **两个都是我的错,而且是不同性质的**:
+  1. **明知道会失败还去跑。**我一小时前刚写下「这个目录不能再 finalize」,
+     然后为了"验证一下能不能合并 legacy 行"又跑了一次。
+     **验证一个我已经证明为真的结论,代价是数据。**
+  2. **把「命令报错」当成「什么都没发生」。**
+     `finalize` 的顺序是:重建 normalized → 重建 raw → 算 manifest(此处才读
+     provenance)→ 写 complete.json。**异常发生在第三步,前两步已经落盘。**
+
+- **损失评估**:
+  - 汇总数字在已发布文档里(Correct 291 / 310 / 198),**榜单不受影响**;
+  - 逐题数据没了,**所有基于它的后续分析(失败模式拆桶、编译错误分析)
+    对这三个模型都做不了**;
+  - **可以恢复** —— `inputs/models/*/generation_results.normalized.jsonl`
+    完好(402×3),补丁也在,重跑 lane 即可。已排队(native lane 现被 RL 占用,P96)。
+
+- **`correctness-8k` 差点也没了。**它有 4,048 条,`modern/` 同样是空的,
+  处于完全相同的风险中 —— **只是我碰巧没对它跑 finalize。**
+
+- **修复**:`finalize` 开头新增 `refuse_if_rerun_would_lose_rows()`:
+  如果 `modern/` + `legacy/` 的行数**少于**现有 `correctness-normalized/`,
+  直接拒绝执行并说明原因。实测:
+
+  ```
+  correctness-8k         已拦截(源 165 行 < 现有 4048 行)
+  correctness-native     允许
+  correctness-rl6        允许
+  ```
+
+  3 条守卫测试锁住语义(拒绝/放行/首次运行)。
+
+- **教训**:
+  1. **一个中途抛异常的命令,可能已经完成了它最具破坏性的那部分。**
+     判据不是"它有没有报错",而是**"它在报错之前写了什么"**。
+     幂等的重建操作尤其危险 —— 它们的第一步通常是清空。
+  2. **不要为了"确认一下"去重跑一个已知会失败的破坏性操作。**
+     我要验证的是"legacy 行能否被合并",而这个问题在
+     `correctness-native` 上验证过了(2944 → 3064),**根本不需要碰 api2。**
+  3. **写操作的守卫要放在函数第一行**,而不是依赖后面的校验。
+     `finalize` 原本有三重哈希校验(tasks/oracles/task-plan),
+     **但它们全都在写操作之后** —— 校验的是输入的新鲜度,
+     没有一个在问"这次写入会不会毁掉已有的东西"。

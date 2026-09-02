@@ -3094,6 +3094,40 @@ def write_artifact_set(output: Path) -> str:
     return sha256(output / "SHA256SUMS")
 
 
+def _rows_in(directory: Path) -> int:
+    return sum(
+        sum(1 for _ in open(path, encoding="utf-8"))
+        for path in sorted(directory.glob("*.jsonl"))
+    )
+
+
+def refuse_if_rerun_would_lose_rows(output: Path) -> None:
+    """Stop a finalize that would replace results with fewer than it found.
+
+    finalize rebuilds correctness-normalized from modern/ plus legacy/, so once
+    a run's working directory has been deleted to reclaim disk the sources are
+    gone and rerunning silently overwrites the only surviving copy with
+    whatever little remains. It also writes before the provenance check raises,
+    so a finalize that ends in a traceback has already done the damage.
+    """
+    normalized = output / "correctness-normalized"
+    if not normalized.is_dir():
+        return
+    existing = _rows_in(normalized)
+    if not existing:
+        return
+    available = _rows_in(output / "modern/correctness") + _rows_in(
+        output / "legacy/correctness"
+    )
+    if available < existing:
+        raise ValueError(
+            f"refusing to finalize {output}: sources hold {available} rows but "
+            f"correctness-normalized already has {existing}. The working "
+            f"directory was probably cleaned up; rerunning would destroy the "
+            f"only remaining copy."
+        )
+
+
 def finalize(
     *,
     tasks_path: Path,
@@ -3101,6 +3135,7 @@ def finalize(
     output: Path,
     allow_incomplete: bool,
 ) -> dict[str, Any]:
+    refuse_if_rerun_would_lose_rows(output)
     inputs = json.loads(
         (output / "input-manifest.json").read_text(encoding="utf-8")
     )

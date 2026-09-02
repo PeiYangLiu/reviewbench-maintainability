@@ -752,3 +752,39 @@ def test_parse_jobs_is_strict():
     assert MODULE.parse_jobs(["gopy=3"])["gopy"] == 3
     with pytest.raises(ValueError, match="duplicate lane jobs"):
         MODULE.parse_jobs(["gopy=3", "gopy=4"])
+
+
+def _seed(root: Path, normalized: int, modern: int = 0, legacy: int = 0) -> Path:
+    for name, count in (
+        ("correctness-normalized", normalized),
+        ("modern/correctness", modern),
+        ("legacy/correctness", legacy),
+    ):
+        directory = root / name
+        directory.mkdir(parents=True, exist_ok=True)
+        if count:
+            (directory / "gopy.jsonl").write_text(
+                "".join(json.dumps({"i": i}) + "\n" for i in range(count)), encoding="utf-8"
+            )
+    return root
+
+
+def test_finalize_refuses_when_its_sources_hold_less_than_the_results(tmp_path):
+    """A cleaned-up working directory makes rerunning finalize destructive.
+
+    finalize rebuilds correctness-normalized from modern plus legacy, so once
+    modern has been deleted to reclaim disk the rebuild is a deletion.
+    """
+    root = _seed(tmp_path, normalized=4048, modern=0, legacy=165)
+    with pytest.raises(ValueError, match="only remaining copy"):
+        MODULE.refuse_if_rerun_would_lose_rows(root)
+
+
+def test_finalize_proceeds_when_the_sources_can_rebuild_what_exists(tmp_path):
+    root = _seed(tmp_path, normalized=2944, modern=2945, legacy=120)
+    MODULE.refuse_if_rerun_would_lose_rows(root)
+
+
+def test_a_first_finalize_with_no_previous_results_is_allowed(tmp_path):
+    root = _seed(tmp_path, normalized=0, modern=500)
+    MODULE.refuse_if_rerun_would_lose_rows(root)
