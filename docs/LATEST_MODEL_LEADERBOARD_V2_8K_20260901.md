@@ -169,7 +169,8 @@ Qwen3-Coder-Next(12)、Devstral-2-123B(13)、gpt-oss-120b(14)。
 | 标称 | 402 | |
 | 从未评过 correctness | **−34** | `published_legacy` 那一档的 correctness **对所有模型都没跑过**;`correctness-8k/legacy/correctness/` 是空的 |
 | 判官无法评 | **−3** | 见 6.2 |
-| **实际有判别力** | **365** | |
+| oracle 在起点就挂 | **−3** | 见 6.3 |
+| **实际有判别力** | **362** | |
 
 **这 34 题在 `correctness-8k` / `correctness-native` / `correctness-rl6`
 三个跑里是同一批** —— 已逐题核对集合相等。它们分布在 34 个不同仓库,
@@ -239,6 +240,25 @@ correctness-8k-api2   correctness-normalized: 1104 → 45 行
 
 `finalize` 已加守卫:源行数少于现有结果时直接拒绝执行。
 `correctness-8k`(4,048 行)处于同样风险中,现已被拦住。详见 P114。
+
+### 6.3 oracle 坏掉的 3 题(09-02 查出)
+
+`rajadilipkolli/mfscreener` PR 333 的三道题(同一 PR 的三条 review comment),
+**11 个模型 100% 撞上「基线自己就挂」** —— 它们的 oracle 在
+**未打补丁的起点上就跑不过**,任何补丁都不可能通过。
+
+**交叉验证**:这 3 道题在 SFT 八臂和 RL 六臂的跑里同样 **3/3 无人通过**。
+三批不同的模型、三次独立的跑,结论一致 —— **是题坏了。**
+
+建议修复 oracle 或移出题库。复现:
+
+```bash
+python3 scripts/summarize_task_discrimination.py correctness-8k
+```
+
+> 顺带,题目侧整体是**健康的**:368 题中 **93.5% 有区分度**
+> (全员通过 3.5%、无人通过 3.0%),native lane 更是 64/65 且零饱和。
+> 另外 8 道无人通过的题基线是干净的,**是真难题,应当保留**。
 
 ### 6.2 判官无法评的那 3 题
 
