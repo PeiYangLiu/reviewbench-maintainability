@@ -1,3 +1,4 @@
+import json
 """Guards for the board summary.
 
 The panel decision rule is the single most dangerous knob here: switching from
@@ -83,3 +84,48 @@ def test_votes_separate_models_that_tie_on_the_strict_gate():
     assert board["a"]["final"] == board["b"]["final"] == 0
     assert board["a"]["votes"] == 10
     assert board["b"]["votes"] == 0
+
+
+def _write(tmp_path, name, records):
+    directory = tmp_path / name
+    directory.mkdir()
+    path = directory / "judgements.jsonl"
+    path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8"
+    )
+    return path
+
+
+def test_a_judge_refusing_is_recorded_but_a_missing_patch_is_not(tmp_path):
+    """Only a lost judgement is data loss; a solver that never edited is a real zero."""
+    _write(
+        tmp_path,
+        "panel",
+        [
+            {"solver_model": "m", "id": "refused", "verdict": None, "error": "filter"},
+            {"solver_model": "m", "id": "nopatch", "verdict": None,
+             "generation_error": "no patch"},
+        ],
+    )
+    dropped = {}
+    MODULE.load_votes(str(tmp_path / "*" / "judgements.jsonl"), dropped)
+    assert list(dropped) == [("m", "refused")]
+    assert dropped[("m", "refused")] == "filter"
+
+
+def test_a_refusal_that_a_retry_covered_is_not_reported_as_a_gap(tmp_path):
+    """The retry restores a full panel, so the stale refusal must not warn."""
+    verdict = {"addressed": "yes", "introduces_new_debt": False, "quality_1_to_5": 5}
+    _write(
+        tmp_path,
+        "panel",
+        [{"solver_model": "m", "id": "t", "verdict": None, "error": "filter"}]
+        + [
+            {"solver_model": "m", "id": "t", "judge_model": j, "verdict": verdict}
+            for j in ("a", "b", "c")
+        ],
+    )
+    dropped = {}
+    votes = MODULE.load_votes(str(tmp_path / "*" / "judgements.jsonl"), dropped)
+    assert ("m", "t") in dropped
+    assert len(votes[("m", "t")]) == 3

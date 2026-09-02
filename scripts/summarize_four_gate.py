@@ -20,7 +20,15 @@ JUDGE = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(JUDGE)
 
 
-def load_votes(pattern):
+def load_votes(pattern, dropped=None):
+    """Collect per-judge verdicts, optionally recording lost judgements.
+
+    A record with no verdict is either the solver never producing a patch
+    (a real failure, correctly worth zero) or the judge refusing to look at
+    one it did produce (data loss). Only the second kind lands in `dropped`,
+    because a task can silently leave the panel that way and the board would
+    under-report it without saying so.
+    """
     votes = collections.defaultdict(dict)
     for path in sorted(glob.glob(pattern)):
         for line in open(path, encoding="utf-8"):
@@ -28,10 +36,12 @@ def load_votes(pattern):
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            key = (record.get("solver_model"), record.get("id"))
             verdict = record.get("verdict")
             if not isinstance(verdict, dict):
+                if dropped is not None and record.get("generation_error") is None:
+                    dropped[key] = record.get("error") or "no verdict"
                 continue
-            key = (record.get("solver_model"), record.get("id"))
             votes[key][record.get("judge_model")] = JUDGE.verdict_passes(
                 verdict, record.get("rubric") or "v2"
             )
@@ -93,7 +103,8 @@ if __name__ == "__main__":
         ),
     )
     args = parser.parse_args()
-    votes = load_votes(args.judgements)
+    dropped = {}
+    votes = load_votes(args.judgements, dropped)
     correctness = load_correctness(args.correctness)
     per = board(votes, correctness, decision=args.decision)
     print(
@@ -110,3 +121,16 @@ if __name__ == "__main__":
             f"{counts['correct']:8d} {counts['final']:6d} "
             f"{counts['votes']:6d} {100 * ratio:5.0f}%"
         )
+    # A refusal that a retry later covered leaves a full panel, so compare
+    # against the verdicts that actually landed rather than trusting the
+    # refusal record. Zero surviving judges is the worst case, not a skip.
+    gaps = [k for k in dropped if len(votes.get(k, {})) < 3]
+    if gaps:
+        by_model = collections.Counter(model for model, _ in gaps)
+        print(
+            f"\nWARNING: {len(gaps)} task(s) lost a judge and are scored by an "
+            f"incomplete panel:"
+        )
+        for model, count in by_model.most_common():
+            print(f"  {model:40s} {count:4d}")
+        print("  Verify these cannot change the ranking before publishing.")
