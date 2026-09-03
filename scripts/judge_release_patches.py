@@ -881,6 +881,7 @@ def main() -> int:
             args.judge_model,
             args.max_context_chars,
             args.max_output_tokens,
+            args.max_output_token_ceiling,
         ),
         args.rubric,
         args.judge_model,

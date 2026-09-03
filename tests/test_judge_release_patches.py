@@ -123,6 +123,28 @@ def test_record_panel_votes_accepts_single_and_combined_record_shapes():
     ) == {"a": True, "b": False}
 
 
+def test_main_attests_with_the_same_output_ceiling_used_by_each_result():
+    """The completion marker used to omit the ceiling and never materialized.
+
+    Each row included the default 16384 ceiling in its protocol fingerprint,
+    while the final attestation recomputed the fingerprint without it. A fully
+    resolved 1206-row run therefore had no completion marker.
+    """
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "judge_release_patches.py"
+    ).read_text(encoding="utf-8")
+    call = """judge_protocol_fingerprint(
+            args.rubric,
+            args.judge_model,
+            args.max_context_chars,
+            args.max_output_tokens,
+            args.max_output_token_ceiling,
+        )"""
+    assert source.count(call) == 1
+
+
 def test_invoke_judge_rejects_silent_model_fallback(monkeypatch):
     monkeypatch.setattr(
         MODULE.generator,
