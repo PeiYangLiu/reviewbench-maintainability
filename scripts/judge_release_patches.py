@@ -233,6 +233,31 @@ def verdict_passes(verdict: dict[str, Any], rubric: str) -> bool:
     )
 
 
+def record_panel_votes(record: dict[str, Any]) -> dict[str, bool]:
+    """Return judge votes from either supported judgement record shape.
+
+    Historical runs wrote one top-level verdict per judge and file. A panel
+    run writes one solver/task record whose member verdicts live in ``panel``.
+    Analysis must accept both; treating the latter as "no verdict" silently
+    turns a valid panel run into an empty board.
+    """
+    rubric = str(record.get("rubric") or "v2")
+    verdict = record.get("verdict")
+    judge_model = record.get("judge_model")
+    if isinstance(verdict, dict) and isinstance(judge_model, str):
+        return {judge_model: verdict_passes(verdict, rubric)}
+
+    votes = {}
+    for member in record.get("panel") or []:
+        if not isinstance(member, dict):
+            continue
+        member_verdict = member.get("verdict")
+        member_model = member.get("judge_model")
+        if isinstance(member_verdict, dict) and isinstance(member_model, str):
+            votes[member_model] = verdict_passes(member_verdict, rubric)
+    return votes
+
+
 def build_prompt(
     task: dict[str, Any],
     source: str,

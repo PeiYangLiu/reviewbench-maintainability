@@ -101,6 +101,28 @@ def test_verdict_passes_v1_still_requires_behavior_and_focus():
     assert MODULE.verdict_passes(verdict, "v1") is False
 
 
+def test_record_panel_votes_accepts_single_and_combined_record_shapes():
+    passed = {
+        "addressed": "yes",
+        "quality_1_to_5": 4,
+        "introduces_new_debt": False,
+    }
+    failed = {**passed, "quality_1_to_5": 3}
+    assert MODULE.record_panel_votes(
+        {"rubric": "v2", "judge_model": "single", "verdict": passed}
+    ) == {"single": True}
+    assert MODULE.record_panel_votes(
+        {
+            "rubric": "v2",
+            "judge_model": ["a", "b"],
+            "panel": [
+                {"judge_model": "a", "verdict": passed},
+                {"judge_model": "b", "verdict": failed},
+            ],
+        }
+    ) == {"a": True, "b": False}
+
+
 def test_invoke_judge_rejects_silent_model_fallback(monkeypatch):
     monkeypatch.setattr(
         MODULE.generator,

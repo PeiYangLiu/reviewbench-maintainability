@@ -36,6 +36,39 @@ def test_exact_model_filter_keeps_a_scoped_board_and_its_warnings():
     assert set(got_correctness) == {("keep", "t")}
 
 
+def test_load_votes_reads_a_combined_panel_record(tmp_path):
+    verdict = {
+        "addressed": "yes",
+        "quality_1_to_5": 4,
+        "introduces_new_debt": False,
+    }
+    path = tmp_path / "judgements.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "id": "t",
+                "solver_model": "m",
+                "rubric": "v2",
+                "panel": [
+                    {"judge_model": "a", "verdict": verdict},
+                    {"judge_model": "b", "verdict": verdict},
+                    {
+                        "judge_model": "c",
+                        "verdict": {**verdict, "quality_1_to_5": 3},
+                    },
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert MODULE.load_votes(str(path))[("m", "t")] == {
+        "a": True,
+        "b": True,
+        "c": False,
+    }
+
+
 def test_exact_model_filter_rejects_a_misspelled_arm():
     try:
         MODULE.filter_models(

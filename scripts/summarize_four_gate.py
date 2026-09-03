@@ -37,14 +37,12 @@ def load_votes(pattern, dropped=None):
             except json.JSONDecodeError:
                 continue
             key = (record.get("solver_model"), record.get("id"))
-            verdict = record.get("verdict")
-            if not isinstance(verdict, dict):
+            panel_votes = JUDGE.record_panel_votes(record)
+            if not panel_votes:
                 if dropped is not None and record.get("generation_error") is None:
                     dropped[key] = record.get("error") or "no verdict"
                 continue
-            votes[key][record.get("judge_model")] = JUDGE.verdict_passes(
-                verdict, record.get("rubric") or "v2"
-            )
+            votes[key].update(panel_votes)
     return votes
 
 

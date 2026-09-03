@@ -16,6 +16,37 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
+def test_load_maintainability_reads_a_combined_panel_record(tmp_path):
+    verdict = {
+        "addressed": "yes",
+        "quality_1_to_5": 4,
+        "introduces_new_debt": False,
+    }
+    path = tmp_path / "judgements.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "id": "t",
+                "solver_model": "arm",
+                "rubric": "v2",
+                "panel": [
+                    {"judge_model": "a", "verdict": verdict},
+                    {"judge_model": "b", "verdict": verdict},
+                    {
+                        "judge_model": "c",
+                        "verdict": {**verdict, "quality_1_to_5": 3},
+                    },
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert MODULE.load_maintainability(str(path), metric="votes") == {
+        "arm": {"t": 2}
+    }
+
+
 def test_one_sided_wins_are_distinguished_from_symmetric_churn():
     """Same marginal gap, opposite meaning."""
     base = {f"t{i}": False for i in range(10)}

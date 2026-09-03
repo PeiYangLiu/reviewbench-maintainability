@@ -54,13 +54,11 @@ def load_maintainability(
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            verdict = record.get("verdict")
-            if not isinstance(verdict, dict):
+            panel_votes = judge.record_panel_votes(record)
+            if not panel_votes:
                 continue
             key = (record.get("solver_model"), record.get("id"))
-            votes[key][record.get("judge_model")] = judge.verdict_passes(
-                verdict, record.get("rubric") or "v2"
-            )
+            votes[key].update(panel_votes)
     result: dict[str, dict[str, int]] = collections.defaultdict(dict)
     for (arm, task), panel_votes in votes.items():
         # A short panel is missing data, not a rejection.
