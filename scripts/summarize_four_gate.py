@@ -162,6 +162,27 @@ def require_complete_runs(roots):
         )
 
 
+def require_covered_runs(roots):
+    """Require every expected pair to have a row, while allowing known infra."""
+    incomplete = []
+    for root in roots:
+        marker = Path(root) / "correctness.complete.json"
+        if not marker.is_file():
+            incomplete.append(f"{root}: missing correctness.complete.json")
+            continue
+        record = json.loads(marker.read_text(encoding="utf-8"))
+        if record.get("records") != record.get("expected_records"):
+            incomplete.append(
+                f"{root}: {record.get('records', '?')}/"
+                f"{record.get('expected_records', '?')} rows"
+            )
+    if incomplete:
+        raise ValueError(
+            "refusing to publish a coverage-complete board from missing rows: "
+            + "; ".join(incomplete)
+        )
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -180,6 +201,11 @@ if __name__ == "__main__":
         help="refuse unless every --correctness run says complete=true",
     )
     parser.add_argument(
+        "--require-covered",
+        action="store_true",
+        help="refuse unless every --correctness run has all expected rows",
+    )
+    parser.add_argument(
         "--decision",
         choices=("unanimous", "majority"),
         default="unanimous",
@@ -192,6 +218,11 @@ if __name__ == "__main__":
     if args.require_complete:
         try:
             require_complete_runs(args.correctness)
+        except ValueError as error:
+            parser.error(str(error))
+    if args.require_covered:
+        try:
+            require_covered_runs(args.correctness)
         except ValueError as error:
             parser.error(str(error))
     dropped = {}

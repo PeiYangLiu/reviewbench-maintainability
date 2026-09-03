@@ -3910,3 +3910,116 @@ cleanup_container(name)                    # 结束后:再收一次
 - **附带**:那次 `RuntimeError` 其实是唯一的告警,而我当时只当它是「作业失败了」,
   是过了一小时后数进程数发现少了一个才回头看的。
   **一个非零退出码,配上一份看起来完好的输出,很容易被读成「跑完了但没成功」。**
+
+---
+
+### P136. 自动重算把 2352/2412 写成了 COMPLETE,还把 60 条缺口写成 204
+
+- **起因**:RL native lane 到 390/390 后,自动重算链生成了
+  `RL_SIX_ARM_FOUR_GATE_COMPLETE.md`。标题写「402 题补齐后」。
+  同一分钟的完成标记却写着:
+
+  ```
+  "complete": false,
+  "records": 2352,
+  "expected_records": 2412
+  ```
+
+  **文件名、标题和机器可读事实互相矛盾。**
+
+- **链里有三个独立错误**:
+  1. 只等 `native.jsonl == 390`,就把**一个 lane 完成**当成**整批完成**;
+  2. 日志把缺口硬编码成 `34 × 6 = 204`,但 light legacy 已补 24 题,
+     实际只缺 `10 × 6 = 60`;
+  3. judgements glob 覆盖 22 个模型,所以一份「六臂板」混进了另外 16 个
+     `no data` 模型。
+
+- **改法**:
+  - 撤下三份错误的 `COMPLETE` 文件,改发
+    `RL_SIX_ARM_FOUR_GATE_392.md`;
+  - `summarize_four_gate.py` 增加 exact `--model`,拼错名字直接失败;
+  - 增加 `--require-complete`:只有 marker 明确 `complete=true` 才能
+    生成声称完整的板;
+  - 再增加 `--require-covered`:允许已知 infra 存在,但要求
+    `records == expected_records`,用于「402/402 已尝试」的准确说法;
+  - 最终收尾器从 marker **动态读** records/expected,不再硬编码缺口。
+
+- **为什么 `complete` 和 `covered` 要分开**:
+  三道已知坏 oracle 会产生 `infra_retry`;即使 402 题都有一行,
+  `complete` 仍然是 false。正确说法是:
+  **「402/402 已尝试,其中 infra 显式排除」**,而不是「全部有效完成」。
+
+- **判据**:
+
+  > **局部步骤无权命名全局状态。**
+  > 要写 `COMPLETE`,必须读取全局完成标记,不能从某个 lane 的行数推断。
+
+---
+
+### P137. 被判为永久丢失的 4048 条 source,其实完整地藏在 normalized 里
+
+- **起因**:P110 说主榜 `correctness-8k` 的 `modern/` 被清理,
+  `runner-provenance.json` 没副本,所以永久停在 368/402。
+  P135 用 normalized 里的 `raw_record` 救回 SFT 数据之后,
+  我才回头问:**主榜是不是也存了同样的副本?**
+
+- **答案是 100%**:
+
+  ```
+  lane        normalized rows   embedded raw_record
+  csharp              187              187
+  gopy                781              781
+  jvm                 572              572
+  native              715              715
+  rust                759              759
+  scripted            572              572
+  tsjs                462              462
+  --------------------------------------------------
+  total              4048             4048
+  ```
+
+- 新工具 `recover_correctness_sources.py` 对每行做三件事:
+  1. 校验 `raw_record_sha256`;
+  2. 校验 `(model, task)` 唯一;
+  3. 按 `raw_record_source` 重建 7 个 lane 文件。
+
+- **原 runner provenance 的正文确实丢了,不能伪造。**
+  旧 manifest 只保存了它的 SHA-256:
+  `ab8d6711...cae0`。恢复工具写的是一个**明确标成 recovery** 的新
+  provenance,保留原 hash 并声明正文 unavailable,不拿今天的 runner
+  文件冒充当时那份。
+
+- **不是只看行数就宣布成功**。在硬链接副本上真实跑了一遍 finalize:
+
+  ```
+  recovered modern: 4048
+  light legacy:       264
+  finalize result:   4312 / 4422
+  patch SHA / lane / source / task set: 全部通过
+  ```
+
+  所以主榜 11 模型不需要重跑 11 × 368 道昂贵 oracle,
+  只需补最后 10 道 legacy 题。
+
+- **判据**:
+
+  > **删除中间目录不等于删除信息。**
+  > 在宣布「不可恢复」之前,从最终产物往回枚举它嵌入的 provenance。
+  > P110 查了文件系统,没查数据模型;P135 的事故反而暴露了恢复路径。
+
+---
+
+### P138. 三副本“失败数稳定”不等于“失败题稳定”
+
+- 27B 三个副本的生成结果是 **393/386/387**，标准差只有 3.79 题，
+  看起来非常稳定。
+- 逐题拆开后，374 题三次都成功、1 题三次都失败，另有 **27 题
+  （6.7%）在成功/失败间翻转**。
+- 三个失败集合两两只重叠 4/4/5 题，三者交集只有 1 题。
+- 在两次都成功的题中，完全相同 patch 也只有 3.9–5.2%。
+
+> **边际总数可以稳定，而组成这个总数的样本完全不同。**
+> 总数回答“产量是否稳定”，逐题配对才回答“行为是否稳定”。
+
+这也是为什么训练效果必须用配对检验：两个副本都失败 15 题，
+不代表它们在同样的 15 题上失败；只看总数会把任务级随机性藏掉。

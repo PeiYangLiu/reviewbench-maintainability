@@ -75,6 +75,31 @@ def test_complete_report_gate_accepts_an_explicit_complete_marker(tmp_path):
     MODULE.require_complete_runs([tmp_path])
 
 
+def test_coverage_gate_accepts_all_rows_even_with_infra(tmp_path):
+    (tmp_path / "correctness.complete.json").write_text(
+        json.dumps(
+            {"complete": False, "records": 2412, "expected_records": 2412}
+        ),
+        encoding="utf-8",
+    )
+    MODULE.require_covered_runs([tmp_path])
+
+
+def test_coverage_gate_rejects_missing_rows(tmp_path):
+    (tmp_path / "correctness.complete.json").write_text(
+        json.dumps(
+            {"complete": False, "records": 2352, "expected_records": 2412}
+        ),
+        encoding="utf-8",
+    )
+    try:
+        MODULE.require_covered_runs([tmp_path])
+    except ValueError as error:
+        assert "2352/2412" in str(error)
+    else:
+        raise AssertionError("a board with missing rows claimed full coverage")
+
+
 def test_unanimous_is_the_default_and_needs_every_judge():
     split = votes((True, True, False))
     board = MODULE.board(split, {("m", "t0"): "pass"})
