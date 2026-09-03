@@ -121,12 +121,64 @@ def report_correctness_coverage(per):
         print(f"  {model:40s} {count:5d}")
 
 
+def filter_models(votes, dropped, correctness, requested):
+    """Keep an exact set of solvers, rejecting misspelled model names."""
+    requested = set(requested)
+    unknown = requested - {model for model, _ in votes}
+    if unknown:
+        raise ValueError(
+            "model(s) did not match any judgement rows: "
+            + ", ".join(sorted(unknown))
+        )
+    return (
+        {key: value for key, value in votes.items() if key[0] in requested},
+        {key: value for key, value in dropped.items() if key[0] in requested},
+        {
+            key: value
+            for key, value in correctness.items()
+            if key[0] in requested
+        },
+    )
+
+
+def require_complete_runs(roots):
+    """Fail closed when a report claims to use complete correctness runs."""
+    incomplete = []
+    for root in roots:
+        marker = Path(root) / "correctness.complete.json"
+        if not marker.is_file():
+            incomplete.append(f"{root}: missing correctness.complete.json")
+            continue
+        record = json.loads(marker.read_text(encoding="utf-8"))
+        if record.get("complete") is not True:
+            incomplete.append(
+                f"{root}: {record.get('records', '?')}/"
+                f"{record.get('expected_records', '?')} rows"
+            )
+    if incomplete:
+        raise ValueError(
+            "refusing to publish a complete board from incomplete correctness: "
+            + "; ".join(incomplete)
+        )
+
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--judgements", default="judge-8k/*/judgements.jsonl")
     parser.add_argument("--correctness", action="append", required=True)
+    parser.add_argument(
+        "--model",
+        action="append",
+        default=[],
+        help="exact solver model to include; repeat to build a scoped board",
+    )
+    parser.add_argument(
+        "--require-complete",
+        action="store_true",
+        help="refuse unless every --correctness run says complete=true",
+    )
     parser.add_argument(
         "--decision",
         choices=("unanimous", "majority"),
@@ -137,9 +189,21 @@ if __name__ == "__main__":
         ),
     )
     args = parser.parse_args()
+    if args.require_complete:
+        try:
+            require_complete_runs(args.correctness)
+        except ValueError as error:
+            parser.error(str(error))
     dropped = {}
     votes = load_votes(args.judgements, dropped)
     correctness = load_correctness(args.correctness)
+    if args.model:
+        try:
+            votes, dropped, correctness = filter_models(
+                votes, dropped, correctness, args.model
+            )
+        except ValueError as error:
+            parser.error(str(error))
     per = board(votes, correctness, decision=args.decision)
     print(
         f"{'model':40s} {'judged':>7s} {'scored':>7s} {'Maint':>6s} "

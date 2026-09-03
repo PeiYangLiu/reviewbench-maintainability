@@ -21,6 +21,60 @@ def votes(*per_task):
     return {("m", f"t{i}"): dict(zip("abc", v)) for i, v in enumerate(per_task)}
 
 
+def test_exact_model_filter_keeps_a_scoped_board_and_its_warnings():
+    all_votes = {
+        ("keep", "t"): {"a": True, "b": True, "c": True},
+        ("drop", "t"): {"a": True, "b": True, "c": True},
+    }
+    dropped = {("keep", "lost"): ["x"], ("drop", "lost"): ["x"]}
+    correctness = {("keep", "t"): "pass", ("drop", "t"): "pass"}
+    got_votes, got_dropped, got_correctness = MODULE.filter_models(
+        all_votes, dropped, correctness, ["keep"]
+    )
+    assert set(got_votes) == {("keep", "t")}
+    assert set(got_dropped) == {("keep", "lost")}
+    assert set(got_correctness) == {("keep", "t")}
+
+
+def test_exact_model_filter_rejects_a_misspelled_arm():
+    try:
+        MODULE.filter_models(
+            {("real", "t"): {"a": True}},
+            {},
+            {("real", "t"): "pass"},
+            ["reel"],
+        )
+    except ValueError as error:
+        assert "reel" in str(error)
+    else:
+        raise AssertionError("a misspelled arm silently produced an empty board")
+
+
+def test_complete_report_gate_rejects_a_partial_correctness_run(tmp_path):
+    (tmp_path / "correctness.complete.json").write_text(
+        json.dumps(
+            {"complete": False, "records": 2352, "expected_records": 2412}
+        ),
+        encoding="utf-8",
+    )
+    try:
+        MODULE.require_complete_runs([tmp_path])
+    except ValueError as error:
+        assert "2352/2412" in str(error)
+    else:
+        raise AssertionError("a partial run was allowed to publish as complete")
+
+
+def test_complete_report_gate_accepts_an_explicit_complete_marker(tmp_path):
+    (tmp_path / "correctness.complete.json").write_text(
+        json.dumps(
+            {"complete": True, "records": 2412, "expected_records": 2412}
+        ),
+        encoding="utf-8",
+    )
+    MODULE.require_complete_runs([tmp_path])
+
+
 def test_unanimous_is_the_default_and_needs_every_judge():
     split = votes((True, True, False))
     board = MODULE.board(split, {("m", "t0"): "pass"})
