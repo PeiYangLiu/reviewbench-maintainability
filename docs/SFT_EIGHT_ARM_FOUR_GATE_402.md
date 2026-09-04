@@ -1,10 +1,13 @@
 # SFT 八臂四门（402/402 题已尝试）
 
-生成时间：2026-09-03 18:40
+生成时间：2026-09-03 23:20
 
-> correctness 覆盖 **3216/3216**，missing=0；179 条历史 `infra_retry` 显式排除，不伪装成模型失败。
+> 3216/3216 rows; infra_retry excluded=179; complete=false
 
-> TS/JS 历史 runner 没有保存顶层 patch hash，但显式保存 `patch_unmodified=true`、`model_identity_preserved=true` 与 `generation_status=generated`；finalize 仅在这三项同时成立时接受，无 hash 且无 attestation 仍 fail-closed。
+> TS/JS 历史 runner 没有顶层 patch hash，但显式保存
+> `patch_unmodified=true`、`model_identity_preserved=true` 和
+> `generation_status=generated`；finalize 只接受三项同时成立的旧记录，
+> 无 hash 且无 attestation 仍 fail-closed。
 
 ## 一、八臂四门总表
 
@@ -43,7 +46,7 @@ totals are not comparable. Check correctness.complete.json.
   r16-nobanner-native-qwen3-14b              373
 ```
 
-## 二、训练主结论（连续票数口径，同次输出噪声地板）
+## 二、两条训练主结论（同次输出噪声地板）
 
 ```
 noise floor -- replicates of one configuration:
@@ -64,42 +67,12 @@ base-qwen3-14b:native-qwen3-14b        correct   62   53     43     34   0.3620
 base-qwen3-14b:native-qwen3-14b        FINAL    25   25     19     19   1.0000  
 ```
 
-## 三、失败模式
+## 三、结论
 
-```
-model                                     passed     regressed  build_broken  tests_failed  out_of_scope      no_patch    apply_fail         infra  unclassified      n
------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-base-qwen3-14b                             15.4%         25.1%         18.7%         10.9%          9.5%          2.2%          1.2%          3.2%         13.7%    402
-native-qwen3-14b                           13.2%         27.1%         17.2%         12.7%          7.5%          2.2%          1.7%          3.7%         14.7%    402
-r16-nobanner-native-qwen3-14b              12.7%         29.6%         18.4%         13.9%          6.2%          0.2%          0.0%          3.5%         15.4%    402
-base-qwen3-8b                              10.9%         27.4%         20.4%         12.4%         10.2%          1.0%          1.5%          2.2%         13.9%    402
-native-qwen3-8b                            10.9%         26.1%         20.6%         12.4%          7.5%          4.7%          0.5%          3.2%         13.9%    402
-nobanner-native-qwen3-14b                   9.7%         29.1%         20.6%         12.7%          6.5%          0.2%          0.5%          4.0%         16.7%    402
-nobanner-native-qwen3-8b                    9.7%         24.4%         20.6%         14.2%          6.2%          4.5%          2.2%          3.5%         14.7%    402
-r16-nobanner-native-qwen3-8b                7.7%         29.9%         20.6%         13.9%          6.0%          3.7%          0.2%          4.0%         13.9%    402
-
-share of failures that are the patch breaking passing tests:
-  base-qwen3-14b                      42.6%   (baseline-confirmed 29.7%)
-  native-qwen3-14b                    45.8%   (baseline-confirmed 31.2%)
-  r16-nobanner-native-qwen3-14b       49.9%   (baseline-confirmed 33.9%)
-  base-qwen3-8b                       44.7%   (baseline-confirmed 30.7%)
-  native-qwen3-8b                     43.3%   (baseline-confirmed 29.3%)
-  nobanner-native-qwen3-14b           46.3%   (baseline-confirmed 32.2%)
-  nobanner-native-qwen3-8b            42.7%   (baseline-confirmed 27.0%)
-  r16-nobanner-native-qwen3-8b        47.4%   (baseline-confirmed 32.3%)
-
-unclassified is mostly raw build output that the root-cause matcher
-did not recognise, not a distinct failure mode, so the share above is
-a lower bound.
-```
-
-## 四、结论
-
-- **8B maintainability 提升成立**：53 → 92 票，p=0.0050；
-- **14B maintainability 提升成立**：95 → 151 票，p=0.0006；
-- **8B correctness 完全不动**：44 → 44，p=1.0000；
-- **14B correctness 没有改善**：62 → 53，p=0.3620（方向反而下降，但不显著）；
+- **8B maintainability**：53 → 92 票，p=0.0050；
+- **14B maintainability**：95 → 151 票，p=0.0006；
+- **8B correctness**：44 → 44，p=1.0000；
+- **14B correctness**：62 → 53，p=0.3620（下降但不显著）；
 - 两条 maintainability 结论均明显超过重复运行噪声地板（最低 p=0.3961）。
 
-因此 402 题最终结论与阶段板一致：**SFT 明确改善可维护性行为，
-没有改善可执行正确性。**
+402 题最终结论：**SFT 改善可维护性行为，没有改善可执行正确性。**

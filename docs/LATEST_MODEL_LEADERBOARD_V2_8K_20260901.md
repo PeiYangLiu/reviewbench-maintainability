@@ -1,5 +1,10 @@
 # ReviewBench-Maintainability 主榜(v2 协议,8,192 输出预算)
 
+> **09-03 更新：本文件的 correctness 只有 368/402。**
+> 34 道 `published_legacy` 现已全部补齐；请以
+> [`MAIN_14_MODEL_FOUR_GATE_402.md`](MAIN_14_MODEL_FOUR_GATE_402.md)
+> 为最终 402 题版本。补齐后 **14 个模型排名 0 个变化**。
+
 **日期**:2026-09-01
 **协议**:`agentic-line-edit/v2`,`--max-rounds 32`,输出预算 **8,192**
 **判分**:三判合议 `claude-opus-5 / gpt-5.6-sol / gemini-3.6-flash`,rubric v2,**全票才过**
