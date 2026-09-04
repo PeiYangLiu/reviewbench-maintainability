@@ -3011,6 +3011,28 @@ def correctness_patch_sha(record: dict[str, Any]) -> str | None:
     return str(value) if value else None
 
 
+def correctness_patch_matches_generation(
+    record: dict[str, Any], generation: dict[str, Any]
+) -> bool:
+    """Verify the runner evaluated the staged patch across old lane schemas.
+
+    Current runners write a patch hash and it must match exactly. Historical
+    tsjs rows instead attest that the staged generated patch was used
+    unmodified and that the model identity was preserved; they contain no hash
+    to compare. Accept only that explicit three-field attestation, never mere
+    absence of a hash.
+    """
+    expected = generation.get("patch_sha256")
+    actual = correctness_patch_sha(record)
+    if actual is not None:
+        return actual == expected
+    return (
+        str(record.get("generation_status") or "").lower() == "generated"
+        and record.get("patch_unmodified") is True
+        and record.get("model_identity_preserved") is True
+    )
+
+
 def normalized_record(
     lane: str,
     record: dict[str, Any],
@@ -3307,8 +3329,8 @@ def finalize(
                     raise ValueError(f"{key} correctness start SHA mismatch")
                 generation = generations[str(key[1])][str(key[0])]
                 if generation.get("apply_ok") is True:
-                    if correctness_patch_sha(record) != generation.get(
-                        "patch_sha256"
+                    if not correctness_patch_matches_generation(
+                        record, generation
                     ):
                         raise ValueError(
                             f"{key} correctness patch checksum mismatch"

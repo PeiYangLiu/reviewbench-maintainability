@@ -856,3 +856,32 @@ def test_the_guard_survives_raw_rows_spelling_the_status_in_capitals(tmp_path):
         modern={("m", "t1"): "PASS"},
     )
     MODULE.refuse_if_rerun_would_undecide_results(root)
+
+
+def test_patch_identity_accepts_the_historical_tsjs_attestation():
+    generation = {"patch_sha256": "expected"}
+    record = {
+        "generation_status": "generated",
+        "patch_unmodified": True,
+        "model_identity_preserved": True,
+    }
+    assert MODULE.correctness_patch_matches_generation(record, generation)
+
+
+def test_patch_identity_rejects_a_missing_hash_without_explicit_attestation():
+    assert not MODULE.correctness_patch_matches_generation(
+        {"generation_status": "generated"},
+        {"patch_sha256": "expected"},
+    )
+
+
+def test_patch_identity_never_lets_attestation_override_a_wrong_hash():
+    record = {
+        "patch_sha256": "wrong",
+        "generation_status": "generated",
+        "patch_unmodified": True,
+        "model_identity_preserved": True,
+    }
+    assert not MODULE.correctness_patch_matches_generation(
+        record, {"patch_sha256": "expected"}
+    )
