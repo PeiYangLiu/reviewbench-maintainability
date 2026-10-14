@@ -6,13 +6,14 @@ import argparse
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import difflib
-import json
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import threading
 from typing import Any
+
+from .jsonl import read_jsonl, write_jsonl
 
 
 HUNK_RE = re.compile(
@@ -231,19 +232,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    records = [
-        json.loads(line)
-        for line in args.input.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    records = list(read_jsonl(args.input))
     if args.limit:
         records = records[: args.limit]
     prior: dict[str, dict[str, Any]] = {}
     if args.resume and args.out.exists():
-        for line in args.out.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                item = json.loads(line)
-                prior[str(item.get("id") or "")] = item
+        for item in read_jsonl(args.out):
+            prior[str(item.get("id") or "")] = item
 
     by_repo: dict[str, list[dict[str, Any]]] = defaultdict(list)
     output: dict[str, dict[str, Any]] = {}
@@ -311,14 +306,7 @@ def _write_ordered(
         for record in records
         if str(record.get("id") or "") in output
     ]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        "\n".join(json.dumps(item, ensure_ascii=False, sort_keys=True) for item in items)
-        + ("\n" if items else ""),
-        encoding="utf-8",
-    )
-    temporary.replace(path)
+    write_jsonl(path, items, atomic=True)
 
 
 def _repo_slug(repo: str) -> str:

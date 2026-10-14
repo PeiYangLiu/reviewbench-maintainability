@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .jsonl import write_jsonl
 from .release import (
     coverage_result,
     golden_evaluation,
@@ -133,15 +134,6 @@ def recovery_priority(status: str) -> int:
         "structurally_ineligible": 7,
     }
     return order.get(status, 99)
-
-
-def write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "\n".join(json.dumps(item, ensure_ascii=False, sort_keys=True) for item in records)
-        + ("\n" if records else ""),
-        encoding="utf-8",
-    )
 
 
 if __name__ == "__main__":

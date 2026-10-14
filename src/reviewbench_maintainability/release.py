@@ -10,6 +10,8 @@ from pathlib import Path
 import re
 from typing import Any
 
+from .jsonl import read_jsonl, write_jsonl
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -51,12 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         target=args.target,
         max_per_repo=args.max_per_repo,
     )
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(
-        "\n".join(json.dumps(item, ensure_ascii=False, sort_keys=True) for item in selected)
-        + ("\n" if selected else ""),
-        encoding="utf-8",
-    )
+    write_jsonl(args.out, selected)
     report = release_report(
         tasks=tasks,
         evaluations=evaluations,
@@ -79,10 +76,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def load_jsonl_by_id(path: Path) -> dict[str, dict[str, Any]]:
     result = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        item = json.loads(line)
+    for item in read_jsonl(path):
         task_id = str(item.get("id") or "")
         if task_id:
             result[task_id] = item

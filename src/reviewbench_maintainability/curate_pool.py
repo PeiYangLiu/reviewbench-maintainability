@@ -9,6 +9,8 @@ from pathlib import Path
 import re
 from typing import Any
 
+from .jsonl import read_jsonl, write_jsonl
+
 
 TEST_PATH_RE = re.compile(
     r"(^|/)(tests?|testing|__tests__|spec|specs)(/|$)"
@@ -71,12 +73,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit:
         kept = kept[: args.limit]
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(
-        "\n".join(json.dumps(item, ensure_ascii=False, sort_keys=True) for item in kept)
-        + ("\n" if kept else ""),
-        encoding="utf-8",
-    )
+    write_jsonl(args.out, kept)
     report = {
         "input_files": [str(path) for path in args.inputs],
         "input_rows": sum(_line_count(path) for path in args.inputs),
@@ -106,11 +103,8 @@ def merge_records(paths: list[Path]) -> tuple[list[dict[str, Any]], int]:
     merged: dict[str, dict[str, Any]] = {}
     rows = 0
     for path in paths:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
+        for record in read_jsonl(path):
             rows += 1
-            record = json.loads(line)
             task_id = str(record.get("id") or "")
             if not task_id:
                 continue

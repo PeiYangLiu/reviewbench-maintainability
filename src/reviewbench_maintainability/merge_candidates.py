@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
+
+from .jsonl import read_jsonl, write_jsonl
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -31,12 +33,7 @@ def main(argv: list[str] | None = None) -> int:
                     records[task_id] = record
 
     ordered = [records[task_id] for task_id in sorted(records)]
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(
-        "\n".join(json.dumps(item, ensure_ascii=False, sort_keys=True) for item in ordered)
-        + ("\n" if ordered else ""),
-        encoding="utf-8",
-    )
+    write_jsonl(args.out, ordered)
     report = {
         "input_files": len(input_files),
         "input_rows": input_rows,
@@ -60,12 +57,6 @@ def candidate_files(source: Path) -> list[Path]:
     if batch_files:
         return batch_files
     return sorted(source.glob("**/candidates.jsonl"))
-
-
-def read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            yield json.loads(line)
 
 
 if __name__ == "__main__":

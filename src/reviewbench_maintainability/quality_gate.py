@@ -13,6 +13,8 @@ from typing import Any
 import urllib.error
 import urllib.request
 
+from .jsonl import read_jsonl, write_jsonl
+
 
 QUALITY_GATE_VERSION = "reviewbench-quality-improvement/v1"
 ALLOWED_PRIMARY_KINDS = {
@@ -375,17 +377,11 @@ def main(argv: list[str] | None = None) -> int:
         print("reviewbench-quality: --model requires --endpoint", file=sys.stderr)
         return 2
 
-    records = [
-        json.loads(line)
-        for line in args.input.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    records = list(read_jsonl(args.input))
     completed: dict[str, dict[str, Any]] = {}
     if args.resume and args.out.exists():
-        for line in args.out.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                item = json.loads(line)
-                completed[str(item.get("id") or "")] = item
+        for item in read_jsonl(args.out):
+            completed[str(item.get("id") or "")] = item
     external = load_external_judgments(args.judgments or [])
 
     output: list[dict[str, Any]] = []
@@ -474,14 +470,7 @@ def load_external_judgments(paths: list[Path]) -> dict[str, list[dict[str, Any]]
 
 
 def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        "\n".join(json.dumps(item, ensure_ascii=False, sort_keys=True) for item in records)
-        + ("\n" if records else ""),
-        encoding="utf-8",
-    )
-    temporary.replace(path)
+    write_jsonl(path, records, atomic=True)
 
 
 def _strict_bool(value: Any, name: str) -> bool:

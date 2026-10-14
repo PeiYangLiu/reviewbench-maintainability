@@ -13,6 +13,7 @@ import sys
 import time
 from typing import Any
 
+from .jsonl import read_jsonl
 from .static_metrics import compare_paths
 
 
@@ -111,11 +112,7 @@ def load_tasks(task_path: Path | None, tasks_path: Path | None) -> list[dict[str
         return [json.loads(task_path.read_text(encoding="utf-8"))]
     if not tasks_path:
         raise ValueError("Either --task or --tasks is required")
-    return [
-        json.loads(line)
-        for line in tasks_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    return list(read_jsonl(tasks_path))
 
 
 def load_oracle_config(path: Path | None) -> dict[str, Any]:
