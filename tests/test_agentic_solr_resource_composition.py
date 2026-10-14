@@ -16,8 +16,8 @@ from run_agentic_progressive import proof_matches
 
 
 @pytest.fixture
-def actual():
-    root = Path(os.environ["SOLR_RESOURCE_COMPOSITION_ROOT"])
+def actual(external_artifact_root):
+    root = external_artifact_root("SOLR_RESOURCE_COMPOSITION_ROOT")
     inputs = json.loads((root / "composition-inputs.json").read_text())
     task = json.loads(Path(inputs["source_task"]["path"]).read_text())
     oracle = json.loads(Path(inputs["source_oracle"]["path"]).read_text())

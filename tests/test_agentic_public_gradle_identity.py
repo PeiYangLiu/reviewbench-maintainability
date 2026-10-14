@@ -20,8 +20,8 @@ def ref(path):
 
 
 @pytest.fixture
-def original():
-    base = Path(os.environ["PUBLIC_GRADLE_PROFILE_ROOT"])
+def original(external_artifact_root):
+    base = external_artifact_root("PUBLIC_GRADLE_PROFILE_ROOT")
     profile = json.loads((base / "original-public-profile.json").read_text())
     binding = json.loads(Path(profile["original_input_bindings"]["path"]).read_text())
     task = json.loads(Path(binding["task"]["path"]).read_text())

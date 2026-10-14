@@ -6,7 +6,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 import tarfile
 import tomllib
@@ -14,6 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 import tomli_w
+
+from test_agentic_rust_vendor import cargo_tool, cargo_vendor_headroom
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from agentic_runtime_migration.rust_build_entry import OverlayError, overlay_files, synchronize_candidate
@@ -281,19 +282,7 @@ def test_rust_lane_passes_conditional_lock_to_vendor_union_without_installing_it
     assert observed["extra_locks"] == [tomllib.loads(asset.read_text())]
 
 
-@pytest.fixture
-def cargo_tool():
-    path = os.environ.get("REVIEWBENCH_TEST_CARGO") or shutil.which("cargo")
-    if not path:
-        pytest.skip("preinstalled Cargo required for offline metadata")
-    result = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=30,
-                            env=dict(os.environ, RUSTUP_AUTO_INSTALL="0"))
-    if result.returncode:
-        pytest.skip("no installed Cargo toolchain: " + result.stderr)
-    return Path(path)
-
-
-def test_real_cargo_vendor_union_contains_both_resolutions_and_keeps_start_lock(tmp_path, cargo_tool):
+def test_real_cargo_vendor_union_contains_both_resolutions_and_keeps_start_lock(tmp_path, cargo_tool, cargo_vendor_headroom):
     from agentic_runtime_migration import rust_vendor
     cache = tmp_path / "cargo"
     archives = cache / "registry/cache/fixture"; archives.mkdir(parents=True)

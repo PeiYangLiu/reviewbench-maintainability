@@ -16,8 +16,8 @@ from run_agentic_progressive import proof_matches
 
 
 @pytest.fixture(params=["skript17", "reposense41"])
-def original(request):
-    directory = Path(os.environ["LEGACY_GRADLE_PROFILE_ROOT"])
+def original(request, external_artifact_root):
+    directory = external_artifact_root("LEGACY_GRADLE_PROFILE_ROOT")
     profile = json.loads((directory / "profiles" / (request.param + ".json")).read_text())
     task = json.loads(Path(profile["case"]["task"]["path"]).read_text())
     oracle = json.loads(Path(profile["case"]["oracle"]["path"]).read_text())

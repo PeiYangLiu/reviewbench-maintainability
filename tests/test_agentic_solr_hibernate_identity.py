@@ -21,8 +21,8 @@ def ref(path):
 
 
 @pytest.fixture(params=["solr31", "hibernate35"])
-def original(request):
-    root = Path(os.environ["SOLR_HIBERNATE_PROFILE_ROOT"]) / request.param
+def original(request, external_artifact_root):
+    root = external_artifact_root("SOLR_HIBERNATE_PROFILE_ROOT") / request.param
     task = json.loads((root / "inputs/task.json").read_text())
     oracle = json.loads((root / "inputs/oracle.json").read_text())
     recipe = RuntimeRecipe.from_dict(json.loads((root / "runtime-final-v2/runtime-recipes.jsonl").read_text()))
@@ -149,7 +149,10 @@ def test_changed_source_or_runtime_is_rejected(original, tmp_path, mutation):
 def actual(original):
     root, task, oracle, recipe = original
     case = root.name
-    path = Path(os.environ["SOLR_HIBERNATE_ADMISSION_ROOT"]) / "actual-admission-proofs" / (case + ".json")
+    admission_root = os.environ.get("SOLR_HIBERNATE_ADMISSION_ROOT")
+    if not admission_root:
+        pytest.skip("set SOLR_HIBERNATE_ADMISSION_ROOT to original admission proofs")
+    path = Path(admission_root) / "actual-admission-proofs" / (case + ".json")
     if not path.exists():
         pytest.skip("actual six-run proof is still executing; no fabricated positive fixture")
     return json.loads(path.read_text()), task, oracle, recipe

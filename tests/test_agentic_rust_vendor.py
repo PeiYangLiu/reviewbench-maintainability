@@ -38,16 +38,43 @@ def commit(root):
 
 @pytest.fixture
 def cargo_tool():
-    executable = os.environ.get("REVIEWBENCH_TEST_CARGO") or shutil.which("cargo")
-    if not executable:
+    configured = os.environ.get("REVIEWBENCH_TEST_CARGO")
+    executable = configured if configured is not None else shutil.which("cargo")
+    if executable is None:
         pytest.skip("a preinstalled Cargo is required for offline metadata subprocesses")
-    executable = Path(executable)
-    # Do not let a rustup proxy install a toolchain during a test.
+    if not executable or not Path(executable).is_file():
+        pytest.fail(f"configured Cargo is not a file: {executable!r}")
+    executable = Path(executable).absolute()
+    # Production uses concrete toolchain binaries under an isolated HOME. A
+    # rustup proxy selected from PATH cannot find its user's default there.
+    # Resolve only an already-installed binary; never install a toolchain.
     env = dict(os.environ, RUSTUP_AUTO_INSTALL="0")
-    result = subprocess.run([str(executable), "--version"], env=env, capture_output=True, text=True, timeout=30)
+    rustup = executable.parent / "rustup"
+    if rustup.is_file() and executable.samefile(rustup):
+        result = subprocess.run([str(rustup), "which", "cargo"], env=env,
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            pytest.fail("cannot resolve preinstalled Cargo: " + result.stderr)
+        executable = Path(result.stdout.strip())
+    result = subprocess.run([str(executable), "--version"], env=env,
+                            capture_output=True, text=True, timeout=30)
     if result.returncode:
-        pytest.skip("no preinstalled Cargo: " + result.stderr)
+        pytest.fail("preinstalled Cargo is not usable: " + result.stderr)
     return executable
+
+
+@pytest.fixture
+def cargo_vendor_headroom(tmp_path):
+    # Only real compiler-backed vendoring integrations consume this fixture;
+    # unit controls and the production resource check remain unchanged.
+    required = 80 * 1024**3
+    available = shutil.disk_usage(tmp_path).free
+    if available < required:
+        pytest.skip(
+            f"real Cargo vendoring requires 80 GiB free scratch; "
+            f"{tmp_path} has {available / 1024**3:.1f} GiB; "
+            "set TMPDIR to a filesystem with sufficient headroom"
+        )
 
 
 def context(tmp_path, cargo, repository):
@@ -99,7 +126,7 @@ def duplicate_project(tmp_path, cargo):
     return repository, commit(repository)
 
 
-def test_cargo_vendor_same_name_version_sources_are_kept_distinct(tmp_path, cargo_tool):
+def test_cargo_vendor_same_name_version_sources_are_kept_distinct(tmp_path, cargo_tool, cargo_vendor_headroom):
     repository, revision = duplicate_project(tmp_path, cargo_tool)
     ctx = context(tmp_path, cargo_tool, repository)
     lock_hash = sha(repository / "Cargo.lock")

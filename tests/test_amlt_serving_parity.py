@@ -175,8 +175,17 @@ def test_sft_ladder_adapters_are_served_under_their_own_name():
         served, _, path = adapter.partition("=")
         assert served and path, adapter
         assert served != env["MODEL_ID"], f"{job['name']} serves the base name"
-        assert (CONFIGS.parent / path).is_dir(), path
         assert env["MAX_LORA_RANK"], job["name"]
+
+
+
+def test_sft_ladder_adapter_artifacts_exist_when_configured(external_artifact_root):
+    """Model weights are optional local artifacts, not distributable source."""
+    root = external_artifact_root("REVIEWBENCH_MODEL_ARTIFACT_ROOT")
+    for name in SFT_LADDER_CONFIGS:
+        for job in load_jobs(CONFIGS / name):
+            _, _, path = job["submit_args"]["env"]["LORA_ADAPTER"].partition("=")
+            assert (root / path).is_dir(), path
 
 
 def test_sft_ladder_covers_the_same_scope_as_the_baseline_ladder():

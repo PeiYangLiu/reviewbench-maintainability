@@ -11,6 +11,14 @@ from test_agentic_rust_image_real import cargo_fixture
 
 
 def real_fixture(tmp_path, monkeypatch, version):
+    variables = ("RPGP_TEST_CARGO", "RPGP_TEST_RUSTC")
+    if all(os.environ.get(name) is None for name in variables):
+        pytest.skip("set RPGP_TEST_CARGO/RPGP_TEST_RUSTC to the original installed toolchain")
+    # An explicit but incomplete or invalid opt-in is a setup failure, not a skip.
+    for name in variables:
+        value = os.environ.get(name)
+        if not value or not Path(value).is_file() or not os.access(value, os.X_OK):
+            pytest.fail(f"configured RPGP integration requires an executable {name}: {value!r}")
     monkeypatch.setenv("IMAGE_TEST_CARGO", os.environ["RPGP_TEST_CARGO"])
     monkeypatch.setenv("IMAGE_TEST_RUSTC", os.environ["RPGP_TEST_RUSTC"])
     source, public, private = cargo_fixture(tmp_path, monkeypatch, version)

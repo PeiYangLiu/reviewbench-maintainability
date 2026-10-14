@@ -22,11 +22,8 @@ def ref(path):
 
 
 @pytest.fixture(params=["skript17", "reposense41"])
-def original(request):
-    profile_root = os.environ.get("LEGACY_GRADLE_PROFILE_ROOT")
-    if not profile_root:
-        pytest.skip("set LEGACY_GRADLE_PROFILE_ROOT to archived original Gradle profiles")
-    directory = Path(profile_root)
+def original(request, external_artifact_root):
+    directory = external_artifact_root("LEGACY_GRADLE_PROFILE_ROOT")
     source = directory / "profiles" / (request.param + ".json")
     profile = json.loads(source.read_text())
     task = json.loads(Path(profile["case"]["task"]["path"]).read_text())

@@ -1,4 +1,5 @@
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -58,9 +59,55 @@ def run(tmp_path, config, document, output=None):
 
 def test_two_preparers_overlap_and_archive_does_not_hold_them(tmp_path):
     config, worker = setup(tmp_path)
-    document = plan([job(tmp_path, worker, "archive", 2, "archive"),
-                     *[job(tmp_path, worker, f"prepare{i}", .3) for i in range(4)]])
-    result = run(tmp_path, config, document)
+    # Hold each pair until both commands have started, rather than assuming
+    # supervisor startup fits inside a short sleep on a busy test host.
+    worker.write_text(
+        "import json,sys,time\nfrom pathlib import Path\n"
+        "p=Path(sys.argv[1]);started=time.monotonic()\n"
+        "p.with_suffix('.started').touch()\n"
+        "if p.stem == 'archive':\n"
+        "    required=[p.with_name(f'prepare{i}.json') for i in range(4)]\n"
+        "else:\n"
+        "    required=[p.with_name(f'release{int(p.stem[-1]) // 2}')]\n"
+        "deadline=time.monotonic()+10\n"
+        "while not all(path.exists() for path in required):\n"
+        "    if time.monotonic() >= deadline: raise TimeoutError(str(required))\n"
+        "    time.sleep(.01)\n"
+        "p.write_text(json.dumps({'started':started,'finished':time.monotonic()}))\n"
+    )
+    document = plan([job(tmp_path, worker, "archive", pool="archive"),
+                     *[job(tmp_path, worker, f"prepare{i}") for i in range(4)]])
+    releases = [tmp_path / f"release{wave}" for wave in range(2)]
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(run, tmp_path, config, document)
+        try:
+            for wave, release in enumerate(releases):
+                names = [f"prepare{i}" for i in range(wave * 2, wave * 2 + 2)]
+                deadline = time.monotonic() + 10
+                while True:
+                    status_path = tmp_path / "queue/status.json"
+                    status = json.loads(status_path.read_text()) if status_path.exists() else {}
+                    states = status.get("states", {})
+                    started = all((tmp_path / f"{name}.started").exists()
+                                  for name in ["archive", *names])
+                    if started and all(states.get(name) == "running" for name in names):
+                        break
+                    if future.done():
+                        result = future.result()
+                        pytest.fail(f"queue exited before {names} started: {result.returncode}: {result.stderr}")
+                    assert time.monotonic() < deadline, f"waiting for {names}: {status}"
+                    time.sleep(.01)
+                assert states["archive"] == "running"
+                assert status["active_by_pool"]["prepare"] == 2
+                if wave == 0:
+                    assert all(states[f"prepare{i}"] == "pending" for i in range(2, 4))
+                release.touch()
+        finally:
+            # Also unblock workers on assertion failure; their own waits and
+            # the subprocess timeout remain bounded if the queue is broken.
+            for release in releases:
+                release.touch()
+        result = future.result(timeout=30)
     assert result.returncode == 0, result.stderr
     rows = [json.loads((tmp_path / f"prepare{i}.json").read_text()) for i in range(4)]
     archive = json.loads((tmp_path / "archive.json").read_text())

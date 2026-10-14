@@ -44,7 +44,9 @@ never calls a model. A help-only smoke test does not test that import path.
 
 ## Tests
 
-The full-suite command assumes the `.[dev,agentic]` environment above. The focused
+The full-suite command assumes **Python 3.12** and the `.[dev,agentic]` environment
+above; some retained runtime-script tests use `tomllib`. Core package and focused
+agent tests retain Python 3.10 compatibility. The focused
 core command can run with just `.[dev]`; it does not exercise the mini-agent loop.
 
 ```bash
@@ -70,7 +72,14 @@ evaluations. Some compiler-backed fixtures can take several minutes. The CLI
 scheduling unit test uses a private ledger and injected host capacity so it
 cannot wait on or reserve production resources.
 
-Historical Gradle profile tests additionally require
+SFT serving-name and parity checks always run. Checking the actual excluded
+adapter weight directories additionally requires `REVIEWBENCH_MODEL_ARTIFACT_ROOT`
+pointing to a directory containing `sft-adapters/`.
+
+Historical profile integration tests additionally require the relevant original
+archive root: `PUBLIC_GRADLE_PROFILE_ROOT`, `SOLR_HIBERNATE_PROFILE_ROOT`,
+`SOLR_HIBERNATE_ADMISSION_ROOT`, or `SOLR_RESOURCE_COMPOSITION_ROOT`.
+Historical Gradle profile tests require
 `LEGACY_GRADLE_PROFILE_ROOT` pointing to the original archived `profiles/` and
 their hash-bound inputs. Only those fixture-dependent cases skip when the variable
 is unset; configured but missing/corrupt inputs still fail. Their local unit
@@ -123,3 +132,13 @@ The [test/build workflow template](../.github/tests.yml.example) covers Python
 3.10 and 3.12. It is not active because the publication credential lacks GitHub's
 `workflow` scope. See [activation instructions](../.github/README.md). Local
 verification results must not be presented as an observed GitHub Actions run.
+
+Real Cargo vendoring fixtures retain the production **80 GiB free scratch**
+requirement. With less headroom they skip; point `TMPDIR` to a sufficiently
+large local filesystem to exercise them, using its canonical path (for example
+`TMPDIR="$(realpath /path/to/scratch)"`); archive extraction rejects symlinked
+ancestor paths. Original toolchain/archive checks use
+`OLD_STABLE_TEST_CARGO`, `RPGP_TEST_CARGO` plus `RPGP_TEST_RUSTC`, and
+`V8_ORIGINAL_ARCHIVE`. Unset optional inputs skip, but explicitly invalid inputs
+still fail. The local cleanup verification exercised both real vendoring cases
+on a filesystem above the original disk floor.
